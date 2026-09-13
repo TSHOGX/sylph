@@ -582,7 +582,7 @@ function SessionRow({
       label: t("sidebar.copyWorkspacePath"),
       onSelect: () => void navigator.clipboard.writeText(session.workdir).catch(() => {}),
     },
-    {
+    ...(refreshRereadsTheStore(session.fidelity) ? [{
       // **Invalidating the cache is not a refresh of the record**, and treating it as one
       // is the defect this entry used to be. A refetch re-reads what Sylph already
       // holds, so a session adopted from a terminal could never gain a line the vendor
@@ -595,12 +595,8 @@ function SessionRow({
       // reasoning and is tested on the decision — a `stream` record is the one a re-read
       // cannot improve, and both ways of getting it wrong are clicks that look successful.
       label: t("sidebar.refreshTranscript"),
-      onSelect: () => {
-        if (refreshRereadsTheStore(session.fidelity)) {
-          rereadSession(session.id, sessionLabel(session));
-        }
-      },
-    },
+      onSelect: () => rereadSession(session.id, sessionLabel(session)),
+    }] : []),
   ];
 
   const relay = relayName(session.environment, environments);

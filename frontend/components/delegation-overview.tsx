@@ -464,6 +464,9 @@ function describe(row: WaterfallRow, name: string, t: Translate): string {
 
   if (row.depth > 0) parts.push(t("overview.row.nested", { depth: row.depth }));
   if (row.note === "no-interior") parts.push(t("overview.row.noInterior"));
+  if (row.note === "pending") parts.push(t("overview.row.interiorPending"));
+  if (row.note === "partial") parts.push(t("overview.row.interiorPartial"));
+  if (row.note === "unreadable") parts.push(t("overview.row.interiorUnreadable"));
   // "Nothing is known" was the wrong tense: nobody has reported an outcome *yet*, and
   // a late one is written against the turn that owns the trajectory — so this row can
   // still acquire one. Only a restart makes it terminal.

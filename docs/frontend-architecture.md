@@ -352,6 +352,12 @@ tool count, token usage, and duration, computed bottom-up, and a descendant fail
 its ancestors' status even when their own result was clean. **No state reachable in the tree
 may be unreported at the root**, which is what makes collapsing deferral rather than loss.
 
+**Interior availability is the producer's observation.** `pending`, `partial`, `full`,
+`forwards_nothing`, and `unreadable` remain distinct in cards and comparison rows. A child's
+interior state or completed phase does not describe its parent. Observed child events prove
+only a readable prefix; they cannot prove completeness, and an empty child list cannot prove
+that a vendor forwards nothing. An empty declared trajectory offers no disclosure control.
+
 #### Rendering `abandoned` distinctly from `failed`
 
 `docs/session-protocol.md` § Delegated trajectories defines the two statuses. Three rules
@@ -433,6 +439,12 @@ to pick.
 seconds and forwarded its one event near the end bounds at a fraction of that, so ranking it
 against an exact figure names the wrong row. When any row is a bound, figures carry their `≥`
 and no row is badged.
+
+Collapsed cards and comparison bars use the same explicit clock endpoints. Live durations
+subtract server arrival times; a vendor timestamp is never substituted into that pair.
+Missing or reversed endpoints remain unmeasured, and a server-authored abandonment does not
+become an exact elapsed value in a collapsed card. Fidelity gates the card's duration as well
+as the comparison axis.
 
 ## Data flow
 

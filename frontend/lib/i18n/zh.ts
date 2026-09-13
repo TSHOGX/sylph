@@ -531,6 +531,9 @@ export const zh: Dictionary = {
   "overview.row.startedWithTurn": "与回合同时开始",
   "overview.row.nested": "嵌套 {depth} 层",
   "overview.row.noInterior": "没有转发自己的任何事件",
+  "overview.row.interiorPending": "内部记录待获取",
+  "overview.row.interiorPartial": "部分内部记录",
+  "overview.row.interiorUnreadable": "内部记录不可读取",
   // 「暂时」是关键：迟到的结果会写在拥有该轨迹的那个回合上，所以这一行之后仍
   // 可能拿到结果。只有重启才让它成为终态。
   "overview.row.unreported": "比它的回合活得更久，暂时还没有结果报告",

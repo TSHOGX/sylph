@@ -21,6 +21,7 @@ function ev(partial: Partial<StreamEvent> & { kind: string }): StreamEvent {
     stability: "stable",
     source: "agent",
     createdAtMs: 0,
+    arrivalAtMs: partial.createdAtMs ?? 0,
     ...partial,
   };
 }
@@ -46,13 +47,14 @@ function closes(
     phase: "completed",
     streamId: id,
     createdAtMs: at,
+    interiorState: "forwards_nothing",
     ...extra,
   });
 }
 
 /** A trajectory the server closed on turn termination. */
 function serverCloses(id: string, at: number): StreamEvent {
-  return closes(id, at, { isError: true, data: { closedBy: "server" } });
+  return closes(id, at, { isError: true, data: { closedBy: "server" }, interiorState: "pending" });
 }
 
 /**
@@ -65,7 +67,7 @@ function waterfall(
   order?: "structure" | "duration",
   fidelity: Fidelity = "stream",
 ) {
-  return buildWaterfall(buildTree(buildRows(events)), fidelity, order);
+  return buildWaterfall(buildTree(buildRows(events), fidelity), fidelity, order);
 }
 
 function named(rows: WaterfallRow[]): string[] {
@@ -73,6 +75,36 @@ function named(rows: WaterfallRow[]): string[] {
 }
 
 describe("buildWaterfall", () => {
+  it("reports unavailable and partial interiors without claiming that a vendor forwarded nothing", () => {
+    const { rows } = waterfall([
+      closes("unreadable", 1000, { interiorState: "unreadable" }),
+      closes("partial", 2000, { interiorState: "partial" }),
+      closes("pending", 3000, { interiorState: "pending" }),
+    ]);
+
+    expect(rows.map((row) => row.note)).toEqual(["unreadable", "partial", "pending"]);
+  });
+
+  it("uses the live arrival clock even when a vendor reports a different clock", () => {
+    const { rows } = waterfall([
+      opens("live", 1000),
+      closes("live", 9000, { arrivalAtMs: 3500, recordedAtMs: 50_000 }),
+    ]);
+
+    expect(rows[0].durationMs).toBe(2500);
+    expect(rows[0].node.rollup.durationMs).toBe(2500);
+  });
+
+  it("keeps native durations unknown without a recorded close, including collapsed cards", () => {
+    const { rows } = waterfall([
+      opens("native", 1000),
+      closes("native", 9000),
+    ], undefined, "blocks");
+
+    expect(rows[0].durationMs).toBeUndefined();
+    expect(rows[0].node.rollup.durationMs).toBeUndefined();
+  });
+
   it("places concurrent delegates in the same band and a chain as a staircase", () => {
     // The one visual distinction the view exists for: both shapes occur, and on a
     // rollup they are indistinguishable because a rollup never compares siblings.
@@ -488,7 +520,7 @@ describe("buildWaterfall", () => {
     expect(timed).toBe(false);
   });
 
-  it("never clips a bar past the end of the axis", () => {
+  it("keeps reversed clock endpoints unmeasured and within the axis", () => {
     // A clock adjustment mid-turn produces an end before the start, which lays out as
     // a bar running backwards off the left edge.
     const { rows } = waterfall([
@@ -502,7 +534,8 @@ describe("buildWaterfall", () => {
       expect(row.offset).toBeGreaterThanOrEqual(0);
       expect(row.offset + row.length).toBeLessThanOrEqual(1.000001);
     }
-    expect(rows[0].durationMs).toBe(0);
+    expect(rows[0].durationMs).toBeUndefined();
+    expect(rows[0].node.rollup.durationMs).toBeUndefined();
   });
 
   it("terminates on a span cycle instead of freezing the tab", () => {

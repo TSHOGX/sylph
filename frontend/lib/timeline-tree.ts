@@ -33,7 +33,7 @@
  * collapsing would be lossy rather than deferred.
  */
 
-import type { StreamEvent } from "@/lib/api-types";
+import type { Fidelity, StreamEvent } from "@/lib/api-types";
 import { mergeInteriorState } from "@/lib/interior-state";
 
 /** A displayable row: an event, plus the result paired to it when it is a call. */
@@ -41,13 +41,6 @@ export interface TimelineRow {
   event: StreamEvent;
   /** Result paired to this row, when it is a tool call. */
   result?: StreamEvent;
-  /**
-   * When a trajectory closed. Held beside the event rather than in it, because
-   * merging phases keeps the *opening* `createdAtMs` — that is the row's start —
-   * so the closing timestamp has nowhere else to go, and without it a delegation
-   * cannot report how long it took.
-   */
-  closedAtMs?: number;
   /** Explicit arrival time of a trajectory close, when available. */
   closedArrivalAtMs?: number;
   /** Explicit recorded/source time of a trajectory close, when available. */
@@ -195,7 +188,6 @@ export function buildRows(events: StreamEvent[]): TimelineRow[] {
           rows[host] = {
             ...rows[host],
             trajectoryClose: event,
-            closedAtMs: rows[host].closedAtMs ?? event.createdAtMs,
             closedArrivalAtMs: rows[host].closedArrivalAtMs ?? event.arrivalAtMs,
             closedRecordedAtMs: rows[host].closedRecordedAtMs ?? event.recordedAtMs,
           };
@@ -208,6 +200,9 @@ export function buildRows(events: StreamEvent[]): TimelineRow[] {
             event: {
               ...rows[host].event,
               data: event.data ?? rows[host].event.data,
+              interiorState: event.interiorState
+                ? mergeInteriorState(rows[host].event.interiorState, event.interiorState)
+                : rows[host].event.interiorState,
             },
           };
         }
@@ -219,8 +214,6 @@ export function buildRows(events: StreamEvent[]): TimelineRow[] {
         const existing = rows[at].event;
         rows[at] = {
           ...rows[at],
-          closedAtMs:
-            event.phase === "completed" ? event.createdAtMs : rows[at].closedAtMs,
           closedArrivalAtMs:
             event.phase === "completed"
               ? event.arrivalAtMs
@@ -376,7 +369,7 @@ function sameChildren(a: TimelineNode[], b: TimelineNode[]): boolean {
   return true;
 }
 
-export function buildTree(rows: TimelineRow[]): TimelineNode[] {
+export function buildTree(rows: TimelineRow[], fidelity: Fidelity): TimelineNode[] {
   const roots: TimelineNode[] = [];
   const byTrajectory = new Map<string, TimelineNode>();
   /** Children of a trajectory not yet seen, kept until it arrives. */
@@ -486,7 +479,7 @@ export function buildTree(rows: TimelineRow[]): TimelineNode[] {
     }
   }
 
-  for (const node of roots) computeRollup(node, new Set());
+  for (const node of roots) computeRollup(node, fidelity, new Set());
 
   // Bottom-up, because a node is only interchangeable with its cached twin once
   // its children are — and a parent canonicalized before its children would keep
@@ -528,9 +521,9 @@ function canonicalize(
     // for the same reason as the event itself — `buildRows` reuses these objects too.
     cached.row.result === node.row.result &&
     cached.row.trajectoryClose === node.row.trajectoryClose &&
-    cached.row.closedAtMs === node.row.closedAtMs &&
     cached.row.closedArrivalAtMs === node.row.closedArrivalAtMs &&
     cached.row.closedRecordedAtMs === node.row.closedRecordedAtMs &&
+    cached.rollup.durationMs === node.rollup.durationMs &&
     sameChildren(cached.children, node.children)
   ) {
     return cached;
@@ -555,7 +548,7 @@ function canonicalize(
  * a guard rather than the input being trusted to be acyclic. A revisited node
  * contributes nothing, which keeps every aggregate a count of distinct work.
  */
-function computeRollup(node: TimelineNode, seen: Set<TimelineNode>): Rollup {
+function computeRollup(node: TimelineNode, fidelity: Fidelity, seen: Set<TimelineNode>): Rollup {
   if (seen.has(node)) return EMPTY_ROLLUP;
   seen.add(node);
 
@@ -569,7 +562,7 @@ function computeRollup(node: TimelineNode, seen: Set<TimelineNode>): Rollup {
   let sawTokens = false;
 
   for (const child of node.children) {
-    const sub = computeRollup(child, seen);
+    const sub = computeRollup(child, fidelity, seen);
     events += sub.events + 1;
     trajectories += sub.trajectories + (child.trajectory ? 1 : 0);
     tools += sub.tools + (isCompletedTool(child.row) ? 1 : 0);
@@ -590,6 +583,12 @@ function computeRollup(node: TimelineNode, seen: Set<TimelineNode>): Rollup {
 
   const status = node.trajectory ? trajectoryStatus(node, failures) : undefined;
   node.status = status;
+  if (node.trajectory && !node.interiorState) {
+    node.interiorState = node.children.length > 0 ? "partial" : "pending";
+  }
+  const measured = status === "done" || status === "failed"
+    ? measuredTrajectoryTimes(node.row, fidelity)
+    : undefined;
   node.rollup = {
     events,
     trajectories,
@@ -600,12 +599,26 @@ function computeRollup(node: TimelineNode, seen: Set<TimelineNode>): Rollup {
     // Only for a closed trajectory. A running one would need a clock, and a
     // duration that ticks re-renders the row at 1 Hz forever — the renderer shows
     // "running" instead, which is the fact that matters while it is still true.
-    durationMs:
-      node.row.closedAtMs !== undefined
-        ? Math.max(0, node.row.closedAtMs - node.row.event.createdAtMs)
-        : undefined,
+    durationMs: measured ? measured.endMs - measured.startMs : undefined,
   };
   return node.rollup;
+}
+
+/** A card and its comparison bar must read the same pair of clock endpoints. */
+export function measuredTrajectoryTimes(
+  row: TimelineRow,
+  fidelity: Fidelity,
+): { startMs: number; endMs: number } | undefined {
+  if (fidelity !== "stream") return undefined;
+  const startMs = row.event.startedAtMs ?? row.event.arrivalAtMs;
+  const endMs = row.closedArrivalAtMs ?? row.result?.arrivalAtMs ??
+    (row.event.startedAtMs !== undefined && row.event.phase === "completed"
+      ? row.event.arrivalAtMs
+      : undefined);
+  // Reversed endpoints disclose a malformed measurement; clamping would turn it into
+  // a plausible measured zero and hide the source defect.
+  if (startMs === undefined || endMs === undefined || endMs < startMs) return undefined;
+  return { startMs, endMs };
 }
 
 /**

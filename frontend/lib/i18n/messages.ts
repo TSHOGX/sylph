@@ -749,6 +749,9 @@ export const en = {
   "overview.row.startedWithTurn": "started with the turn",
   "overview.row.nested": "nested {depth} deep",
   "overview.row.noInterior": "forwarded none of its own events",
+  "overview.row.interiorPending": "interior pending",
+  "overview.row.interiorPartial": "partial interior",
+  "overview.row.interiorUnreadable": "interior unavailable",
   // "Yet" is load-bearing: a late outcome is written against the turn that owns the
   // trajectory, so this row can still acquire one. Only a restart makes it terminal.
   "overview.row.unreported": "outlived its turn, no outcome reported yet",

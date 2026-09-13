@@ -18,8 +18,8 @@
  *
  * # What the events genuinely carry, and what they do not
  *
- * Every event has `createdAtMs`, so a *live* trajectory is measurable: its opening
- * event is the start and `TimelineRow.closedAtMs` — or a promoted host's
+ * Every event has `arrivalAtMs`, so a *live* trajectory is measurable: its opening
+ * event is the start and `TimelineRow.closedArrivalAtMs` — or a promoted host's
  * `tool_result` — is the end. Three cases are not measurable, and each is reported
  * as itself rather than drawn as a bar that implies a measurement:
  *
@@ -31,8 +31,7 @@
  *    lower bound, and it is labelled as one.
  * 3. **A consolidated row with no `startedAtMs`.** Consolidation folds a block's phases
  *    into one row keyed by its close, so the start has to be carried on the block
- *    explicitly; where it is absent — history written before the field was published, or a
- *    block that never had a distinct start — the start is genuinely unknown. Such a row is
+ *    explicitly; where the source supplied no distinct start, it is unknown. Such a row is
  *    an instant on the axis rather than a bar, because inventing a width there fabricates
  *    a measurement.
  *
@@ -47,7 +46,7 @@
  * was read back from a vendor's own store, which flushes at block or message
  * boundaries, and the per-event timings a bar is computed from **were never
  * recorded at all** (`docs/architecture.md` § What genuinely differs). The events still
- * carry a `createdAtMs`, because the server stamps a row when it writes one — so the
+ * carry an `arrivalAtMs`, because the server stamps a row when it writes one — so the
  * subtraction succeeds, produces a plausible number, and lays out a bar that is
  * entirely an artefact of when a file was flushed.
  *
@@ -61,7 +60,7 @@
  */
 
 import type { Fidelity } from "./api";
-import { flattenTrajectories, type TimelineNode, type TrajectoryStatus } from "./timeline-tree";
+import { flattenTrajectories, measuredTrajectoryTimes, type TimelineNode, type TrajectoryStatus } from "./timeline-tree";
 
 /**
  * How much of a trajectory's extent is actually known.
@@ -134,6 +133,9 @@ export type ExtentBound =
  * into one field forced a choice between two true statements.
  */
 export type WaterfallNote =
+  | "pending"
+  | "partial"
+  | "unreadable"
   /** Finished and forwarded none of its interior. Real terminal state, not pending. */
   | "no-interior"
   /**
@@ -410,7 +412,7 @@ function measuredDuration(extent: Extent): number | undefined {
  *
  * The two kinds of trajectory answer this differently, which is the same split every
  * other rule about promotion has to make. A declared `subagent`'s row is folded
- * across its phases, so its `createdAtMs` is the `started` phase and `closedAtMs` is
+ * across its phases, so its `arrivalAtMs` is the opening phase and `closedArrivalAtMs` is
  * the close. A promoted `tool_call`'s row keeps the *call's* timestamp, and its close
  * is the `tool_result` sharing its id — reading its phase instead would time the
  * argument streaming rather than the delegated work
@@ -419,86 +421,20 @@ function measuredDuration(extent: Extent): number | undefined {
 function extentOf(node: TimelineNode): Extent {
   const { row, status } = node;
   const promoted = row.event.kind !== "subagent";
-  const arrival = (event: typeof row.event): number => event.arrivalAtMs ?? event.createdAtMs;
-
-  // Live rows are measured on the server clock. This never mixes a vendor timestamp
-  // with a receipt timestamp, which would make a remote clock offset look like work.
-  const liveStartMs = arrival(row.event);
-  const liveEndMs =
-    row.closedArrivalAtMs ??
-    (promoted ? row.result && arrival(row.result) : undefined) ??
-    // Compatibility for pre-split live snapshots that had only `closedAtMs`.
-    (row.event.arrivalAtMs === undefined ? row.closedAtMs : undefined);
-
-  if (liveEndMs !== undefined) {
+  const measured = measuredTrajectoryTimes(row, "stream");
+  if (measured) {
     return {
       kind: "measured",
-      startMs: liveStartMs,
-      endMs: Math.max(liveStartMs, liveEndMs),
+      ...measured,
       bound: status === "abandoned" ? "stopped-listening" : "exact",
     };
   }
-
-  // Settled native blocks carry a source timestamp for the closing event and a
-  // `startedAtMs` anchor from the same source clock. Workflow journal closes have no
-  // recorded timestamp; those deliberately fall through to an unmeasured instant.
-  if (!promoted && row.event.recordedAtMs !== undefined && row.event.startedAtMs !== undefined) {
-    return {
-      kind: "measured",
-      startMs: row.event.startedAtMs,
-      endMs: Math.max(row.event.startedAtMs, row.event.recordedAtMs),
-      bound: "exact",
-    };
-  }
-
-  // A consolidated live stream has no vendor clock, but its first and closing
-  // arrivals are both on the server clock. `buildWaterfall` has already removed
-  // block/message-fidelity records before this function runs, so this cannot mistake
-  // a native flush time for a measured stream duration.
-  if (
-    !promoted &&
-    row.event.recordedAtMs === undefined &&
-    row.event.arrivalAtMs !== undefined &&
-    row.event.startedAtMs !== undefined
-  ) {
-    return {
-      kind: "measured",
-      startMs: row.event.startedAtMs,
-      endMs: Math.max(row.event.startedAtMs, row.event.arrivalAtMs),
-      bound: "exact",
-    };
-  }
-
-  // Compatibility for history snapshots written before explicit time axes existed.
-  // New rows always carry `arrivalAtMs`, so this branch cannot mix domains after rollout.
-  if (
-    !promoted &&
-    row.event.arrivalAtMs === undefined &&
-    row.event.recordedAtMs === undefined &&
-    row.event.startedAtMs !== undefined &&
-    row.event.startedAtMs < row.event.createdAtMs
-  ) {
-    return {
-      kind: "measured",
-      startMs: row.event.startedAtMs,
-      endMs: row.event.createdAtMs,
-      bound: "exact",
-    };
-  }
-
-  if (promoted && row.result?.recordedAtMs !== undefined && row.result.startedAtMs !== undefined) {
-    return {
-      kind: "measured",
-      startMs: row.result.startedAtMs,
-      endMs: Math.max(row.result.startedAtMs, row.result.recordedAtMs),
-      bound: "exact",
-    };
-  }
-
+  const liveStartMs = row.event.arrivalAtMs;
+  if (liveStartMs === undefined) return { kind: "unrecorded" };
   if (status === "running") return { kind: "open", startMs: liveStartMs };
 
   // Closed with no close timestamp: a *declared* trajectory whose phases were
-  // consolidated into one row, so `createdAtMs` is its close.
+  // consolidated into one row, so `arrivalAtMs` is its close.
   //
   // `startedAtMs` is the block's own record of when its first phase arrived, and it
   // makes this exact rather than reconstructed. It is present only on a consolidated
@@ -511,12 +447,10 @@ function extentOf(node: TimelineNode): Extent {
   // bound, and a lower bound cannot be ranked — so the "slowest" answer this view
   // exists to give was withheld on all but a live turn.
   if (!promoted) {
-    const startMs = row.event.recordedAtMs ?? row.event.createdAtMs;
+    const startMs = liveStartMs;
 
-    // No `startedAtMs`: history written before the field was published, or a block
-    // whose phases all arrived in one millisecond. The interior still bounds it from
-    // below, since every descendant is its own timestamped block. Labelled as the
-    // bound it is.
+    // No recorded start: descendants still provide a lower bound on the same arrival
+    // clock. Equal endpoints remain an instant unless the source actually measured both.
     const first = earliestDescendant(node);
     if (first !== undefined && first < startMs) {
       return { kind: "measured", startMs: first, endMs: startMs, bound: "from-children" };
@@ -543,8 +477,8 @@ function earliestDescendant(node: TimelineNode): number | undefined {
     const next = stack.pop()!;
     if (seen.has(next)) continue;
     seen.add(next);
-    const at = next.row.event.createdAtMs;
-    if (earliest === undefined || at < earliest) earliest = at;
+    const at = next.row.event.arrivalAtMs;
+    if (at !== undefined && (earliest === undefined || at < earliest)) earliest = at;
     stack.push(...next.children);
   }
   return earliest;
@@ -558,10 +492,13 @@ function earliestDescendant(node: TimelineNode): number | undefined {
  * defence of collapsing is that nothing hidden goes unreported.
  */
 function noteFor(node: TimelineNode): WaterfallNote | undefined {
+  if (node.interiorState === "unreadable") return "unreadable";
+  if (node.interiorState === "partial") return "partial";
+  if (node.interiorState === "pending") {
+    return node.status === "abandoned" ? "unreported" : "pending";
+  }
   if (node.children.length > 0) return undefined;
-  if (node.status === "abandoned") return "unreported";
-  if (node.status === "running") return undefined;
-  return "no-interior";
+  return node.interiorState === "forwards_nothing" ? "no-interior" : undefined;
 }
 
 /**

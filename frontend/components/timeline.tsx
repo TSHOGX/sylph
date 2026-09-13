@@ -142,7 +142,7 @@ export function Timeline({
   onOpenFile?: (path: string, line?: number) => void;
   expandAll?: boolean | null;
 }) {
-  const roots = useMemo(() => buildTree(buildRows(events)), [events]);
+  const roots = useMemo(() => buildTree(buildRows(events), fidelity), [events, fidelity]);
 
   /**
    * The trajectory the view is rooted at, or null for the whole turn.
@@ -412,16 +412,14 @@ function TrajectoryCard({
   const report = trajectoryReport(node);
 
   const empty = node.children.length === 0;
-  const interiorState =
-    node.interiorState ??
-    (empty ? (node.status === "running" || node.status === "abandoned" ? "pending" : "forwards_nothing") : "full");
+  const interiorState = node.interiorState;
   const unreported = empty && node.status === "abandoned" && interiorState === "pending";
   const hollow = empty && interiorState === "forwards_nothing";
-  const unreadable = empty && interiorState === "unreadable";
+  const unreadable = interiorState === "unreadable";
   // A promoted host always has its own call to show, so it stays expandable even when
   // nothing was forwarded from inside it. The badge still says which of the two empty
   // states this is; what changes is that opening it is no longer pointless.
-  const openable = promoted || (!hollow && !unreported && !unreadable);
+  const openable = promoted || !empty;
 
   return (
     <section
@@ -466,6 +464,18 @@ function TrajectoryCard({
             title="The delegated interior was expected but its source could not be read."
           >
             interior unavailable
+          </span>
+        )}
+
+        {interiorState === "partial" && (
+          <span className="shrink-0 rounded bg-hover px-1 text-3xs text-ink-muted">
+            partial interior
+          </span>
+        )}
+
+        {interiorState === "pending" && !unreported && (
+          <span className="shrink-0 rounded bg-hover px-1 text-3xs text-ink-muted">
+            interior pending
           </span>
         )}
 

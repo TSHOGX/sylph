@@ -26,6 +26,7 @@ function ev(partial: Partial<StreamEvent> & { kind: string }): StreamEvent {
     stability: "stable",
     source: "agent",
     createdAtMs: seq,
+    arrivalAtMs: partial.createdAtMs ?? seq,
     ...partial,
   };
 }
@@ -39,7 +40,7 @@ function closes(id: string, span?: string, isError?: boolean): StreamEvent {
 }
 
 function tree(events: StreamEvent[]): TimelineNode[] {
-  return buildTree(buildRows(events));
+  return buildTree(buildRows(events), "stream");
 }
 
 /** Trajectory ids at each level, for compact structural assertions. */
@@ -200,7 +201,7 @@ describe("buildTree", () => {
       ev({ kind: "subagent", phase: "completed", streamId: "s1", createdAtMs: 3500 }),
       ev({ kind: "subagent", phase: "started", streamId: "s2", createdAtMs: 1000 }),
     ]);
-    const nodes = buildTree(rows);
+    const nodes = buildTree(rows, "stream");
 
     expect(nodes[0].rollup.durationMs).toBe(2500);
     expect(nodes[1].rollup.durationMs).toBeUndefined();
@@ -468,10 +469,10 @@ describe("promotion", () => {
     // whole subtree at token rate.
     const settled = [opens("s1", "Explore"), closes("s1")];
     const rows = buildRows(settled);
-    const first = buildTree(rows);
+    const first = buildTree(rows, "stream");
     const second = buildTree(buildRows(settled.concat(
       ev({ kind: "assistant", phase: "completed", streamId: "late", text: "tail" }),
-    )));
+    )), "stream");
 
     expect(second[0]).toBe(first[0]);
   });

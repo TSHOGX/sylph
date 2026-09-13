@@ -35,6 +35,28 @@ function turn(id: string, events: StreamEvent[], origin: "user" | "agent" = "use
 }
 
 describe("buildSessionTrace", () => {
+  it("keeps a parent's state independent from a completed nested trajectory", () => {
+    const index = buildSessionTrace([turn("t1", [
+      event({ kind: "subagent", phase: "started", streamId: "parent", interiorState: "unreadable" }),
+      event({ kind: "subagent", phase: "completed", streamId: "child", span: "parent", interiorState: "full" }),
+    ])]);
+
+    expect(index.trajectories.get("parent")?.status).toBe("running");
+    expect(index.trajectories.get("parent")?.interiorState).toBe("unreadable");
+    expect(index.trajectories.get("child")?.status).toBe("completed");
+  });
+
+  it("does not infer a complete interior or a vendor refusal from observed row counts", () => {
+    const index = buildSessionTrace([turn("t1", [
+      event({ kind: "subagent", phase: "completed", streamId: "empty" }),
+      event({ kind: "subagent", phase: "started", streamId: "parent" }),
+      event({ kind: "assistant", phase: "completed", streamId: "answer", span: "parent", text: "a prefix" }),
+    ])]);
+
+    expect(index.trajectories.get("empty")?.interiorState).toBe("pending");
+    expect(index.trajectories.get("parent")?.interiorState).toBe("partial");
+  });
+
   it("moves a late child close back to the turn that owns the trajectory", () => {
     const host = event({ kind: "subagent", phase: "started", streamId: "child", name: "worker" });
     const childTool = event({
@@ -90,7 +112,7 @@ describe("buildSessionTrace", () => {
 
     expect(trajectory?.ownerTurnId).toBe("t1");
     expect(trajectory?.name).toBe("Workflow");
-    expect(trajectory?.interiorState).toBe("full");
+    expect(trajectory?.interiorState).toBe("partial");
     expect(trajectory?.events.map((item) => item.seq)).toEqual([host.seq, child.seq]);
   });
 

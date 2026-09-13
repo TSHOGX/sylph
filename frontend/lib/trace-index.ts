@@ -46,11 +46,7 @@ export function buildSessionTrace(
   for (const entry of turns) {
     for (const event of entry.events) {
       const normalized = withArrivalTurn(event, entry.turn.id);
-      // The session allocator makes seq globally unique. Prefer a trace copy when it
-      // carries the explicit server field; this also makes the index tolerant of a
-      // mixed-version server during rollout.
-      const existing = bySeq.get(normalized.seq);
-      if (!existing || !existing.arrivalTurnId) bySeq.set(normalized.seq, normalized);
+      bySeq.set(normalized.seq, normalized);
     }
   }
   for (const event of liveEvents) {
@@ -86,7 +82,7 @@ export function buildSessionTrace(
       .filter((name): name is string => Boolean(name));
     const close = [...own]
       .reverse()
-      .find((event) => event.phase === "completed" && event.kind === "subagent");
+      .find((event) => event.streamId === id && event.phase === "completed" && event.kind === "subagent");
     const serverClosed = Boolean(
       close?.data &&
         typeof close.data === "object" &&
@@ -103,20 +99,16 @@ export function buildSessionTrace(
             : "running";
     const arrivalTurnIds = [...new Set(own.map((event) => event.arrivalTurnId))];
     const explicitState = own
-      .filter((event) => event.kind === "subagent" && event.interiorState)
+      .filter((event) => event.streamId === id && event.interiorState)
       .map((event) => event.interiorState!)
       .reduce<InteriorState | undefined>(
         (current, incoming) => mergeInteriorState(current, incoming),
         undefined,
       );
     const hasInterior = own.some((event) => event.kind !== "subagent" && event.span === id);
-    // Old rows predate the typed state. Preserve their only reliable distinctions while
-    // making the fallback explicit: observed child events mean full, a still-live trajectory
-    // may acquire a source later, and a closed childless trajectory is the old vendor contract
-    // that forwards nothing.
-    const interiorState =
-      explicitState ??
-      (hasInterior ? "full" : status === "running" || status === "abandoned" ? "pending" : "forwards_nothing");
+    // Observing a prefix proves readability, never completeness. Only the producer can
+    // report that a source is full or that this vendor surface forwards nothing.
+    const interiorState = explicitState ?? (hasInterior ? "partial" : "pending");
 
     trajectories.set(id, {
       id,
@@ -146,7 +138,7 @@ export function buildSessionTrace(
  * Project a session trace back onto the turn list used by the existing transcript UI.
  * Late child events disappear from the agent-created arrival turn and are appended to
  * the turn that owns their trajectory. Unknown spans remain on arrival, preserving work
- * when a declaration was lost or an older backend did not persist one.
+ * when the source has not supplied a declaration.
  */
 export function projectSessionTurns(
   turns: TurnWithEvents[],

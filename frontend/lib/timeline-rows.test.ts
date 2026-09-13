@@ -154,4 +154,15 @@ describe("buildRows", () => {
   it("returns nothing for an empty stream", () => {
     expect(buildRows([])).toEqual([]);
   });
+
+  it("retains a promoted host's interior observation before its close", () => {
+    const rows = buildRows([
+      ev({ kind: "tool_call", phase: "completed", streamId: "host", name: "Workflow" }),
+      ev({ kind: "subagent", phase: "delta", streamId: "host", interiorState: "partial" }),
+      ev({ kind: "subagent", phase: "completed", streamId: "host", interiorState: "pending" }),
+    ]);
+
+    expect(rows[0].event.kind).toBe("tool_call");
+    expect(rows[0].event.interiorState).toBe("partial");
+  });
 });
