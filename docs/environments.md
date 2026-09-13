@@ -61,6 +61,7 @@ against its configured CA before the wire handshake.
 | `hello` / `welcome` | env → server, server → env | version, agents present, machine facts, resume cursor |
 | `session.*` | server → env | open, send a turn, interrupt, steer, set config |
 | `event` | env → server | normalized events carrying producer sequence and source provenance |
+| `native_blob_chunk` | env → server | bounded, ack-gated chunk of a native sidecar snapshot |
 | `ack` | server → env | durable through a contiguous producer prefix |
 | `agents` | env → server | the agent inventory changed (§ Agent availability) |
 | `watch.*` | server → env | start or stop following a native session |
@@ -77,6 +78,12 @@ Native adopt and watch events arrive without a server turn id, so ingest assigns
 server-owned container per source. The vendor stream is unchanged; the container is what
 makes each event reachable through the per-turn history API. A terminal event closes it,
 and a finite source emits an ordered close diagnostic at EOF.
+
+Native records that name a large sidecar are accompanied by `native_blob_chunk` messages.
+The envagent opens the validated vendor locator on its machine, snapshots it in bounded
+chunks, and spools those chunks before the record. The server retains the complete body in
+CAS before acknowledging the record; a locator is never opened by the server and is never
+used as a backup after projection.
 
 ## Agent availability
 
@@ -374,14 +381,13 @@ The adapter has no cursor to resume from: `Adapter::adopt` restarts at the begin
 the store, so the second pass re-emits every record of the first. Suppression is therefore
 the server's, and it happens at ingest.
 
-**A vendor id is not available to key that suppression, so content identity is.** Only
-`claude` emits native records at all, and neither `codex` nor `pi` carries any per-event
-vendor identifier through the event vocabulary — the raw tier's `(session, source,
-version)` key covers one agent's raw rows and cannot answer for the projected events of
-the other two. So a re-read digests each incoming event over the fields that decide what a
-reader sees, and skips one whose digest a previous pass already journaled for that
-session. The digest is per session and covers both tiers, because a turn's events live in
-whichever tier consolidation last left them.
+**Raw identity and projected-event identity answer different questions.** All three
+adapters emit native records, keyed by `(session, source, version)`. Projected events
+still use content identity when the source supplies no durable per-event identifier or
+the live source version is process-local. A re-read digests each incoming event over the
+fields that decide what a reader sees, and skips one whose digest a previous pass already
+journaled for that session. The digest is per session and covers both tiers, because a
+turn's events live in whichever tier consolidation last left them.
 
 **Two events may legitimately be identical**, and this is the cost the design accepts
 knowingly: a vendor that wrote the same text twice in one session has a second record that

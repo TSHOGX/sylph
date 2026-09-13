@@ -269,6 +269,25 @@ impl ChannelEventSink {
                     self.connection_epoch,
                 ),
             },
+            "native_blob_chunk" => match (
+                session_id.clone(),
+                serde_json::from_value::<sylph_protocol::NativeBlobChunk>(value.clone()),
+            ) {
+                (Some(session_id), Ok(chunk)) => WireMessage::NativeBlobChunk {
+                    session_id,
+                    chunk,
+                    producer_id: self.producer_id.clone(),
+                    producer_seq: ProducerSeq::new(row.producer_seq),
+                    connection_epoch: self.connection_epoch,
+                },
+                _ => diagnostic_message(
+                    row,
+                    session_id,
+                    value,
+                    self.producer_id.as_str(),
+                    self.connection_epoch,
+                ),
+            },
             "source_state" => {
                 match serde_json::from_value::<sylph_protocol::SourceState>(value.clone()) {
                     Ok(source) => WireMessage::SourceState {
@@ -1139,7 +1158,21 @@ impl EnvAgent {
     }
 
     async fn reread_command(&self, agent: &str, native_id: NativeId) -> Result<serde_json::Value> {
-        let pass = self.reread(agent, native_id).await?;
+        let session_id = SessionId::new(
+            EnvironmentId::parse(self.config.environment_id.clone())?,
+            AgentName::parse(agent.to_string())?,
+            native_id.clone(),
+        );
+        let mut pass = self.reread(agent, native_id).await?;
+        // Sidecars are transferred through the durable producer path before the
+        // command result exposes their native records. The server can therefore
+        // acknowledge the reread only after CAS retention has completed.
+        let mut retained = Vec::with_capacity(pass.records.len());
+        for record in pass.records {
+            retained.push(self.retain_native_sidecars(&session_id, record).await?);
+        }
+        pass.records = retained;
+        while self.flush_pending(64).await? > 0 {}
         Ok(serde_json::to_value(&pass)?)
     }
 
@@ -2463,6 +2496,13 @@ impl EnvAgent {
                             warn!("native record arrived before a native id; refusing a fake identity");
                             break;
                         };
+                        let record = match runtime.retain_native_sidecars(&session, record).await {
+                            Ok(record) => record,
+                            Err(error) => {
+                                warn!("could not snapshot native sidecar: {error:#}");
+                                break;
+                            }
+                        };
                         let value = serde_json::to_value(&record).unwrap_or_default();
                         if let Err(error) = runtime
                             .enqueue_json(&session.encode(), "native_record", &value, None)
@@ -2561,6 +2601,120 @@ impl EnvAgent {
                 }
             }
         })
+    }
+
+    /// Snapshot opaque vendor sidecars locally before their native record is sent.
+    /// Chunks use the normal durable producer spool, so the server can retain the
+    /// body before acknowledging the referencing record without putting large bytes
+    /// into timeline events or relying on the vendor store later.
+    async fn retain_native_sidecars(
+        &self,
+        session_id: &SessionId,
+        mut record: sylph_protocol::NativeRecord,
+    ) -> Result<sylph_protocol::NativeRecord> {
+        use std::io::Read;
+        for blob in &mut record.blobs {
+            let Some(locator) = blob.locator.take() else {
+                continue;
+            };
+            let path = match self.config.path_policy.contain(&locator) {
+                Ok(path) => path,
+                Err(error) => {
+                    blob.error = Some(format!("sidecar locator refused: {error}"));
+                    continue;
+                }
+            };
+            let mut file = match std::fs::File::open(&path) {
+                Ok(file) => file,
+                Err(error) => {
+                    blob.error = Some(error.to_string());
+                    continue;
+                }
+            };
+            let metadata = match file.metadata() {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    blob.error = Some(error.to_string());
+                    continue;
+                }
+            };
+            let size = metadata.len();
+            blob.size = size;
+            if !metadata.is_file() {
+                blob.error = Some("native sidecar is not a regular file".into());
+                continue;
+            }
+            if size > sylph_protocol::MAX_NATIVE_BLOB_BYTES {
+                blob.error = Some(format!(
+                    "native sidecar is {size} bytes; limit is {}",
+                    sylph_protocol::MAX_NATIVE_BLOB_BYTES
+                ));
+                continue;
+            }
+            let mut offset = 0u64;
+            while offset < size {
+                // Never spool bytes beyond the declared snapshot. A growing file would
+                // otherwise publish an invalid chunk that blocks the producer prefix.
+                let length = (size - offset).min(sylph_protocol::NATIVE_BLOB_CHUNK_BYTES as u64);
+                let mut bytes = vec![0u8; length as usize];
+                if let Err(error) = file.read_exact(&mut bytes) {
+                    blob.error = Some(error.to_string());
+                    break;
+                }
+                let chunk = sylph_protocol::NativeBlobChunk {
+                    source: record.source.clone(),
+                    version: record.version,
+                    name: blob.name.clone(),
+                    size,
+                    offset,
+                    data: base64::engine::general_purpose::STANDARD.encode(&bytes),
+                    final_chunk: offset + length == size,
+                };
+                let value = serde_json::to_value(chunk)?;
+                if let Err(error) = self
+                    .enqueue_json(&session_id.encode(), "native_blob_chunk", &value, None)
+                    .await
+                {
+                    if !matches!(error.downcast_ref::<crate::spool::SpoolError>(),
+                        Some(crate::spool::SpoolError::Overflow { .. })) {
+                        return Err(error);
+                    }
+                    // A connected server can consume an object larger than the spool.
+                    // If delivery fails, every accepted chunk stays durable for reconnect.
+                    while self.flush_pending(64).await? > 0 {}
+                    self.enqueue_json(&session_id.encode(), "native_blob_chunk", &value, None)
+                        .await?;
+                }
+                offset += length;
+            }
+            if blob.error.is_none() {
+                let unchanged = file.metadata().is_ok_and(|after| {
+                    after.len() == size && after.modified().ok() == metadata.modified().ok()
+                });
+                if !unchanged || offset != size {
+                    blob.error = Some("native sidecar changed during snapshot".into());
+                }
+            }
+            if size == 0 {
+                let chunk = sylph_protocol::NativeBlobChunk {
+                    source: record.source.clone(),
+                    version: record.version,
+                    name: blob.name.clone(),
+                    size,
+                    offset: 0,
+                    data: String::new(),
+                    final_chunk: true,
+                };
+                self.enqueue_json(
+                    &session_id.encode(),
+                    "native_blob_chunk",
+                    &serde_json::to_value(chunk)?,
+                    None,
+                )
+                .await?;
+            }
+        }
+        Ok(record)
     }
 }
 
@@ -3107,6 +3261,99 @@ mod tests {
         runtime.flush_pending(10).await.unwrap();
         assert!(runtime.spool().is_empty().await.unwrap());
         assert_eq!(sink.events().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn native_sidecars_larger_than_the_spool_survive_vendor_removal() {
+        let dir = tempfile::tempdir().unwrap();
+        let sidecar = dir.path().join("tool-output.txt");
+        let bytes = vec![b'x'; sylph_protocol::NATIVE_BLOB_CHUNK_BYTES * 2 + 17];
+        std::fs::write(&sidecar, &bytes).unwrap();
+        let sink = Arc::new(RecordingSink::default());
+        let runtime = EnvAgent::open(
+            EnvAgentConfig {
+                environment_id: "env7fk2".into(),
+                producer_id: "p".into(),
+                spool: SpoolConfig::new(dir.path().join("spool.db"), 2 * 1024 * 1024),
+                path_policy: PathPolicy::from_roots([dir.path().to_path_buf()]).unwrap(),
+            },
+            sink.clone(),
+        )
+        .await
+        .unwrap();
+        let session = SessionId::new(
+            EnvironmentId::parse("env7fk2").unwrap(),
+            AgentName::parse("claude").unwrap(),
+            NativeId::new("n1"),
+        );
+        let record = sylph_protocol::NativeRecord {
+            source: "transcript.jsonl".into(),
+            version: 1,
+            payload: serde_json::json!({"toolUseResult": {"persistedOutputPath": sidecar}}),
+            raw_json: None,
+            blobs: vec![sylph_protocol::NativeBlob {
+                name: "tool-output.txt".into(),
+                size: bytes.len() as u64,
+                bytes: None,
+                locator: Some(sidecar.to_string_lossy().into()),
+                error: None,
+            }],
+        };
+        let retained = runtime
+            .retain_native_sidecars(&session, record)
+            .await
+            .unwrap();
+        std::fs::remove_file(&sidecar).unwrap();
+        assert!(retained.blobs[0].locator.is_none());
+        assert!(retained.blobs[0].bytes.is_none());
+        let mut pending = sink.events().await;
+        pending.extend(runtime.spool.pending("p", 10).await.unwrap());
+        assert_eq!(pending.len(), 3);
+        let mut reconstructed = Vec::new();
+        for (index, row) in pending.iter().enumerate() {
+            assert_eq!(row.kind, "native_blob_chunk");
+            let envelope: serde_json::Value = serde_json::from_slice(&row.payload).unwrap();
+            let chunk: sylph_protocol::NativeBlobChunk =
+                serde_json::from_value(envelope["payload"].clone()).unwrap();
+            assert_eq!(chunk.offset, reconstructed.len() as u64);
+            assert_eq!(chunk.final_chunk, index == 2);
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(chunk.data)
+                .unwrap();
+            assert!(decoded.len() <= sylph_protocol::NATIVE_BLOB_CHUNK_BYTES);
+            reconstructed.extend(decoded);
+        }
+        assert_eq!(reconstructed, bytes);
+    }
+
+    #[tokio::test]
+    async fn absent_native_sidecars_are_retained_as_explicit_errors() {
+        let (runtime, _spy, dir) = spy_runtime(false).await;
+        let session = SessionId::new(
+            EnvironmentId::parse("env7fk2").unwrap(),
+            AgentName::parse("claude").unwrap(),
+            NativeId::new("n1"),
+        );
+        let record = sylph_protocol::NativeRecord {
+            source: "transcript.jsonl".into(),
+            version: 1,
+            raw_json: None,
+            payload: serde_json::json!({}),
+            blobs: vec![sylph_protocol::NativeBlob {
+                name: "missing".into(),
+                size: 42,
+                bytes: None,
+                locator: Some(dir.path().join("missing").to_string_lossy().into()),
+                error: None,
+            }],
+        };
+        let retained = runtime
+            .retain_native_sidecars(&session, record)
+            .await
+            .unwrap();
+        assert!(retained.blobs[0].locator.is_none());
+        assert!(retained.blobs[0].error.is_some());
+        assert_eq!(retained.blobs[0].size, 42);
     }
 
     #[tokio::test]

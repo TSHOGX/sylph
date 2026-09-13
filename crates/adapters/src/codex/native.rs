@@ -49,7 +49,7 @@ fn native_source(path: &Path) -> String {
 fn native_record(path: &Path, version: u64, value: &Value, raw: Vec<u8>) -> NativeRecord {
     NativeRecord {
         source: native_source(path),
-        version,
+        version: crate::native::record_revision(version, &raw),
         raw_json: Some(raw),
         payload: value.clone(),
         blobs: Vec::new(),
@@ -418,10 +418,18 @@ fn project_record(
         "world_state" | "inter_agent_communication_metadata" => {}
         _ => parsed.unknown_records += 1,
     }
-    if at_ms != NO_RECORDED_TIME {
+    let recorded_at_ms = if kind == "event_msg"
+        && payload.get("type").and_then(Value::as_str) == Some("item_completed")
+    {
+        payload.get("completed_at_ms").and_then(Value::as_i64)
+    } else {
+        None
+    }
+    .or_else(|| (at_ms != NO_RECORDED_TIME).then_some(at_ms));
+    if let Some(recorded_at_ms) = recorded_at_ms {
         for message in &mut parsed.messages[before..] {
             if let SessionMessage::Event(event) = message {
-                event.recorded_at_ms = Some(at_ms);
+                event.recorded_at_ms = Some(recorded_at_ms);
             }
         }
     }
@@ -940,8 +948,7 @@ fn legacy_delegation(
     event.span = string_at(payload, "call_id");
     event.name = string_at(payload, "new_agent_nickname")
         .or_else(|| string_at(payload, "receiver_agent_nickname"));
-    // Adoption reads an immutable rollout to EOF, so the forwarded interior is complete.
-    event.interior_state = Some(InteriorState::Full);
+    // The graph reader reports interior availability after reading the child's sources.
     // The brief. Plaintext in this era, and it is the delegate's whole assignment — a card
     // with a name and no brief says who ran and not what they were asked.
     event.text = string_at(payload, "prompt").unwrap_or_default();
@@ -1012,7 +1019,6 @@ fn legacy_delegation_close(payload: &Value, subtype: &str, at_ms: i64, parsed: &
         // [`ParsedRollout::failed_delegations`] — this is the ordering that makes the flag
         // necessary rather than defensive.
         event.is_error = failed || parsed.failed_delegations.contains(&thread);
-        event.interior_state = Some(InteriorState::Full);
         if let Some(text) = message {
             event.text = text;
         }
@@ -1216,8 +1222,7 @@ fn paginated_delegation(
     // this era ([`BRIEF_IS_CIPHERTEXT`]) and a placeholder written in its place is permanent
     // and afterwards indistinguishable from a real name.
     event.name = name;
-    // This is a complete native record, not a live prefix.
-    event.interior_state = Some(InteriorState::Full);
+    // A complete parent declaration does not establish whether the child is readable.
     // **No text, deliberately.** The delegate's assignment is the `spawn_agent` call's
     // `message`, which is a Fernet token in this era — putting it on the card would render
     // 3 KB of base64 as a delegation's description. `text` is empty rather than holding a
@@ -1639,7 +1644,7 @@ impl RolloutCursor {
                 // Retain the complete vendor envelope before its normalized projection. The
                 // server can then re-project Codex history after the event vocabulary evolves,
                 // with lexical bytes preserved for JSONL round-trips.
-                let version = (self.generation << 32).saturating_add(self.records + 1);
+                let version = self.records + 1;
                 let raw_json = record
                     .raw
                     .strip_suffix(&[b'\n'][..])
@@ -1757,10 +1762,41 @@ struct RolloutFollowState {
     declared: HashSet<String>,
     forwarded_events: HashSet<u64>,
     child_events: HashSet<u64>,
+    forwarded_sources: HashSet<String>,
+    forwarded_closes: HashSet<String>,
+    interior_states: HashMap<String, InteriorState>,
     pending: VecDeque<SessionMessage>,
     finalizing: bool,
     stopped: bool,
     retry_after_error: bool,
+}
+
+/// Native-only envelopes that the app-server never forwards, using the same graph reader
+/// as adoption. Stdout remains the sole producer of normalized live events.
+pub(super) struct LiveRecords {
+    state: Option<RolloutFollowState>,
+}
+
+impl LiveRecords {
+    pub(super) fn new() -> Self {
+        Self { state: None }
+    }
+
+    pub(super) fn poll(&mut self, id: &NativeId) -> Result<Vec<SessionMessage>> {
+        if self.state.is_none() {
+            let Some(path) = store_root().and_then(|root| {
+                candidates(&root, is_rollout).into_iter().find_map(|candidate| {
+                    header_of(&candidate).filter(|header| header.native_id.as_ref() == Some(id)).map(|_| candidate.path)
+                })
+            }) else {
+                return Ok(Vec::new());
+            };
+            self.state = Some(RolloutFollowState::new(id.clone(), path, true));
+        }
+        let mut messages = self.state.as_mut().expect("native source found").poll()?;
+        messages.retain(|message| matches!(message, SessionMessage::NativeRecord(_)));
+        Ok(messages)
+    }
 }
 
 impl RolloutFollowState {
@@ -1792,6 +1828,9 @@ impl RolloutFollowState {
             declared: HashSet::new(),
             forwarded_events: HashSet::new(),
             child_events: HashSet::new(),
+            forwarded_sources: HashSet::new(),
+            forwarded_closes: HashSet::new(),
+            interior_states: HashMap::new(),
             pending: VecDeque::new(),
             finalizing,
             stopped: false,
@@ -1947,6 +1986,12 @@ impl RolloutFollowState {
                     }
                     self.child_events.insert(key);
                 } else if event.span.is_some() {
+                    if let Some(span) = &event.span {
+                        self.forwarded_sources.insert(span.clone());
+                        if event.kind == EventKind::Turn && event.phase == Some(Phase::Completed) {
+                            self.forwarded_closes.insert(span.clone());
+                        }
+                    }
                     if self.child_events.contains(&key) {
                         continue;
                     }
@@ -1956,7 +2001,46 @@ impl RolloutFollowState {
             }
             messages.extend(retained);
         }
+        self.update_interiors(&mut messages);
         Ok(messages)
+    }
+
+    fn update_interiors(&mut self, messages: &mut Vec<SessionMessage>) {
+        for (child, link) in &self.links {
+            let source = self.sources.values().find(|cursor| {
+                cursor.projector.parsed.header.as_ref().and_then(|header| header.native_id.as_ref()).map(NativeId::as_str) == Some(child.as_str())
+            });
+            let readable = source.filter(|cursor| cursor.offset > 0 && cursor.path.is_file());
+            let complete = readable.is_some_and(|cursor| {
+                std::fs::metadata(&cursor.path).is_ok_and(|meta| meta.len() == cursor.offset)
+            });
+            let state = if self.forwarded_closes.contains(child) || (self.finalizing && complete) {
+                InteriorState::Full
+            } else if readable.is_some() || self.forwarded_sources.contains(child) {
+                InteriorState::Partial
+            } else if self.finalizing {
+                InteriorState::Unreadable
+            } else {
+                InteriorState::Pending
+            };
+            let mut reported = false;
+            for message in messages.iter_mut() {
+                if let SessionMessage::Event(event) = message {
+                    if event.kind == EventKind::Subagent && event.stream_id.as_deref() == Some(child.as_str()) {
+                        event.interior_state = Some(state);
+                        reported = true;
+                    }
+                }
+            }
+            if !reported && self.interior_states.get(child).is_some_and(|old| *old != state) {
+                let mut event = Event::new(EventKind::Subagent, Some(Phase::Delta), 0);
+                event.stream_id = Some(child.clone());
+                event.span = link.host.clone();
+                event.interior_state = Some(state);
+                messages.push(SessionMessage::Event(event));
+            }
+            self.interior_states.insert(child.clone(), state);
+        }
     }
 
     fn discover(&mut self) -> Result<Vec<(PathBuf, Header)>> {
@@ -2070,12 +2154,6 @@ impl RolloutFollowState {
             let already_declared = !self.declared.insert(child_id.clone());
             if already_declared {
                 event.phase = Some(Phase::Delta);
-            }
-            if !self.finalizing {
-                // A native declaration is complete as a record, but the child rollout can
-                // continue growing. Watchers therefore expose a readable prefix until the
-                // caller performs a final/adopt pass.
-                event.interior_state = Some(InteriorState::Partial);
             }
             self.links.insert(
                 child_id.clone(),
@@ -2472,6 +2550,39 @@ mod tests {
     }
 
     #[test]
+    fn raw_revision_survives_reopen_and_distinguishes_rewritten_bytes() {
+        let dir = std::env::temp_dir().join(format!("sylph-codex-raw-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("rollout-test.jsonl");
+        std::fs::write(&path, "{\"type\":\"future\",\"payload\":1}\n").unwrap();
+        let read = || {
+            RolloutCursor::new(path.clone()).poll().unwrap().into_iter().find_map(|message| {
+                match message { SessionMessage::NativeRecord(record) => Some(record), _ => None }
+            }).unwrap()
+        };
+        let first = read();
+        assert_eq!(first.version, read().version);
+        std::fs::write(&path, "{ \"type\" : \"future\", \"payload\" : 1 }\n").unwrap();
+        let rewritten = read();
+        assert_eq!(first.payload, rewritten.payload);
+        assert_ne!(first.version, rewritten.version, "lexical changes are retained revisions");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn item_recorded_time_uses_completion_even_without_an_outer_stamp() {
+        for outer in [Some("2026-09-02T00:00:00.100Z"), None] {
+            let mut projector = RolloutProjector::default();
+            projector.apply(&json!({"type":"session_meta","payload":{"id":"time","history_mode":"paginated"}}));
+            let mut record = json!({"type":"event_msg","payload":{"type":"item_completed","completed_at_ms":1788307200090_i64,"started_at_ms":1788307200000_i64,"item":{"type":"AgentMessage","id":"msg","content":[{"type":"Text","text":"answer"}]}}});
+            if let Some(outer) = outer { record["timestamp"] = json!(outer); }
+            let messages = projector.apply(&record);
+            let event = messages.iter().find_map(|message| match message { SessionMessage::Event(event) if event.kind == EventKind::Assistant => Some(event), _ => None }).unwrap();
+            assert_eq!(event.recorded_at_ms, Some(1788307200090));
+        }
+    }
+
+    #[test]
     fn adopt_retains_each_rollout_record_before_projection() {
         let mut cursor = RolloutCursor::new(fixture("ordinary-turn-item-completed-era.jsonl"));
         let messages = cursor.poll().expect("fixture must parse");
@@ -2489,9 +2600,7 @@ mod tests {
             "every JSONL row is retained as raw"
         );
         assert!(retained.iter().all(|record| record.raw_json.is_some()));
-        assert!(retained
-            .windows(2)
-            .all(|pair| pair[0].version < pair[1].version));
+        assert_eq!(retained.iter().map(|record| record.version).collect::<HashSet<_>>().len(), expected);
     }
 
     /// The header one fixture's own `session_meta` yields, from the same pass.
@@ -2580,7 +2689,7 @@ mod tests {
                 span.starts_with("call_"),
                 "the span must be the host tool call, got {span:?}"
             );
-            assert_eq!(sub.interior_state, Some(InteriorState::Full));
+            assert_eq!(sub.interior_state, None, "the single-file projector cannot establish child reachability");
             assert_ne!(
                 stream, span,
                 "a trajectory keyed by its host cannot distinguish two delegates \
@@ -2776,6 +2885,18 @@ mod tests {
     /// is emitted once, and the child's own records arrive later with the child trajectory as
     /// their span. This is the path that a one-shot `adopt`/`watch` implementation misses.
     #[test]
+    fn an_absent_child_source_is_pending_live_and_unreadable_on_final_read() {
+        for finalizing in [false, true] {
+            let (root, parent, _) = watch_fixture_dir(if finalizing { "missing-final" } else { "missing-live" });
+            let mut state = RolloutFollowState::new_with_root(NativeId::new("watch-parent"), parent, root.clone(), finalizing);
+            let events = watch_events(&state.poll().unwrap());
+            let declaration = events.iter().find(|event| event.kind == EventKind::Subagent && event.stream_id.as_deref() == Some("watch-child")).unwrap();
+            assert_eq!(declaration.interior_state, Some(if finalizing { InteriorState::Unreadable } else { InteriorState::Pending }));
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
     fn a_watcher_discovers_a_child_rollout_created_after_the_first_poll() {
         let (root, parent, child) = watch_fixture_dir("late-child");
         let id = NativeId::new("watch-parent");
@@ -2786,7 +2907,7 @@ mod tests {
         assert!(first_events.iter().any(|event| {
             event.kind == EventKind::Subagent
                 && event.stream_id.as_deref() == Some("watch-child")
-                && event.interior_state == Some(InteriorState::Partial)
+                && event.interior_state == Some(InteriorState::Pending)
         }));
         assert!(
             first_events
@@ -2809,6 +2930,7 @@ mod tests {
                 .iter()
                 .filter(|event| {
                     event.kind == EventKind::Subagent
+                        && event.phase == Some(Phase::Started)
                         && event.stream_id.as_deref() == Some("watch-child")
                 })
                 .count(),

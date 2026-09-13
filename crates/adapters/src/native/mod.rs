@@ -25,6 +25,18 @@ pub mod timestamp;
 
 pub use timestamp::{epoch_millis_from_iso, epoch_millis_from_json};
 
+/// Identity of one source position and its exact revision, stable across reader restarts.
+/// The store checks byte equality on collision; a changed line must never reuse its old
+/// identity merely because a new reader starts its generation counter at zero.
+pub(crate) fn record_revision(position: u64, bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in position.to_le_bytes().iter().chain(bytes) {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
 /// Where a vendor keeps its sessions on this machine.
 ///
 /// Hardcoded per agent, because a native store's location is a vendor fact rather than a

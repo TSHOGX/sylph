@@ -232,11 +232,11 @@ pub struct IngestReport {
 /// # Why content and not a vendor id
 ///
 /// There is no vendor id to use. `Adapter::adopt` restarts at the beginning of the store
-/// and exposes no cursor, so a re-read re-emits every event the first pass saw; and of the
-/// three agents only `claude` emits [`SessionMessage::NativeRecord`] at all, so the raw
-/// tier's `(session, source, version)` key cannot answer for `codex` or `pi`, whose native
-/// parsers emit projected events exclusively. Content identity is what is available for all
-/// three (`docs/environments.md` § Re-reading a session Sylph already holds).
+/// and exposes no cursor, so a re-read re-emits every event the first pass saw. Native
+/// records use the `(session, source, version)` key, while content identity remains the
+/// fallback for projected events and live sources whose versions are process-local. Content
+/// identity is therefore available for all three agents (`docs/environments.md` § Re-reading
+/// a session Sylph already holds).
 ///
 /// # What is hashed, and what is deliberately not
 ///

@@ -32,6 +32,17 @@ machine's inventory changes (`docs/environments.md` § Agent availability).
 | second-party control surface | decides whether the control facet exists at all |
 | which vendor keys carry what | the most-repeated defect class in this repo |
 
+Native revision identity is derived from the retained bytes and source position, never
+from a reader's process-local generation counter. A fresh reader of a rewritten file must
+retain the new revision, while identical repeated lines at different positions remain
+separate records. Snapshot payload, lexical bytes, and revision are derived from one read.
+Only newline-terminated JSONL records are complete; an unfinished tail remains pending.
+
+Native-only metadata is retained alongside live stdout. Acquiring that raw source does
+not publish a second normalized copy of events already supplied by the live transport.
+An interior is complete only when the producer has read its complete source; reaching
+the end of a parent's transcript does not prove a child's transcript was available.
+
 ## Capability matrix
 
 Against `claude` 2.1.247 and `pi` 0.84.3 on 2026-08-27, and `codex-cli` 0.150.1 on

@@ -663,6 +663,58 @@ impl EnvBridge {
                         )
                         .await?;
                     }
+                    DecodedMessage::Known(WireMessage::NativeBlobChunk {
+                        session_id,
+                        chunk,
+                        producer_id,
+                        producer_seq,
+                        connection_epoch: frame_epoch,
+                    }) => {
+                        self.validate_producer_frame(
+                            &environment,
+                            epoch,
+                            frame_epoch,
+                            &producer_id,
+                        )
+                        .await?;
+                        if session_id.environment != environment {
+                            return Err(BridgeError::ProducerMismatch.into());
+                        }
+                        let payload_hash = hash_bytes(&serde_json::to_vec(&serde_json::json!({
+                            "sessionId": session_id,
+                            "chunk": chunk,
+                        }))?);
+                        let history = self.history.clone();
+                        let session_key = session_id.encode();
+                        let result = self.process_message(
+                            &environment,
+                            epoch,
+                            &producer_id,
+                            producer_seq,
+                            &payload_hash,
+                            &tx,
+                            move || async move {
+                                history.put_native_blob_chunk(&session_key, &chunk).await
+                            },
+                        )
+                        .await;
+                        if let Err(error) = result {
+                            if let Some(turn_id) = self.store.running_turn_id(&session_id).await? {
+                                if let Some(closer) = self.turn_closer.read().await.clone() {
+                                    closer.close(
+                                        &session_id,
+                                        &turn_id,
+                                        Outcome::LinkLost {
+                                            detail: Some(format!(
+                                                "could not retain native sidecar: {error:#}"
+                                            )),
+                                        },
+                                    ).await;
+                                }
+                            }
+                            return Err(error);
+                        }
+                    }
                     DecodedMessage::Known(WireMessage::NativeRecord {
                         session_id,
                         record,
@@ -3041,6 +3093,143 @@ mod tests {
             second.await.unwrap().unwrap(),
             CommandOutcome::Accepted { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn sidecar_receipts_follow_durable_bytes_and_survive_replay() {
+        use base64::Engine;
+        let (bridge, _dir) = bridge().await;
+        let environment = EnvironmentId::parse("env-sidecar").unwrap();
+        let producer = ProducerId::parse("producer-sidecar").unwrap();
+        bridge
+            .store
+            .upsert_environment(
+                &environment,
+                "install-sidecar",
+                "fixture",
+                "development",
+                &hash_secret("sidecar-token"),
+                "[]",
+            )
+            .await
+            .unwrap();
+        let session = Session {
+            id: SessionId::new(
+                environment.clone(),
+                AgentName::parse("claude").unwrap(),
+                sylph_protocol::NativeId::new("sidecar-session"),
+            ),
+            workdir: Some("/tmp".into()),
+            title: None,
+            inject_identity: false,
+            fidelity: sylph_protocol::Fidelity::Blocks,
+            flags_json: "{}".into(),
+            status: "idle".into(),
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        };
+        bridge.store.create_session(&session).await.unwrap();
+        let (mut client, server) = tokio::io::duplex(32 * 1024);
+        let (reader, writer) = tokio::io::split(server);
+        let task = tokio::spawn({
+            let bridge = bridge.clone();
+            async move { bridge.serve_io(reader, writer).await }
+        });
+        let hello = sylph_protocol::Hello::current(
+            "install-sidecar",
+            producer.clone(),
+            Some(environment),
+            0,
+        );
+        write_frame(
+            &mut client,
+            &serde_json::to_vec(&WireMessage::from_hello(hello)).unwrap(),
+        )
+        .await
+        .unwrap();
+        write_frame(&mut client, &serde_json::to_vec("sidecar-token").unwrap())
+            .await
+            .unwrap();
+        let epoch = match sylph_protocol::decode_message(&read_frame(&mut client).await.unwrap())
+            .unwrap()
+        {
+            DecodedMessage::Known(WireMessage::Welcome {
+                connection_epoch, ..
+            }) => connection_epoch,
+            other => panic!("expected welcome, got {other:?}"),
+        };
+        let bytes = b"sidecar bytes supplied by a different machine";
+        let chunk = sylph_protocol::NativeBlobChunk {
+            source: "root.jsonl".into(),
+            version: 1,
+            name: "remote-output".into(),
+            size: bytes.len() as u64,
+            offset: 0,
+            data: base64::engine::general_purpose::STANDARD.encode(bytes),
+            final_chunk: true,
+        };
+        let record = sylph_protocol::NativeRecord {
+            source: chunk.source.clone(),
+            version: chunk.version,
+            raw_json: Some(br#"{ "unknown": true }"#.to_vec()),
+            payload: serde_json::json!({"unknown": true}),
+            blobs: vec![sylph_protocol::NativeBlob {
+                name: chunk.name.clone(),
+                size: chunk.size,
+                bytes: None,
+                locator: None,
+                error: None,
+            }],
+        };
+        let frames = [
+            WireMessage::NativeBlobChunk {
+                session_id: session.id.clone(),
+                chunk,
+                producer_id: producer.clone(),
+                producer_seq: ProducerSeq::new(1),
+                connection_epoch: epoch,
+            },
+            WireMessage::NativeRecord {
+                session_id: session.id.clone(),
+                record,
+                producer_id: producer.clone(),
+                producer_seq: ProducerSeq::new(2),
+                connection_epoch: epoch,
+            },
+        ];
+        // Replay the native-record receipt after its staging rows have been consumed.
+        for (frame, expected) in [(&frames[0], 1), (&frames[1], 2), (&frames[1], 2)] {
+            write_frame(&mut client, &serde_json::to_vec(frame).unwrap())
+                .await
+                .unwrap();
+            let reply =
+                tokio::time::timeout(std::time::Duration::from_secs(5), read_frame(&mut client))
+                    .await
+                    .expect("the durable producer prefix must be acknowledged")
+                    .unwrap();
+            assert!(matches!(sylph_protocol::decode_message(&reply).unwrap(),
+                DecodedMessage::Known(WireMessage::Ack { accepted_through, .. }) if accepted_through.get() == expected));
+            if expected == 2 {
+                assert_eq!(
+                    bridge
+                        .history
+                        .native_blob(&session.id.encode(), "root.jsonl", 1, "remote-output")
+                        .await
+                        .unwrap(),
+                    crate::storage::NativeBlobState::Available(bytes.to_vec())
+                );
+                assert_eq!(
+                    bridge
+                        .history
+                        .native_record_bytes(&session.id.encode(), "root.jsonl", 1)
+                        .await
+                        .unwrap(),
+                    Some(br#"{ "unknown": true }"#.to_vec())
+                );
+            }
+        }
+        drop(client);
+        let _ = task.await.unwrap();
     }
 
     #[tokio::test]

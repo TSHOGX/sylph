@@ -43,7 +43,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use quick_xml::events::Event as XmlEvent;
 use quick_xml::Reader as XmlReader;
 use serde_json::{json, Value};
@@ -753,7 +753,7 @@ fn native_record_with_raw(
     }
     NativeRecord {
         source: native_source(path),
-        version,
+        version: crate::native::record_revision(version, raw_json.as_deref().unwrap_or_default()),
         raw_json,
         payload: record.clone(),
         blobs,
@@ -814,10 +814,6 @@ fn revision_bytes(bytes: &[u8]) -> u64 {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     hash
-}
-
-fn manifest_revision(path: &Path) -> Option<u64> {
-    Some(revision_bytes(&std::fs::read(path).ok()?))
 }
 
 /// Stable logical source name, relative to the session bundle rather than the host's home.
@@ -1350,6 +1346,7 @@ fn workflow_run_of(path: &Path) -> Option<String> {
 fn delegate_spans(
     session: &SessionFiles,
     root_workflow_hosts: &HashMap<String, Option<String>>,
+    manifests: &HashMap<PathBuf, ManifestCursor>,
 ) -> HashMap<String, String> {
     // `agentId` → the `tool_use` id that spawned it, when a sidecar names one.
     let mut by_tool_use: HashMap<String, String> = HashMap::new();
@@ -1359,7 +1356,7 @@ fn delegate_spans(
     let mut by_workflow: HashMap<String, Option<String>> = HashMap::new();
 
     for manifest in &session.manifests {
-        let Some(payload) = read_workflow_manifest(manifest) else {
+        let Some(payload) = manifests.get(manifest).and_then(|cursor| cursor.payload.as_ref()) else {
             continue;
         };
         let Some(run_id) = string_at(&payload, "runId") else {
@@ -1471,9 +1468,10 @@ fn collect_host_tools(record: &Value, into: &mut HashMap<String, String>) {
 }
 
 /// Read one workflow manifest snapshot.
-fn read_workflow_manifest(path: &Path) -> Option<Value> {
-    let text = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&text).ok()
+fn read_workflow_manifest(path: &Path) -> Result<(Vec<u8>, Value)> {
+    let raw = std::fs::read(path).with_context(|| format!("reading workflow manifest {}", path.display()))?;
+    let payload = serde_json::from_slice(&raw).with_context(|| format!("invalid workflow manifest {}", path.display()))?;
+    Ok((raw, payload))
 }
 
 /// Parse, then follow the transcript as it grows.
@@ -1664,6 +1662,7 @@ struct JsonlCursor {
 struct ManifestCursor {
     fingerprint: Option<(u64, u128)>,
     version: u64,
+    payload: Option<Value>,
 }
 
 struct JournalCursor {
@@ -1824,11 +1823,13 @@ impl BundleFollowState {
                 .insert(journal, JournalCursor { offset, version });
         }
         for (manifest, fingerprint) in baseline.manifests {
+            let snapshot = read_workflow_manifest(&manifest).ok();
             self.manifests.insert(
                 manifest.clone(),
                 ManifestCursor {
                     fingerprint: Some(fingerprint),
-                    version: manifest_revision(&manifest).unwrap_or(1),
+                    version: snapshot.as_ref().map_or(0, |(raw, _)| revision_bytes(raw)),
+                    payload: snapshot.map(|(_, payload)| payload),
                 },
             );
         }
@@ -1899,27 +1900,29 @@ impl BundleFollowState {
             if !changed {
                 continue;
             }
-            let version = manifest_revision(&manifest).unwrap_or_else(|| {
-                self.manifests
-                    .get(&manifest)
-                    .map_or(1, |cursor| cursor.version.saturating_add(1))
-            });
-            if let Some(payload) = read_workflow_manifest(&manifest) {
-                messages.push(SessionMessage::NativeRecord(NativeRecord {
-                    source: native_source(&manifest),
+            let (raw, payload) = match read_workflow_manifest(&manifest) {
+                Ok(snapshot) => snapshot,
+                Err(error) if self.finalizing => return Err(error),
+                // A live snapshot may be between truncate and rewrite. Remove the old
+                // metadata so it cannot govern a new declaration, and retry on the next pass.
+                Err(_) => { self.manifests.remove(&manifest); continue; }
+            };
+            let version = revision_bytes(&raw);
+            messages.push(SessionMessage::NativeRecord(NativeRecord {
+                source: native_source(&manifest),
+                version,
+                raw_json: Some(raw),
+                payload: payload.clone(),
+                blobs: Vec::new(),
+            }));
+            self.manifests.insert(
+                manifest.clone(),
+                ManifestCursor {
+                    fingerprint: Some(fingerprint),
                     version,
-                    raw_json: std::fs::read(&manifest).ok(),
-                    payload,
-                    blobs: Vec::new(),
-                }));
-                self.manifests.insert(
-                    manifest.clone(),
-                    ManifestCursor {
-                        fingerprint: Some(fingerprint),
-                        version,
-                    },
-                );
-            }
+                    payload: Some(payload),
+                },
+            );
         }
 
         // **Two-phase poll to eliminate file-order dependency in suppression decisions.**
@@ -1943,7 +1946,7 @@ impl BundleFollowState {
 
         // Resolve spans from the current manifest/sidecar view every pass. This is what
         // makes a manifest rewritten after watch() started visible without a restart.
-        let mut spans = delegate_spans(&self.session, &self.workflow_hosts);
+        let mut spans = delegate_spans(&self.session, &self.workflow_hosts, &self.manifests);
         for (agent, host) in &self.delegate_hosts {
             if let Some(host) = host {
                 spans.entry(agent.clone()).or_insert_with(|| host.clone());
@@ -2952,7 +2955,7 @@ mod tests {
         );
         let mut reader = BundleFollowState::new(session.clone(), RootSource::File);
         reader.poll().unwrap();
-        let spans = delegate_spans(&session, &reader.workflow_hosts);
+        let spans = delegate_spans(&session, &reader.workflow_hosts, &reader.manifests);
 
         // Every delegate is contained by the `Agent` call that spawned it — depth-1 by a call
         // in the root transcript, depth-2 by a call inside its parent's. The pairs come from
@@ -3140,7 +3143,7 @@ mod tests {
         let session_files = collect(root.join(format!("{session}.jsonl")));
         assert_eq!(session_files.delegates.len(), 1);
         assert!(
-            delegate_spans(&session_files, &HashMap::new()).is_empty(),
+            delegate_spans(&session_files, &HashMap::new(), &HashMap::new()).is_empty(),
             "this delegate genuinely has no recorded link"
         );
 
@@ -3352,7 +3355,7 @@ mod tests {
         );
         let mut reader = BundleFollowState::new(session.clone(), RootSource::File);
         reader.poll().unwrap();
-        let spans = delegate_spans(&session, &reader.workflow_hosts);
+        let spans = delegate_spans(&session, &reader.workflow_hosts, &reader.manifests);
         assert_eq!(
             spans.get("workflow_agent_one").map(String::as_str),
             Some(host_one),
@@ -3966,6 +3969,21 @@ mod tests {
     /// The bundle reader discovers a delegate after its first pass and then follows only
     /// the bytes appended after the cursor.  This is the regression that the old
     /// `watch()` could never catch: it collected delegates once, then tailed only root.
+    #[test]
+    fn a_final_manifest_read_reports_malformed_bytes() {
+        let dir = std::env::temp_dir().join(format!("sylph-manifest-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let transcript = dir.join("session.jsonl");
+        std::fs::write(&transcript, "{\"type\":\"mode\"}\n").unwrap();
+        let manifests = transcript.with_extension("").join("workflows");
+        std::fs::create_dir_all(&manifests).unwrap();
+        std::fs::write(manifests.join("broken.json"), "{\"runId\":").unwrap();
+        let mut state = BundleFollowState::new(collect(transcript), RootSource::File);
+        state.finalizing = true;
+        assert!(state.poll().unwrap_err().to_string().contains("broken.json"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn a_bundle_reader_discovers_and_follows_a_delegate_created_late() {
         let dir = std::env::temp_dir().join(format!("sylph-claude-bundle-{}", std::process::id()));

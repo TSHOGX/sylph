@@ -2129,7 +2129,7 @@ pub mod native {
     fn native_record(path: &Path, version: u64, value: &Value, raw: Vec<u8>) -> NativeRecord {
         NativeRecord {
             source: native_source(path),
-            version,
+            version: crate::native::record_revision(version, &raw),
             raw_json: Some(raw),
             payload: value.clone(),
             blobs: Vec::new(),
@@ -2586,6 +2586,7 @@ pub mod native {
         let mut reader = std::io::BufReader::new(file);
         let mut raw_line = Vec::new();
         let mut ordinal = 0u64;
+        let mut line_number = 0u64;
         loop {
             raw_line.clear();
             let read = std::io::BufRead::read_until(&mut reader, b'\n', &mut raw_line)
@@ -2593,12 +2594,30 @@ pub mod native {
             if read == 0 {
                 break;
             }
+            if !raw_line.ends_with(b"\n") {
+                break;
+            }
             let trimmed = raw_line.strip_suffix(&[b'\n'][..]).unwrap_or(&raw_line);
             if trimmed.iter().all(u8::is_ascii_whitespace) {
                 continue;
             }
-            let Ok(record) = serde_json::from_slice::<Value>(trimmed) else {
-                continue;
+            line_number = line_number.saturating_add(1);
+            let record = match serde_json::from_slice::<Value>(trimmed) {
+                Ok(record) => record,
+                Err(error) => {
+                    // A complete malformed line is an unreadable source, not an omitted
+                    // vendor record. Silently skipping it would make a lossless adoption
+                    // indistinguishable from a successful parse with less history.
+                    if failure.is_none() {
+                        failure = Some(anyhow!(
+                            "invalid complete JSON record {} in {}: {}",
+                            line_number,
+                            path.display(),
+                            error
+                        ));
+                    }
+                    continue;
+                }
             };
             ordinal = ordinal.saturating_add(1);
             if failure.is_some() {
@@ -2958,6 +2977,21 @@ pub mod native {
         Ok(follow(PiFollowState::new(root, id.clone())))
     }
 
+    /// Acquire native envelopes during RPC execution without projecting a second transcript.
+    pub(super) struct LiveRecords(PiFollowState);
+
+    impl LiveRecords {
+        pub(super) fn new(id: NativeId) -> Option<Self> {
+            store_root().map(|root| Self(PiFollowState::new(root, id)))
+        }
+
+        pub(super) fn poll(&mut self) -> Result<Vec<SessionMessage>> {
+            let mut messages = self.0.poll()?;
+            messages.retain(|message| matches!(message, SessionMessage::NativeRecord(_)));
+            Ok(messages)
+        }
+    }
+
     /// Construct the polling stream around one source-specific cursor.
     fn follow(state: PiFollowState) -> EventStream {
         // `message_end` is the native flush boundary. A 250ms poll keeps a watcher responsive
@@ -3029,6 +3063,8 @@ pub mod native {
         /// generation's update. Keep only a compact fingerprint rather than retaining every
         /// tool-output `Value` in memory for the watcher's lifetime.
         seen: HashMap<String, u64>,
+        raw_seen: std::collections::HashSet<u64>,
+        ordinal: u64,
         pending: VecDeque<SessionMessage>,
         backoff_after_error: bool,
     }
@@ -3047,6 +3083,8 @@ pub mod native {
                 generation: 0,
                 header_seen: false,
                 seen: HashMap::new(),
+                raw_seen: std::collections::HashSet::new(),
+                ordinal: 0,
                 pending: VecDeque::new(),
                 backoff_after_error: false,
             }
@@ -3178,7 +3216,10 @@ pub mod native {
             let mut staged_seen = HashMap::new();
             let mut updates = Vec::new();
             let mut projected = Vec::new();
+            let mut ordinal = self.ordinal;
+            let mut raw_updates = Vec::new();
             for (record, raw) in records {
+                ordinal += 1;
                 if !header_seen {
                     if record.get("type").and_then(Value::as_str) != Some("session") {
                         // The header is always first in a valid Pi file. During a rewrite the
@@ -3205,9 +3246,6 @@ pub mod native {
                     .get(&key)
                     .or_else(|| self.seen.get(&key))
                     .is_some_and(|old| *old == signature);
-                if unchanged {
-                    continue;
-                }
                 // Project before committing the seen value. If field spelling is ambiguous or
                 // another parser error appears, the same record is retried on the next pass.
                 let messages = match project_record(&record) {
@@ -3217,22 +3255,22 @@ pub mod native {
                         return Err(error);
                     }
                 };
-                staged_seen.insert(key.clone(), signature);
-                updates.push((key, signature));
-                // Preserve the complete Pi envelope before its normalized projection. The
-                // server's raw tier uses `(session, source, version)` to deduplicate re-reads;
-                // generation in the high bits keeps a rewritten file's revisions distinct while
-                // the low bits retain the append ordinal within that generation.
-                let version = (self.generation << 32)
-                    .saturating_add(self.seen.len() as u64 + updates.len() as u64);
-                projected.push(SessionMessage::NativeRecord(native_record(
-                    &path, version, &record, raw,
-                )));
-                projected.extend(messages);
+                let retained = native_record(&path, ordinal, &record, raw);
+                if !self.raw_seen.contains(&retained.version) {
+                    raw_updates.push(retained.version);
+                    projected.push(SessionMessage::NativeRecord(retained));
+                }
+                if !unchanged {
+                    staged_seen.insert(key.clone(), signature);
+                    updates.push((key, signature));
+                    projected.extend(messages);
+                }
             }
 
             self.header_seen = header_seen;
             self.offset = next_offset;
+            self.ordinal = ordinal;
+            self.raw_seen.extend(raw_updates);
             // After a reset the old hash is the FNV offset; extending it over the complete bytes
             // is equivalent to hashing the newly consumed prefix. For a normal append, extending
             // the previous state avoids a second full-file hash.
@@ -3263,6 +3301,7 @@ pub mod native {
             self.observed = None;
             self.failed = None;
             self.header_seen = false;
+            self.ordinal = 0;
             self.generation = self.generation.saturating_add(1);
         }
     }
@@ -4032,6 +4071,33 @@ pub mod native {
         }
 
         #[test]
+        fn adopt_leaves_an_unterminated_tail_unpublished() {
+            let dir = watch_temp_dir("adopt-tail");
+            let path = dir.join("session.jsonl");
+            std::fs::write(&path, format!("{}\n{{\"type\":\"future\",\"id\":\"pending\"}}", watch_header("tail"))).unwrap();
+            let parsed = parse_session(&path).unwrap();
+            assert_eq!(parsed.messages.iter().filter(|message| matches!(message, SessionMessage::NativeRecord(_))).count(), 1);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        #[test]
+        fn lexical_rewrite_is_retained_with_the_same_revision_after_reopen() {
+            let dir = watch_temp_dir("lexical-rewrite");
+            let path = dir.join("session.jsonl");
+            let header = watch_header("lexical");
+            std::fs::write(&path, format!("{header}\n{{\"type\":\"future\",\"id\":\"row\"}}\n")).unwrap();
+            let mut state = PiFollowState::new(dir.clone(), NativeId::new("lexical"));
+            let initial = state.poll().unwrap();
+            std::fs::write(&path, format!("{header}\n{{ \"type\" : \"future\", \"id\" : \"row\" }}\n")).unwrap();
+            let changed = state.poll().unwrap();
+            let record = changed.iter().find_map(|message| match message { SessionMessage::NativeRecord(record) => Some(record), _ => None }).expect("lexical-only rewrite must be retained");
+            assert!(!initial.iter().any(|message| matches!(message, SessionMessage::NativeRecord(old) if old.version == record.version)));
+            let reopened = parse_session(&path).unwrap();
+            assert!(reopened.messages.iter().any(|message| matches!(message, SessionMessage::NativeRecord(new) if new == record)));
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        #[test]
         fn adopt_retains_every_pi_jsonl_record_losslessly() {
             let path = fixture("ordinary-turn.jsonl");
             let parsed = parse_session(&path).expect("fixture must parse");
@@ -4050,9 +4116,31 @@ pub mod native {
                 .count();
             assert_eq!(records.len(), expected);
             assert!(records.iter().all(|record| record.raw_json.is_some()));
-            assert!(records
-                .windows(2)
-                .all(|pair| pair[0].version < pair[1].version));
+            assert_eq!(records.iter().map(|record| record.version).collect::<std::collections::HashSet<_>>().len(), expected);
+        }
+
+        #[test]
+        fn adopt_reports_a_complete_malformed_record_as_unreadable() {
+            let dir = watch_temp_dir("adopt-malformed");
+            let path = dir.join("session.jsonl");
+            std::fs::write(
+                &path,
+                format!(
+                    "{}\n{{\"type\":\"message\",\"id\":\"broken\"\n",
+                    watch_header("pi-adopt-malformed")
+                ),
+            )
+            .unwrap();
+
+            let error =
+                parse_session(&path).expect_err("a malformed complete record is unreadable");
+            let text = error.to_string();
+            assert!(text.contains("invalid complete JSON record"), "got {text}");
+            assert!(
+                text.contains("session.jsonl"),
+                "the error must name its source: {text}"
+            );
+            let _ = std::fs::remove_dir_all(dir);
         }
 
         /// A final JSON line without a newline is still being written. The cursor stays before
@@ -4338,8 +4426,9 @@ pub mod session {
     use async_trait::async_trait;
     use serde_json::{json, Value};
     use sylph_protocol::{
-        AdapterError, ConfigOption, Event, EventKind, EventStream, NativeId, RequestedNativeId,
-        Resolution, RunSpec, Session, SessionCapabilities, SessionMessage, TurnInput,
+        AdapterError, ConfigOption, Event, EventKind, EventStream, NativeId, NativeRecord,
+        RequestedNativeId, Resolution, RunSpec, Session, SessionCapabilities, SessionMessage,
+        TurnInput,
     };
     use tokio::sync::{mpsc, Mutex};
     use tracing::{debug, warn};
@@ -4500,6 +4589,8 @@ pub mod session {
                 dialogs: session.dialogs.clone(),
                 models: session.models.clone(),
                 refreshing: session.refreshing.clone(),
+                source: format!("live/stdout/{}.jsonl", uuid::Uuid::new_v4()),
+                native: super::native::LiveRecords::new(session.native_id.clone()),
             }));
 
             Ok(session)
@@ -4829,6 +4920,8 @@ pub mod session {
         dialogs: Dialogs,
         models: Arc<Mutex<Option<Value>>>,
         refreshing: Arc<Mutex<()>>,
+        source: String,
+        native: Option<super::native::LiveRecords>,
     }
 
     /// Turn pi's lines into session messages, for the session's whole life.
@@ -4839,9 +4932,23 @@ pub mod session {
     /// session rather than a failure of it.
     async fn pump(mut state: Pump) {
         let mut last_model: Option<String> = None;
-        while let Some(line) = state.lines.recv().await {
-            let payload = match line {
-                Ok(line) => line.value,
+        let mut version = 0u64;
+        let mut poll = tokio::time::interval(std::time::Duration::from_millis(250));
+        poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            let line = tokio::select! {
+                line = state.lines.recv() => line,
+                _ = poll.tick() => {
+                    if !retain_native(&mut state).await { return; }
+                    continue;
+                }
+            };
+            let Some(line) = line else {
+                let _ = retain_native(&mut state).await;
+                break;
+            };
+            let (payload, raw) = match line {
+                Ok(line) => (line.value, line.raw),
                 Err(error) => {
                     if state.messages.send(Err(error)).await.is_err() {
                         break;
@@ -4878,6 +4985,24 @@ pub mod session {
                 _ => {}
             }
 
+            // Retain the exact vendor envelope before projecting it. Control responses and
+            // UI requests are handled above and intentionally do not become transcript rows.
+            version = version.saturating_add(1);
+            if state
+                .messages
+                .send(Ok(SessionMessage::NativeRecord(NativeRecord {
+                    source: state.source.clone(),
+                    version,
+                    raw_json: Some(raw),
+                    payload: payload.clone(),
+                    blobs: Vec::new(),
+                })))
+                .await
+                .is_err()
+            {
+                return;
+            }
+
             let emission = {
                 // Scoped tightly: the lock must not be held across the send below, or
                 // backpressure from a slow consumer would block `steer`'s read of
@@ -4904,6 +5029,19 @@ pub mod session {
                     refresh_config(&state);
                 }
             }
+        }
+    }
+
+    async fn retain_native(state: &mut Pump) -> bool {
+        let Some(native) = state.native.as_mut() else { return true; };
+        match native.poll() {
+            Ok(messages) => {
+                for message in messages {
+                    if state.messages.send(Ok(message)).await.is_err() { return false; }
+                }
+                true
+            }
+            Err(error) => state.messages.send(Err(error)).await.is_ok(),
         }
     }
 
@@ -5378,17 +5516,57 @@ done
             );
         }
 
-        /// The next message off the stream, or `None` if none arrives in `ms`.
+        /// The next projected message off the stream, or `None` if none arrives in `ms`.
         ///
         /// A timeout rather than an unbounded await, so a test asserting that **nothing** is
         /// published can say so — which is what pins "a reply is not an event".
         async fn next_message(stream: &mut EventStream, ms: u64) -> Option<SessionMessage> {
             use futures::StreamExt;
-            tokio::time::timeout(Duration::from_millis(ms), stream.next())
-                .await
-                .ok()
-                .flatten()
-                .map(|item| item.expect("the scripted peer emits no read failures here"))
+            tokio::time::timeout(Duration::from_millis(ms), async {
+                while let Some(item) = stream.next().await {
+                    let message = item.expect("the scripted peer emits no read failures here");
+                    if !matches!(message, SessionMessage::NativeRecord(_)) {
+                        return Some(message);
+                    }
+                }
+                None
+            })
+            .await
+            .ok()
+            .flatten()
+        }
+
+        #[tokio::test]
+        async fn live_stdout_retains_lexical_raw_before_each_projection() {
+            use futures::StreamExt;
+            let raw =
+                r#"{ "type" : "extension_error", "error" : "raw\\u0020body", "future" : [1,2] }"#;
+            let (mut session, _log) = scripted("live-raw", &[raw, raw]).await;
+            let mut stream = session.events().unwrap();
+            let mut source = None;
+            for version in 1..=2 {
+                let message = tokio::time::timeout(Duration::from_secs(2), stream.next())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                let SessionMessage::NativeRecord(record) = message else {
+                    panic!("the raw envelope must precede its projection: {message:?}");
+                };
+                assert_eq!(record.raw_json.as_deref(), Some(raw.as_bytes()));
+                assert_eq!(record.payload["future"], json!([1, 2]));
+                assert_eq!(record.version, version);
+                assert!(record.source.starts_with("live/stdout/"));
+                if let Some(source) = &source {
+                    assert_eq!(&record.source, source);
+                } else {
+                    source = Some(record.source);
+                }
+                let event = stream.next().await.unwrap().unwrap();
+                assert!(
+                    matches!(event, SessionMessage::Event(event) if event.kind == EventKind::Status)
+                );
+            }
         }
 
         /// **The surface's current values come from the vendor, not from what was set.**

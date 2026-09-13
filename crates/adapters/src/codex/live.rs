@@ -32,8 +32,8 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use sylph_protocol::{
     AdapterError, CapabilityFacets, ConfigChoice, ConfigKind, ConfigOption, Event, EventKind,
-    EventStream, InteriorState, NativeId, Phase, Request, RequestKind, RequestOption, Resolution,
-    RunSpec, Session, SessionCapabilities, SessionMessage, TurnInput,
+    EventStream, InteriorState, NativeId, NativeRecord, Phase, Request, RequestKind, RequestOption,
+    Resolution, RunSpec, Session, SessionCapabilities, SessionMessage, TurnInput,
 };
 use tokio::sync::{mpsc, Mutex, Notify};
 
@@ -157,13 +157,13 @@ impl Translator {
         // **The vendor's own stamp, in epoch milliseconds, and never synthesized when it
         // is there.** `emittedAtMs` is on every notification measured; `now_ms` is the
         // fallback for the one frame kind that carries none, a server *request*.
-        let at_ms = params
+        let recorded_at_ms = params
             .get("emittedAtMs")
             .or_else(|| frame.get("emittedAtMs"))
-            .and_then(Value::as_i64)
-            .unwrap_or_else(now_ms);
+            .and_then(Value::as_i64);
+        let at_ms = recorded_at_ms.unwrap_or_else(now_ms);
 
-        match method {
+        let mut messages = match method {
             notification::ITEM_STARTED => self.item(params, at_ms, Phase::Started).await,
             notification::ITEM_COMPLETED => self.item(params, at_ms, Phase::Completed).await,
             notification::AGENT_MESSAGE_DELTA => {
@@ -189,7 +189,13 @@ impl Translator {
             // is billing. `thread/goal/cleared` and `remoteControl/status/changed` concern
             // surfaces this adapter does not drive.
             _ => Vec::new(),
+        };
+        for message in &mut messages {
+            if let Ok(SessionMessage::Event(event)) = message {
+                event.recorded_at_ms = recorded_at_ms;
+            }
         }
+        messages
     }
 
     /// An `item/*` frame, at the phase its method named.
@@ -1069,6 +1075,7 @@ async fn open(child: Child, lines: mpsc::Receiver<Line>, spec: RunSpec) -> Resul
         state.clone(),
         settings_echo.clone(),
         child.clone(),
+        format!("live/stdout/{}.jsonl", uuid::Uuid::new_v4()),
     ));
 
     // **`experimentalApi` is declared, and it is not optional.** Measured: without it,
@@ -1702,11 +1709,40 @@ async fn read_loop(
     state: Arc<Mutex<State>>,
     settings_echo: Arc<Notify>,
     child: Arc<Child>,
+    source: String,
 ) {
     let mut translator: Option<Translator> = None;
-    while let Some(line) = lines.recv().await {
-        let frame = match line {
-            Ok(line) => line.value,
+    let mut version = 0u64;
+    let mut native = super::native::LiveRecords::new();
+    let mut poll = tokio::time::interval(std::time::Duration::from_millis(250));
+    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        let line = tokio::select! {
+            line = lines.recv() => line,
+            _ = poll.tick() => {
+                let id = state.lock().await.thread.clone();
+                if let Some(id) = id {
+                    match native.poll(&NativeId::new(id)) {
+                        Ok(messages) => for message in messages {
+                            if tx.send(Ok(message)).await.is_err() { child.close().await; return; }
+                        },
+                        Err(error) => { if tx.send(Err(error)).await.is_err() { return; } }
+                    }
+                }
+                continue;
+            }
+        };
+        let Some(line) = line else {
+            if let Some(id) = state.lock().await.thread.clone() {
+                match native.poll(&NativeId::new(id)) {
+                    Ok(messages) => for message in messages { if tx.send(Ok(message)).await.is_err() { break; } },
+                    Err(error) => { let _ = tx.send(Err(error)).await; }
+                }
+            }
+            break;
+        };
+        let (frame, raw) = match line {
+            Ok(line) => (line.value, line.raw),
             Err(error) => {
                 // **Reported, not fatal.** A malformed line must not fail a turn, and an
                 // `Err` on this stream is a failure *reading* the session rather than a
@@ -1739,6 +1775,21 @@ async fn read_loop(
             state: state.clone(),
             settings_echo: settings_echo.clone(),
         });
+        version = version.saturating_add(1);
+        if tx
+            .send(Ok(SessionMessage::NativeRecord(NativeRecord {
+                source: source.clone(),
+                version,
+                raw_json: Some(raw),
+                payload: frame.clone(),
+                blobs: Vec::new(),
+            })))
+            .await
+            .is_err()
+        {
+            child.close().await;
+            return;
+        }
         for message in translator.frame(&frame).await {
             if tx.send(message).await.is_err() {
                 // The server dropped the session. Nothing is left to report to, so the
@@ -1756,6 +1807,16 @@ async fn read_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn next_projection(stream: &mut EventStream) -> Option<Result<SessionMessage>> {
+        use futures::StreamExt;
+        while let Some(message) = stream.next().await {
+            if !matches!(message, Ok(SessionMessage::NativeRecord(_))) {
+                return Some(message);
+            }
+        }
+        None
+    }
 
     /// A translator over a fresh session whose thread id is `thread`.
     async fn translator(thread: &str) -> Translator {
@@ -2561,7 +2622,7 @@ mod tests {
         // The approval is on the event stream, not in a caller's reply.
         let message = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            futures::StreamExt::next(&mut stream),
+            next_projection(&mut stream),
         )
         .await
         .expect("the approval must arrive rather than being swallowed by a waiter")
@@ -2610,7 +2671,7 @@ mod tests {
 
         let message = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            futures::StreamExt::next(&mut stream),
+            next_projection(&mut stream),
         )
         .await
         .expect(
@@ -2643,6 +2704,38 @@ mod tests {
             "01a0460c-c359-7ed3-9e13-212c0a33d6c0"
         );
         let _ = std::fs::remove_file(&frame);
+    }
+
+    #[tokio::test]
+    async fn live_stdout_retains_lexical_raw_before_projection() {
+        let raw = r#"{ "method" : "error", "params" : { "message" : "raw\\u0020warning", "future" : [1,2] } }"#;
+        let script =
+            SCRIPTED_APP_SERVER.replace("# AFTER_OPEN_REPLY", &format!("printf '%s\\n' '{}'", raw));
+        let mut session = open_against(&script).await.expect("the peer opens");
+        let mut stream = session.events().expect("the stream is yielded once");
+        let raw_message = tokio::time::timeout(std::time::Duration::from_secs(2), async { loop {
+            let item = futures::StreamExt::next(&mut stream)
+                .await
+                .unwrap()
+                .unwrap();
+            if matches!(&item, SessionMessage::NativeRecord(record) if record.payload["params"].get("future").is_some()) {
+                break item;
+            }
+        }}).await.expect("the scripted raw frame arrives");
+        let SessionMessage::NativeRecord(record) = raw_message else {
+            unreachable!()
+        };
+        assert_eq!(record.raw_json.as_deref(), Some(raw.as_bytes()));
+        assert_eq!(record.payload["params"]["future"], json!([1, 2]));
+        assert!(record.version >= 1);
+        assert!(record.source.starts_with("live/stdout/"));
+        let projection = futures::StreamExt::next(&mut stream)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(projection, SessionMessage::Event(event) if event.kind == EventKind::Notice)
+        );
     }
 
     /// A full open over a scripted peer: handshake, catalogue, thread, and the id the
