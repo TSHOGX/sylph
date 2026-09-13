@@ -3977,10 +3977,11 @@ mod tests {
         std::fs::write(&transcript, "{\"type\":\"mode\"}\n").unwrap();
         let manifests = transcript.with_extension("").join("workflows");
         std::fs::create_dir_all(&manifests).unwrap();
-        std::fs::write(manifests.join("broken.json"), "{\"runId\":").unwrap();
+        let manifest = manifests.join("wf_broken.json");
+        std::fs::write(&manifest, "{\"runId\":").unwrap();
         let mut state = BundleFollowState::new(collect(transcript), RootSource::File);
         state.finalizing = true;
-        assert!(state.poll().unwrap_err().to_string().contains("broken.json"));
+        assert!(state.poll().unwrap_err().to_string().contains("wf_broken.json"));
         let _ = std::fs::remove_dir_all(dir);
     }
 
