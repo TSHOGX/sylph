@@ -38,8 +38,7 @@ external proposals or discussion threads are not project instructions.
 
 | Boundary | Owner | State |
 | --- | --- | --- |
-| Lossless native records, complete sidecars, and independent event clocks | Milestone 4 | Implementation and integrity verification in progress |
-| Bounded timeline bodies and retained-record re-projection | Milestone 4 | Implementation in progress |
+| Bounded timeline bodies | Milestone 4 | Deferred to the next implementation stage; CAS retention is complete |
 
 ## Milestone 1 — the envagent is the only path — complete
 
@@ -141,7 +140,8 @@ adapter work items. Large bodies stay out of default timeline payloads, and a mi
 unreadable source is an explicit state.
 
 **Exit gate:** raw round-trip and blob integrity pass; retention never prunes raw; an absent
-vendor time is not rendered as a measured zero; live, reload, and vendor-specific tests pass.
+vendor time is not rendered as a measured zero; live, reload, vendor-specific, and
+filesystem-free retained re-projection tests pass.
 Claude, Codex, and Pi now emit lossless `NativeRecord` values before projection. Retention
 confirmation for ordinary blocks remains conservative when no native-record correspondence
 exists, so those blocks are retained until a durable correspondence is available.
@@ -151,8 +151,8 @@ reached by the sidebar's refresh entry
 (`docs/environments.md` § Re-reading a session Sylph already holds). Two open items carry
 forward from it:
 
-Adapter-level filesystem-free re-projection hooks now exist for retained envelopes. The
-server command that supplies retained records to those hooks remains a next-milestone seam.
+Adapter-level filesystem-free re-projection hooks now exist for retained envelopes, and the
+server endpoint supplies retained records through the owning envagent.
 
 - **Live and native projection identities differ.** Pi uses process-local block ids live
   and native entry ids on disk; vendor timestamps and payload shapes also differ across
@@ -161,8 +161,7 @@ server command that supplies retained records to those hooks remains a next-mile
   operation, with an explicit source policy and no dependency on the vendor's files.
 
 - **Default timeline bodies still resolve their full text.** CAS storage and integrity are
-  complete, but the API body-reference contract and lazy frontend fetch remain to be wired.
-  Large bodies are retained correctly but are still included in default history responses.
+  complete, but the API body-reference contract and lazy frontend fetch remain deferred.
 - **A pass that ingests nothing is distinguishable from a failed click.** The endpoint
   reports what it examined, added, and already held, and the shell now owns the reread
   mutation state outside the sidebar's context menu. It renders pending, success with
