@@ -50,7 +50,9 @@ pub mod semantic;
 // public so a doc link can name one.
 pub use adapter::{
     normalize_workdir, Adapter, AgentInfo, EventStream, NativeBlob, NativeRecord, NativeSummary,
-    RequestedNativeId, RereadPass, RunSpec, Session, SessionMessage, StoreFilter, TurnInput,
+    NativeTransfer, NativeTransferChunk, NativeTransferItem, NativeTransferOperation,
+    RequestedNativeId, RunSpec, Session, SessionMessage, StoreFilter, TurnInput,
+    NATIVE_TRANSFER_CHUNK_BYTES,
 };
 pub use capabilities::{
     Capability, CapabilityFacets, CommandKind, CommandSpec, ConfigChoice, ConfigKind, ConfigOption,

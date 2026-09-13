@@ -299,10 +299,23 @@ impl Adapter for PiAdapter {
 
     async fn reproject(&self, records: Vec<NativeRecord>) -> Result<EventStream> {
         let mut messages = Vec::new();
+        let mut live = std::collections::HashMap::new();
+        let has_live = records
+            .iter()
+            .any(|record| record.source.starts_with("live/"));
         for record in records {
-            messages.extend(native::reproject_native_record(&record)?);
+            if record.source.starts_with("live/") {
+                let correlation = live
+                    .entry(record.source)
+                    .or_insert_with(translate::Correlation::new);
+                messages.extend(correlation.translate(&record.payload, 0).messages);
+            } else if !has_live {
+                messages.extend(native::reproject_native_record(&record)?);
+            }
         }
-        Ok(Box::pin(futures::stream::iter(messages.into_iter().map(Ok))))
+        Ok(Box::pin(futures::stream::iter(
+            messages.into_iter().map(Ok),
+        )))
     }
 
     async fn watch(&self, id: &NativeId) -> Result<EventStream> {
@@ -2678,7 +2691,7 @@ pub mod native {
             // Every valid vendor record is retained, including metadata-only rows that have no
             // current projection. This is what lets a future parser re-project fields today's
             // vocabulary ignores.
-            messages.push(SessionMessage::NativeRecord(native_record(
+            let retained = native_record(
                 path,
                 ordinal,
                 &record,
@@ -2686,9 +2699,12 @@ pub mod native {
                     .strip_suffix(&[b'\n'][..])
                     .unwrap_or(&raw_line)
                     .to_vec(),
-            )));
-            match project_record(&record) {
-                Ok(projected) => messages.extend(projected),
+            );
+            match reproject_native_record(&retained) {
+                Ok(projected) => {
+                    messages.push(SessionMessage::NativeRecord(retained));
+                    messages.extend(projected);
+                }
                 Err(error) => failure = Some(error),
             }
         }
@@ -2790,6 +2806,25 @@ pub mod native {
 
         let role = message.get("role").and_then(Value::as_str).unwrap_or("");
         let entry_id = string_at(record, "id");
+
+        if role == "user" {
+            let mut input = sylph_protocol::TurnInputFact::new(super::translate::flatten(
+                message.get("content").unwrap_or(&Value::Null),
+            ));
+            input.recorded_at_ms = (at_ms != NO_RECORDED_TIME).then_some(at_ms);
+            out.push(SessionMessage::TurnInput(input));
+            // Keep a normalized user block for native transcripts. The TurnInput fact
+            // supplies turn provenance; this event makes the user's actual question
+            // visible to renderers that only consume the event vocabulary.
+            let mut event = Event::new(
+                EventKind::Other("user".into()),
+                Some(Phase::Completed),
+                at_ms,
+            );
+            event.text = super::translate::flatten(message.get("content").unwrap_or(&Value::Null));
+            out.push(SessionMessage::Event(event));
+            return;
+        }
 
         if role == "toolResult" {
             let mut event = Event::new(EventKind::ToolResult, Some(Phase::Completed), at_ms);
@@ -3256,7 +3291,7 @@ pub mod native {
                     .is_some_and(|old| *old == signature);
                 // Project before committing the seen value. If field spelling is ambiguous or
                 // another parser error appears, the same record is retried on the next pass.
-                let messages = match project_record(&record) {
+                let mut messages = match project_record(&record) {
                     Ok(messages) => messages,
                     Err(error) => {
                         self.failed = Some((fingerprint, hash_bytes(&bytes)));
@@ -3264,6 +3299,7 @@ pub mod native {
                     }
                 };
                 let retained = native_record(&path, ordinal, &record, raw);
+                crate::native::input_cursors(&mut messages, &retained);
                 if !self.raw_seen.contains(&retained.version) {
                     raw_updates.push(retained.version);
                     projected.push(SessionMessage::NativeRecord(retained));
@@ -3572,7 +3608,9 @@ pub mod native {
     /// Re-project one retained Pi envelope without consulting the native store path.
     #[allow(dead_code)]
     pub(crate) fn reproject_native_record(record: &NativeRecord) -> Result<Vec<SessionMessage>> {
-        project_record(&record.payload)
+        let mut messages = project_record(&record.payload)?;
+        crate::native::input_cursors(&mut messages, record);
+        Ok(messages)
     }
 
     /// Find one session's file by its native id.
@@ -4088,9 +4126,23 @@ pub mod native {
         fn adopt_leaves_an_unterminated_tail_unpublished() {
             let dir = watch_temp_dir("adopt-tail");
             let path = dir.join("session.jsonl");
-            std::fs::write(&path, format!("{}\n{{\"type\":\"future\",\"id\":\"pending\"}}", watch_header("tail"))).unwrap();
+            std::fs::write(
+                &path,
+                format!(
+                    "{}\n{{\"type\":\"future\",\"id\":\"pending\"}}",
+                    watch_header("tail")
+                ),
+            )
+            .unwrap();
             let parsed = parse_session(&path).unwrap();
-            assert_eq!(parsed.messages.iter().filter(|message| matches!(message, SessionMessage::NativeRecord(_))).count(), 1);
+            assert_eq!(
+                parsed
+                    .messages
+                    .iter()
+                    .filter(|message| matches!(message, SessionMessage::NativeRecord(_)))
+                    .count(),
+                1
+            );
             let _ = std::fs::remove_dir_all(dir);
         }
 
@@ -4099,23 +4151,68 @@ pub mod native {
             let dir = watch_temp_dir("lexical-rewrite");
             let path = dir.join("session.jsonl");
             let header = watch_header("lexical");
-            std::fs::write(&path, format!("{header}\n{{\"type\":\"future\",\"id\":\"row\"}}\n")).unwrap();
+            std::fs::write(
+                &path,
+                format!("{header}\n{{\"type\":\"future\",\"id\":\"row\"}}\n"),
+            )
+            .unwrap();
             let mut state = PiFollowState::new(dir.clone(), NativeId::new("lexical"));
             let initial = state.poll().unwrap();
-            std::fs::write(&path, format!("{header}\n{{ \"type\" : \"future\", \"id\" : \"row\" }}\n")).unwrap();
+            std::fs::write(
+                &path,
+                format!("{header}\n{{ \"type\" : \"future\", \"id\" : \"row\" }}\n"),
+            )
+            .unwrap();
             let changed = state.poll().unwrap();
-            let record = changed.iter().find_map(|message| match message { SessionMessage::NativeRecord(record) => Some(record), _ => None }).expect("lexical-only rewrite must be retained");
+            let record = changed
+                .iter()
+                .find_map(|message| match message {
+                    SessionMessage::NativeRecord(record) => Some(record),
+                    _ => None,
+                })
+                .expect("lexical-only rewrite must be retained");
             assert!(!initial.iter().any(|message| matches!(message, SessionMessage::NativeRecord(old) if old.version == record.version)));
             let reopened = parse_session(&path).unwrap();
-            assert!(reopened.messages.iter().any(|message| matches!(message, SessionMessage::NativeRecord(new) if new == record)));
+            assert!(reopened.messages.iter().any(
+                |message| matches!(message, SessionMessage::NativeRecord(new) if new == record)
+            ));
             let _ = std::fs::remove_dir_all(dir);
         }
 
         #[test]
+        fn retained_fixture_preserves_recorded_times_and_user_input() {
+            let original = parse_session(&fixture("ordinary-turn.jsonl"))
+                .unwrap()
+                .messages;
+            assert!(original.iter().any(|message| matches!(message, SessionMessage::TurnInput(input) if !input.text.is_empty() && input.recorded_at_ms.is_some())));
+            let retained: Vec<_> = original
+                .iter()
+                .filter_map(|message| match message {
+                    SessionMessage::NativeRecord(record) => Some(record),
+                    _ => None,
+                })
+                .flat_map(|record| reproject_native_record(record).unwrap())
+                .collect();
+            let projected: Vec<_> = original
+                .into_iter()
+                .filter(|message| !matches!(message, SessionMessage::NativeRecord(_)))
+                .collect();
+            assert_eq!(retained, projected);
+        }
+
+        #[test]
         fn retained_record_reprojection_does_not_read_the_native_path() {
-            let record = NativeRecord { source: "/does/not/exist".into(), version: 1, raw_json: None, payload: json!({"type":"message","message":{"role":"assistant","timestamp":1788307200000_i64,"content":[{"type":"text","text":"ok"}]}}), blobs: Vec::new() };
+            let record = NativeRecord {
+                source: "/does/not/exist".into(),
+                version: 1,
+                raw_json: None,
+                payload: json!({"type":"message","message":{"role":"assistant","timestamp":1788307200000_i64,"content":[{"type":"text","text":"ok"}]}}),
+                blobs: Vec::new(),
+            };
             let messages = reproject_native_record(&record).unwrap();
-            assert!(messages.iter().any(|message| matches!(message, SessionMessage::Event(event) if event.text == "ok")));
+            assert!(messages.iter().any(
+                |message| matches!(message, SessionMessage::Event(event) if event.text == "ok")
+            ));
         }
 
         #[test]
@@ -4137,7 +4234,14 @@ pub mod native {
                 .count();
             assert_eq!(records.len(), expected);
             assert!(records.iter().all(|record| record.raw_json.is_some()));
-            assert_eq!(records.iter().map(|record| record.version).collect::<std::collections::HashSet<_>>().len(), expected);
+            assert_eq!(
+                records
+                    .iter()
+                    .map(|record| record.version)
+                    .collect::<std::collections::HashSet<_>>()
+                    .len(),
+                expected
+            );
         }
 
         #[test]
@@ -5054,11 +5158,15 @@ pub mod session {
     }
 
     async fn retain_native(state: &mut Pump) -> bool {
-        let Some(native) = state.native.as_mut() else { return true; };
+        let Some(native) = state.native.as_mut() else {
+            return true;
+        };
         match native.poll() {
             Ok(messages) => {
                 for message in messages {
-                    if state.messages.send(Ok(message)).await.is_err() { return false; }
+                    if state.messages.send(Ok(message)).await.is_err() {
+                        return false;
+                    }
                 }
                 true
             }

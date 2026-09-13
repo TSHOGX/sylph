@@ -122,9 +122,9 @@ files (`docs/architecture.md` § One authority). There is no adapter directory: 
 are compiled into the envagent, so a vendor that changes faster than the shipped adapter
 is answered by upgrading the envagent on that one machine.
 
-An agent's own native files are never written by anything here, so an install, an
-upgrade, or discarding the journal leaves them intact — which is what makes the journal
-disposable while native sources remain.
+An agent's own native files are never written by anything here. Vendors may prune those
+files independently, so Sylph's retained raw records and blobs can be the only surviving
+copy. Preserve the complete server data directory when upgrading.
 
 ## Upgrading
 
@@ -137,10 +137,14 @@ git pull
 ```
 
 Sylph is in development and ships no schema migrations. A build that cannot read an
-existing store refuses to start and names the store, and the answer is to discard it:
-delete `~/.sylph/data` and re-adopt from the vendors' own native stores, which still hold
-everything. Upgrade an envagent independently of the server; it is a separate product on
-a separate root.
+existing store refuses to start and names the store. Stop both processes and make a copy
+of the complete data directory before changing schemas. Never delete a retained raw
+archive on the assumption that a vendor still holds it. For a compatible raw schema,
+rebuild session projections through `POST /api/v1/sessions/{id}/reproject`; this requires
+the owning envagent but no vendor source files. Keep the prior binary and data copy
+together until the rebuilt transcript has been verified. Test data may be discarded
+explicitly and re-adopted when its vendor sources still exist. Upgrade an envagent
+independently of the server; it is a separate product on a separate root.
 
 ## Logs and health
 

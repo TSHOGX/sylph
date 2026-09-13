@@ -73,7 +73,93 @@ pub struct Block {
     pub arrival_at_ms: i64,
     pub recorded_at_ms: Option<i64>,
     pub started_at_ms: i64,
+    pub started_recorded_at_ms: Option<i64>,
     pub created_at_ms: i64,
+}
+
+/// A timeline block with bounded previews. The full text and metadata remain in CAS or
+/// compressed storage and are fetched only by the body endpoint.
+#[derive(Debug, Clone)]
+pub struct BlockSummary {
+    pub block: Block,
+    pub text_bytes: u64,
+    pub data_bytes: u64,
+    pub has_body: bool,
+}
+
+pub const BLOCK_PREVIEW_BYTES: usize = 4096;
+
+const BLOCK_SUMMARY_COLUMNS: &str = "session_id, seq, turn_id, kind, phase, stream_id,
+    span, interior_state, name, text_preview, text_len, data_preview_json, data_len,
+    body_truncated, is_error, source, arrival_at_ms, recorded_at_ms, started_at_ms,
+    started_recorded_at_ms, created_at_ms";
+
+/// A byte-bounded UTF-8 preview, shared by hot and consolidated timeline reads.
+pub fn text_preview(text: &str) -> String {
+    let mut end = text.len().min(BLOCK_PREVIEW_BYTES);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_owned()
+}
+
+/// Keep small metadata fields useful to the renderer while bounding the serialized JSON.
+/// Large strings and nested payloads are available through the same body reference as text.
+pub fn data_preview(data: Option<&serde_json::Value>) -> Option<serde_json::Value> {
+    fn bounded(value: &serde_json::Value, depth: usize) -> serde_json::Value {
+        use serde_json::Value;
+        match value {
+            Value::String(text) => {
+                let mut end = text.len().min(512);
+                while !text.is_char_boundary(end) {
+                    end -= 1;
+                }
+                Value::String(text[..end].to_owned())
+            }
+            Value::Object(object) if depth < 3 => {
+                let mut preview = serde_json::Map::new();
+                // Short scalar facts describe the block; give them priority over bodies.
+                let mut entries: Vec<_> = object.iter().collect();
+                entries.sort_by_key(|(_, value)| value.to_string().len());
+                for (key, value) in entries.into_iter().take(64) {
+                    let candidate = bounded(value, depth + 1);
+                    let cost = serde_json::to_string(key).map_or(0, |key| key.len())
+                        + candidate.to_string().len()
+                        + 2;
+                    if Value::Object(preview.clone()).to_string().len() + cost > BLOCK_PREVIEW_BYTES
+                    {
+                        continue;
+                    }
+                    preview.insert(key.clone(), candidate);
+                }
+                Value::Object(preview)
+            }
+            Value::Array(array) if depth < 3 => {
+                let mut preview = Vec::new();
+                for value in array.iter().take(8) {
+                    let candidate = bounded(value, depth + 1);
+                    if Value::Array(preview.clone()).to_string().len()
+                        + candidate.to_string().len()
+                        + 1
+                        > BLOCK_PREVIEW_BYTES
+                    {
+                        break;
+                    }
+                    preview.push(candidate);
+                }
+                Value::Array(preview)
+            }
+            Value::Object(_) | Value::Array(_) => Value::Null,
+            value => value.clone(),
+        }
+    }
+    data.filter(|value| !value.is_null()).map(|value| {
+        if value.to_string().len() <= BLOCK_PREVIEW_BYTES {
+            value.clone()
+        } else {
+            bounded(value, 0)
+        }
+    })
 }
 
 /// Quote a user's text as a single FTS5 phrase.
@@ -413,8 +499,9 @@ impl HistoryStore {
             .unwrap_or_else(|| record.payload.to_string().into_bytes());
         sqlx::query(
             r#"INSERT INTO native_records
-               (session_id, source, version, payload_json, created_at_ms, retention_class)
-               VALUES (?, ?, ?, ?, ?, 'raw')
+               (session_id, source, version, payload_json, created_at_ms, retained_seq, retention_class)
+               VALUES (?1, ?2, ?3, ?4, ?5,
+                 (SELECT COALESCE(MAX(retained_seq), -1) + 1 FROM native_records WHERE session_id = ?1), 'raw')
                ON CONFLICT(session_id, source, version) DO NOTHING"#,
         )
         .bind(session_id)
@@ -451,7 +538,11 @@ impl HistoryStore {
                 r#"INSERT INTO native_blobs
                    (session_id, source, version, name, hash, size, error)
                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(session_id, source, version, name) DO NOTHING"#,
+                   ON CONFLICT(session_id, source, version, name) DO UPDATE SET
+                     hash = COALESCE(native_blobs.hash, excluded.hash),
+                     size = CASE WHEN native_blobs.hash IS NULL THEN excluded.size ELSE native_blobs.size END,
+                     error = CASE WHEN native_blobs.hash IS NOT NULL OR excluded.hash IS NOT NULL
+                                  THEN NULL ELSE excluded.error END"#,
             )
             .bind(session_id)
             .bind(&record.source)
@@ -472,13 +563,15 @@ impl HistoryStore {
             .bind(&blob.name)
             .fetch_one(&mut *tx)
             .await?;
-            anyhow::ensure!(
-                held == (hash, blob.size as i64, blob.error.clone()),
-                "native blob revision collision for {}:{}:{}",
-                record.source,
-                record.version,
-                blob.name
-            );
+            if let Some(hash) = hash {
+                anyhow::ensure!(
+                    held.0.as_ref() == Some(&hash) && held.1 == blob.size as i64,
+                    "native blob revision collision for {}:{}:{}",
+                    record.source,
+                    record.version,
+                    blob.name
+                );
+            }
             sqlx::query("DELETE FROM native_blob_chunks WHERE session_id = ? AND source = ? AND version = ? AND name = ?")
                 .bind(session_id).bind(&record.source).bind(record.version as i64).bind(&blob.name)
                 .execute(&mut *tx).await?;
@@ -533,11 +626,11 @@ impl HistoryStore {
             .map_err(Into::into)
     }
 
-    /// Read all retained native envelopes for one session in source order.
+    /// Read retained envelopes in their durable first-seen bundle order.
     pub async fn native_records(&self, session_id: &str) -> Result<Vec<NativeRecord>> {
         let rows = sqlx::query(
             "SELECT source, version, payload_json FROM native_records
-             WHERE session_id = ? ORDER BY source, version",
+             WHERE session_id = ? ORDER BY retained_seq",
         )
         .bind(session_id)
         .fetch_all(&self.pool)
@@ -545,7 +638,7 @@ impl HistoryStore {
         rows.into_iter()
             .map(|row| {
                 let source: String = row.try_get("source")?;
-                let version: u64 = row.try_get::<i64, _>("version")?.max(0) as u64;
+                let version = row.try_get::<i64, _>("version")? as u64;
                 let raw_json: Vec<u8> = row.try_get("payload_json")?;
                 let payload = serde_json::from_slice(&raw_json)?;
                 Ok(NativeRecord {
@@ -656,13 +749,13 @@ impl HistoryStore {
                 r#"
                 INSERT OR REPLACE INTO blocks (
                     session_id, seq, turn_id, kind, phase, stream_id, span, interior_state, name,
-                    text_inline, text_hash, text_len, text_encoding,
+                    text_inline, text_hash, text_len, text_encoding, text_preview,
                     delta_offsets, delta_timings,
-                    data_json, data_hash, data_len, data_encoding, reconciled,
+                    data_json, data_hash, data_len, data_encoding, data_preview_json, body_truncated, reconciled,
                     is_error, source, arrival_at_ms, recorded_at_ms,
-                    started_at_ms, created_at_ms
+                    started_at_ms, started_recorded_at_ms, created_at_ms
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 "#,
             )
             .bind(&block.session_id)
@@ -678,18 +771,22 @@ impl HistoryStore {
             .bind(&text_hash)
             .bind(block.text.len() as i64)
             .bind(text.encoding())
+            .bind(text_preview(&block.text))
             .bind(block.folded.as_ref().map(|f| fold::pack(&f.offsets)))
             .bind(block.folded.as_ref().map(|f| fold::pack(&f.timings)))
             .bind(data_inline)
             .bind(&data_hash)
             .bind(*data_len as i64)
             .bind(data.as_ref().map_or("raw", Payload::encoding))
+            .bind(data_preview(block.data.as_ref()).map(|value| value.to_string()))
+            .bind(block.text.len() > BLOCK_PREVIEW_BYTES || *data_len > BLOCK_PREVIEW_BYTES)
             .bind(block.data.as_ref().and_then(|value| value.get("reconciled")).and_then(serde_json::Value::as_bool).unwrap_or(false))
             .bind(block.is_error)
             .bind(&block.source)
             .bind(block.arrival_at_ms)
             .bind(block.recorded_at_ms)
             .bind(block.started_at_ms)
+            .bind(block.started_recorded_at_ms)
             .bind(block.created_at_ms)
             .execute(&mut *tx)
             .await?;
@@ -760,6 +857,84 @@ impl HistoryStore {
             blocks.push(self.row_to_block(row).await?);
         }
         Ok(blocks)
+    }
+
+    /// Read bounded timeline metadata without hydrating CAS payloads.
+    pub async fn block_summaries(
+        &self,
+        session_id: &str,
+        after_seq: i32,
+    ) -> Result<Vec<BlockSummary>> {
+        let rows = sqlx::query(&format!("SELECT {BLOCK_SUMMARY_COLUMNS} FROM blocks WHERE session_id = ? AND seq > ? ORDER BY seq"))
+            .bind(session_id).bind(after_seq).fetch_all(&self.pool).await?;
+        rows.into_iter()
+            .map(|row| self.row_to_summary(row))
+            .collect()
+    }
+
+    /// Read bounded metadata for one turn without hydrating CAS payloads.
+    pub async fn turn_block_summaries(&self, turn_id: &str) -> Result<Vec<BlockSummary>> {
+        let rows = sqlx::query(&format!(
+            "SELECT {BLOCK_SUMMARY_COLUMNS} FROM blocks WHERE turn_id = ? ORDER BY seq"
+        ))
+        .bind(turn_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| self.row_to_summary(row))
+            .collect()
+    }
+
+    /// Read and verify one complete block by session sequence.
+    pub async fn block(&self, session_id: &str, seq: i32) -> Result<Option<Block>> {
+        let row = sqlx::query("SELECT * FROM blocks WHERE session_id = ? AND seq = ?")
+            .bind(session_id)
+            .bind(seq)
+            .fetch_optional(&self.pool)
+            .await?;
+        match row {
+            Some(row) => Ok(Some(self.row_to_block(row).await?)),
+            None => Ok(None),
+        }
+    }
+
+    fn row_to_summary(&self, row: sqlx::sqlite::SqliteRow) -> Result<BlockSummary> {
+        let text_len = row.try_get::<i64, _>("text_len")? as u64;
+        let data_len = row.try_get::<i64, _>("data_len")? as u64;
+        let text = row.try_get("text_preview")?;
+        let data = row
+            .try_get::<Option<String>, _>("data_preview_json")?
+            .map(|data| serde_json::from_str(&data))
+            .transpose()
+            .context("stored block metadata preview is not valid JSON")?;
+        let has_body = row.try_get::<bool, _>("body_truncated")?;
+        let block = Block {
+            session_id: row.try_get("session_id")?,
+            seq: row.try_get("seq")?,
+            turn_id: row.try_get("turn_id")?,
+            kind: row.try_get("kind")?,
+            phase: row.try_get("phase")?,
+            stream_id: row.try_get("stream_id")?,
+            span: row.try_get("span")?,
+            interior_state: row.try_get("interior_state")?,
+            name: row.try_get("name")?,
+            text,
+            folded: None,
+            data,
+            is_error: row.try_get::<i64, _>("is_error")? != 0,
+            source: row.try_get("source")?,
+            arrival_at_ms: row.try_get("arrival_at_ms")?,
+            recorded_at_ms: row.try_get("recorded_at_ms")?,
+            started_at_ms: row.try_get("started_at_ms")?,
+            started_recorded_at_ms: row.try_get("started_recorded_at_ms")?,
+            created_at_ms: row.try_get("created_at_ms")?,
+        };
+        Ok(BlockSummary {
+            has_body,
+            block,
+            text_bytes: text_len,
+            data_bytes: data_len,
+        })
     }
 
     /// Return the next sequence number occupied by this session in history.
@@ -862,6 +1037,7 @@ impl HistoryStore {
             arrival_at_ms: row.try_get("arrival_at_ms")?,
             recorded_at_ms: row.try_get("recorded_at_ms")?,
             started_at_ms: row.try_get("started_at_ms")?,
+            started_recorded_at_ms: row.try_get("started_recorded_at_ms")?,
             created_at_ms: row.try_get("created_at_ms")?,
         })
     }
@@ -1623,7 +1799,7 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
                     turn_id: event.turn_id.clone().unwrap_or_default(),
                     kind: event.kind.clone(),
                     phase: event.phase.clone(),
-                    stream_id,
+                    stream_id: stream_id.clone(),
                     span: event.span.clone(),
                     interior_state,
                     // The completed event's own name wins when it has one; a name
@@ -1637,6 +1813,13 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
                     arrival_at_ms: event.arrival_at_ms,
                     recorded_at_ms: event.recorded_at_ms,
                     started_at_ms,
+                    started_recorded_at_ms: stream_id.as_ref().and_then(|id| {
+                        // The first phase's vendor stamp is the only honest native anchor.
+                        events
+                            .iter()
+                            .find(|candidate| candidate.stream_id.as_ref() == Some(id))
+                            .and_then(|candidate| candidate.recorded_at_ms)
+                    }),
                     created_at_ms: event.created_at_ms,
                 });
             }
@@ -1684,6 +1867,7 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
             arrival_at_ms: declaring.arrival_at_ms,
             recorded_at_ms: declaring.recorded_at_ms,
             started_at_ms,
+            started_recorded_at_ms: declaring.recorded_at_ms,
             created_at_ms: declaring.created_at_ms,
         });
     }
@@ -1762,6 +1946,10 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
                 .rev()
                 .find_map(|event| event.recorded_at_ms),
             started_at_ms,
+            started_recorded_at_ms: events
+                .iter()
+                .find(|event| event.stream_id.as_deref() == Some(stream_id.as_str()))
+                .and_then(|event| event.recorded_at_ms),
             created_at_ms: last,
         });
     }

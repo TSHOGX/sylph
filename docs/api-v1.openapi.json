@@ -2541,6 +2541,48 @@
           }
         }
       }
+    },
+    "/api/v1/sessions/{sessionId}/bodies/{seq}": {
+      "get": {
+        "summary": "Fetch one full event body",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          },
+          {
+            "name": "seq",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Event body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "text": {
+                      "type": "string"
+                    },
+                    "data": {}
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -3731,7 +3773,9 @@
       "HistoryResponse": {
         "type": "object",
         "required": [
-          "turns"
+          "turns",
+          "hasMore",
+          "snapshotSeq"
         ],
         "properties": {
           "turns": {
@@ -3739,6 +3783,15 @@
             "items": {
               "$ref": "#/components/schemas/TurnWithEvents"
             }
+          },
+          "hasMore": {
+            "type": "boolean"
+          },
+          "nextCursor": {
+            "type": "string"
+          },
+          "snapshotSeq": {
+            "type": "integer"
           }
         }
       },

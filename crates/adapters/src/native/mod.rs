@@ -37,6 +37,23 @@ pub(crate) fn record_revision(position: u64, bytes: &[u8]) -> u64 {
     hash
 }
 
+/// Bind adopted input to the retained envelope that supplied it. Reprojection uses the
+/// same cursor, so rereading a prompt never manufactures a second turn container.
+pub(crate) fn input_cursors(
+    messages: &mut [sylph_protocol::SessionMessage],
+    record: &sylph_protocol::NativeRecord,
+) {
+    for message in messages {
+        if let sylph_protocol::SessionMessage::TurnInput(input) = message {
+            input.source_cursor = Some(sylph_protocol::SourceCursor {
+                source: record.source.clone(),
+                generation: record.version,
+                offset: 0,
+            });
+        }
+    }
+}
+
 /// Where a vendor keeps its sessions on this machine.
 ///
 /// Hardcoded per agent, because a native store's location is a vendor fact rather than a

@@ -223,6 +223,7 @@ function ShellFrame({
       {rereadNotice?.state === "error" && (
         <p role="alert" className="shrink-0 border-b border-danger-line bg-danger-bg px-4 py-2 text-xs text-danger">
           {t("shell.rereadFailed", { session: rereadNotice.sessionLabel })}
+          {" "}{rereadNotice.message}
         </p>
       )}
 

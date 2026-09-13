@@ -137,6 +137,17 @@ pub struct StreamEvent {
     /// "settled, and here is the span it covered".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at_ms: Option<i64>,
+    /// Present when the event carries a bounded preview and the full body is fetched lazily.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_ref: Option<BodyRef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BodyRef {
+    pub seq: i32,
+    pub text_bytes: u64,
+    pub data_bytes: u64,
 }
 
 impl StreamEvent {
@@ -302,6 +313,7 @@ impl StreamEvent {
             recorded_at_ms,
             created_at_ms,
             started_at_ms,
+            body_ref: None,
         }
     }
 
@@ -334,6 +346,7 @@ impl StreamEvent {
             recorded_at_ms: row.recorded_at_ms,
             created_at_ms: row.created_at_ms,
             started_at_ms: None,
+            body_ref: None,
         }
     }
 }
@@ -650,6 +663,7 @@ mod tests {
             recorded_at_ms: None,
             created_at_ms: 1_700_000_000_000,
             started_at_ms: None,
+            body_ref: None,
         }
     }
 

@@ -293,6 +293,7 @@ impl EnvBridge {
             source: "server".into(),
             arrival_at_ms: now_ms(),
             recorded_at_ms: None,
+            body_ref: None,
             created_at_ms: now_ms(),
             started_at_ms: None,
         };
@@ -844,7 +845,7 @@ impl EnvBridge {
                                     chosen_option: None,
                                     resolved_input_json: None,
                                     resolved_by: None,
-                                    created_at_ms: now_ms(),
+            created_at_ms: now_ms(),
                                     resolved_at_ms: None,
                                 };
                                 let stored = store.create_pending_request(&pending).await?;
@@ -866,7 +867,8 @@ impl EnvBridge {
                                         source: "agent".into(),
                                         arrival_at_ms: now_ms(),
                                         recorded_at_ms: None,
-                                        created_at_ms: now_ms(),
+                                        body_ref: None,
+            created_at_ms: now_ms(),
                                         started_at_ms: None,
                                     },
                                 )
@@ -932,7 +934,8 @@ impl EnvBridge {
                                         source: "agent".into(),
                                         arrival_at_ms: now_ms(),
                                         recorded_at_ms: None,
-                                        created_at_ms: now_ms(),
+                                        body_ref: None,
+            created_at_ms: now_ms(),
                                         started_at_ms: None,
                                     },
                                 )
@@ -1946,6 +1949,7 @@ impl EnvBridge {
                                 source: "server".into(),
                                 arrival_at_ms: now_ms(),
                                 recorded_at_ms: None,
+                                body_ref: None,
                                 created_at_ms: now_ms(),
                                 started_at_ms: None,
                             },
@@ -2614,6 +2618,7 @@ fn command_name(command: &sylph_protocol::EnvironmentCommand) -> &'static str {
         EnvironmentCommand::BrowseRoots => "browse-roots",
         EnvironmentCommand::BrowseTree { .. } => "browse-tree",
         EnvironmentCommand::Reproject { .. } => "reproject",
+        EnvironmentCommand::NativeTransfer { .. } => "native-transfer",
     }
 }
 
@@ -2667,7 +2672,9 @@ fn command_needs_a_fresh_request_id(command: &sylph_protocol::EnvironmentCommand
         // result and report counts taken before the bytes it was clicked to
         // collect existed: a "refresh" answering from cache, which is the very
         // defect the control exists to fix, one layer down.
-        EnvironmentCommand::Reread { .. } => true,
+        EnvironmentCommand::Reread { .. }
+        | EnvironmentCommand::Reproject { .. }
+        | EnvironmentCommand::NativeTransfer { .. } => true,
         _ => false,
     }
 }

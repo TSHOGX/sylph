@@ -813,12 +813,14 @@ fn event_msg(
             // fires 1549 times across 15 sessions — one per turn with the same objective — so
             // a row per record would repeat one sentence dozens of times.
         }
-        "user_message" | "thread_rolled_back" | "entered_review_mode" | "exited_review_mode" => {
-            // `user_message` (4770) duplicates the `response_item/message` the user typed, and
-            // the vocabulary has no `user` kind — the server owns a turn's `request_text`
-            // (`docs/database-schema.md`), and inventing a kind is what
-            // `crates/adapters/src/lib.rs` forbids an adapter from doing.
+        "user_message" if era == Era::Legacy => {
+            if let Some(text) = string_at(payload, "message") {
+                let mut input = sylph_protocol::TurnInputFact::new(text);
+                input.recorded_at_ms = (at_ms != 0).then_some(at_ms);
+                parsed.messages.push(SessionMessage::TurnInput(input));
+            }
         }
+        "user_message" | "thread_rolled_back" | "entered_review_mode" | "exited_review_mode" => {}
         _ => parsed.unknown_records += 1,
     }
 }
@@ -1116,7 +1118,10 @@ fn item_completed(
                 .push(SessionMessage::Event(compaction(completed_ms)));
         }
         "UserMessage" => {
-            // The vocabulary has no `user` kind and the server owns a turn's `request_text`.
+            let mut input =
+                sylph_protocol::TurnInputFact::new(flatten_content(item.get("content")));
+            input.recorded_at_ms = (completed_ms != 0).then_some(completed_ms);
+            parsed.messages.push(SessionMessage::TurnInput(input));
         }
         "Plan" => {
             // `docs/session-protocol.md` § Events reserves a `plan` kind and **no adapter
@@ -1490,7 +1495,9 @@ pub(crate) fn reproject_native_record(
     projector: &mut RolloutProjector,
     record: &NativeRecord,
 ) -> Vec<SessionMessage> {
-    projector.apply(&record.payload)
+    let mut messages = projector.apply(&record.payload);
+    crate::native::input_cursors(&mut messages, record);
+    messages
 }
 
 /// A stable identity for one filesystem incarnation of a rollout.
@@ -1649,7 +1656,7 @@ impl RolloutCursor {
                 .previous_lines
                 .get(&record.offset)
                 .is_some_and(|previous| *previous == fingerprint);
-            let projected = self.projector.apply(&record.value);
+            let mut projected = self.projector.apply(&record.value);
             if !replayed {
                 // Retain the complete vendor envelope before its normalized projection. The
                 // server can then re-project Codex history after the event vocabulary evolves,
@@ -1660,12 +1667,9 @@ impl RolloutCursor {
                     .strip_suffix(&[b'\n'][..])
                     .unwrap_or(&record.raw)
                     .to_vec();
-                messages.push(SessionMessage::NativeRecord(native_record(
-                    &self.path,
-                    version,
-                    &record.value,
-                    raw_json,
-                )));
+                let retained = native_record(&self.path, version, &record.value, raw_json);
+                crate::native::input_cursors(&mut projected, &retained);
+                messages.push(SessionMessage::NativeRecord(retained));
                 messages.extend(projected);
             }
             self.line_fingerprints.insert(record.offset, fingerprint);
@@ -1795,9 +1799,13 @@ impl LiveRecords {
     pub(super) fn poll(&mut self, id: &NativeId) -> Result<Vec<SessionMessage>> {
         if self.state.is_none() {
             let Some(path) = store_root().and_then(|root| {
-                candidates(&root, is_rollout).into_iter().find_map(|candidate| {
-                    header_of(&candidate).filter(|header| header.native_id.as_ref() == Some(id)).map(|_| candidate.path)
-                })
+                candidates(&root, is_rollout)
+                    .into_iter()
+                    .find_map(|candidate| {
+                        header_of(&candidate)
+                            .filter(|header| header.native_id.as_ref() == Some(id))
+                            .map(|_| candidate.path)
+                    })
             }) else {
                 return Ok(Vec::new());
             };
@@ -2018,7 +2026,14 @@ impl RolloutFollowState {
     fn update_interiors(&mut self, messages: &mut Vec<SessionMessage>) {
         for (child, link) in &self.links {
             let source = self.sources.values().find(|cursor| {
-                cursor.projector.parsed.header.as_ref().and_then(|header| header.native_id.as_ref()).map(NativeId::as_str) == Some(child.as_str())
+                cursor
+                    .projector
+                    .parsed
+                    .header
+                    .as_ref()
+                    .and_then(|header| header.native_id.as_ref())
+                    .map(NativeId::as_str)
+                    == Some(child.as_str())
             });
             let readable = source.filter(|cursor| cursor.offset > 0 && cursor.path.is_file());
             let complete = readable.is_some_and(|cursor| {
@@ -2036,13 +2051,20 @@ impl RolloutFollowState {
             let mut reported = false;
             for message in messages.iter_mut() {
                 if let SessionMessage::Event(event) = message {
-                    if event.kind == EventKind::Subagent && event.stream_id.as_deref() == Some(child.as_str()) {
+                    if event.kind == EventKind::Subagent
+                        && event.stream_id.as_deref() == Some(child.as_str())
+                    {
                         event.interior_state = Some(state);
                         reported = true;
                     }
                 }
             }
-            if !reported && self.interior_states.get(child).is_some_and(|old| *old != state) {
+            if !reported
+                && self
+                    .interior_states
+                    .get(child)
+                    .is_some_and(|old| *old != state)
+            {
                 let mut event = Event::new(EventKind::Subagent, Some(Phase::Delta), 0);
                 event.stream_id = Some(child.clone());
                 event.span = link.host.clone();
@@ -2566,36 +2588,89 @@ mod tests {
         let path = dir.join("rollout-test.jsonl");
         std::fs::write(&path, "{\"type\":\"future\",\"payload\":1}\n").unwrap();
         let read = || {
-            RolloutCursor::new(path.clone()).poll().unwrap().into_iter().find_map(|message| {
-                match message { SessionMessage::NativeRecord(record) => Some(record), _ => None }
-            }).unwrap()
+            RolloutCursor::new(path.clone())
+                .poll()
+                .unwrap()
+                .into_iter()
+                .find_map(|message| match message {
+                    SessionMessage::NativeRecord(record) => Some(record),
+                    _ => None,
+                })
+                .unwrap()
         };
         let first = read();
         assert_eq!(first.version, read().version);
         std::fs::write(&path, "{ \"type\" : \"future\", \"payload\" : 1 }\n").unwrap();
         let rewritten = read();
         assert_eq!(first.payload, rewritten.payload);
-        assert_ne!(first.version, rewritten.version, "lexical changes are retained revisions");
+        assert_ne!(
+            first.version, rewritten.version,
+            "lexical changes are retained revisions"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn retained_record_reprojection_uses_payload_without_source_path() {
-        let record = NativeRecord { source: "/does/not/exist".into(), version: 1, raw_json: None, payload: json!({"type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","id":"m","content":[{"type":"Text","text":"ok"}]}}}), blobs: Vec::new() };
+    fn retained_fixture_preserves_recorded_times_and_user_input() {
+        let original = RolloutCursor::new(fixture("ordinary-turn-item-completed-era.jsonl"))
+            .poll()
+            .unwrap();
+        assert!(original.iter().any(|message| matches!(message, SessionMessage::TurnInput(input) if !input.text.is_empty() && input.recorded_at_ms.is_some())));
         let mut projector = RolloutProjector::default();
-        projector.apply(&json!({"type":"session_meta","payload":{"id":"reproject","history_mode":"paginated"}}));
-        assert!(reproject_native_record(&mut projector, &record).iter().any(|message| matches!(message, SessionMessage::Event(event) if event.text == "ok")));
+        let retained: Vec<_> = original
+            .iter()
+            .filter_map(|message| match message {
+                SessionMessage::NativeRecord(record) => Some(record),
+                _ => None,
+            })
+            .flat_map(|record| reproject_native_record(&mut projector, record))
+            .collect();
+        let projected: Vec<_> = original
+            .into_iter()
+            .filter(|message| !matches!(message, SessionMessage::NativeRecord(_)))
+            .collect();
+        assert_eq!(retained, projected);
+    }
+
+    #[test]
+    fn retained_record_reprojection_uses_payload_without_source_path() {
+        let record = NativeRecord {
+            source: "/does/not/exist".into(),
+            version: 1,
+            raw_json: None,
+            payload: json!({"type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","id":"m","content":[{"type":"Text","text":"ok"}]}}}),
+            blobs: Vec::new(),
+        };
+        let mut projector = RolloutProjector::default();
+        projector.apply(
+            &json!({"type":"session_meta","payload":{"id":"reproject","history_mode":"paginated"}}),
+        );
+        assert!(reproject_native_record(&mut projector, &record)
+            .iter()
+            .any(|message| matches!(message, SessionMessage::Event(event) if event.text == "ok")));
     }
 
     #[test]
     fn item_recorded_time_uses_completion_even_without_an_outer_stamp() {
         for outer in [Some("2026-09-02T00:00:00.100Z"), None] {
             let mut projector = RolloutProjector::default();
-            projector.apply(&json!({"type":"session_meta","payload":{"id":"time","history_mode":"paginated"}}));
+            projector.apply(
+                &json!({"type":"session_meta","payload":{"id":"time","history_mode":"paginated"}}),
+            );
             let mut record = json!({"type":"event_msg","payload":{"type":"item_completed","completed_at_ms":1788307200090_i64,"started_at_ms":1788307200000_i64,"item":{"type":"AgentMessage","id":"msg","content":[{"type":"Text","text":"answer"}]}}});
-            if let Some(outer) = outer { record["timestamp"] = json!(outer); }
+            if let Some(outer) = outer {
+                record["timestamp"] = json!(outer);
+            }
             let messages = projector.apply(&record);
-            let event = messages.iter().find_map(|message| match message { SessionMessage::Event(event) if event.kind == EventKind::Assistant => Some(event), _ => None }).unwrap();
+            let event = messages
+                .iter()
+                .find_map(|message| match message {
+                    SessionMessage::Event(event) if event.kind == EventKind::Assistant => {
+                        Some(event)
+                    }
+                    _ => None,
+                })
+                .unwrap();
             assert_eq!(event.recorded_at_ms, Some(1788307200090));
         }
     }
@@ -2618,7 +2693,14 @@ mod tests {
             "every JSONL row is retained as raw"
         );
         assert!(retained.iter().all(|record| record.raw_json.is_some()));
-        assert_eq!(retained.iter().map(|record| record.version).collect::<HashSet<_>>().len(), expected);
+        assert_eq!(
+            retained
+                .iter()
+                .map(|record| record.version)
+                .collect::<HashSet<_>>()
+                .len(),
+            expected
+        );
     }
 
     /// The header one fixture's own `session_meta` yields, from the same pass.
@@ -2707,7 +2789,10 @@ mod tests {
                 span.starts_with("call_"),
                 "the span must be the host tool call, got {span:?}"
             );
-            assert_eq!(sub.interior_state, None, "the single-file projector cannot establish child reachability");
+            assert_eq!(
+                sub.interior_state, None,
+                "the single-file projector cannot establish child reachability"
+            );
             assert_ne!(
                 stream, span,
                 "a trajectory keyed by its host cannot distinguish two delegates \
@@ -2905,11 +2990,33 @@ mod tests {
     #[test]
     fn an_absent_child_source_is_pending_live_and_unreadable_on_final_read() {
         for finalizing in [false, true] {
-            let (root, parent, _) = watch_fixture_dir(if finalizing { "missing-final" } else { "missing-live" });
-            let mut state = RolloutFollowState::new_with_root(NativeId::new("watch-parent"), parent, root.clone(), finalizing);
+            let (root, parent, _) = watch_fixture_dir(if finalizing {
+                "missing-final"
+            } else {
+                "missing-live"
+            });
+            let mut state = RolloutFollowState::new_with_root(
+                NativeId::new("watch-parent"),
+                parent,
+                root.clone(),
+                finalizing,
+            );
             let events = watch_events(&state.poll().unwrap());
-            let declaration = events.iter().find(|event| event.kind == EventKind::Subagent && event.stream_id.as_deref() == Some("watch-child")).unwrap();
-            assert_eq!(declaration.interior_state, Some(if finalizing { InteriorState::Unreadable } else { InteriorState::Pending }));
+            let declaration = events
+                .iter()
+                .find(|event| {
+                    event.kind == EventKind::Subagent
+                        && event.stream_id.as_deref() == Some("watch-child")
+                })
+                .unwrap();
+            assert_eq!(
+                declaration.interior_state,
+                Some(if finalizing {
+                    InteriorState::Unreadable
+                } else {
+                    InteriorState::Pending
+                })
+            );
             let _ = std::fs::remove_dir_all(root);
         }
     }

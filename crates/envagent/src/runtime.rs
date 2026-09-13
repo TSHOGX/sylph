@@ -632,6 +632,7 @@ pub struct EnvAgent {
     prepared: Arc<RwLock<std::collections::HashMap<String, PreparedHosted>>>,
     promoted_drafts: Arc<RwLock<std::collections::HashMap<String, SessionId>>>,
     adapters: Arc<dyn AdapterSource>,
+    transfers: crate::native_transfer::Transfers,
 }
 
 impl EnvAgent {
@@ -681,6 +682,13 @@ impl EnvAgent {
         let spool = Spool::open(config.spool.clone())
             .await
             .context("opening envagent spool")?;
+        let transfers = crate::native_transfer::Transfers::new(
+            config
+                .spool
+                .path
+                .parent()
+                .context("spool has no parent directory")?,
+        )?;
         Ok(Self {
             config: Arc::new(config),
             environment,
@@ -696,6 +704,7 @@ impl EnvAgent {
             prepared: Arc::new(RwLock::new(std::collections::HashMap::new())),
             promoted_drafts: Arc::new(RwLock::new(std::collections::HashMap::new())),
             adapters,
+            transfers,
         })
     }
 
@@ -1078,11 +1087,11 @@ impl EnvAgent {
             .await
     }
 
-    /// One bare parse of a native session, answered inline.
+    /// One bare parse of a native session, exposed as a bounded transfer.
     ///
     /// Hosts nothing: no source registration, no pump, no workdir entry. The server owns
-    /// deduplication against its own journal, so this reads the store and hands the whole
-    /// pass back (`docs/environments.md` § Re-reading a session Sylph already holds).
+    /// deduplication against its own journal, so this preserves the adapter's order
+    /// (`docs/environments.md` § Re-reading a session Sylph already holds).
     ///
     /// # Path policy still applies, and the reason is not obvious
     ///
@@ -1092,11 +1101,7 @@ impl EnvAgent {
     /// and a store holds every session any agent ever ran on this machine. Skipping the
     /// check because this command starts no process would make it a way to read files
     /// outside the configured roots by naming a session that ran there.
-    pub async fn reread(
-        &self,
-        agent: &str,
-        native_id: NativeId,
-    ) -> Result<sylph_protocol::RereadPass> {
+    async fn reread_stream(&self, agent: &str, native_id: NativeId) -> Result<EventStream> {
         // Through the injected `AdapterSource`, exactly as `start_native_source` resolves
         // it. The free `sylph_adapters::for_agent` answers from the hardcoded vendor list,
         // which bypasses the seam this field exists to provide — so a re-read would refuse
@@ -1124,37 +1129,61 @@ impl EnvAgent {
             .contain(recorded_workdir)
             .map_err(|error| anyhow!(error))?;
 
-        let mut stream = adapter.adopt(&native_id).await?;
-        let mut pass = sylph_protocol::RereadPass::default();
+        adapter.adopt(&native_id).await
+    }
+
+    async fn transfer_stream(
+        &self,
+        session_id: &SessionId,
+        mut stream: EventStream,
+        retain_sidecars: bool,
+    ) -> Result<serde_json::Value> {
+        use std::io::Write;
+        use sylph_protocol::NativeTransferItem;
+        let mut file = self.transfers.temporary_file()?;
+        let mut read_errors = 0;
+        let mut skipped = 0;
         while let Some(item) = stream.next().await {
-            match item {
-                Ok(sylph_protocol::SessionMessage::Event(event)) => pass.events.push(event),
-                Ok(sylph_protocol::SessionMessage::NativeRecord(record)) => {
-                    // Kept, never dropped. A vendor's whole record is what makes a schema
-                    // break cheap, and `AGENTS.md` § Compatibility forbids ingesting
-                    // lossily — the server dedups these on `(session, source, version)`.
-                    pass.records.push(record)
-                }
-                // A request read from a store was answered months ago, and a capability
-                // surface describes a link this session does not have. Both are counted
-                // rather than silently dropped, so a parser that starts emitting one is
-                // visible here instead of invisible. The server's own drain draws the same
-                // two distinctions for the same reasons.
-                Ok(_) => pass.skipped += 1,
-                Err(error) => {
-                    pass.read_errors += 1;
-                    if pass.read_errors == 1 {
-                        warn!("could not read part of native session {native_id}: {error:#}");
+            let item = match item {
+                Ok(SessionMessage::Event(event)) => NativeTransferItem::Event(event),
+                Ok(SessionMessage::TurnInput(input)) => NativeTransferItem::TurnInput(input),
+                Ok(SessionMessage::NativeRecord(record)) => {
+                    NativeTransferItem::Record(if retain_sidecars {
+                        self.retain_native_sidecars(session_id, record).await?
                     } else {
-                        debug!(
-                            "further read error on {native_id} (#{}): {error:#}",
-                            pass.read_errors
-                        );
-                    }
+                        record
+                    })
                 }
-            }
+                Ok(_) => {
+                    skipped += 1;
+                    continue;
+                }
+                Err(error) => {
+                    read_errors += 1;
+                    if read_errors == 1 {
+                        warn!("could not read part of native session {session_id}: {error:#}");
+                    } else {
+                        debug!("further read error on {session_id}: {error:#}");
+                    }
+                    continue;
+                }
+            };
+            serde_json::to_writer(&mut file, &item)?;
+            file.write_all(b"\n")?;
         }
-        Ok(pass)
+        serde_json::to_writer(
+            &mut file,
+            &NativeTransferItem::Summary {
+                read_errors,
+                skipped,
+            },
+        )?;
+        file.write_all(b"\n")?;
+        file.as_file().sync_all()?;
+        while self.flush_pending(64).await? > 0 {}
+        Ok(serde_json::to_value(
+            self.transfers.insert(session_id, file, true).await?,
+        )?)
     }
 
     async fn reread_command(&self, agent: &str, native_id: NativeId) -> Result<serde_json::Value> {
@@ -1163,17 +1192,8 @@ impl EnvAgent {
             AgentName::parse(agent.to_string())?,
             native_id.clone(),
         );
-        let mut pass = self.reread(agent, native_id).await?;
-        // Sidecars are transferred through the durable producer path before the
-        // command result exposes their native records. The server can therefore
-        // acknowledge the reread only after CAS retention has completed.
-        let mut retained = Vec::with_capacity(pass.records.len());
-        for record in pass.records {
-            retained.push(self.retain_native_sidecars(&session_id, record).await?);
-        }
-        pass.records = retained;
-        while self.flush_pending(64).await? > 0 {}
-        Ok(serde_json::to_value(&pass)?)
+        let stream = self.reread_stream(agent, native_id).await?;
+        self.transfer_stream(&session_id, stream, true).await
     }
 
     async fn start_native_source(
@@ -1692,10 +1712,8 @@ impl EnvAgent {
             // through a path that has no content dedup, duplicating exactly the transcript
             // this operation exists to extend.
             //
-            // The result carries the events rather than spooling them because suppression
-            // is the server's: only the server knows what its journal already holds. Bulk
-            // in a command result is the established shape here — `Enumerate` answers with
-            // every native summary a machine holds the same way.
+            // A transfer keeps message ordering and bounds each wire chunk. Suppression
+            // remains server-owned, independently of the live producer spool.
             EnvironmentCommand::Reread {
                 agent,
                 native_id,
@@ -1707,28 +1725,73 @@ impl EnvAgent {
                     message: format!("{error:#}"),
                 },
             },
-            EnvironmentCommand::Reproject { agent, records, .. } => {
+            EnvironmentCommand::Reproject {
+                session_id,
+                agent,
+                transfer_id,
+            } => {
                 let Some(adapter) = self.adapters.for_agent(&agent) else {
                     return sylph_protocol::CommandOutcome::Rejected {
                         code: "AGENT_UNAVAILABLE".into(),
                         message: format!("agent '{agent}' is not installed on this environment"),
                     };
                 };
-                match adapter.reproject(records).await {
-                    Ok(mut stream) => {
-                        let mut pass = sylph_protocol::RereadPass::default();
-                        while let Some(item) = stream.next().await {
-                            match item {
-                                Ok(sylph_protocol::SessionMessage::Event(event)) => pass.events.push(event),
-                                Ok(sylph_protocol::SessionMessage::NativeRecord(record)) => pass.records.push(record),
-                                Ok(_) => pass.skipped += 1,
-                                Err(_error) => pass.read_errors += 1,
-                            }
-                        }
-                        sylph_protocol::CommandOutcome::accepted_with_result(serde_json::to_value(pass).unwrap_or_default())
-                    }
+                let result = async {
+                    use std::io::BufRead;
+                    let file = self.transfers.take(&session_id, &transfer_id).await?;
+                    let records = std::io::BufReader::new(file.reopen()?)
+                        .lines()
+                        .map(|line| {
+                            Ok(serde_json::from_str::<sylph_protocol::NativeRecord>(
+                                &line?,
+                            )?)
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    let stream = adapter.reproject(records).await?;
+                    self.transfer_stream(&session_id, stream, false).await
+                }
+                .await;
+                match result {
+                    Ok(value) => sylph_protocol::CommandOutcome::accepted_with_result(value),
                     Err(error) => sylph_protocol::CommandOutcome::Rejected {
                         code: "REPROJECT_FAILED".into(),
+                        message: format!("{error:#}"),
+                    },
+                }
+            }
+            EnvironmentCommand::NativeTransfer {
+                session_id,
+                operation,
+            } => {
+                use sylph_protocol::NativeTransferOperation;
+                let result: Result<serde_json::Value> = async {
+                    Ok(match operation {
+                        NativeTransferOperation::Begin => serde_json::to_value(
+                            self.transfers
+                                .insert(&session_id, self.transfers.temporary_file()?, false)
+                                .await?,
+                        )?,
+                        NativeTransferOperation::Append { id, offset, bytes } => {
+                            serde_json::to_value(
+                                self.transfers
+                                    .append(&session_id, &id, offset, &bytes)
+                                    .await?,
+                            )?
+                        }
+                        NativeTransferOperation::Read { id, offset } => serde_json::to_value(
+                            self.transfers.read(&session_id, &id, offset).await?,
+                        )?,
+                        NativeTransferOperation::Release { id } => {
+                            drop(self.transfers.take(&session_id, &id).await?);
+                            serde_json::json!({})
+                        }
+                    })
+                }
+                .await;
+                match result {
+                    Ok(value) => sylph_protocol::CommandOutcome::accepted_with_result(value),
+                    Err(error) => sylph_protocol::CommandOutcome::Rejected {
+                        code: "NATIVE_TRANSFER_FAILED".into(),
                         message: format!("{error:#}"),
                     },
                 }
@@ -2701,8 +2764,10 @@ impl EnvAgent {
                     .enqueue_json(&session_id.encode(), "native_blob_chunk", &value, None)
                     .await
                 {
-                    if !matches!(error.downcast_ref::<crate::spool::SpoolError>(),
-                        Some(crate::spool::SpoolError::Overflow { .. })) {
+                    if !matches!(
+                        error.downcast_ref::<crate::spool::SpoolError>(),
+                        Some(crate::spool::SpoolError::Overflow { .. })
+                    ) {
                         return Err(error);
                     }
                     // A connected server can consume an object larger than the spool.
@@ -2974,7 +3039,10 @@ mod tests {
             Err(anyhow!("the spy agent has no native store"))
         }
 
-        async fn reproject(&self, _records: Vec<sylph_protocol::NativeRecord>) -> Result<EventStream> {
+        async fn reproject(
+            &self,
+            _records: Vec<sylph_protocol::NativeRecord>,
+        ) -> Result<EventStream> {
             Err(anyhow!("the spy agent has no native records"))
         }
 

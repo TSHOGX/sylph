@@ -50,9 +50,9 @@ use serde_json::{json, Value};
 use sylph_protocol::{
     Adapter, AdapterError, AgentInfo, Capability, CapabilityFacets, Choice, ConfigChoice,
     ConfigKind, ConfigOption, Event, EventKind, EventStream, Fidelity, Field, FieldKind, FlagSpec,
-    Form, NativeId, NativeSummary, Phase, Request, RequestKind, RequestOption, RequestedNativeId,
-    Resolution, RunSpec, SelectMode, Session, SessionCapabilities, SessionMessage, StoreFilter,
-    SubagentSpec, TurnInput,
+    Form, NativeId, NativeRecord, NativeSummary, Phase, Request, RequestKind, RequestOption,
+    RequestedNativeId, Resolution, RunSpec, SelectMode, Session, SessionCapabilities,
+    SessionMessage, StoreFilter, SubagentSpec, TurnInput,
 };
 use tokio::sync::{mpsc, Mutex};
 

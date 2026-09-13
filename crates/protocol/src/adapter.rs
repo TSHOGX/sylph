@@ -294,7 +294,8 @@ pub struct NativeSummary {
 /// Native stores evolve faster than the event vocabulary.  Keeping the complete payload
 /// (including fields the current projection ignores) makes a parser change a local
 /// re-projection rather than a second read of a vendor file that may already have rotated.
-/// `version` is an append ordinal for JSONL sources and a snapshot revision for manifests.
+/// `version` is an opaque revision, never an ordering key. The retained archive keeps
+/// first-observed order separately, including across sources in the same bundle.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeRecord {
@@ -333,43 +334,50 @@ pub struct NativeBlob {
     pub error: Option<String>,
 }
 
-/// One re-read pass over a native store, as an envagent answers it.
-///
-/// This is a *command result*, not a stream: an envagent parses the store and hands the
-/// whole pass back, because only the server knows which of these its journal already holds
-/// (`docs/environments.md` § Re-reading a session Sylph already holds). Spooling them as a
-/// producer batch instead would put them through a path with no content deduplication,
-/// duplicating the transcript a re-read exists to extend.
-///
-/// One shared type rather than a hand-written `json!` object on each side. `HostedSource`
-/// was two literals of one payload, and that is how `parentRelation` came to be read by the
-/// server and written by nobody — a field added to the struct was added to neither.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+/// One ordered JSON line in a disk-backed native projection transfer.
+/// User inputs stay between the records and events they describe.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum NativeTransferItem {
+    Event(Event),
+    Record(NativeRecord),
+    TurnInput(TurnInputFact),
+    Summary { read_errors: usize, skipped: usize },
+}
+
+/// One bounded chunk fits comfortably in a wire frame even with JSON byte-array encoding.
+pub const NATIVE_TRANSFER_CHUNK_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RereadPass {
-    /// Every event the pass parsed, in the vendor's own order.
-    ///
-    /// Unsuppressed: the envagent has no way to know what the server holds, so it sends
-    /// what the store says and the server decides what is new.
-    #[serde(default)]
-    pub events: Vec<Event>,
-    /// Complete vendor records the pass parsed, for the raw tier.
-    ///
-    /// Present for native parsers that can preserve their complete source records (`claude`,
-    /// `codex`, and `pi`). Carried rather than dropped because a vendor's native store is read
-    /// and kept whole, including fields Sylph has no use for yet.
-    #[serde(default)]
-    pub records: Vec<NativeRecord>,
-    /// Items the pass could not read. Not fatal: an `Err` from a native stream is a
-    /// truncated or mid-rewrite file rather than a failure of the session, so the pass
-    /// continues past each one and reports the count.
-    #[serde(default)]
-    pub read_errors: usize,
-    /// Messages this operation deliberately does not carry: a request answered long ago,
-    /// or a capability surface describing a link the session does not have. Counted so a
-    /// parser that starts emitting one is visible rather than silent.
-    #[serde(default)]
-    pub skipped: usize,
+pub struct NativeTransfer {
+    pub id: String,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum NativeTransferOperation {
+    Begin,
+    Append {
+        id: String,
+        offset: u64,
+        bytes: Vec<u8>,
+    },
+    Read {
+        id: String,
+        offset: u64,
+    },
+    Release {
+        id: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeTransferChunk {
+    pub bytes: Vec<u8>,
+    pub next_offset: u64,
 }
 
 /// Anything an adapter has to tell the server about a session.
@@ -673,7 +681,9 @@ pub trait Adapter: Send + Sync {
     /// The envagent supplies records already retained by the server. This is the
     /// recovery path after a vendor rotates or removes its source files.
     async fn reproject(&self, _records: Vec<NativeRecord>) -> Result<EventStream> {
-        Err(anyhow::anyhow!("this adapter has no retained native reprojection"))
+        Err(anyhow::anyhow!(
+            "this adapter has no retained native reprojection"
+        ))
     }
 
     /// Parse, then follow the native store as it grows.

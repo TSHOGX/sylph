@@ -718,6 +718,32 @@ impl JournalStore {
         .map_err(Error::Database)
     }
 
+    /// Page turns oldest-to-newest without loading an unbounded session into memory.
+    /// The cursor is the exclusive `created_at_ms` boundary from the previous page.
+    pub async fn list_turns_page(
+        &self,
+        session_id: &SessionId,
+        cursor: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<Turn>> {
+        let boundary = cursor.and_then(|value| value.parse::<i64>().ok());
+        sqlx::query_as::<_, Turn>(
+            "SELECT * FROM turns
+             WHERE session_env = ? AND session_agent = ? AND session_native = ?
+               AND (? IS NULL OR created_at_ms < ?)
+             ORDER BY created_at_ms DESC LIMIT ?",
+        )
+        .bind(session_id.environment.as_str())
+        .bind(session_id.agent.as_str())
+        .bind(session_id.native_id.as_str())
+        .bind(boundary)
+        .bind(boundary)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Error::Database)
+    }
+
     // Event operations
     pub async fn create_event(&self, event: &Event) -> Result<Event> {
         sqlx::query_as::<_, Event>(
@@ -1194,6 +1220,17 @@ impl JournalStore {
         .bind(turn_id)
         .execute(&self.pool)
         .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Attach user input recovered from a native transcript to its Sylph turn container.
+    pub async fn update_turn_request_text(&self, turn_id: &str, text: &str) -> Result<bool> {
+        let result =
+            sqlx::query("UPDATE turns SET request_text = ? WHERE id = ? AND request_text = ''")
+                .bind(text)
+                .bind(turn_id)
+                .execute(&self.pool)
+                .await?;
         Ok(result.rows_affected() > 0)
     }
 

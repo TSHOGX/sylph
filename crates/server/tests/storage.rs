@@ -107,6 +107,68 @@ async fn native_record_revision_collision_is_reported() {
 }
 
 #[tokio::test]
+async fn retained_native_records_preserve_first_seen_order_and_unsigned_revisions() {
+    let (history, _dir) = history_store().await;
+    let id = session_id().encode();
+    let records = [("z.jsonl", u64::MAX), ("a.jsonl", 42), ("z.jsonl", 1)]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (source, version))| NativeRecord {
+            source: source.into(),
+            version,
+            payload: serde_json::json!({"index": index}),
+            raw_json: None,
+            blobs: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    for record in &records {
+        history.put_native_record(&id, record).await.unwrap();
+    }
+    history.put_native_record(&id, &records[0]).await.unwrap();
+    let held = history.native_records(&id).await.unwrap();
+    assert_eq!(
+        held.iter()
+            .map(|record| (&record.source, record.version, &record.payload))
+            .collect::<Vec<_>>(),
+        records
+            .iter()
+            .map(|record| (&record.source, record.version, &record.payload))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn an_unavailable_sidecar_can_be_retained_when_the_source_appears() {
+    let (history, _dir) = history_store().await;
+    let id = session_id().encode();
+    let mut record = NativeRecord {
+        source: "root.jsonl".into(),
+        version: 1,
+        payload: serde_json::json!({"type": "tool_result"}),
+        raw_json: None,
+        blobs: vec![NativeBlob {
+            name: "output".into(),
+            size: 0,
+            bytes: None,
+            locator: None,
+            error: Some("source missing".into()),
+        }],
+    };
+    history.put_native_record(&id, &record).await.unwrap();
+    record.blobs[0].size = 4;
+    record.blobs[0].bytes = Some(b"body".to_vec());
+    record.blobs[0].error = None;
+    history.put_native_record(&id, &record).await.unwrap();
+    assert_eq!(
+        history
+            .native_blob(&id, "root.jsonl", 1, "output")
+            .await
+            .unwrap(),
+        NativeBlobState::Available(b"body".to_vec())
+    );
+}
+
+#[tokio::test]
 async fn raw_native_records_survive_event_retention() {
     let (history, _dir) = history_store().await;
     let record = NativeRecord {
@@ -253,7 +315,7 @@ async fn native_blob_chunks_reject_gaps_changed_bytes_and_incomplete_bodies() {
 }
 
 #[tokio::test]
-async fn a_retained_native_blob_cannot_be_replaced_by_a_new_body_or_error() {
+async fn a_retained_native_blob_rejects_changed_bytes_and_survives_source_disappearance() {
     let (history, _dir) = history_store().await;
     let id = session_id().encode();
     let mut record = NativeRecord {
@@ -274,7 +336,7 @@ async fn a_retained_native_blob_cannot_be_replaced_by_a_new_body_or_error() {
     assert!(history.put_native_record(&id, &record).await.is_err());
     record.blobs[0].bytes = None;
     record.blobs[0].error = Some("source disappeared".to_string());
-    assert!(history.put_native_record(&id, &record).await.is_err());
+    history.put_native_record(&id, &record).await.unwrap();
     assert_eq!(
         history
             .native_blob(&id, "root.jsonl", 1, "output")
@@ -519,6 +581,37 @@ fn event(
         recorded_at_ms: Some(at_ms),
         created_at_ms: at_ms,
     }
+}
+
+#[tokio::test]
+async fn large_block_summaries_keep_bounded_previews_without_reading_the_body() {
+    let (history, _dir) = history_store().await;
+    let text = "readable content ".repeat(150_000);
+    let mut row = event(
+        0,
+        "tool_result",
+        Some("completed"),
+        Some("tool-1"),
+        &text,
+        10,
+    );
+    row.data_json =
+        serde_json::json!({"toolName": "Read", "output": "large metadata ".repeat(150_000)})
+            .to_string();
+    let blocks = history::consolidate(&[row]);
+    history.put_blocks(&blocks).await.unwrap();
+    let body_hash = blake3::hash(text.as_bytes()).to_hex().to_string();
+    history.blobs().remove(&body_hash).await.unwrap();
+    let summaries = history.turn_block_summaries("turn-1").await.unwrap();
+    let summary = &summaries[0];
+    assert!(summary.block.text.starts_with("readable content"));
+    assert!(summary.block.text.len() <= 4096);
+    assert_eq!(summary.block.data.as_ref().unwrap()["toolName"], "Read");
+    assert!(summary.block.data.as_ref().unwrap().to_string().len() <= 4096);
+    assert_eq!(summary.text_bytes, text.len() as u64);
+    assert!(summary.has_body);
+    // The summary remains readable even when the cold body has been removed; the
+    // full block read is the operation that reports that corruption.
 }
 
 /// One assistant block that streamed in four deltas, consolidated and replayed.
@@ -1631,6 +1724,7 @@ async fn retention_batch_rotates_past_measured_unreachable_sessions() {
             arrival_at_ms: index,
             recorded_at_ms: None,
             started_at_ms: index,
+            started_recorded_at_ms: None,
             created_at_ms: index,
         });
     }

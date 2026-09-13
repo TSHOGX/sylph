@@ -328,6 +328,17 @@ it breaks.
 **Scroll is anchored only while the user is already at the bottom.** Auto-scrolling a user
 who has scrolled up to read is the standard way to make a streaming transcript unusable.
 
+**History is cursor-paged, and a page is never the whole record.** The transcript initially
+reads the newest page and offers an accessible Load earlier turns action until the server
+reports exhaustion. Prepending preserves the first visible turn's screen position. Session
+trace subscription starts at the history snapshot's cursor, so opening a long session does
+not replay its entire archive. Earlier pages supply their own event containers.
+
+**Large event bodies are explicit resources.** History and streams carry bounded previews
+and a body reference; an explicit Load full content action fetches the retained body.
+Loading, retryable errors, and the preview remain visible. Folding a tool or reasoning row
+does not fetch its body. Copying a turn resolves its body references before writing text.
+
 ### Delegated trajectories
 
 An event's `span` names the trajectory it ran in, and a `subagent` event's `streamId` *is*
@@ -405,9 +416,10 @@ promotion, and the call renders above the work it dispatched in the order it hap
 A promoted host therefore stays expandable with nothing forwarded, while a *declared*
 trajectory with no interior keeps its disclosure suppressed — **`aria-expanded` on a control
 with nothing to expand is a promise the tree cannot keep.** Focus is the same question one
-level up: re-rooting to `children` is right for a declared `subagent` whose row carries no
-content of its own, so `Timeline` renders the focused row itself when it is not a `subagent`,
-and states why a pane is empty.
+level up: the focused trajectory keeps its own complete report above its children, including
+declared subagents. Empty interiors render the typed observation, never a reason inferred
+from lifecycle status. A clamped summary is a preview; focus is a touch-accessible route to
+the full report.
 
 #### Comparing siblings needs one shared axis
 
@@ -936,6 +948,11 @@ a refusal turns one bad request into several and delays the message the user nee
 gently) and resumes from the highest `seq` seen via `after_seq`. A clean end of body means
 the turn finished, and retrying there would loop forever. `AbortController` makes teardown
 immediate.
+
+Session notifications have no replay cursor. Their connection retries both network failures
+and clean EOF with capped backoff, and every recovered connection invalidates session,
+history, capabilities, and requests. This resource reconciliation recovers notifications
+missed while offline even when a successful capability response was cached indefinitely.
 
 **An empty state must not be reachable from a pending one.** A listing that has not
 resolved is also an empty array, so treating "no rows" as "no sessions" flashes onboarding

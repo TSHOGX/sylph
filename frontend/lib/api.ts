@@ -24,7 +24,7 @@ import type {
   SessionFilters,
   SoulResponse,
   Turn,
-  TurnWithEvents,
+  HistoryPage,
   UploadFileRequest,
   UploadFileResponse, WorkspacesResponse,
 } from "./api-types";
@@ -259,9 +259,13 @@ export const api = {
       }),
     discardPrepared: (draftId: string) =>
       fetchAPI<void>(`/sessions/draft/${segment(draftId)}`, { method: "DELETE" }),
-    /** Full durable history: every turn in the session with its events. */
-    history: (id: string) =>
-      fetchAPI<{ turns: TurnWithEvents[] }>(`/sessions/${segment(id)}/turns`),
+    history: (id: string, before?: string) => {
+      const query = new URLSearchParams({ limit: "100" });
+      if (before) query.set("before", before);
+      return fetchAPI<HistoryPage>(`/sessions/${segment(id)}/turns?${query}`);
+    },
+    eventBody: (id: string, seq: number) =>
+      fetchAPI<{ text: string; data?: unknown }>(`/sessions/${segment(id)}/bodies/${seq}`),
     edges: (id: string) =>
       fetchAPI<{ edges: SessionEdge[] }>(`/sessions/${segment(id)}/edges`),
     /**

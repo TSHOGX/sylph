@@ -146,6 +146,8 @@ export interface StreamEvent {
   name?: string;
   text?: string;
   data?: unknown;
+  /** Complete bodies are fetched separately when these fields are previews. */
+  bodyRef?: { seq: number; textBytes: number; dataBytes: number };
   isError?: boolean;
   stability: string;
   source: string;
@@ -176,6 +178,14 @@ export type InteriorState =
 export interface TurnWithEvents {
   turn: Turn;
   events: StreamEvent[];
+}
+
+export interface HistoryPage {
+  turns: TurnWithEvents[];
+  hasMore: boolean;
+  nextCursor?: string | null;
+  /** Session event sequence covered by this snapshot, including compacted history. */
+  snapshotSeq: number;
 }
 
 /** A flag declared by an agent's handshake. */

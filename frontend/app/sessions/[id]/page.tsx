@@ -14,9 +14,9 @@
  * actually contains it, which closes the gap where it would vanish for a frame.
  */
 
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   api,
   ApiError,
@@ -38,6 +38,8 @@ import { useWorkspaceUI } from "@/lib/workspace-ui";
 import { useSSE } from "@/lib/use-sse";
 import { useAgentSession } from "@/lib/use-agent-session";
 import { useSessionTrace } from "@/lib/use-session-trace";
+import { turnDurationMs } from "@/lib/turn-duration";
+import { refreshRereadsTheStore } from "@/lib/refresh-transcript";
 import {
   buildSessionTrace,
   projectSessionTurnsFromIndex,
@@ -75,7 +77,9 @@ export default function SessionPage() {
   const sessionId = useSessionIdParam() ?? "";
   const queryClient = useQueryClient();
   const { settings } = useSettings();
-  const { showArtifact, registerSessionActions, setActiveWorkdir } = useWorkspaceUI();
+  const { showArtifact, registerSessionActions, setActiveWorkdir, rereadSession, rereadNotice } = useWorkspaceUI();
+  const scroller = useRef<HTMLDivElement>(null);
+  const olderAnchor = useRef<{ element: Element; top: number } | null>(null);
 
   const [text, setText] = useState("");
   const [attachments, setAttachments] = useState<StagedAttachment[]>([]);
@@ -92,14 +96,44 @@ export default function SessionPage() {
     queryFn: () => api.sessions.get(sessionId),
   });
 
-  const historyQuery = useQuery({
+  const historyQuery = useInfiniteQuery({
     queryKey: ["session", sessionId, "history"],
-    queryFn: () => api.sessions.history(sessionId),
+    queryFn: ({ pageParam }) => api.sessions.history(sessionId, pageParam),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (page) => page.hasMore ? page.nextCursor ?? undefined : undefined,
   });
 
   const session = sessionQuery.data?.session;
-  const history = useMemo(() => historyQuery.data?.turns ?? [], [historyQuery.data]);
-  const { events: traceEvents } = useSessionTrace(sessionId || undefined, Boolean(sessionId));
+  const history = useMemo(() => {
+    const byId = new Map<string, TurnWithEvents>();
+    for (const page of [...(historyQuery.data?.pages ?? [])].reverse()) {
+      for (const entry of page.turns) byId.set(entry.turn.id, entry);
+    }
+    return [...byId.values()].sort((a, b) => a.turn.createdAtMs - b.turn.createdAtMs);
+  }, [historyQuery.data]);
+  const { events: traceEvents } = useSessionTrace(
+    sessionId || undefined,
+    Boolean(historyQuery.data),
+    historyQuery.data?.pages[0]?.snapshotSeq ?? -1,
+  );
+
+  useLayoutEffect(() => {
+    const anchor = olderAnchor.current;
+    if (historyQuery.isFetchingNextPage || !anchor || !scroller.current) return;
+    scroller.current.scrollTop += anchor.element.getBoundingClientRect().top - anchor.top;
+    olderAnchor.current = null;
+  }, [history, historyQuery.isFetchingNextPage]);
+
+  function loadEarlier() {
+    const pane = scroller.current;
+    const top = pane?.getBoundingClientRect().top ?? 0;
+    const firstVisible = pane && [...pane.querySelectorAll("[data-turn-id]")]
+      .find((element) => element.getBoundingClientRect().bottom > top);
+    if (firstVisible) olderAnchor.current = {
+      element: firstVisible, top: firstVisible.getBoundingClientRect().top,
+    };
+    void historyQuery.fetchNextPage();
+  }
 
   // A late agent report can open a new turn after the history request that loaded the
   // page has already completed. The session trace carries its arrival turn id immediately,
@@ -459,15 +493,12 @@ export default function SessionPage() {
                   onSelect: () =>
                     void navigator.clipboard.writeText(session.workdir).catch(() => {}),
                 },
-                {
+                ...(refreshRereadsTheStore(session.fidelity) ? [{
                   label: t("session.refreshTranscript"),
                   icon: <RefreshIcon size={14} />,
-                  onSelect: () => {
-                    void queryClient.invalidateQueries({
-                      queryKey: ["session", sessionId, "history"],
-                    });
-                  },
-                },
+                  disabled: rereadNotice?.state === "pending" && rereadNotice.sessionId === sessionId,
+                  onSelect: () => rereadSession(sessionId, sessionLabel(session)),
+                }] : []),
               ]}
             >
               {(trigger) => (
@@ -531,15 +562,27 @@ export default function SessionPage() {
         moment a scroll container is expressed differently, and did break when this
         became the `pane` utility. An explicit contract cannot drift.
       */}
-      <div data-scroller className="pane min-h-0 flex-1 px-3 py-3 md:px-4">
+      <div ref={scroller} data-scroller className="pane min-h-0 flex-1 px-3 py-3 md:px-4">
         <div className={`mx-auto max-w-3xl ${density.text}`}>
           <ErrorBoundary label="the transcript">
+            {historyQuery.hasNextPage && (
+              <div className="pb-3 text-center">
+                <Button variant="ghost" onClick={loadEarlier} disabled={historyQuery.isFetchingNextPage}>
+                  {historyQuery.isFetchingNextPage ? "Loading earlier turns..." : "Load earlier turns"}
+                </Button>
+                {historyQuery.isFetchNextPageError && (
+                  <p role="alert" className="mt-1 text-xs text-danger">
+                    {historyQuery.error.message}
+                  </p>
+                )}
+              </div>
+            )}
             <Transcript
               history={history}
               traceEvents={traceEvents}
               fidelity={session.fidelity}
               isPending={historyQuery.isPending}
-              error={historyQuery.error}
+              error={historyQuery.isFetchNextPageError ? null : historyQuery.error}
               onRetry={() => void historyQuery.refetch()}
               liveTurnId={liveTurnId}
               onLiveTurnSettled={onLiveTurnSettled}
@@ -798,9 +841,12 @@ function FindBar({
  * Tool calls are included as headings, not only prose: in an agent transcript the tool
  * calls are the record of what happened, so a copy without them is not the conversation.
  */
-function turnAsText(entry: TurnWithEvents): string {
+async function turnAsText(entry: TurnWithEvents): Promise<string> {
   const lines = entry.turn.requestText ? [`> ${entry.turn.requestText}`, ""] : [];
-  for (const event of entry.events) {
+  for (const preview of entry.events) {
+    const event = preview.bodyRef
+      ? { ...preview, ...await api.sessions.eventBody(entry.turn.sessionId, preview.bodyRef.seq) }
+      : preview;
     if (event.kind === "assistant" && event.text) {
       lines.push(event.text, "");
     } else if (event.kind === "tool_call") {
@@ -974,14 +1020,12 @@ function TurnSection({
     entry.turn.status === "cancelled" ||
     entry.turn.status === "interrupted";
 
-  const duration =
-    entry.turn.completedAtMs && entry.turn.startedAtMs
-      ? (entry.turn.completedAtMs - entry.turn.startedAtMs) / 1000
-      : undefined;
+  const elapsed = turnDurationMs(entry.turn, fidelity);
+  const duration = elapsed === undefined ? undefined : elapsed / 1000;
 
   async function copy() {
     try {
-      await navigator.clipboard.writeText(turnAsText(entry));
+      await navigator.clipboard.writeText(await turnAsText(entry));
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     } catch {
@@ -991,7 +1035,7 @@ function TurnSection({
   }
 
   return (
-    <section aria-label={`Turn ${entry.turn.id}`} className="border-t border-line pt-1 first:border-t-0">
+    <section data-turn-id={entry.turn.id} aria-label={`Turn ${entry.turn.id}`} className="border-t border-line pt-1 first:border-t-0">
       {/* A turn nobody asked for has to say so. Its `requestText` is empty, so
           unlabelled it renders as an answer to a message the user never wrote —
           and the thing it is usually reporting is work they had stopped expecting

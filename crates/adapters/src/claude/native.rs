@@ -616,7 +616,15 @@ pub(crate) fn reproject_native_record(
     correlation: &mut Correlation,
     record: &NativeRecord,
 ) -> Vec<SessionMessage> {
-    project_record(correlation, &record.payload, 0)
+    let at_ms = record
+        .payload
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .and_then(epoch_millis_from_iso)
+        .unwrap_or(0);
+    let mut messages = project_record(correlation, &record.payload, at_ms);
+    crate::native::input_cursors(&mut messages, record);
+    messages
 }
 
 fn project_record_inner(
@@ -642,9 +650,23 @@ fn project_record_inner(
                 // shape, which is the fact the whole reuse rests on.
                 correlation.translate(record, at_ms).messages
             } else {
-                // Native input provenance is reserved for the adapter integration stage once
-                // source cursors and turn ownership are wired.
-                vec![]
+                let content = record
+                    .get("message")
+                    .and_then(|message| message.get("content"));
+                let text = match content {
+                    Some(Value::String(text)) => text.clone(),
+                    Some(Value::Array(blocks)) => blocks
+                        .iter()
+                        .filter_map(|block| block.get("text").and_then(Value::as_str))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    _ => String::new(),
+                };
+                let mut input = sylph_protocol::TurnInputFact::new(text);
+                input.recorded_at_ms = (at_ms != 0).then_some(at_ms);
+                let mut messages = vec![SessionMessage::TurnInput(input)];
+                messages.extend(correlation.translate(record, at_ms).messages);
+                messages
             }
         }
         "assistant" => assistant_blocks(correlation, record, at_ms),
@@ -1365,7 +1387,10 @@ fn delegate_spans(
     let mut by_workflow: HashMap<String, Option<String>> = HashMap::new();
 
     for manifest in &session.manifests {
-        let Some(payload) = manifests.get(manifest).and_then(|cursor| cursor.payload.as_ref()) else {
+        let Some(payload) = manifests
+            .get(manifest)
+            .and_then(|cursor| cursor.payload.as_ref())
+        else {
             continue;
         };
         let Some(run_id) = string_at(payload, "runId") else {
@@ -1478,8 +1503,10 @@ fn collect_host_tools(record: &Value, into: &mut HashMap<String, String>) {
 
 /// Read one workflow manifest snapshot.
 fn read_workflow_manifest(path: &Path) -> Result<(Vec<u8>, Value)> {
-    let raw = std::fs::read(path).with_context(|| format!("reading workflow manifest {}", path.display()))?;
-    let payload = serde_json::from_slice(&raw).with_context(|| format!("invalid workflow manifest {}", path.display()))?;
+    let raw = std::fs::read(path)
+        .with_context(|| format!("reading workflow manifest {}", path.display()))?;
+    let payload = serde_json::from_slice(&raw)
+        .with_context(|| format!("invalid workflow manifest {}", path.display()))?;
     Ok((raw, payload))
 }
 
@@ -1915,7 +1942,10 @@ impl BundleFollowState {
                 Err(error) if self.finalizing => return Err(error),
                 // A live snapshot may be between truncate and rewrite. Remove the old
                 // metadata so it cannot govern a new declaration, and retry on the next pass.
-                Err(_) => { self.manifests.remove(&manifest); continue; }
+                Err(_) => {
+                    self.manifests.remove(&manifest);
+                    continue;
+                }
             };
             let version = revision_bytes(&raw);
             messages.push(SessionMessage::NativeRecord(NativeRecord {
@@ -2128,12 +2158,13 @@ impl BundleFollowState {
         let mut messages = Vec::new();
         for (record, raw) in records {
             self.root.version += 1;
-            messages.push(SessionMessage::NativeRecord(native_record_with_raw(
+            let retained = native_record_with_raw(
                 &self.session.transcript,
                 self.root.version,
                 &record,
                 Some(raw),
-            )));
+            );
+            messages.push(SessionMessage::NativeRecord(retained.clone()));
             let at_ms = record
                 .get("timestamp")
                 .and_then(Value::as_str)
@@ -2149,7 +2180,9 @@ impl BundleFollowState {
             // least read_root still collects from what it processes. The cost is negligible.
             self.remember_record_metadata(&record);
             if self.root_source == RootSource::File {
-                messages.extend(project_record(&mut self.root.correlation, &record, at_ms));
+                let mut projected = project_record(&mut self.root.correlation, &record, at_ms);
+                crate::native::input_cursors(&mut projected, &retained);
+                messages.extend(projected);
             } else if let Some(correlation) = &self.root_correlation {
                 if let Ok(mut correlation) = correlation.lock() {
                     messages.extend(project_native_facts(&mut correlation, &record, at_ms));
@@ -3991,15 +4024,47 @@ mod tests {
         std::fs::write(&manifest, "{\"runId\":").unwrap();
         let mut state = BundleFollowState::new(collect(transcript), RootSource::File);
         state.finalizing = true;
-        assert!(state.poll().unwrap_err().to_string().contains("wf_broken.json"));
+        assert!(state
+            .poll()
+            .unwrap_err()
+            .to_string()
+            .contains("wf_broken.json"));
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn retained_record_reprojection_does_not_open_the_source_path() {
-        let record = NativeRecord { source: "/does/not/exist".into(), version: 1, raw_json: None, payload: json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]}}), blobs: Vec::new() };
+    fn retained_fixture_preserves_recorded_times_and_user_input() {
+        let original = read_bundle(collect(fixture("ordinary-turn-session-start.jsonl"))).unwrap();
+        assert!(original.iter().any(|message| matches!(message, SessionMessage::TurnInput(input) if !input.text.is_empty() && input.recorded_at_ms.is_some())));
         let mut correlation = Correlation::new();
-        assert!(reproject_native_record(&mut correlation, &record).iter().any(|message| matches!(message, SessionMessage::Event(event) if event.text == "ok")));
+        let retained: Vec<_> = original
+            .iter()
+            .filter_map(|message| match message {
+                SessionMessage::NativeRecord(record) => Some(record),
+                _ => None,
+            })
+            .flat_map(|record| reproject_native_record(&mut correlation, record))
+            .collect();
+        let projected: Vec<_> = original
+            .into_iter()
+            .filter(|message| !matches!(message, SessionMessage::NativeRecord(_)))
+            .collect();
+        assert_eq!(retained, projected);
+    }
+
+    #[test]
+    fn retained_record_reprojection_does_not_open_the_source_path() {
+        let record = NativeRecord {
+            source: "/does/not/exist".into(),
+            version: 1,
+            raw_json: None,
+            payload: json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]}}),
+            blobs: Vec::new(),
+        };
+        let mut correlation = Correlation::new();
+        assert!(reproject_native_record(&mut correlation, &record)
+            .iter()
+            .any(|message| matches!(message, SessionMessage::Event(event) if event.text == "ok")));
     }
 
     #[test]

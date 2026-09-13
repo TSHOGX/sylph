@@ -67,6 +67,8 @@ import {
 import { CodeBlock, OutputBlock } from "@/components/code-block";
 import { DiffView } from "@/components/diff-view";
 import { Markdown } from "@/components/markdown";
+import { EventBody } from "@/components/event-body";
+import { interiorMessage } from "@/lib/interior-state";
 import { useSettings } from "@/lib/settings";
 import {
   BranchIcon,
@@ -172,15 +174,7 @@ export function Timeline({
           onClear={() => setFocus(null)}
         />
       )}
-      {/* The focused trajectory's own row, above the work beneath it.
-          Focus re-roots to `children`, which is right for a declared `subagent` —
-          its row carries no content of its own. A *promoted* host is a tool call as
-          well as a container (§ Promotion), so dropping its row discards the call
-          that defines what its delegates are: focusing a `Workflow` whose interior
-          was never forwarded showed a breadcrumb over an empty pane, which is what
-          made a delegation that had genuinely reported nothing look like a broken
-          one. The card renders this inline for the same reason; focus is the same
-          question one level up. */}
+      {focused && <FocusedReport node={focused} />}
       {focused && focused.row.event.kind !== "subagent" && (
         <TimelineRowView
           row={focused.row}
@@ -190,9 +184,7 @@ export function Timeline({
       )}
       {focused && shown.length === 0 && (
         <p className="py-1 text-2xs text-ink-muted">
-          {focused.status === "running"
-            ? "Waiting for this delegation's first output…"
-            : "This delegation forwarded none of its own events."}
+          {interiorMessage(focused.interiorState)}
         </p>
       )}
       {/* Scoped to what is on screen, so the comparison is always between rows the
@@ -211,6 +203,22 @@ export function Timeline({
           onFocus={setFocus}
         />
       ))}
+    </div>
+  );
+}
+
+function FocusedReport({ node }: { node: TimelineNode }) {
+  const reportEvent = node.row.event.kind === "subagent" ? node.row.event : node.row.trajectoryClose;
+  if (!reportEvent) return null;
+  return (
+    <div aria-label="Delegation report" className="min-w-0 py-1 text-sm text-ink-soft">
+      <EventBody event={reportEvent} label="Load full report">
+        {(event) => {
+          const progress = (event.data as { progress?: unknown } | undefined)?.progress;
+          const text = event.text?.trim() || (typeof progress === "string" ? progress : "");
+          return text ? <Markdown text={text} /> : null;
+        }}
+      </EventBody>
     </div>
   );
 }
@@ -534,17 +542,10 @@ function TrajectoryCard({
         </span>
       </div>
 
-      {/* The delegate's own account of its work, which the backend records and this
-          card did not show. It sits above the counts because it is the only line here
-          that is *content*: the counts say work happened, and this says what came of
-          it. Two lines at most — a summary can run long, and a card that grows without
-          bound stops being one row per delegation, which is the property the whole tree
-          is built on. `title` carries the rest rather than a "more" control, since the
-          full text is one click away inside the branch. */}
+      {/* Focus keeps the complete report readable on touch and keyboard; this is a preview. */}
       {report && (
         <p
           className="line-clamp-2 pb-0.5 pr-2 text-2xs text-ink-soft"
-          title={report}
         >
           {report}
         </p>
@@ -572,13 +573,9 @@ function TrajectoryCard({
           )}
 
           {node.children.length === 0 ? (
-            // Only reachable while running, or for a promoted host whose interior was
-            // never forwarded — the badge above already says which.
-            node.status === "running" ? (
-              <p className="py-1 text-2xs text-ink-muted">
-                Waiting for the delegate&apos;s first output…
-              </p>
-            ) : null
+            <p className="py-1 text-2xs text-ink-muted">
+              {interiorMessage(node.interiorState)}
+            </p>
           ) : (
             node.children.map((child) => (
               <MemoizedNode
@@ -676,6 +673,22 @@ function TimelineRowView({
   onOpenFile,
   expandAll,
 }: {
+  row: TimelineRow;
+  onOpenFile?: (path: string, line?: number) => void;
+  expandAll?: boolean | null;
+}) {
+  return (
+    <EventBody event={row.event}>
+      {(event) => row.result ? (
+        <EventBody event={row.result} label="Load full result">
+          {(result) => <TimelineRowContent row={{ ...row, event, result }} onOpenFile={onOpenFile} expandAll={expandAll} />}
+        </EventBody>
+      ) : <TimelineRowContent row={{ ...row, event }} onOpenFile={onOpenFile} expandAll={expandAll} />}
+    </EventBody>
+  );
+}
+
+function TimelineRowContent({ row, onOpenFile, expandAll }: {
   row: TimelineRow;
   onOpenFile?: (path: string, line?: number) => void;
   expandAll?: boolean | null;

@@ -98,9 +98,9 @@ export type MobileDrawer = "none" | "sessions" | "files";
 export type SessionActionHandler = (action: ShortcutAction) => boolean;
 
 export type RereadNotice =
-  | { state: "pending"; sessionLabel: string }
-  | { state: "success"; sessionLabel: string; report: RereadReport }
-  | { state: "error"; sessionLabel: string };
+  | { state: "pending"; sessionId: string; sessionLabel: string }
+  | { state: "success"; sessionId: string; sessionLabel: string; report: RereadReport }
+  | { state: "error"; sessionId: string; sessionLabel: string; message: string };
 
 interface WorkspaceUIValue {
   leftOpen: boolean;
@@ -218,17 +218,23 @@ export function WorkspaceUIProvider({
   const [adoptEnvironment, setAdoptEnvironment] = useState<string | null>(null);
   const sessionHandlerRef = useRef<SessionActionHandler | null>(null);
   const [rereadNotice, setRereadNotice] = useState<RereadNotice | null>(null);
+  const rereading = useRef(new Set<string>());
 
   const rereadSession = useCallback((sessionId: string, sessionLabel: string) => {
-    setRereadNotice({ state: "pending", sessionLabel });
+    if (rereading.current.has(sessionId)) return;
+    rereading.current.add(sessionId);
+    setRereadNotice({ state: "pending", sessionId, sessionLabel });
     void api.sessions.reread(sessionId).then(
       ({ reread }) => {
-        setRereadNotice({ state: "success", sessionLabel, report: reread });
+        setRereadNotice({ state: "success", sessionId, sessionLabel, report: reread });
         void queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
         void queryClient.invalidateQueries({ queryKey: ["sessions"] });
       },
-      () => setRereadNotice({ state: "error", sessionLabel }),
-    );
+      (error: unknown) => setRereadNotice({
+        state: "error", sessionId, sessionLabel,
+        message: error instanceof Error ? error.message : "Unknown error.",
+      }),
+    ).finally(() => rereading.current.delete(sessionId));
   }, [queryClient]);
 
   const isMobile = useIsMobile();

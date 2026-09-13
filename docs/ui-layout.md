@@ -681,6 +681,13 @@ belong to the chat shape this canvas rejected, and the reasoning is under
 | `OrphanResult` | a `tool_result` whose call never arrived | open |
 | `UsageLine` / `StatusLine` | token counts, lifecycle notices | single line |
 
+The oldest loaded turn is preceded by Load earlier turns while older pages exist. Loading
+preserves the reader's current position and exposes failures with a retry action. A turn
+footer shows elapsed time only when its record and explicit endpoints support a measurement.
+Large-body previews have a Load full content action and an inline loading/error state.
+The session menu and sidebar use the same transcript reread operation and share pending,
+result, and concrete error notices in the shell.
+
 `ToolCall` is the anchor row. It draws a bordered region carrying the tool's
 target (`ToolTarget`) and outcome (`StatusMark`), and decides its own expansion
 from the shape rather than from a uniform default: edits open with their diff,

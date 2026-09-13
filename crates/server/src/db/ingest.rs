@@ -473,6 +473,7 @@ impl NativeIngest {
         // whether its turn is new. Always `None` on a first pass, which suppresses nothing
         // and so writes every opener where it arrives.
         let mut deferred_opener: Option<StreamEvent> = None;
+        let mut pending_input: Option<sylph_protocol::TurnInputFact> = None;
 
         while let Some(item) = stream.next().await {
             let message = match item {
@@ -538,12 +539,11 @@ impl NativeIngest {
                     // Raw native records do not open or close a turn container.
                     continue;
                 }
-                SessionMessage::TurnInput(_) => {
-                    report.read_errors += 1;
-                    warn!(
-                        "Ignoring native turn-input fact from {} until adapter provenance is enabled",
-                        session_id
-                    );
+                SessionMessage::TurnInput(input) => {
+                    // Native user input is provenance for the Sylph turn row, not a
+                    // synthetic transcript event. Keep it until the first projected event
+                    // opens the container, then persist it exactly once.
+                    pending_input = Some(input);
                     continue;
                 }
             };
@@ -609,7 +609,13 @@ impl NativeIngest {
                 // silently-shortened turn a suppressed opener produces.
                 if let Some(opener) = deferred_opener.take() {
                     match self
-                        .journal(session_id, opener, &mut report, &mut open_turn)
+                        .journal(
+                            session_id,
+                            opener,
+                            &mut report,
+                            &mut open_turn,
+                            pending_input.as_ref(),
+                        )
                         .await
                     {
                         Journaled::Continued => {}
@@ -619,10 +625,20 @@ impl NativeIngest {
             }
 
             match self
-                .journal(session_id, wire, &mut report, &mut open_turn)
+                .journal(
+                    session_id,
+                    wire,
+                    &mut report,
+                    &mut open_turn,
+                    pending_input.as_ref(),
+                )
                 .await
             {
-                Journaled::Continued => {}
+                Journaled::Continued => {
+                    // `journal` attaches pending provenance before it can close a
+                    // one-event turn, so no input is lost at the terminal boundary.
+                    pending_input = None;
+                }
                 Journaled::SessionGone => return Ok(report),
             }
         }
@@ -663,6 +679,7 @@ impl NativeIngest {
         mut wire: StreamEvent,
         report: &mut IngestReport,
         open_turn: &mut Option<(String, i64)>,
+        pending_input: Option<&sylph_protocol::TurnInputFact>,
     ) -> Journaled {
         let at = event_time(&wire);
         let closes = wire.kind == "turn" && wire.phase.as_deref() == Some("completed");
@@ -682,6 +699,19 @@ impl NativeIngest {
             },
         };
         wire.arrival_turn_id = Some(turn_id.clone());
+
+        if let Some(input) = pending_input {
+            if let Err(error) = self
+                .store
+                .update_turn_request_text(&turn_id, &input.text)
+                .await
+            {
+                warn!(
+                    "Could not retain recovered input for turn {}: {}",
+                    turn_id, error
+                );
+            }
+        }
 
         match self.seq.next(session_id).await {
             Ok(seq) => wire.seq = seq,

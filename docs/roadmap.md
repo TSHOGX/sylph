@@ -146,26 +146,19 @@ Claude, Codex, and Pi now emit lossless `NativeRecord` values before projection.
 confirmation for ordinary blocks remains conservative when no native-record correspondence
 exists, so those blocks are retained until a durable correspondence is available.
 
-On-demand native refresh of one held session is in place — `POST /sessions/{id}/reread`,
-reached by the sidebar's refresh entry
-(`docs/environments.md` § Re-reading a session Sylph already holds). Two open items carry
-forward from it:
+On-demand native refresh and filesystem-free retained re-projection are complete. Native
+records preserve first-seen order and full revisions; all three adapters retain user input,
+timestamps, delegation context, and live-envelope projections. Re-read and re-project use
+bounded disk-backed transfers, so frame size does not impose a session-size limit. History
+is cursor-paged with a snapshot sequence, timeline bodies are lazy with integrity-checked
+fetches, durations honor fidelity and clock domains, notification streams reconnect, and
+refresh reports pending, success, and concrete failure states. Storage corruption now fails
+the read instead of becoming an empty successful transcript, and sidecar availability can
+recover without colliding with the retained identity.
 
-Adapter-level filesystem-free re-projection hooks now exist for retained envelopes, and the
-server endpoint supplies retained records through the owning envagent.
-
-- **Live and native projection identities differ.** Pi uses process-local block ids live
-  and native entry ids on disk; vendor timestamps and payload shapes also differ across
-  live and native paths. Native refresh must retain raw additions without appending a
-  second projection over a stream record. Re-projection from retained raw is a separate
-  operation, with an explicit source policy and no dependency on the vendor's files.
-
-- **Default timeline bodies still resolve their full text.** CAS storage and integrity are
-  complete, but the API body-reference contract and lazy frontend fetch remain deferred.
-- **A pass that ingests nothing is distinguishable from a failed click.** The endpoint
-  reports what it examined, added, and already held, and the shell now owns the reread
-  mutation state outside the sidebar's context menu. It renders pending, success with
-  all four counts, and failure through an accessible status surface.
+The M4 acceptance suite covers raw ordering and unsigned revisions, sidecar transitions,
+large summaries and bodies, native user-input provenance, all three adapter reprojections,
+bounded transfer framing, pagination, reconnect recovery, and mobile focus/refresh behavior.
 
 ## Milestone 5 — multi-client control convergence
 

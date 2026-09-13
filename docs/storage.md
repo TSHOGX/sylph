@@ -183,6 +183,12 @@ The uncompressed length is stored even when the text is externalized, so a timel
 lay out and truncate without touching CAS. Fetching a 200 KB blob to learn it is large is
 the read amplification that makes a list view slow.
 
+Timeline reads use persisted bounded previews of text and metadata, with the original
+byte lengths and a body reference when either preview is incomplete. Preview queries do
+not select compressed bodies or read CAS. Full body and replay reads resolve and verify
+the original payload; a corrupt or absent body is an explicit read error. A preview is a
+projection for scanning, never a substitute used by reconstruction or deduplication.
+
 Text and JSON metadata each record their own encoding and uncompressed length. Their
 sizes are independent: a short tool-result label can accompany compressed or externalized
 metadata. Decoding follows those recorded encodings, and corrupt metadata fails the read
@@ -217,6 +223,15 @@ remain explicit errors on the retained reference.
 Native records are a separate table from projected blocks for two reasons: re-projection
 needs fields the current adapter ignores, and raw records are never safe to prune against
 an event watermark.
+
+Each retained record has a durable first-seen sequence within its session. Replay of the
+native bundle follows that sequence, including when records from several sources
+interleave. A revision is an opaque unsigned 64-bit identity, never an ordering key; its
+SQLite integer representation preserves all bits. Repeated observations keep the original
+sequence. Sidecar availability is an observation separate from the raw identity: a later
+successful read fills a previously unavailable body, and disappearance at the vendor
+never withdraws bytes already retained. Two different available bodies for the same raw
+reference remain a collision.
 
 Raw retention is an ingestion prerequisite rather than best-effort telemetry. A write is
 retried once for a transient SQLite or sidecar race; if it still fails, adopt returns an

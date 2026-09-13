@@ -12,6 +12,7 @@ pub mod client;
 pub mod credentials;
 pub mod fixture;
 pub mod health;
+mod native_transfer;
 pub mod path;
 pub mod runtime;
 pub mod spool;

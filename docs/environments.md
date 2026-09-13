@@ -371,6 +371,14 @@ that brought it in. **Re-read** is that pass again, on demand, for a session tha
 has a row: the adapter parses the native store from the beginning and the server ingests
 only what its journal does not already hold.
 
+The pass is a disk-backed, ordered message transfer. Commands return an opaque transfer
+handle and byte length; the server reads bounded chunks and drains records, user-input
+facts, and events in their original order. A single large record may span chunks. Uploads
+for retained re-projection use the same framing in the other direction. Transfer handles
+are scoped to their session, expire, and are released after use; incomplete transfers
+never publish a replacement projection. The transport frame limit is not a history-size
+limit.
+
 It is one pass and nothing else. It does not start a follower, does not change what
 `adopt` does, and does not touch the session's `fidelity` — a record's resolution is a
 property of the source that wrote it, so re-reading the same store cannot raise or lower

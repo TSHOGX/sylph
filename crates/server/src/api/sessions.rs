@@ -237,12 +237,20 @@ pub struct TurnWithEvents {
 #[derive(Serialize)]
 pub struct HistoryResponse {
     turns: Vec<TurnWithEvents>,
+    #[serde(rename = "hasMore")]
+    has_more: bool,
+    #[serde(rename = "nextCursor", skip_serializing_if = "Option::is_none")]
+    next_cursor: Option<String>,
+    #[serde(rename = "snapshotSeq")]
+    snapshot_seq: i32,
 }
 
 #[derive(Deserialize)]
 pub struct HistoryQuery {
     #[serde(default = "default_history_limit")]
     limit: i64,
+    #[serde(alias = "before")]
+    cursor: Option<String>,
 }
 
 fn default_history_limit() -> i64 {
@@ -276,7 +284,29 @@ pub async fn history(
 
     // `list_turns` orders newest-first for the session list; a transcript reads
     // oldest-first.
-    let mut turns = state.store.list_turns(&id, limit).await?;
+    // Capture before the page so a concurrent arrival may be replayed twice but can
+    // never be skipped between reading history and opening the trace connection.
+    let snapshot_seq = state.store.max_event_seq(&id).await?.max(
+        state
+            .history
+            .next_seq(&id.encode())
+            .await
+            .map_err(|error| Error::Internal(error.to_string()))?
+            .saturating_sub(1),
+    );
+    let mut turns = state
+        .store
+        .list_turns_page(&id, query.cursor.as_deref(), limit + 1)
+        .await?;
+    let has_more = turns.len() > limit as usize;
+    if has_more {
+        turns.truncate(limit as usize);
+    }
+    let next_cursor = if has_more {
+        turns.last().map(|turn| turn.created_at_ms.to_string())
+    } else {
+        None
+    };
     turns.reverse();
 
     let mut out = Vec::with_capacity(turns.len());
@@ -302,8 +332,10 @@ pub async fn history(
                 .history
                 .turn_blocks(&turn.id)
                 .await
-                .map(|blocks| blocks.iter().map(block_to_event).collect())
-                .unwrap_or_default()
+                .map_err(|error| Error::Internal(format!("could not read transcript: {error:#}")))?
+                .iter()
+                .map(block_to_event)
+                .collect()
         } else {
             crate::storage::history::consolidate(&journalled)
                 .iter()
@@ -313,7 +345,42 @@ pub async fn history(
         out.push(TurnWithEvents { turn, events });
     }
 
-    Ok(Json(HistoryResponse { turns: out }))
+    Ok(Json(HistoryResponse {
+        turns: out,
+        has_more,
+        next_cursor,
+        snapshot_seq,
+    }))
+}
+
+/// Fetch one full event body after a bounded timeline preview.
+pub async fn body(
+    State(state): State<AppState>,
+    Extension(subject): Extension<SubjectId>,
+    Path((id, seq)): Path<(String, i32)>,
+) -> Result<Json<serde_json::Value>> {
+    let session_id = decode_id(&id)?;
+    state
+        .store
+        .get_session(&session_id)
+        .await?
+        .ok_or(Error::SessionNotFound)?;
+    if !state
+        .store
+        .has_capability(&subject.0, session_id.environment.as_str(), "observe")
+        .await?
+    {
+        return Err(Error::SessionNotFound);
+    }
+    let block = state
+        .history
+        .block(&session_id.encode(), seq)
+        .await
+        .map_err(|error| Error::Internal(format!("could not read event body: {error:#}")))?
+        .ok_or(Error::SessionNotFound)?;
+    Ok(Json(
+        serde_json::json!({"text": block.text, "data": block.data}),
+    ))
 }
 
 /// Render a consolidated block as the event a client expects.
@@ -352,6 +419,21 @@ pub fn block_to_event(block: &crate::storage::Block) -> StreamEvent {
         // start/end when `recordedAtMs` exists, otherwise arrival start/end for a stream
         // record; block/message fidelity gates native arrival stamps before arithmetic.
         started_at_ms: Some(block.started_at_ms),
+        body_ref: if block.text.len() > crate::storage::history::BLOCK_PREVIEW_BYTES
+            || block.data.as_ref().is_some_and(|data| {
+                data.to_string().len() > crate::storage::history::BLOCK_PREVIEW_BYTES
+            }) {
+            Some(crate::events::BodyRef {
+                seq: block.seq,
+                text_bytes: block.text.len() as u64,
+                data_bytes: block
+                    .data
+                    .as_ref()
+                    .map_or(0, |data| data.to_string().len() as u64),
+            })
+        } else {
+            None
+        },
     }
 }
 
@@ -1294,9 +1376,19 @@ pub async fn reread(
             )))
         }
     };
-    let pass: sylph_protocol::RereadPass = serde_json::from_value(value)
-        .map_err(|error| Error::Internal(format!("remote re-read was malformed: {error}")))?;
-    Ok(Json(ingest_reread_pass(&state, &session_id, pass).await?))
+    let transfer: sylph_protocol::NativeTransfer =
+        serde_json::from_value(value).map_err(|error| {
+            Error::Internal(format!("remote re-read transfer was malformed: {error}"))
+        })?;
+    let downloaded = crate::api::native_transfer::download(&state, &session_id, transfer)
+        .await
+        .map_err(|error| {
+            Error::Internal(format!("could not download native re-read: {error:#}"))
+        })?;
+    let read_errors = downloaded.read_errors;
+    Ok(Json(
+        ingest_reread_pass(&state, &session_id, downloaded.stream(), read_errors).await?,
+    ))
 }
 
 /// Re-project native envelopes already retained by Sylph, without consulting the vendor store.
@@ -1306,28 +1398,69 @@ pub async fn reproject(
     Path(id): Path<String>,
 ) -> Result<Json<RereadResponse>> {
     let session_id = decode_id(&id)?;
-    if !state.store.has_capability(&subject.0, session_id.environment.as_str(), "observe").await? {
+    if !state
+        .store
+        .has_capability(&subject.0, session_id.environment.as_str(), "observe")
+        .await?
+    {
         return Err(Error::SessionNotFound);
     }
-    state.store.get_session(&session_id).await?.ok_or(Error::SessionNotFound)?;
-    let records = state.history.native_records(&session_id.encode()).await.map_err(|error| Error::Internal(format!("could not read retained native records: {error:#}")))?;
-    let outcome = state.env_bridge.remote_session_command(
-        &session_id,
-        sylph_protocol::EnvironmentCommand::Reproject {
-            session_id: session_id.clone(),
-            agent: session_id.agent.to_string(),
-            records,
-        },
-        sylph_protocol::IdempotencyPolicy::AtMostOnce,
-    ).await.map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
+    state
+        .store
+        .get_session(&session_id)
+        .await?
+        .ok_or(Error::SessionNotFound)?;
+    let records = state
+        .history
+        .native_records(&session_id.encode())
+        .await
+        .map_err(|error| {
+            Error::Internal(format!("could not read retained native records: {error:#}"))
+        })?;
+    let transfer = crate::api::native_transfer::upload_records(&state, &session_id, records)
+        .await
+        .map_err(|error| {
+            Error::Internal(format!("could not upload retained records: {error:#}"))
+        })?;
+    let outcome = state
+        .env_bridge
+        .remote_session_command(
+            &session_id,
+            sylph_protocol::EnvironmentCommand::Reproject {
+                session_id: session_id.clone(),
+                agent: session_id.agent.to_string(),
+                transfer_id: transfer.id,
+            },
+            sylph_protocol::IdempotencyPolicy::AtMostOnce,
+        )
+        .await
+        .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
     let value = match outcome {
         sylph_protocol::CommandOutcome::Accepted { result } => result.unwrap_or_default(),
-        sylph_protocol::CommandOutcome::Rejected { code, message } => return Err(Error::Internal(format!("{code}: {message}"))),
-        sylph_protocol::CommandOutcome::Unknown { message } => return Err(Error::LinkFailed(message.unwrap_or_default())),
+        sylph_protocol::CommandOutcome::Rejected { code, message } => {
+            return Err(Error::Internal(format!("{code}: {message}")))
+        }
+        sylph_protocol::CommandOutcome::Unknown { message } => {
+            return Err(Error::LinkFailed(message.unwrap_or_default()))
+        }
     };
-    let pass: sylph_protocol::RereadPass = serde_json::from_value(value)
-        .map_err(|error| Error::Internal(format!("remote re-projection was malformed: {error}")))?;
-    Ok(Json(ingest_reread_pass(&state, &session_id, pass).await?))
+    let transfer: sylph_protocol::NativeTransfer =
+        serde_json::from_value(value).map_err(|error| {
+            Error::Internal(format!(
+                "remote re-projection transfer was malformed: {error}"
+            ))
+        })?;
+    let downloaded = crate::api::native_transfer::download(&state, &session_id, transfer)
+        .await
+        .map_err(|error| {
+            Error::Internal(format!(
+                "could not download native re-projection: {error:#}"
+            ))
+        })?;
+    let read_errors = downloaded.read_errors;
+    Ok(Json(
+        ingest_reread_pass(&state, &session_id, downloaded.stream(), read_errors).await?,
+    ))
 }
 
 /// Ingest a pass an envagent parsed.
@@ -1341,24 +1474,9 @@ pub async fn reproject(
 async fn ingest_reread_pass(
     state: &AppState,
     session_id: &sylph_protocol::SessionId,
-    pass: sylph_protocol::RereadPass,
+    stream: sylph_protocol::EventStream,
+    read_errors: usize,
 ) -> Result<RereadResponse> {
-    let read_errors = pass.read_errors;
-    // Records first, then events, in the order the adapter emitted them: a native record is
-    // the source of the events projected from it, and normalized events are never kept
-    // without it (`docs/storage.md` § Native records are kept whole).
-    let messages: Vec<_> = pass
-        .records
-        .into_iter()
-        .map(sylph_protocol::SessionMessage::NativeRecord)
-        .chain(
-            pass.events
-                .into_iter()
-                .map(sylph_protocol::SessionMessage::Event),
-        )
-        .map(Ok)
-        .collect();
-    let stream: sylph_protocol::EventStream = Box::pin(futures::stream::iter(messages));
     let report = state
         .ingest
         .reread(session_id, stream)

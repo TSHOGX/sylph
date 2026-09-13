@@ -29,7 +29,7 @@ import {
   type LinkState,
   type PendingRequest,
 } from "@/lib/api";
-import { createSSEDecoder } from "@/lib/sse-parse";
+import { subscribeSessionNotifications } from "@/lib/session-notifications";
 import { mergeRequestRow, parseRequestFrame } from "@/lib/pending-requests";
 
 /**
@@ -178,41 +178,9 @@ export function useAgentSession(sessionId: string | undefined): AgentSession {
   useEffect(() => {
     if (!sessionId) return;
 
-    const controller = new AbortController();
-
-    async function listen() {
-      try {
-        const response = await fetch(
-          // `segment`, not raw interpolation: a session id is the identity triple, so it
-          // holds `:` — and a native id can hold `/` besides, since `claude` names a
-          // delegated session `<parent>/agent-a<name>-<hash>`. Raw, the browser encodes
-          // the colons itself and the backend refuses the result, because
-          // `SessionId::decode` splits on a literal `:` rather than decoding first.
-          // `sessionId!` for the same reason the queries above use it: the effect returns
-          // early when it is absent, but that guard does not narrow inside this nested
-          // function.
-          `/api/v1/sessions/${segment(sessionId!)}/events`,
-          { signal: controller.signal, headers: { Accept: "text/event-stream" } },
-        );
-        if (!response.ok || !response.body) return;
-
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        // The same parser the turn stream uses, rather than `split("\n\n")` and
-        // `frame.includes("event: request")`. Two reasons, and the second is why the
-        // payload can now be trusted at all: a substring test matches the *body* as
-        // readily as the name, so any request whose title quoted the text `event:
-        // request` triggered its own branch — and matching `"event: request"` as a
-        // prefix cannot distinguish a kind added later that merely starts the same way.
-        // Reading the name as a field settles both, and having a parsed frame is what
-        // makes `data` available as a value instead of as text inside a haystack.
-        const frames = createSSEDecoder();
-
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          for (const frame of frames.push(decoder.decode(value, { stream: true }))) {
+    return subscribeSessionNotifications(
+      `/api/v1/sessions/${segment(sessionId)}/events`,
+      (frame) => {
             if (frame.event === "request") {
               // Applied, not invalidated. The frame carries the whole row, so the set
               // this client is blocked on is recomputed from it with **no round trip** —
@@ -254,16 +222,13 @@ export function useAgentSession(sessionId: string | undefined): AgentSession {
               });
               void queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
             }
-          }
-        }
-      } catch {
-        // An aborted fetch on unmount, or a dropped connection. The poll above is
-        // the backstop, so a reconnect loop here would add nothing but load.
-      }
-    }
-
-    void listen();
-    return () => controller.abort();
+      },
+      () => {
+        // Prefix invalidation also covers capabilities, requests, and every history
+        // page: none of the notifications missed during this gap can be replayed.
+        void queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+      },
+    );
   }, [sessionId, queryClient]);
 
   const resolveMutation = useMutation({

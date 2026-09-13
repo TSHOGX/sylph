@@ -51,6 +51,7 @@ pub fn server_event(kind: &str, text: String, data: Option<serde_json::Value>) -
         source: "server".into(),
         arrival_at_ms: now_ms(),
         recorded_at_ms: None,
+        body_ref: None,
         created_at_ms: now_ms(),
         started_at_ms: None,
     }

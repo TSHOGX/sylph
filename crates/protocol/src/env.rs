@@ -329,7 +329,11 @@ pub enum EnvironmentCommand {
     Reproject {
         session_id: SessionId,
         agent: String,
-        records: Vec<NativeRecord>,
+        transfer_id: String,
+    },
+    NativeTransfer {
+        session_id: SessionId,
+        operation: crate::NativeTransferOperation,
     },
     Files {
         session_id: SessionId,

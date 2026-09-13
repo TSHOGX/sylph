@@ -49,6 +49,7 @@ toml = "1.1"
 futures = { workspace = true }
 tokio-stream = { version = "0.1", features = ["sync"] }
 async-stream = "0.3"
+tempfile = "3.14"
 
 # Logging
 tracing = "0.1"
@@ -110,7 +111,6 @@ csv = "1.4"
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
-tempfile = "3.14"
 sylph-envagent = { path = "../envagent" }
 # Drives the router in-process via ServiceExt::oneshot, so integration tests
 # need no bound port and no spawned server.

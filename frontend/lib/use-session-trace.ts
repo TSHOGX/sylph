@@ -26,6 +26,7 @@ const FLUSH_INTERVAL_MS = 16;
 export function useSessionTrace(
   sessionId: string | undefined,
   enabled = true,
+  snapshotCursor = -1,
 ): { events: StreamEvent[]; status: SessionTraceStatus } {
   const [state, setState] = useState<SessionTraceState>({ sessionId, events: [] });
   const [connection, setConnection] = useState<Exclude<SessionTraceStatus, "closed">>(
@@ -48,7 +49,7 @@ export function useSessionTrace(
     // hidden during navigation without a render-phase or effect-phase state reset. The
     // first flush below adopts the new key; this avoids both a stale frame and the
     // cascading render that a synchronous setState inside this effect would cause.
-    cursorRef.current = -1;
+    cursorRef.current = snapshotCursor;
 
     function flush() {
       flushTimer = undefined;
@@ -56,7 +57,9 @@ export function useSessionTrace(
       const batch = queue;
       queue = [];
       setState((previous) => {
-        const prior = previous.sessionId === sessionId ? previous.events : [];
+        const prior = previous.sessionId === sessionId
+          ? previous.events.filter((event) => event.seq > snapshotCursor)
+          : [];
         const seen = new Set(prior.map((event) => event.seq));
         const next = [...prior];
         for (const event of batch) {
@@ -87,9 +90,7 @@ export function useSessionTrace(
             signal: controller.signal,
           },
         );
-        // A mixed-version rollout may serve a UI with a backend that predates this
-        // endpoint. Stop quietly in that case; retrying a permanent 404 forever would
-        // turn a compatibility gap into a request storm.
+        // A deleted session has no trace to reconnect to.
         if (response.status === 404) {
           setUnsupportedSession(sessionId!);
           return;
@@ -133,10 +134,12 @@ export function useSessionTrace(
       clearTimeout(flushTimer);
       controller.abort();
     };
-  }, [sessionId, enabled]);
+  }, [sessionId, enabled, snapshotCursor]);
 
   return {
-    events: state.sessionId === sessionId ? state.events : [],
+    events: state.sessionId === sessionId
+      ? state.events.filter((event) => event.seq > snapshotCursor)
+      : [],
     status:
       !sessionId || !enabled
         ? "closed"

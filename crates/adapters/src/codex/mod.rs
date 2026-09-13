@@ -54,7 +54,8 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use sylph_protocol::{
     Adapter, AgentInfo, Capability, EventStream, Facet, FlagSpec, LinkFacets, NativeId,
-    NativeRecord, NativeSummary, RequestedNativeId, RunSpec, Session, StoreFilter, UnavailableReason,
+    NativeRecord, NativeSummary, RequestedNativeId, RunSpec, Session, StoreFilter,
+    UnavailableReason,
 };
 
 /// The name this adapter answers to, and the `PATH` binary that decides availability.
@@ -414,6 +415,16 @@ impl Adapter for CodexAdapter {
     }
 
     async fn reproject(&self, records: Vec<NativeRecord>) -> Result<EventStream> {
+        let live = records
+            .iter()
+            .filter(|record| record.source.starts_with("live/"))
+            .collect::<Vec<_>>();
+        if !live.is_empty() {
+            let messages = live::reproject_frames(&live).await?;
+            return Ok(Box::pin(futures::stream::iter(
+                messages.into_iter().map(Ok),
+            )));
+        }
         let mut projector = native::RolloutProjector::default();
         let messages = records
             .iter()

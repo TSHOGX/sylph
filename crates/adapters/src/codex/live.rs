@@ -148,6 +148,10 @@ impl Translator {
     /// frame can be two messages — a settings echo is both a capability partial and the
     /// thing `set_config` is waiting on.
     async fn frame(&self, frame: &Value) -> Vec<Result<SessionMessage>> {
+        self.frame_at(frame, now_ms()).await
+    }
+
+    async fn frame_at(&self, frame: &Value, arrival_at_ms: i64) -> Vec<Result<SessionMessage>> {
         let Some(method) = frame.get("method").and_then(Value::as_str) else {
             // A reply with no waiter. Not an error: `initialized` takes no id, and a
             // reply whose caller timed out has nowhere to go.
@@ -161,7 +165,7 @@ impl Translator {
             .get("emittedAtMs")
             .or_else(|| frame.get("emittedAtMs"))
             .and_then(Value::as_i64);
-        let at_ms = recorded_at_ms.unwrap_or_else(now_ms);
+        let at_ms = recorded_at_ms.unwrap_or(arrival_at_ms);
 
         let mut messages = match method {
             notification::ITEM_STARTED => self.item(params, at_ms, Phase::Started).await,
@@ -338,6 +342,39 @@ impl Translator {
         event.stream_id = turn.get("id").and_then(Value::as_str).map(str::to_string);
         vec![Ok(SessionMessage::Event(event))]
     }
+}
+
+/// Reuse the live frame projector with isolated state and no process or wall clock.
+pub(super) async fn reproject_frames(records: &[&NativeRecord]) -> Result<Vec<SessionMessage>> {
+    let thread = records.iter().find_map(|record| {
+        let params = record.payload.get("params")?;
+        params
+            .get("thread")
+            .and_then(|thread| thread.get("id"))
+            .and_then(Value::as_str)
+            .or_else(|| params.get("threadId").and_then(Value::as_str))
+            .map(str::to_string)
+    });
+    let translator = Translator {
+        state: Arc::new(Mutex::new(State {
+            thread,
+            ..State::default()
+        })),
+        settings_echo: Arc::new(Notify::new()),
+    };
+    let mut messages = Vec::new();
+    for record in records {
+        for message in translator.frame_at(&record.payload, 0).await {
+            let message = message?;
+            if matches!(
+                message,
+                SessionMessage::Event(_) | SessionMessage::TurnInput(_)
+            ) {
+                messages.push(message);
+            }
+        }
+    }
+    Ok(messages)
 }
 
 fn span_for_thread(thread: Option<&str>, own: Option<&str>) -> Option<String> {
@@ -1735,8 +1772,16 @@ async fn read_loop(
         let Some(line) = line else {
             if let Some(id) = state.lock().await.thread.clone() {
                 match native.poll(&NativeId::new(id)) {
-                    Ok(messages) => for message in messages { if tx.send(Ok(message)).await.is_err() { break; } },
-                    Err(error) => { let _ = tx.send(Err(error)).await; }
+                    Ok(messages) => {
+                        for message in messages {
+                            if tx.send(Ok(message)).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        let _ = tx.send(Err(error)).await;
+                    }
                 }
             }
             break;

@@ -48,6 +48,7 @@ CREATE TABLE blocks (
   -- 'raw' | 'zstd' | 'external'. Recorded per row rather than assumed globally,
   -- so a row stays readable after a threshold changes.
   text_encoding TEXT NOT NULL DEFAULT 'raw',
+  text_preview TEXT NOT NULL,
 
   -- Delta reconstruction: packed little-endian u32 arrays. NULL when the block
   -- never streamed — a tool result arrives complete.
@@ -58,6 +59,8 @@ CREATE TABLE blocks (
   data_hash    TEXT,
   data_len     INTEGER NOT NULL DEFAULT 0,
   data_encoding TEXT NOT NULL DEFAULT 'raw',
+  data_preview_json TEXT,
+  body_truncated INTEGER NOT NULL DEFAULT 0,
   -- Stored separately because data_json can be compressed or externalized.
   reconciled   INTEGER NOT NULL DEFAULT 0,
 
@@ -70,6 +73,7 @@ CREATE TABLE blocks (
   -- When the block's first delta arrived. Without it the timing array is relative
   -- to nothing and a replay cannot be paced.
   started_at_ms INTEGER NOT NULL,
+  started_recorded_at_ms INTEGER,
   -- The same two clocks the journal's events carry, preserved rather than collapsed:
   -- `recorded_at_ms` is the vendor's own and is NULL when it supplied nothing usable,
   -- `arrival_at_ms` is the server's receipt clock and always present.
@@ -184,11 +188,14 @@ CREATE INDEX session_bytes_by_size ON session_bytes(bytes DESC);
 CREATE TABLE native_records (
   session_id     TEXT NOT NULL,
   source         TEXT NOT NULL,
+  -- Revisions are opaque u64 bit patterns, stored by reversible integer cast.
   version        INTEGER NOT NULL,
+  retained_seq   INTEGER NOT NULL,
   payload_json   BLOB NOT NULL,
   created_at_ms  INTEGER NOT NULL,
   retention_class TEXT NOT NULL DEFAULT 'raw' CHECK (retention_class = 'raw'),
-  PRIMARY KEY (session_id, source, version)
+  PRIMARY KEY (session_id, source, version),
+  UNIQUE (session_id, retained_seq)
 ) WITHOUT ROWID;
 
 CREATE TABLE native_blobs (
@@ -218,7 +225,7 @@ CREATE TABLE native_blob_chunks (
 ) WITHOUT ROWID;
 
 CREATE INDEX native_records_by_session
-  ON native_records(session_id, source, version);
+  ON native_records(session_id, retained_seq);
 
 -- Cross-session full-text search over the same rows the timeline renders, so coverage is
 -- a contract rather than a function of what some parser reached
