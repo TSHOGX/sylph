@@ -229,6 +229,13 @@ follower, and it does not change the session's `fidelity`.
 **Response 200:**
 ```json
 { "reread": { "examined": 412, "ingested": 37, "alreadyHeld": 375, "readErrors": 0 } }
+
+### `POST /api/v1/sessions/{id}/reproject`
+
+Re-projects native envelopes already retained by Sylph through the owning envagent. The
+vendor's source files are not read, so the operation remains available after rotation or
+deletion of the native store. The response uses the same `RereadReport` shape; `examined`
+counts retained projected events and `ingested` counts new events added to the journal.
 ```
 
 Every field is a count of events in this one pass:
