@@ -611,6 +611,7 @@ fn project_record_without_native_facts(
 }
 
 /// Re-project one retained Claude envelope without touching the vendor filesystem.
+#[allow(dead_code)]
 pub(crate) fn reproject_native_record(
     correlation: &mut Correlation,
     record: &NativeRecord,
@@ -1669,6 +1670,7 @@ struct JsonlCursor {
 /// Cursor for a manifest snapshot rewritten in place.
 struct ManifestCursor {
     fingerprint: Option<(u64, u128)>,
+    #[allow(dead_code)]
     version: u64,
     payload: Option<Value>,
 }

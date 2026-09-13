@@ -3562,6 +3562,7 @@ pub mod native {
     }
 
     /// Re-project one retained Pi envelope without consulting the native store path.
+    #[allow(dead_code)]
     pub(crate) fn reproject_native_record(record: &NativeRecord) -> Result<Vec<SessionMessage>> {
         project_record(&record.payload)
     }

@@ -1436,7 +1436,7 @@ fn flatten_content(content: Option<&Value>) -> String {
 
 /// Stateful projector shared by adoption and follow.
 #[derive(Default)]
-struct RolloutProjector {
+pub(crate) struct RolloutProjector {
     era: Option<Era>,
     opened: HashSet<String>,
     call_names: HashMap<String, String>,
@@ -1485,6 +1485,7 @@ impl RolloutProjector {
 
 /// Re-project one retained Codex envelope without opening its original rollout file.
 /// Callers that need cross-record correlation should retain and reuse the projector.
+#[allow(dead_code)]
 pub(crate) fn reproject_native_record(
     projector: &mut RolloutProjector,
     record: &NativeRecord,
