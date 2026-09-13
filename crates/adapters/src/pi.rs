@@ -3561,6 +3561,11 @@ pub mod native {
         Ok(messages)
     }
 
+    /// Re-project one retained Pi envelope without consulting the native store path.
+    pub(crate) fn reproject_native_record(record: &NativeRecord) -> Result<Vec<SessionMessage>> {
+        project_record(&record.payload)
+    }
+
     /// Find one session's file by its native id.
     ///
     /// The directory is a mangled `cwd` and is **not derivable from the session id**, so the
@@ -4095,6 +4100,13 @@ pub mod native {
             let reopened = parse_session(&path).unwrap();
             assert!(reopened.messages.iter().any(|message| matches!(message, SessionMessage::NativeRecord(new) if new == record)));
             let _ = std::fs::remove_dir_all(dir);
+        }
+
+        #[test]
+        fn retained_record_reprojection_does_not_read_the_native_path() {
+            let record = NativeRecord { source: "/does/not/exist".into(), version: 1, raw_json: None, payload: json!({"type":"message","message":{"role":"assistant","timestamp":1788307200000_i64,"content":[{"type":"text","text":"ok"}]}}), blobs: Vec::new() };
+            let messages = reproject_native_record(&record).unwrap();
+            assert!(messages.iter().any(|message| matches!(message, SessionMessage::Event(event) if event.text == "ok")));
         }
 
         #[test]

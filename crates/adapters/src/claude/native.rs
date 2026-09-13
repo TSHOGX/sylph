@@ -610,6 +610,14 @@ fn project_record_without_native_facts(
     project_record_inner(correlation, record, at_ms, false)
 }
 
+/// Re-project one retained Claude envelope without touching the vendor filesystem.
+pub(crate) fn reproject_native_record(
+    correlation: &mut Correlation,
+    record: &NativeRecord,
+) -> Vec<SessionMessage> {
+    project_record(correlation, &record.payload, 0)
+}
+
 fn project_record_inner(
     correlation: &mut Correlation,
     record: &Value,
@@ -3983,6 +3991,13 @@ mod tests {
         state.finalizing = true;
         assert!(state.poll().unwrap_err().to_string().contains("wf_broken.json"));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn retained_record_reprojection_does_not_open_the_source_path() {
+        let record = NativeRecord { source: "/does/not/exist".into(), version: 1, raw_json: None, payload: json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]}}), blobs: Vec::new() };
+        let mut correlation = Correlation::new();
+        assert!(reproject_native_record(&mut correlation, &record).iter().any(|message| matches!(message, SessionMessage::Event(event) if event.text == "ok")));
     }
 
     #[test]

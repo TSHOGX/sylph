@@ -1483,6 +1483,15 @@ impl RolloutProjector {
     }
 }
 
+/// Re-project one retained Codex envelope without opening its original rollout file.
+/// Callers that need cross-record correlation should retain and reuse the projector.
+pub(crate) fn reproject_native_record(
+    projector: &mut RolloutProjector,
+    record: &NativeRecord,
+) -> Vec<SessionMessage> {
+    projector.apply(&record.payload)
+}
+
 /// A stable identity for one filesystem incarnation of a rollout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FileIdentity {
@@ -2567,6 +2576,13 @@ mod tests {
         assert_eq!(first.payload, rewritten.payload);
         assert_ne!(first.version, rewritten.version, "lexical changes are retained revisions");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn retained_record_reprojection_uses_payload_without_source_path() {
+        let record = NativeRecord { source: "/does/not/exist".into(), version: 1, raw_json: None, payload: json!({"type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","id":"m","content":[{"type":"Text","text":"ok"}]}}}), blobs: Vec::new() };
+        let mut projector = RolloutProjector::default();
+        assert!(reproject_native_record(&mut projector, &record).iter().any(|message| matches!(message, SessionMessage::Event(event) if event.text == "ok")));
     }
 
     #[test]
