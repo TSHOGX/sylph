@@ -501,6 +501,7 @@ CREATE INDEX import_jobs_environment_idx ON import_jobs(environment_id, created_
 CREATE TABLE import_items (
   job_id TEXT NOT NULL REFERENCES import_jobs(id) ON DELETE CASCADE,
   ordinal INTEGER NOT NULL,
+  order_tie INTEGER NOT NULL DEFAULT 0,
   agent TEXT NOT NULL,
   native_id TEXT NOT NULL,
   title TEXT,
@@ -514,3 +515,150 @@ CREATE TABLE import_items (
 );
 
 CREATE INDEX import_items_native_idx ON import_items(agent, native_id, job_id);
+
+-- Reconstructable, body-free execution nodes; independent of archive eviction.
+CREATE TABLE timeline_clock (id INTEGER PRIMARY KEY CHECK(id = 1), revision INTEGER NOT NULL);
+INSERT INTO timeline_clock VALUES (1, 0);
+CREATE TABLE timeline_nodes (
+  session_id TEXT NOT NULL,
+  id TEXT NOT NULL,
+  parent_id TEXT NOT NULL DEFAULT '',
+  turn_id TEXT NOT NULL,
+  ordinal INTEGER NOT NULL,
+  order_tie INTEGER NOT NULL DEFAULT 0,
+  revision INTEGER NOT NULL,
+  body_revision INTEGER NOT NULL DEFAULT 0,
+  body_start_seq INTEGER NOT NULL DEFAULT 0,
+  event_json TEXT NOT NULL,
+  trajectory_json TEXT,
+  stream_id TEXT,
+  kind TEXT NOT NULL DEFAULT '',
+  structure_error TEXT,
+  children INTEGER NOT NULL DEFAULT 0,
+  tools INTEGER NOT NULL DEFAULT 0,
+  reads INTEGER NOT NULL DEFAULT 0,
+  commands INTEGER NOT NULL DEFAULT 0,
+  thinking INTEGER NOT NULL DEFAULT 0,
+  failed INTEGER NOT NULL DEFAULT 0,
+  running INTEGER NOT NULL DEFAULT 0,
+  waiting INTEGER NOT NULL DEFAULT 0,
+  activity TEXT NOT NULL DEFAULT '',
+  own_running INTEGER NOT NULL DEFAULT 0,
+  scope_id TEXT NOT NULL DEFAULT '',
+  unfinished INTEGER NOT NULL DEFAULT 0,
+  own_unfinished INTEGER NOT NULL DEFAULT 0,
+  own_activity TEXT NOT NULL DEFAULT '',
+  child_running INTEGER NOT NULL DEFAULT 0,
+  own_failed INTEGER NOT NULL DEFAULT 0,
+  declared INTEGER NOT NULL DEFAULT 1,
+  PRIMARY KEY(session_id, id)
+);
+CREATE INDEX timeline_streams ON timeline_nodes(session_id,stream_id,kind,ordinal DESC);
+CREATE INDEX timeline_children ON timeline_nodes(session_id, parent_id, ordinal, order_tie, id);
+CREATE INDEX timeline_changes ON timeline_nodes(session_id, parent_id, revision, id);
+CREATE INDEX timeline_active ON timeline_nodes(session_id, parent_id, ordinal, id) WHERE running > 0;
+CREATE TABLE timeline_lanes (
+  session_id TEXT NOT NULL, turn_id TEXT NOT NULL, parent_id TEXT NOT NULL,
+  group_id TEXT NOT NULL,
+  PRIMARY KEY(session_id, turn_id, parent_id)
+);
+CREATE TRIGGER sessions_delete_timeline AFTER DELETE ON sessions BEGIN
+  DELETE FROM timeline_nodes WHERE session_id = OLD.environment || ':' || OLD.agent || ':' || OLD.native_id;
+  DELETE FROM timeline_lanes WHERE session_id = OLD.environment || ':' || OLD.agent || ':' || OLD.native_id;
+END;
+CREATE INDEX events_stream_body ON events(session_env, session_agent, session_native, stream_id, seq);
+
+-- Requests remain operable resources. Their projection points to the durable id;
+-- ancestor counts change in the same transaction as create/resolve/abandon.
+CREATE TRIGGER requests_project_insert AFTER INSERT ON pending_requests BEGIN
+  UPDATE timeline_clock SET revision=revision+1 WHERE id=1;
+  INSERT INTO timeline_nodes(session_id,id,parent_id,turn_id,ordinal,revision,event_json,waiting,order_tie)
+  VALUES(NEW.session_env||':'||NEW.session_agent||':'||NEW.session_native,'q:'||NEW.id,
+    COALESCE((SELECT id FROM timeline_nodes WHERE session_id=NEW.session_env||':'||NEW.session_agent||':'||NEW.session_native AND stream_id=NEW.tool_use_id AND kind='tool_call' ORDER BY ordinal DESC LIMIT 1),''),
+    NEW.turn_id, (SELECT next_event_seq*2 FROM sessions WHERE environment=NEW.session_env AND agent=NEW.session_agent AND native_id=NEW.session_native),
+    (SELECT revision FROM timeline_clock WHERE id=1),
+    json_object('seq',-1,'kind','request','phase','started','text',substr(NEW.title,1,256),
+      'data',json_object('requestId',NEW.id),'stability','stable','source','server',
+      'arrivalAtMs',NEW.created_at_ms,'createdAtMs',NEW.created_at_ms), NEW.status='pending',(SELECT revision FROM timeline_clock WHERE id=1));
+  UPDATE timeline_nodes SET waiting=waiting+(NEW.status='pending'),
+    children=children+(id=(SELECT parent_id FROM timeline_nodes WHERE session_id=NEW.session_env||':'||NEW.session_agent||':'||NEW.session_native AND id='q:'||NEW.id)),
+    revision=(SELECT revision FROM timeline_clock WHERE id=1)
+  WHERE session_id=NEW.session_env||':'||NEW.session_agent||':'||NEW.session_native AND id IN (
+    WITH RECURSIVE ancestors(id) AS (
+      SELECT parent_id FROM timeline_nodes WHERE session_id=NEW.session_env||':'||NEW.session_agent||':'||NEW.session_native AND id='q:'||NEW.id
+      UNION SELECT n.parent_id FROM timeline_nodes n JOIN ancestors a ON n.id=a.id WHERE n.session_id=NEW.session_env||':'||NEW.session_agent||':'||NEW.session_native
+    ) SELECT id FROM ancestors WHERE id<>''
+  );
+END;
+CREATE TRIGGER requests_project_status AFTER UPDATE OF status ON pending_requests WHEN OLD.status<>NEW.status BEGIN
+  UPDATE timeline_clock SET revision=revision+1 WHERE id=1;
+  UPDATE timeline_nodes SET waiting=waiting+(NEW.status='pending')-(OLD.status='pending'),
+    revision=(SELECT revision FROM timeline_clock WHERE id=1),
+    event_json=CASE WHEN id='q:'||NEW.id THEN json_set(event_json,'$.phase',CASE WHEN NEW.status='pending' THEN 'started' ELSE 'completed' END) ELSE event_json END
+  WHERE session_id=NEW.session_env||':'||NEW.session_agent||':'||NEW.session_native AND id IN (
+    WITH RECURSIVE ancestors(id) AS (
+      SELECT 'q:'||NEW.id
+      UNION SELECT n.parent_id FROM timeline_nodes n JOIN ancestors a ON n.id=a.id WHERE n.session_id=NEW.session_env||':'||NEW.session_agent||':'||NEW.session_native
+    ) SELECT id FROM ancestors WHERE id<>''
+  );
+END;
+
+-- At most one removal per former parent/address. Unlike an append-only patch
+-- log, repeated corrections of the same relationship do not grow this table.
+CREATE TABLE timeline_removals (
+  session_id TEXT NOT NULL, parent_id TEXT NOT NULL, id TEXT NOT NULL,
+  revision INTEGER NOT NULL, node_json TEXT NOT NULL,
+  PRIMARY KEY(session_id,parent_id,id)
+);
+CREATE INDEX timeline_removed_changes ON timeline_removals(session_id,parent_id,revision,id);
+CREATE TRIGGER sessions_delete_timeline_removals AFTER DELETE ON sessions BEGIN
+  DELETE FROM timeline_removals WHERE session_id=OLD.environment||':'||OLD.agent||':'||OLD.native_id;
+END;
+
+-- Block stream ids are turn-scoped. Only delegated trajectories have a session
+-- scope; a promoted tool and its trajectory share a projection address.
+CREATE TABLE timeline_trajectories (
+  session_id TEXT NOT NULL, stream_id TEXT NOT NULL, node_id TEXT NOT NULL,
+  PRIMARY KEY(session_id,stream_id)
+);
+CREATE TRIGGER sessions_delete_timeline_trajectories AFTER DELETE ON sessions BEGIN
+  DELETE FROM timeline_trajectories WHERE session_id=OLD.environment||':'||OLD.agent||':'||OLD.native_id;
+END;
+
+CREATE TABLE timeline_event_nodes (
+  session_id TEXT NOT NULL, seq INTEGER NOT NULL, node_id TEXT NOT NULL,
+  PRIMARY KEY(session_id,seq)
+);
+CREATE TRIGGER sessions_delete_timeline_event_nodes AFTER DELETE ON sessions BEGIN
+  DELETE FROM timeline_event_nodes WHERE session_id=OLD.environment||':'||OLD.agent||':'||OLD.native_id;
+END;
+
+
+CREATE INDEX timeline_turn_order ON timeline_nodes(session_id,turn_id,ordinal);
+CREATE TRIGGER turns_project_prompt_insert AFTER INSERT ON turns WHEN NEW.request_text<>'' BEGIN
+  UPDATE timeline_clock SET revision=revision+1 WHERE id=1;
+  INSERT INTO timeline_nodes(session_id,id,parent_id,turn_id,ordinal,revision,event_json,kind,order_tie)
+  VALUES(NEW.session_env||':'||NEW.session_agent||':'||NEW.session_native,'p:'||NEW.id,'',NEW.id,
+    (SELECT next_event_seq*2-1 FROM sessions WHERE environment=NEW.session_env AND agent=NEW.session_agent AND native_id=NEW.session_native),
+    (SELECT revision FROM timeline_clock WHERE id=1),
+    json_object('seq',-1,'kind','user','phase','completed','text',substr(NEW.request_text,1,1024),'stability','stable','source','user',
+      'arrivalAtMs',NEW.created_at_ms,'createdAtMs',NEW.created_at_ms,
+      'bodyRef',CASE WHEN length(NEW.request_text)>1024 THEN json_object('seq',-1,'textBytes',length(CAST(NEW.request_text AS BLOB)),'dataBytes',0) ELSE NULL END),'user',(SELECT revision FROM timeline_clock WHERE id=1));
+END;
+CREATE TRIGGER turns_project_prompt_update AFTER UPDATE OF request_text ON turns WHEN OLD.request_text<>NEW.request_text BEGIN
+  UPDATE timeline_clock SET revision=revision+1 WHERE id=1;
+  INSERT INTO timeline_nodes(session_id,id,parent_id,turn_id,ordinal,revision,event_json,kind,order_tie)
+  VALUES(NEW.session_env||':'||NEW.session_agent||':'||NEW.session_native,'p:'||NEW.id,'',NEW.id,
+    COALESCE((SELECT MIN(ordinal)-1 FROM timeline_nodes WHERE session_id=NEW.session_env||':'||NEW.session_agent||':'||NEW.session_native AND turn_id=NEW.id),
+      (SELECT next_event_seq*2-1 FROM sessions WHERE environment=NEW.session_env AND agent=NEW.session_agent AND native_id=NEW.session_native)),
+    (SELECT revision FROM timeline_clock WHERE id=1),
+    json_object('seq',-1,'kind','user','phase','completed','text',substr(NEW.request_text,1,1024),'stability','stable','source','user',
+      'arrivalAtMs',NEW.created_at_ms,'createdAtMs',NEW.created_at_ms,
+      'bodyRef',CASE WHEN length(NEW.request_text)>1024 THEN json_object('seq',-1,'textBytes',length(CAST(NEW.request_text AS BLOB)),'dataBytes',0) ELSE NULL END),'user',(SELECT revision FROM timeline_clock WHERE id=1))
+  ON CONFLICT(session_id,id) DO UPDATE SET revision=excluded.revision,body_revision=excluded.revision,event_json=excluded.event_json;
+END;
+
+CREATE INDEX timeline_body_addresses ON timeline_event_nodes(session_id,node_id,seq);
+
+CREATE INDEX timeline_open_scopes ON timeline_nodes(session_id,scope_id,turn_id,id) WHERE own_running>0;
+CREATE INDEX timeline_open_turns ON timeline_nodes(turn_id,scope_id) WHERE own_running>0;

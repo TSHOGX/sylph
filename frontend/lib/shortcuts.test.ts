@@ -130,7 +130,6 @@ describe("reserved combos", () => {
       "toggleRightSidebar",
       "openSettings",
       "stopTurn",
-      "expandAll",
       "collapseAll",
       "findInSession",
     ]) {

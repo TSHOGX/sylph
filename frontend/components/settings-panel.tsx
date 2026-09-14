@@ -155,18 +155,7 @@ function GeneralSection() {
         />
       </Field>
 
-      <Field label={t("settings.expansion.label")} hint={t("settings.expansion.hint")}>
-        <Checkbox
-          label={t("settings.expansion.thinking")}
-          checked={settings.expandThinking}
-          onChange={(checked) => update({ expandThinking: checked })}
-        />
-        <Checkbox
-          label={t("settings.expansion.toolOutput")}
-          checked={settings.expandToolOutput}
-          onChange={(checked) => update({ expandToolOutput: checked })}
-        />
-      </Field>
+
 
       {/*
         The data directory used to be shown here as a lone read-only path. It has
@@ -682,7 +671,6 @@ const ACTION_KEYS: Record<ShortcutAction, MessageKey> = {
   toggleRightSidebar: "shortcut.toggleRightSidebar",
   openSettings: "shortcut.openSettings",
   stopTurn: "shortcut.stopTurn",
-  expandAll: "shortcut.expandAll",
   collapseAll: "shortcut.collapseAll",
   findInSession: "shortcut.findInSession",
 };
@@ -870,27 +858,5 @@ export function Field({
       {hint && <p className="mt-0.5 text-2xs leading-relaxed text-ink-muted">{hint}</p>}
       <div className="mt-1.5 space-y-1.5">{children}</div>
     </section>
-  );
-}
-
-function Checkbox({
-  label,
-  checked,
-  onChange,
-}: {
-  label: string;
-  checked: boolean;
-  onChange: (checked: boolean) => void;
-}) {
-  return (
-    <label className="flex items-center gap-2 text-xs">
-      <input
-        type="checkbox"
-        checked={checked}
-        onChange={(event) => onChange(event.target.checked)}
-        className="h-3.5 w-3.5 rounded border-line-strong focus-ring"
-      />
-      {label}
-    </label>
   );
 }

@@ -62,6 +62,7 @@ interface Hit {
   session: Session;
   /** Only ever set by the index — a local match is on the label, which is visible. */
   excerpt?: string;
+  seq?: number;
 }
 
 export function SearchOverlay() {
@@ -124,6 +125,7 @@ export function SearchOverlay() {
       .map((result) => ({
         session: result.session,
         excerpt: result.bestMatch?.excerpt?.replace(/\s+/g, " "),
+        seq: result.bestMatch?.seq,
       }));
 
     return [...local, ...indexed];
@@ -133,7 +135,7 @@ export function SearchOverlay() {
 
   const items = useMemo<SelectChoice[]>(
     () =>
-      hits.map(({ session, excerpt }) => ({
+      hits.map(({ session, excerpt, seq }) => ({
         label: sessionLabel(session),
         detail: `${session.agent}${
           session.workdir ? ` · ${shortenHome(session.workdir, homes.get(session.environment))}` : ""
@@ -159,7 +161,7 @@ export function SearchOverlay() {
         // footer along with the archive.
         onSelect: () => {
           closeOverlay();
-          router.push(`/sessions/${encodeURIComponent(session.id)}`);
+          router.push(`/sessions/${encodeURIComponent(session.id)}${seq === undefined ? "" : `?seq=${seq}`}`);
         },
       })),
     [hits, homes, environments, closeOverlay, router],

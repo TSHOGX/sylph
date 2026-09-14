@@ -488,3 +488,19 @@ that went to sleep.
 at `error` and at `debug` thereafter, in the client that holds the connection rather than
 in the handlers that poll it — a sidebar and a picker both polling would otherwise
 reproduce the flood one layer up.
+
+## Native persistence faults
+
+A failed native write is a synchronization failure, not evidence the vendor agent
+stopped. The server journals a synchronization notice, Nacks the unaccepted producer
+prefix, and keeps the connection and turn alive. A successful retry records recovery;
+repeated failures of the same blocked pass do not produce one notice per record.
+Protocol authentication, epoch, producer, and payload-integrity violations still refuse
+the connection.
+
+The envagent stops delivery at the first Nack. It does not send later numbered records
+that can only create more gaps. One bounded replay task retries the retained prefix
+alongside command handling, including after restart. Producer sequence assignment,
+receipt validation, and accepted-through continuity remain unchanged. This is one
+producer channel; the design does not claim collision-free sharding or independent
+session delivery channels.

@@ -1089,7 +1089,7 @@ async fn runner_failure_is_reported_as_a_failed_turn() {
 }
 
 #[tokio::test]
-async fn raw_retention_failure_stops_a_live_link_before_projection() {
+async fn raw_retention_failure_pauses_sync_without_claiming_the_agent_stopped() {
     let backend =
         TestBackend::start_with_runners(&[MockRunner::raw_retention_failure("mock")]).await;
     let session_id = backend.create_session("mock").await;
@@ -1105,12 +1105,41 @@ async fn raw_retention_failure_stops_a_live_link_before_projection() {
         .unwrap()
         .to_string();
 
-    let finished = backend.await_turn(&turn_id).await;
-    assert_eq!(finished["turn"]["status"], "failed");
-    assert_eq!(finished["turn"]["errorCode"], "LINK_LOST");
-    assert!(finished["turn"]["errorMessage"]
-        .as_str()
-        .is_some_and(|message| message.contains("native record root.jsonl:1")));
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let page = backend
+                .state
+                .store
+                .node_page(&session_id, "", None, false, 40)
+                .await
+                .unwrap();
+            if page.nodes.iter().any(|node| {
+                node.event.kind == "error" && node.event.text.contains("native record root.jsonl:1")
+            }) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("retention failure must be visible as a synchronization fault");
+    let current = json_body(
+        backend
+            .get_authed(&format!("/api/v1/turns/{turn_id}"))
+            .await,
+    )
+    .await;
+    assert!(!["completed", "failed", "cancelled", "interrupted"]
+        .contains(&current["turn"]["status"].as_str().unwrap()));
+    assert!(current["turn"]["errorCode"].is_null());
+    let files = backend
+        .get_authed(&format!("/api/v1/sessions/{session_id}/files"))
+        .await;
+    assert_eq!(
+        files.status(),
+        StatusCode::OK,
+        "native persistence must not disconnect file browsing"
+    );
 
     let history = json_body(
         backend

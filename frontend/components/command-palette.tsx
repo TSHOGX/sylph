@@ -174,45 +174,11 @@ export function CommandPalette() {
         run: () => runAction("toggleRightSidebar"),
       },
       {
-        id: "expand-all",
-        label: t("palette.cmd.expandAll"),
-        group: t("palette.group.view"),
-        action: "expandAll",
-        run: () => runAction("expandAll"),
-      },
-      {
         id: "collapse-all",
         label: t("palette.cmd.collapseAll"),
         group: t("palette.group.view"),
         action: "collapseAll",
         run: () => runAction("collapseAll"),
-      },
-      {
-        id: "toggle-thinking",
-        label: t(
-          settings.expandThinking
-            ? "palette.cmd.collapseThinking"
-            : "palette.cmd.expandThinking",
-        ),
-        group: t("palette.group.view"),
-        keywords: "reasoning preference",
-        run: () => {
-          update({ expandThinking: !settings.expandThinking });
-          closeOverlay();
-        },
-      },
-      {
-        id: "toggle-tool-output",
-        label: t(
-          settings.expandToolOutput
-            ? "palette.cmd.collapseToolOutput"
-            : "palette.cmd.expandToolOutput",
-        ),
-        group: t("palette.group.view"),
-        run: () => {
-          update({ expandToolOutput: !settings.expandToolOutput });
-          closeOverlay();
-        },
       },
       {
         id: "density",
@@ -272,8 +238,6 @@ export function CommandPalette() {
       queryClient,
       leftOpen,
       rightOpen,
-      settings.expandThinking,
-      settings.expandToolOutput,
       settings.density,
       update,
       // Every label is translated, so a language change has to rebuild the list.

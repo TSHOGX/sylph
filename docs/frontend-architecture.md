@@ -53,7 +53,7 @@ is reachable only through a relay.
   case here, and a state library would add a dependency for a store that holds
   about a dozen fields.
 - **Not the `EventSource` API.** SSE is read with `fetch` and a hand-written frame
-  parser (`lib/use-session-trace.ts`, `lib/sse-parse.ts`); § SSE Connection Management states
+  parser (`lib/execution-store.ts`, `lib/sse-parse.ts`); § SSE Connection Management states
   the three properties that reach.
 
 **UI components:**
@@ -359,147 +359,58 @@ its independently timed block replacements into the same renderer.
 
 ### Event rendering
 
-**Deltas accumulate into a live projection and are replaced by the `completed` event**,
-which is the one that reaches the journal. `lib/timeline-rows.ts` owns the fold: it
-collapses deltas into rows, pairs a `tool_result` with its `tool_call` by shared
-`streamId`, and renders an unpaired result on its own so no output is ever dropped.
+The interactive transcript consumes execution nodes from `GET /sessions/{id}/nodes`.
+`lib/execution-store.ts` keeps entities by stable id and ordered child windows per parent.
+Individual revisions notify only the affected row. Structural changes update the expanded
+visible list; `components/execution-timeline.tsx` virtualizes that list with TanStack Virtual.
+No event fold or subtree summary calculation runs in the browser.
 
-**Rows are memoized on event identity, and that is what makes the timeline fast** — see
-§ Render cost, which also states the property a unit test pins and why it is invisible if
-it breaks.
+Each open parent has a cancellable revision subscription. Polling changes reads only rows
+updated since that parent's cursor; responses and the number of subscriptions are bounded.
+Snapshot revisions prevent older pages from overwriting newer patches. Parent removals
+retire the old visible address even when the destination patch arrives first.
 
-**Scroll is anchored only while the user is already at the bottom.** Auto-scrolling a user
-who has scrolled up to read is the standard way to make a streaming transcript unusable.
-
-**History is cursor-paged, and a page is never the whole record.** The transcript initially
-reads the newest page and offers an accessible Load earlier turns action until the server
-reports exhaustion. Prepending preserves the first visible turn's screen position. Session
-trace subscription starts at the history snapshot's cursor, so opening a long session does
-not replay its entire archive. Earlier pages supply their own event containers.
-
-**Large event bodies are explicit resources.** History and streams carry bounded previews
-and a body reference; an explicit Load full content action fetches the retained body.
-Loading, retryable errors, and the preview remain visible. Folding a tool or reasoning row
-does not fetch its body. Copying a turn resolves its body references before writing text.
+Large bodies use `components/event-body.tsx`, which fetches only on an explicit action,
+cancels abandoned requests, and shows failures without replacing the readable preview.
+Search requests the retained full-text index, then loads a bounded window at the matched
+node's direct parent. Focus returns to the root conversation with one action.
 
 ### Delegated trajectories
 
-An event's `span` names the trajectory it ran in, and a `subagent` event's `streamId` *is*
-a trajectory id (`docs/session-protocol.md` § Delegated trajectories). `lib/timeline-tree.ts`
-turns that into a tree — `buildRows` collapses deltas and pairs results, `buildTree` links
-each row to the trajectory it names — and is React-free so it unit-tests in a `node`
-environment, the same reason `lib/sse-parse.ts` is separate from the hook that uses it.
-
-**The tree is navigated, not displayed.** Depth is unbounded, so one indent level per depth
-runs out of viewport before it runs out of tree. Instead: a trajectory renders as one
-collapsed card; indentation stops at `MAX_INDENT`, past which a phone's content column is
-narrower than a line of code and the indent destroys content rather than conveying
-structure; and focusing a trajectory **re-roots** the timeline with a breadcrumb back.
-
-**Collapsing is also what makes it fast**, and why virtualization stays unnecessary here. A
-closed card mounts none of its subtree, so DOM cost tracks what the user opened rather than
-what the agent did. An indented rendering cannot have that property, since it lays out every
-node to know where any node goes.
-
-**Every card reports its whole subtree.** `Rollup` carries failures, nested trajectory count,
-tool count, token usage, and duration, computed bottom-up, and a descendant failure escalates
-its ancestors' status even when their own result was clean. **No state reachable in the tree
-may be unreported at the root**, which is what makes collapsing deferral rather than loss.
-
-**Interior availability is the producer's observation.** `pending`, `partial`, `full`,
-`forwards_nothing`, and `unreadable` remain distinct in cards and comparison rows. A child's
-interior state or completed phase does not describe its parent. Observed child events prove
-only a readable prefix; they cannot prove completeness, and an empty child list cannot prove
-that a vendor forwards nothing. An empty declared trajectory offers no disclosure control.
+The server materializes parentage, ownership and counters in the event transaction
+(`docs/storage.md` § Execution node projection). Ordinary stream ids are scoped to their
+turn; delegated ids keep their first session-scoped owner. A promoted tool retains its
+arguments and a separate trajectory report. Ancestor failures and waiting counts remain
+visible while descendants are unloaded.
 
 #### Rendering `abandoned` distinctly from `failed`
 
-`docs/session-protocol.md` § Delegated trajectories defines the two statuses. Three rules
-carry the distinction through the tree, where a rollup is what erases it:
-
-- **A server-authored close is not a rollup failure.** The server marks its own closing
-  event `isError`, so the row reads as unresolved; counting that as a descendant failure
-  would badge every ancestor red, including a host whose own `tool_result` succeeded.
-  `rowFailed` excludes a server-closed row while the trajectory keeps `abandoned` as its own
-  status.
-- **"Forwarded no interior" and "outlived its turn" are separate claims**, and one card
-  states one of them. No interior is a terminal measurement: the host finished and forwarded
-  nothing. Abandoned-and-empty means nothing is known about the interior yet.
-- **A badge for `abandoned` says nobody has reported an outcome yet**, which stays true when
-  the agent later opens a turn of its own to report.
+A server-authored trajectory closure reports an unknown outcome, not a vendor failure.
+The projection excludes it from failure counts and the row says “never finished”.
+A later real completion replaces that provisional state at the same address.
 
 #### A summary is the point of a collapsed card
 
-A status and counts say work happened, not what came of it. The delegate's own account is the
-card's first line, clamped, and is appended last to each overview row's accessible name so a
-reader scanning many rows hears the comparison before the prose. `trajectoryReport` owns two
-rules:
-
-- **The summary comes from the `subagent` close held beside the row**, since a promoted host's
-  `text` is its tool arguments.
-- **A close outranks progress**, because a progress snapshot describes a state the outcome has
-  superseded.
-
-**It may not read a promoted host's `tool_result`.** A result is the tool's output, not the
-delegation's account of itself.
+A declared trajectory exposes its bounded report beside its counters. Promoted tools
+keep the delegation report separately from their arguments and result. Reading or
+expanding one never substitutes a tool result for the delegate's own account.
 
 #### `trajectoryName` is the sole definition
 
-One definition keeps one node from being named two ways. Its fallback states what the row
-knows — nobody reported what this is — rather than restating a category the chrome already
-carries, and **contains no tool name**: a fallback that did would make every
-`{ name: "<tool> delegation" }` locator ambiguous with it by construction, in exactly the
-states that render a nameless row.
+Names come from the projection's retained event or trajectory report. A missing name
+stays missing in storage; only the renderer supplies a category label.
 
 #### A promoted host renders its own call
 
-The row keeps `kind: "tool_call"`, so the tool's name, arguments, and result survive
-promotion, and the call renders above the work it dispatched in the order it happened.
-
-A promoted host therefore stays expandable with nothing forwarded, while a *declared*
-trajectory with no interior keeps its disclosure suppressed — **`aria-expanded` on a control
-with nothing to expand is a promise the tree cannot keep.** Focus is the same question one
-level up: the focused trajectory keeps its own complete report above its children, including
-declared subagents. Empty interiors render the typed observation, never a reason inferred
-from lifecycle status. A clamped summary is a preview; focus is a touch-accessible route to
-the full report.
+The tool retains its call body and owns its result as a direct child. Delegated work
+references that same node. Focusing loads its direct-child window and offers a way back.
 
 #### Comparing siblings needs one shared axis
 
-A rollup describes one node against itself, so it answers whether to open a branch rather
-than which of twenty was slow. `lib/timeline-waterfall.ts` puts every trajectory on **one
-shared time axis**, which is what distributed tracing settled on for the same problem and the
-same `span`. A concurrent fan-out reads as bars stacked in one band, a sequential chain as a
-staircase; the slow one is the long bar.
-
-`components/delegation-overview.tsx` renders it as `left`/`width` percentages — no chart
-library, no measuring pass — and is `next/dynamic`, so a route that never opens it pays
-essentially nothing. It is scoped to what is on screen, so under focus the comparison is
-between the branch's own children, and it renders nothing below two trajectories: one
-delegation compares to nothing.
-
-Rows are buttons whose accessible name carries what the bar shows — name, status, elapsed,
-offset into the turn, depth — so the summary reaches a reader who cannot see the bars. Native
-tab order rather than a roving cursor, since these are navigation targets rather than options
-to pick.
-
-**Three states are not measurable, and each renders as itself rather than as a bar:**
-
-- **Running** has no end. Deriving one from `Date.now()` would re-lay out every bar at clock
-  rate inside a live stream, so the axis comes from the data and an open bar fades.
-- **Abandoned** ends where the turn terminated — a lower bound, labelled `≥`.
-- **A trajectory that forwarded nothing** has no bound at all and is drawn as a caret.
-
-**Ranking by duration therefore requires every row to be exact.** A delegate that ran nine
-seconds and forwarded its one event near the end bounds at a fraction of that, so ranking it
-against an exact figure names the wrong row. When any row is a bound, figures carry their `≥`
-and no row is badged.
-
-Collapsed cards and comparison bars use the same explicit clock endpoints. Live durations
-subtract server arrival times; a vendor timestamp is never substituted into that pair.
-Missing or reversed endpoints remain unmeasured, and a server-authored abandonment does not
-become an exact elapsed value in a collapsed card. Fidelity gates the card's duration as well
-as the comparison axis.
+The interactive transcript does not fetch a full tree for a comparison strip. Timing
+endpoints remain available on loaded node summaries. Parallel elapsed intervals cannot
+be added, and an absent start is not a measured zero. Full replay and export remain
+explicit operations for analysis of the whole record.
 
 ## Data flow
 
@@ -518,7 +429,7 @@ rows and failure details. Edits and cancellation carry the displayed revision, s
 changes produce a visible conflict followed by a resource refresh. Rendering is paged within
 the bounded recent ledger, while every pending item remains reachable.
 
-**Streaming a turn** — `lib/use-session-trace.ts` reads the body and hands frames to the page, which
+**Streaming a turn** — `lib/execution-store.ts` reads the body and hands frames to the page, which
 merges them into the live projection and refetches history when the turn settles. The
 handover from live stream to durable history is the subtle part: the live turn is filtered
 out of history until the refetched history actually contains it, which closes the frame
@@ -831,30 +742,16 @@ confirmed absent from the first-load chunk set and fetched on demand.
 
 ### Render cost
 
-**A 1000-event conversation cold-renders in well under the 2s budget**
-(`e2e/timeline.spec.ts`, on a reload, so it covers durable history rather than incremental
-streaming).
-
-The mechanism is memoization by object identity, not windowing. `buildRows`
-produces a new row object only for rows whose content changed, and the row
-component compares by reference — so a streaming token costs O(new rows) rather
-than O(conversation length). A unit test pins that settled rows stay referentially
-stable as events arrive, because that property is what the whole approach rests on
-and it is invisible if it breaks.
-
-**No virtualization.** A windowing library would consume most of the remaining
-budget, and profiling showed re-render count, not DOM size, to be the cost. The
-evidence that would reverse this: scroll jank on a large session while *idle*,
-which is the signature of a DOM-size problem rather than a render-count one.
-
-Bounded rendering keeps DOM size in check without windowing: code blocks show 60
-lines with "show all", command output 40, diffs elide unchanged runs to three lines
-of context, and diff alignment above 2000 lines per side degrades to a wholesale
-replacement rather than allocating a quadratic table.
+First-screen work is bounded by the node and byte limits in `docs/storage.md` § Execution
+node projection. Collapsed execution mounts no descendants. Each parent caches a bounded
+window, and only the currently expanded visible list enters TanStack Virtual. Its end-anchor
+mode preserves reading position across prepend and resize, and follows appends only near
+the bottom. Tests measure entity identity, subscriber notifications, body requests and
+mounted rows separately from HTTP latency.
 
 ### Document previews
 
-**A grid is not virtualized either, but for different reasons from the timeline,
+**A grid is not virtualized, unlike the timeline,
 and they were measured directly.** A sticky-header table in headless Chromium:
 
 | Rows × cols | Cells | Build | Scroll |
@@ -949,7 +846,7 @@ Checked in a real browser, because none of it is verifiable statically:
   actually moves focus to `<main>`.
 - Every overlay traps Tab, closes on Escape, and **returns focus to its opener** —
   without which a keyboard user is dropped at the top of the document.
-- Bare-key shortcuts (`Shift+E`) do not fire while a text field has focus.
+- Bare-key shortcuts (`Shift+C`) do not fire while a text field has focus.
 - Sidebars toggle, the palette runs commands, and search opens a session, all
   without a pointer.
 
@@ -1034,9 +931,7 @@ invites a reader to conclude coverage shrank.
 | `lib/fuzzy.test.ts` | Subsequence matching and *relative ranking* — boundary and adjacency bonuses, field weighting |
 | `lib/shortcuts.test.ts` | Canonical combo spelling, Cmd/Ctrl unification, recorder and dispatcher agreeing |
 | `lib/sse-parse.test.ts` | Frame decoding across chunk boundaries — the bug `EventSource` shipped untested |
-| `lib/timeline-rows.test.ts` | Delta accumulation, tool-result pairing, interleaved streams, referential stability of settled rows |
-| `lib/timeline-tree.test.ts` | Delegation tree building: `span` attachment, orphans, cycles, promotion by use, status rollup, and `trajectoryName` including the nameless fallback |
-| `lib/timeline-waterfall.test.ts` | The sibling comparison: shared time axis, exact extent vs lower bound, and which rows may be ranked |
+| `lib/execution-store.test.ts` | Entity identity, subscriber isolation, snapshot merging, parent removals, and bounded window eviction |
 | `lib/select-list.test.ts` | The one choice-list engine: one cursor per list, non-selectable rows, one current row per single-select group |
 | `lib/request-form.test.ts`, `lib/request-parse.test.ts` | A declared request form's fields and the answer shape sent back |
 | `lib/i18n/i18n.test.ts` | Message coverage across locales, so a translated surface cannot silently fall back |
@@ -1069,7 +964,7 @@ counts are not.
 | --- | --- |
 | `session-lifecycle.spec.ts` | Create, send, stream, reload-replay, sidebar grouping, resuming from `/` |
 | `start-screen.spec.ts` | Usable before the listing settles, first-run guide vs recents, create button matching its shortcut, key hints reflecting a rebind |
-| `timeline.spec.ts` | Tool calls as regions, inline diff, failure auto-expansion, Markdown, 1000-event render budget |
+| `timeline.spec.ts` | Three-level disclosures, Markdown order, keyboard access, and bounded reload rendering |
 | `delegation.spec.ts` | The delegation tree: one card per delegate, nesting to the agent's own depth, a failure three levels down surfacing on the collapsed card above, focus mode and the way back, structure surviving reload, promotion of an undeclared delegating tool, a host that forwarded no interior saying so, the turn-settle sweep closing what an adapter left open without failing a host that succeeded, work reported on a later agent-initiated turn, and a backgrounded shell command staying a tool call |
 | `requests.spec.ts` | A declared request form: pick, note, and multi-select reaching the agent; an answer outside the offered list; declining while a required field is empty; prefill; dismissal saying the agent still waits; keyboard-only answering |
 | `workspace-shell.spec.ts` | Pane toggles and persistence, palette including grouping and a cursor that skips headings, search including a hit's match snippet, focus restoration, settings round-trip, Artifacts tree, history browser, dialog-free creation |

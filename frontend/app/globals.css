@@ -422,3 +422,9 @@ select {
   animation: fade-in 180ms ease-out;
 }
 
+
+/* Opacity only, with readable contrast at the dimmest point. */
+@keyframes execution-activity-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.8; }
+}

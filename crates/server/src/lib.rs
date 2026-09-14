@@ -403,11 +403,24 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             "/api/v1/sessions/{id}/turns",
-            get(api::sessions::history).post(api::turns::create),
+            get(api::sessions::export_turns).post(api::turns::create),
         )
         .route(
             "/api/v1/sessions/{id}/bodies/{seq}",
             get(api::sessions::body),
+        )
+        .route("/api/v1/sessions/{id}/nodes", get(api::sessions::nodes))
+        .route(
+            "/api/v1/sessions/{id}/nodes/search",
+            get(api::sessions::search_nodes),
+        )
+        .route(
+            "/api/v1/sessions/{id}/nodes/{node}/body",
+            get(api::sessions::node_body),
+        )
+        .route(
+            "/api/v1/sessions/{id}/turn-state",
+            get(api::sessions::history),
         )
         .route("/api/v1/sessions/{id}/edges", get(api::sessions::edges))
         // Parse the vendor's store again for a session already held, ingesting only what

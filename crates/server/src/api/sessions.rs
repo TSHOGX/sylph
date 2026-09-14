@@ -247,9 +247,9 @@ pub struct HistoryResponse {
 
 #[derive(Deserialize)]
 pub struct HistoryQuery {
+    turn_id: Option<String>,
     #[serde(default = "default_history_limit")]
     limit: i64,
-    #[serde(alias = "before")]
     cursor: Option<String>,
 }
 
@@ -270,7 +270,7 @@ fn turn_cursor(turn: &Turn) -> String {
 /// Only journal rows are read, never the ephemeral projection: `delta` events are
 /// transient by protocol and their text is already contained in the matching
 /// `completed` event, so replaying both would duplicate every token.
-pub async fn history(
+pub async fn export_turns(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(query): Query<HistoryQuery>,
@@ -291,10 +291,22 @@ pub async fn history(
     // Capture before the page so a concurrent arrival may be replayed twice but can
     // never be skipped between reading history and opening the trace connection.
     let snapshot_seq = state.store.max_event_seq(&id).await?;
-    let mut turns = state
-        .store
-        .list_turns_page(&id, query.cursor.as_deref(), limit + 1)
-        .await?;
+    let mut turns = if let Some(turn_id) = query.turn_id.as_deref() {
+        let turn = state
+            .store
+            .get_turn(turn_id)
+            .await?
+            .ok_or(Error::TurnNotFound)?;
+        if turn.session_id != id {
+            return Err(Error::TurnNotFound);
+        }
+        vec![turn]
+    } else {
+        state
+            .store
+            .list_turns_page(&id, query.cursor.as_deref(), limit + 1)
+            .await?
+    };
     let has_more = turns.len() > limit as usize;
     if has_more {
         turns.truncate(limit as usize);
@@ -344,6 +356,203 @@ pub async fn history(
         next_cursor,
         snapshot_seq,
     }))
+}
+
+/// Turn metadata for control state; transcript content uses the node endpoint.
+pub async fn history(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<HistoryQuery>,
+) -> Result<Json<serde_json::Value>> {
+    let id = decode_id(&id)?;
+    state
+        .store
+        .get_session(&id)
+        .await?
+        .ok_or(Error::SessionNotFound)?;
+    let rows = sqlx::query("SELECT id,status FROM turns WHERE session_env=? AND session_agent=? AND session_native=? ORDER BY created_at_ms DESC,id DESC LIMIT ?")
+        .bind(id.environment.as_str()).bind(id.agent.as_str()).bind(id.native_id.as_str())
+        .bind(query.limit.clamp(1,40)).fetch_all(state.store.read_pool()).await?;
+    use sqlx::Row;
+    let turns = rows
+        .into_iter()
+        .map(|row| {
+            Ok(serde_json::json!({"turn": {
+                "id": row.try_get::<String,_>("id")?, "status": row.try_get::<String,_>("status")?
+            }}))
+        })
+        .collect::<std::result::Result<Vec<_>, sqlx::Error>>()?;
+    Ok(Json(serde_json::json!({"turns": turns})))
+}
+
+#[derive(Deserialize)]
+pub struct NodesQuery {
+    around: Option<i32>,
+    #[serde(default)]
+    parent: String,
+    cursor: Option<String>,
+    #[serde(default)]
+    changes: bool,
+    limit: Option<i64>,
+}
+
+/// Direct children only, from the same projection before and after archiving.
+pub async fn nodes(
+    State(state): State<AppState>,
+    Extension(subject): Extension<SubjectId>,
+    Path(id): Path<String>,
+    Query(query): Query<NodesQuery>,
+) -> Result<impl axum::response::IntoResponse> {
+    let id = decode_id(&id)?;
+    state
+        .store
+        .get_session(&id)
+        .await?
+        .ok_or(Error::SessionNotFound)?;
+    if !state
+        .store
+        .has_capability(&subject.0, id.environment.as_str(), "observe")
+        .await?
+    {
+        return Err(Error::SessionNotFound);
+    }
+    let page = if let Some(seq) = query.around {
+        state.store.node_window(&id.encode(), seq).await?
+    } else {
+        state
+            .store
+            .node_page(
+                &id.encode(),
+                &query.parent,
+                query.cursor.as_deref(),
+                query.changes,
+                query.limit.unwrap_or(crate::db::timeline::PAGE_NODES),
+            )
+            .await?
+    };
+    let timing = format!(
+        "node_pool;dur={:.3},node_read;dur={:.3}",
+        page.work.pool_wait_us as f64 / 1000.0,
+        page.work.projection_us as f64 / 1000.0
+    );
+    Ok(([("Server-Timing", timing)], Json(page)))
+}
+
+#[derive(Deserialize)]
+pub struct NodeSearchQuery {
+    q: String,
+}
+
+/// Explicit search uses the retained full-text index, never a scan of node previews.
+pub async fn search_nodes(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<NodeSearchQuery>,
+) -> Result<Json<serde_json::Value>> {
+    let id = decode_id(&id)?;
+    state
+        .store
+        .get_session(&id)
+        .await?
+        .ok_or(Error::SessionNotFound)?;
+    let hits = state
+        .history
+        .search_session(&id.encode(), &query.q)
+        .await
+        .map_err(|e| Error::Internal(e.to_string()))?;
+    Ok(Json(
+        serde_json::json!({"hits":hits.into_iter().map(|(seq,excerpt)|serde_json::json!({"seq":seq,"excerpt":excerpt})).collect::<Vec<_>>()}),
+    ))
+}
+
+/// A prompt body is owned by its turn; ordinary nodes reuse the event body resource.
+pub async fn node_body(
+    State(state): State<AppState>,
+    Extension(subject): Extension<SubjectId>,
+    Path((id, node)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>> {
+    let session = decode_id(&id)?;
+    if !state
+        .store
+        .has_capability(&subject.0, session.environment.as_str(), "observe")
+        .await?
+    {
+        return Err(Error::SessionNotFound);
+    }
+    if let Some(turn_id) = node.strip_prefix("p:") {
+        let turn = state
+            .store
+            .get_turn(turn_id)
+            .await?
+            .ok_or(Error::TurnNotFound)?;
+        if turn.session_id != session {
+            return Err(Error::SessionNotFound);
+        }
+        return Ok(Json(serde_json::json!({"text": turn.request_text})));
+    }
+    let (node, hot, seqs) = state.store.node_body_snapshot(&session, &node).await?;
+    if node.event.body_ref.is_none() {
+        return Ok(Json(
+            serde_json::json!({"text":node.event.text,"data":node.event.data}),
+        ));
+    }
+    let hot_seqs = hot
+        .iter()
+        .map(|event| event.seq)
+        .collect::<std::collections::HashSet<_>>();
+    let archived = seqs
+        .into_iter()
+        .filter(|seq| !hot_seqs.contains(seq))
+        .collect::<Vec<_>>();
+    let blocks = state
+        .history
+        .node_body_blocks(&session.encode(), &node.event.kind, &archived)
+        .await
+        .map_err(|e| Error::Internal(format!("could not read node body: {e:#}")))?;
+    let mut parts = std::collections::BTreeMap::new();
+    for block in blocks {
+        let replace = block.phase.as_deref() == Some("completed") || block.kind == "subagent";
+        parts.insert(block.seq, (replace, block.text, block.data));
+    }
+    for event in hot {
+        let replace = event.phase.as_deref() != Some("delta") || event.kind == "subagent";
+        parts.insert(
+            event.seq,
+            (
+                replace,
+                event.text,
+                crate::events::data_from_column(&event.data_json),
+            ),
+        );
+    }
+    let mut text = String::new();
+    let mut data = None;
+    for (replace, part, value) in parts.into_values() {
+        if replace {
+            text = part;
+            data = value;
+        } else {
+            text.push_str(&part);
+            if value.is_some() {
+                data = value;
+            }
+        }
+    }
+    let expected = node.event.body_ref.as_ref().unwrap().text_bytes;
+    if text.len() as u64 != expected {
+        return Err(Error::Internal(
+            "node body is incomplete; a retained fragment is unavailable".into(),
+        ));
+    }
+    let data_bytes = data
+        .as_ref()
+        .map_or(0, |value| value.to_string().len() as u64);
+    if data_bytes != node.event.body_ref.as_ref().unwrap().data_bytes {
+        return Err(Error::Internal(
+            "node metadata is incomplete; a retained fragment is unavailable".into(),
+        ));
+    }
+    Ok(Json(serde_json::json!({"text":text,"data":data})))
 }
 
 /// Render a bounded history summary without hydrating the complete body.
@@ -399,6 +608,22 @@ pub async fn body(
         .await?
     {
         return Err(Error::SessionNotFound);
+    }
+    // Read the journal first. Publication writes history before deleting journal
+    // rows, so this order cannot observe a hole at the archive boundary.
+    let rows = state.store.event_body_rows(&session_id, seq).await?;
+    if !rows.is_empty() {
+        let blocks = crate::storage::history::consolidate(&rows);
+        if let Some(block) = blocks.iter().find(|b| b.seq == seq) {
+            return Ok(Json(
+                serde_json::json!({"text": block.text, "data": block.data}),
+            ));
+        }
+        if let Some(row) = rows.iter().find(|r| r.seq == seq) {
+            return Ok(Json(
+                serde_json::json!({"text": row.text, "data": row.data()}),
+            ));
+        }
     }
     let block = state
         .history

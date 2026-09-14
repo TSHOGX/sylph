@@ -1,0 +1,91 @@
+diff --git a/crates/envagent/src/client.rs b/crates/envagent/src/client.rs
+index 0b84b93..a7b001d 100644
+--- a/crates/envagent/src/client.rs
++++ b/crates/envagent/src/client.rs
+@@ -287,0 +288,5 @@ async fn run_connection(
++                let file_list=match &command {
++                    sylph_protocol::EnvironmentCommand::Files{operation:sylph_protocol::FileOperation::List{relative},..}=>Some(relative.clone()),
++                    _=>None,
++                };
++                let queued_at=std::time::Instant::now();
+@@ -292,0 +298,2 @@ async fn run_connection(
++                    let queue_us=queued_at.elapsed().as_micros() as u64;
++                    let executing=std::time::Instant::now();
+@@ -293,0 +301,3 @@ async fn run_connection(
++                    if let Some(relative)=file_list {
++                        tracing::debug!(%request_id,%relative,queue_us,filesystem_us=executing.elapsed().as_micros() as u64,"file_list_timing");
++                    }
+diff --git a/crates/envagent/src/main.rs b/crates/envagent/src/main.rs
+index 71fddf6..8b484a8 100644
+--- a/crates/envagent/src/main.rs
++++ b/crates/envagent/src/main.rs
+@@ -22,0 +23,7 @@ async fn main() -> Result<()> {
++    tracing_subscriber::fmt()
++        .with_env_filter(
++            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
++        )
++        .with_writer(std::io::stderr)
++        .with_ansi(false)
++        .init();
+diff --git a/crates/server/src/api/files.rs b/crates/server/src/api/files.rs
+index 48aa42c..866294e 100644
+--- a/crates/server/src/api/files.rs
++++ b/crates/server/src/api/files.rs
+@@ -298 +298,2 @@ pub async fn tree(
+-) -> Result<Json<TreeResponse>> {
++) -> Result<axum::response::Response> {
++    let started = std::time::Instant::now();
+@@ -299,0 +301,2 @@ pub async fn tree(
++        let lookup_ms = started.elapsed().as_secs_f64() * 1000.0;
++        let bridge_start = std::time::Instant::now();
+@@ -312,0 +316 @@ pub async fn tree(
++        let bridge_ms = bridge_start.elapsed().as_secs_f64() * 1000.0;
+@@ -365 +369 @@ pub async fn tree(
+-        return Ok(Json(TreeResponse {
++        let mut response = Json(TreeResponse {
+@@ -370 +374,9 @@ pub async fn tree(
+-        }));
++        })
++        .into_response();
++        response.headers_mut().insert(
++            "Server-Timing",
++            format!("lookup;dur={lookup_ms:.3},bridge;dur={bridge_ms:.3}")
++                .parse()
++                .expect("numeric timing header"),
++        );
++        return Ok(response);
+@@ -482 +494,2 @@ pub async fn tree(
+-    }))
++    })
++    .into_response())
+diff --git a/crates/server/src/middleware/auth.rs b/crates/server/src/middleware/auth.rs
+index 5cf407d..4ef23a7 100644
+--- a/crates/server/src/middleware/auth.rs
++++ b/crates/server/src/middleware/auth.rs
+@@ -52,0 +53 @@ pub async fn auth_middleware(
++    let started = std::time::Instant::now();
+@@ -85 +86 @@ pub async fn auth_middleware(
+-        return Ok(next.run(request).await);
++        return Ok(timed_authenticated_response(request, next, started).await);
+@@ -105 +106 @@ pub async fn auth_middleware(
+-        return Ok(next.run(request).await);
++        return Ok(timed_authenticated_response(request, next, started).await);
+@@ -116 +117,17 @@ pub async fn auth_middleware(
+-    Ok(next.run(request).await)
++    Ok(timed_authenticated_response(request, next, started).await)
++}
++
++async fn timed_authenticated_response(
++    request: Request,
++    next: Next,
++    started: std::time::Instant,
++) -> Response {
++    let duration = started.elapsed().as_secs_f64() * 1000.0;
++    let mut response = next.run(request).await;
++    response.headers_mut().append(
++        "Server-Timing",
++        format!("auth;dur={duration:.3}")
++            .parse()
++            .expect("numeric timing header"),
++    );
++    response

@@ -1,0 +1,306 @@
+{
+  "label": "bounded-execution-nodes-final",
+  "createdAt": "2026-09-14T20:14:35.089Z",
+  "browser": "148.0.7778.96",
+  "directories": 100,
+  "backgroundExecution": {
+    "turnId": "b1cbcfdc-1d9d-48ce-ad07-6faccf124cd3",
+    "startedAtMs": 1789416873339,
+    "completedAtMs": 1789416874836
+  },
+  "firstFile": {
+    "paintedMs": 114.10000002384186,
+    "requestMs": 50,
+    "responseMs": 55.799999952316284,
+    "bytes": 810,
+    "server": {
+      "lookup": 0.221,
+      "bridge": 2.738,
+      "auth": 0.484
+    },
+    "envQueueMs": 0.033,
+    "envFilesystemMs": 0.825,
+    "envFinishedAtMs": 1789416873077.948
+  },
+  "samples": [
+    {
+      "relative": "latency-000",
+      "totalMs": 49.10000002384186,
+      "beforeRequestMs": 5,
+      "requestToFirstByteMs": 3.600000023841858,
+      "httpTransferMs": 0.20000004768371582,
+      "afterResponseMs": 40.299999952316284,
+      "bytes": 245,
+      "server": {
+        "lookup": 0.269,
+        "bridge": 1.581,
+        "auth": 0.589
+      },
+      "envQueueMs": 0.024,
+      "envFilesystemMs": 0.132,
+      "envFinishedAtMs": 1789416873395.648,
+      "bridgeOutsideEnvMs": 1.4249999999999998,
+      "backgroundActiveAtEnumeration": true
+    },
+    {
+      "relative": "latency-001",
+      "totalMs": 67.29999995231628,
+      "beforeRequestMs": 3.899999976158142,
+      "requestToFirstByteMs": 5,
+      "httpTransferMs": 0.30000007152557373,
+      "afterResponseMs": 58.09999990463257,
+      "bytes": 245,
+      "server": {
+        "lookup": 0.192,
+        "bridge": 1.302,
+        "auth": 0.352
+      },
+      "envQueueMs": 0.031,
+      "envFilesystemMs": 0.506,
+      "envFinishedAtMs": 1789416873523.739,
+      "bridgeOutsideEnvMs": 0.7650000000000001,
+      "backgroundActiveAtEnumeration": true
+    },
+    {
+      "relative": "latency-002",
+      "totalMs": 43.60000002384186,
+      "beforeRequestMs": 3.9000000953674316,
+      "requestToFirstByteMs": 2.6999999284744263,
+      "httpTransferMs": 0.20000004768371582,
+      "afterResponseMs": 36.799999952316284,
+      "bytes": 245,
+      "server": {
+        "lookup": 0.229,
+        "bridge": 0.914,
+        "auth": 0.329
+      },
+      "envQueueMs": 0.016,
+      "envFilesystemMs": 0.152,
+      "envFinishedAtMs": 1789416873686.889,
+      "bridgeOutsideEnvMs": 0.746,
+      "backgroundActiveAtEnumeration": true
+    },
+    {
+      "relative": "latency-003",
+      "totalMs": 43.800000071525574,
+      "beforeRequestMs": 3.8000000715255737,
+      "requestToFirstByteMs": 2.899999976158142,
+      "httpTransferMs": 0.19999992847442627,
+      "afterResponseMs": 36.90000009536743,
+      "bytes": 245,
+      "server": {
+        "lookup": 0.186,
+        "bridge": 1.033,
+        "auth": 0.326
+      },
+      "envQueueMs": 0.033,
+      "envFilesystemMs": 0.209,
+      "envFinishedAtMs": 1789416873801.474,
+      "bridgeOutsideEnvMs": 0.7909999999999999,
+      "backgroundActiveAtEnumeration": true
+    },
+    {
+      "relative": "latency-004",
+      "totalMs": 45.299999952316284,
+      "beforeRequestMs": 3.6999999284744263,
+      "requestToFirstByteMs": 2.600000023841858,
+      "httpTransferMs": 0.20000004768371582,
+      "afterResponseMs": 38.799999952316284,
+      "bytes": 245,
+      "server": {
+        "lookup": 0.21,
+        "bridge": 0.964,
+        "auth": 0.273
+      },
+      "envQueueMs": 0.025,
+      "envFilesystemMs": 0.202,
+      "envFinishedAtMs": 1789416873922.026,
+      "bridgeOutsideEnvMs": 0.7369999999999999,
+      "backgroundActiveAtEnumeration": true
+    },
+    {
+      "relative": "latency-005",
+      "totalMs": 44.700000047683716,
+      "beforeRequestMs": 4,
+      "requestToFirstByteMs": 2.799999952316284,
+      "httpTransferMs": 0.20000004768371582,
+      "afterResponseMs": 37.700000047683716,
+      "bytes": 245,
+      "server": {
+        "lookup": 0.175,
+        "bridge": 1.011,
+        "auth": 0.329
+      },
+      "envQueueMs": 0.029,
+      "envFilesystemMs": 0.16,
+      "envFinishedAtMs": 1789416874043.783,
+      "bridgeOutsideEnvMs": 0.8219999999999998,
+      "backgroundActiveAtEnumeration": true
+    },
+    {
+      "relative": "latency-006",
+      "totalMs": 44.299999952316284,
+      "beforeRequestMs": 3.6999999284744263,
+      "requestToFirstByteMs": 2.4000000953674316,
+      "httpTransferMs": 0.19999992847442627,
+      "afterResponseMs": 38,
+      "bytes": 245,
+      "server": {
+        "lookup": 0.171,
+        "bridge": 0.949,
+        "auth": 0.292
+      },
+      "envQueueMs": 0.037,
+      "envFilesystemMs": 0.167,
+      "envFinishedAtMs": 1789416874161.1208,
+      "bridgeOutsideEnvMs": 0.7449999999999999,
+      "backgroundActiveAtEnumeration": true
+    },
+    {
+      "relative": "latency-007",
+      "totalMs": 44.60000002384186,
+      "beforeRequestMs": 3.5,
+      "requestToFirstByteMs": 2.600000023841858,
+      "httpTransferMs": 0.20000004768371582,
+      "afterResponseMs": 38.299999952316284,
+      "bytes": 245,
+      "server": {
+        "lookup": 0.226,
+        "bridge": 0.987,
+        "auth": 0.264
+      },
+      "envQueueMs": 0.032,
+      "envFilesystemMs": 0.279,
+      "envFinishedAtMs": 1789416874278.555,
+      "bridgeOutsideEnvMs": 0.6759999999999999,
+      "backgroundActiveAtEnumeration": true
+    },
+    {
+      "relative": "latency-008",
+      "totalMs": 46.10000002384186,
+      "beforeRequestMs": 3.600000023841858,
+      "requestToFirstByteMs": 2.8000000715255737,
+      "httpTransferMs": 0.19999992847442627,
+      "afterResponseMs": 39.5,
+      "bytes": 245,
+      "server": {
+        "lookup": 0.216,
+        "bridge": 1.044,
+        "auth": 0.308
+      },
+      "envQueueMs": 0.049,
+      "envFilesystemMs": 0.176,
+      "envFinishedAtMs": 1789416874402.638,
+      "bridgeOutsideEnvMs": 0.819,
+      "backgroundActiveAtEnumeration": true
+    },
+    {
+      "relative": "latency-009",
+      "totalMs": 44,
+      "beforeRequestMs": 3.600000023841858,
+      "requestToFirstByteMs": 2.899999976158142,
+      "httpTransferMs": 0.20000004768371582,
+      "afterResponseMs": 37.299999952316284,
+      "bytes": 245,
+      "server": {
+        "lookup": 0.176,
+        "bridge": 1.048,
+        "auth": 0.358
+      },
+      "envQueueMs": 0.033,
+      "envFilesystemMs": 0.195,
+      "envFinishedAtMs": 1789416874526.8071,
+      "bridgeOutsideEnvMs": 0.8200000000000001,
+      "backgroundActiveAtEnumeration": true
+    },
+    {
+      "relative": "latency-010",
+      "totalMs": 45.799999952316284,
+      "beforeRequestMs": 3.6999999284744263,
+      "requestToFirstByteMs": 5,
+      "httpTransferMs": 0.20000004768371582,
+      "afterResponseMs": 36.89999997615814,
+      "bytes": 245,
+      "server": {
+        "lookup": 0.285,
+        "bridge": 1.157,
+        "auth": 0.367
+      },
+      "envQueueMs": 0.027,
+      "envFilesystemMs": 0.193,
+      "envFinishedAtMs": 1789416874646.581,
+      "bridgeOutsideEnvMs": 0.937,
+      "backgroundActiveAtEnumeration": true
+    },
+    {
+      "relative": "latency-011",
+      "totalMs": 45.800000071525574,
+      "beforeRequestMs": 4,
+      "requestToFirstByteMs": 2.8000000715255737,
+      "httpTransferMs": 0.19999992847442627,
+      "afterResponseMs": 38.800000071525574,
+      "bytes": 245,
+      "server": {
+        "lookup": 0.216,
+        "bridge": 0.96,
+        "auth": 0.333
+      },
+      "envQueueMs": 0.034,
+      "envFilesystemMs": 0.186,
+      "envFinishedAtMs": 1789416874777.69,
+      "bridgeOutsideEnvMs": 0.74,
+      "backgroundActiveAtEnumeration": true
+    },
+    {
+      "relative": "latency-012",
+      "totalMs": 45.39999997615814,
+      "beforeRequestMs": 4,
+      "requestToFirstByteMs": 3,
+      "httpTransferMs": 0.10000002384185791,
+      "afterResponseMs": 38.299999952316284,
+      "bytes": 245,
+      "server": {
+        "lookup": 0.161,
+        "bridge": 1.103,
+        "auth": 0.362
+      },
+      "envQueueMs": 0.033,
+      "envFilesystemMs": 0.187,
+      "envFinishedAtMs": 1789416874894.8792,
+      "bridgeOutsideEnvMs": 0.883,
+      "backgroundActiveAtEnumeration": false
+    },
+    {
+      "relative": "latency-013",
+      "totalMs": 48.39999997615814,
+      "beforeRequestMs": 4.099999904632568,
+      "requestToFirstByteMs": 3.200000047683716,
+      "httpTransferMs": 0.20000004768371582,
+      "afterResponseMs": 40.89999997615814,
+      "bytes": 245,
+      "server": {
+        "lookup": 0.223,
+        "bridge": 1.189,
+        "auth": 0.356
+      },
+      "envQueueMs": 0.031,
+      "envFilesystemMs": 0.174,
+      "envFinishedAtMs": 1789416875012.29,
+      "bridgeOutsideEnvMs": 0.9840000000000002,
+      "backgroundActiveAtEnumeration": false
+    }
+  ],
+  "dom": {
+    "elements": 132,
+    "sections": 22
+  },
+  "heapBefore": 26705228,
+  "heapAfter": 21306680,
+  "measurementNotes": [
+    "Deterministic fixture agents; no model calls and no native user records.",
+    "Browser durations and envagent durations use their own monotonic clocks; enumeration overlap uses same-host wall clocks.",
+    "bridgeOutsideEnvMs includes server scheduling, transport, and reply decoding, not just network time.",
+    "Heap samples do not force garbage collection and are not a leak measurement.",
+    "Background activity is recorded per sample; do not claim every expansion overlapped execution."
+  ]
+}

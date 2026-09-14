@@ -525,3 +525,65 @@ Measurements include uncompressed block text and metadata, original native-recor
 retained native sidecar bodies, and staged sidecar chunk bytes. An unreadable reference
 contributes no body bytes: its reported source size is not data the server holds. Sessions
 holding only raw records or staged sidecars still participate in the accounting pass.
+
+## Execution node projection
+
+The interactive transcript reads a materialized projection in the journal, independent
+of the tier holding original events. Event insertion, producer receipts, node updates,
+and ancestor summary deltas commit together. Archiving removes event rows, never node
+addresses. Replay and export continue to read original records.
+
+A node address is scoped to the existing session identity. Logical streams keep their
+first address and ordering across phases and late completion. Direct parentage expresses
+execution groups and tool results as well as delegated trajectories; `span` alone is
+not the UI tree. Consecutive execution items share a group within each trajectory and
+turn. User messages and outward assistant replies end that group. First declaration
+owns a delegated trajectory even when its close arrives on another turn.
+
+Nodes contain bounded previews, a body address and byte lengths, first ordering key,
+start/end clocks, direct child count, and materialized descendant counters. Failure,
+running, and waiting counters propagate by differences along affected ancestor paths.
+Running counts describe active leaves: a running ancestor does not count again when
+its children are already active. Parallel duration is an interval, never a sum. Token usage remains explicitly scoped to
+its reporting node; parent and child totals are not added. Pending approvals remain
+durable request resources with their existing authorization and resolution endpoints.
+
+Child pages seek an index on session, parent, ordering and node address. Every response
+is bounded in both nodes and encoded bytes. Initial reads request recent root nodes;
+expansion requests only direct children. No collapsed subtree or body is hydrated.
+A read transaction captures a projection revision with the page. Changes after that
+revision are bounded patches, including ancestor summaries, rather than replayed bodies.
+Readers reconcile by stable node identity and revision; an older page cannot overwrite
+a newer patch. Current node revisions are indexed per parent, so polling an unchanged
+branch does not traverse its children.
+
+Prompt and pending-request projection updates are transactional with their owning rows.
+Ordinary stream addresses include their turn; trajectory aliases are session-scoped and
+can promote a tool without replacing its arguments. A former parent keeps a coalesced
+removal revision, and event-to-node addresses survive archive eviction for search jumps.
+Cyclic declarations are attached to the root with an explicit structural warning.
+
+Session titles are materialized when root user input is accepted. Metadata reads do not
+search event bodies for a missing title or acquire the writer to fill it. An unknown title
+stays absent until a producer supplies evidence. This also bounds the session lookup used
+by file browsing when an untitled session has a large transcript.
+
+A separate body revision changes only when a node's own content changes. Updating an
+ancestor's counters cannot cause an expanded body to download again. A loaded body stays
+readable while newer content is available through an explicit reload action; unused full
+bodies leave the browser cache immediately. The node preview cache remains independently
+bounded.
+
+Execution lifetime is separate from UI parentage. Ordinary root streams close as
+unfinished when their turn seals; an independent delegated scope can continue across
+that boundary. Explicit trajectory closure seals only ordinary streams in that scope,
+not nested independent scopes. Open-scope indexes bound this work to affected streams.
+A later result clears an unfinished invocation without counting missing completion as
+failure.
+
+On-demand bodies follow the durable event-to-node index across both physical tiers.
+A journal snapshot captures the current body boundary and hot fragments; archived
+fragments whose terminal sequence is still hot are excluded. Started/completed
+replacement boundaries prevent an older revision from being appended to a new one.
+The assembled text and metadata lengths must match the projection, so a missing retained
+fragment fails visibly instead of returning a plausible suffix.

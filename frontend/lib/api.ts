@@ -261,13 +261,12 @@ export const api = {
       }),
     discardPrepared: (draftId: string) =>
       fetchAPI<void>(`/sessions/draft/${segment(draftId)}`, { method: "DELETE" }),
-    history: (id: string, before?: string, signal?: AbortSignal) => {
-      const query = new URLSearchParams({ limit: "100" });
-      if (before) query.set("before", before);
-      return fetchAPI<HistoryPage>(`/sessions/${segment(id)}/turns?${query}`, { signal });
-    },
-    eventBody: (id: string, seq: number) =>
-      fetchAPI<{ text: string; data?: unknown }>(`/sessions/${segment(id)}/bodies/${seq}`),
+    turnStates: (id: string, signal?: AbortSignal) =>
+      fetchAPI<HistoryPage>(`/sessions/${segment(id)}/turn-state?limit=40`, { signal }),
+    exportTurn: (id: string, turnId: string) =>
+      fetchAPI<{turns: import("./api-types").TurnWithEvents[]}>(`/sessions/${segment(id)}/turns?turn_id=${encodeURIComponent(turnId)}`),
+    eventBody: (id: string, seq: number, signal?: AbortSignal) =>
+      fetchAPI<{ text: string; data?: unknown }>(`/sessions/${segment(id)}/bodies/${seq}`, { signal }),
     edges: (id: string) =>
       fetchAPI<{ edges: SessionEdge[] }>(`/sessions/${segment(id)}/edges`),
     /**

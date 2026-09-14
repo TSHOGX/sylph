@@ -105,7 +105,9 @@ test("the composer fits the viewport, with a flag selected and with a long messa
   const sheet = page.getByRole("dialog", { name: "Model" });
   await expect(sheet).toBeVisible();
   await sheet.getByRole("menuitemradio", { name: "Thorough" }).click();
-  await expect(page.getByRole("button", { name: /^Model:/ })).toHaveText(/Thorough/);
+  await expect(page.getByRole("button", { name: /^Model:/ })).toHaveText(
+    /Thorough/,
+  );
   expect(await overflowingElements(page)).toEqual([]);
 
   // And with content in it, since the textarea grows.
@@ -119,14 +121,20 @@ test("the composer fits the viewport, with a flag selected and with a long messa
   expect(box!.height).toBeLessThanOrEqual(height * 0.45);
 });
 
-test("the conversation owns the full width; sidebars are not in flow", async ({ page }) => {
+test("the conversation owns the full width; sidebars are not in flow", async ({
+  page,
+}) => {
   await createSession(page);
 
   // `showLeftSidebar` defaults to true, and that default is exactly what crushed the
   // conversation: a 240px in-flow pane on a 412px viewport. Below the breakpoint the
   // pane must not be laid out at all, regardless of the stored preference.
-  await expect(page.getByRole("complementary", { name: "Workspaces" })).toBeHidden();
-  await expect(page.getByRole("complementary", { name: "Artifacts" })).toBeHidden();
+  await expect(
+    page.getByRole("complementary", { name: "Workspaces" }),
+  ).toBeHidden();
+  await expect(
+    page.getByRole("complementary", { name: "Artifacts" }),
+  ).toBeHidden();
 
   const width = await viewportWidth(page);
   const main = await page.locator("#main").boundingBox();
@@ -177,7 +185,9 @@ test("the sessions drawer overlays the conversation and dismisses on navigation"
   await expect(page.getByLabel("Message", { exact: true })).toBeVisible();
 });
 
-test("files open as a bottom sheet, and a file opens full screen from it", async ({ page }) => {
+test("files open as a bottom sheet, and a file opens full screen from it", async ({
+  page,
+}) => {
   await createSession(page, { workdir: "/tmp" });
 
   await page.getByRole("button", { name: "Open files" }).click();
@@ -260,7 +270,9 @@ test("the app is installable: manifest, icons, and a standalone display mode", a
   expect(sizes).toContain("192x192");
   expect(sizes).toContain("512x512");
   expect(
-    manifest.icons.some((icon: { purpose?: string }) => icon.purpose === "maskable"),
+    manifest.icons.some(
+      (icon: { purpose?: string }) => icon.purpose === "maskable",
+    ),
   ).toBe(true);
 
   // Every declared icon must actually exist. `output: "standalone"` omits `public/`
@@ -279,7 +291,9 @@ test("the app is installable: manifest, icons, and a standalone display mode", a
   await expect(capable).toHaveAttribute("content", "yes");
 });
 
-test("dark mode applies before paint and follows an explicit choice", async ({ page }) => {
+test("dark mode applies before paint and follows an explicit choice", async ({
+  page,
+}) => {
   await page.emulateMedia({ colorScheme: "dark" });
   // `gotoReady` rather than `goto`, because a shortcut is pressed further down and is
   // silently dropped if it arrives before the shell's keydown effect has run.
@@ -292,8 +306,8 @@ test("dark mode applies before paint and follows an explicit choice", async ({ p
 
   // The canvas actually follows the token, rather than the attribute being set and
   // ignored — which is the failure mode of a half-migrated palette.
-  const canvas = await page.evaluate(() =>
-    getComputedStyle(document.body).backgroundColor,
+  const canvas = await page.evaluate(
+    () => getComputedStyle(document.body).backgroundColor,
   );
   expect(canvas).not.toBe("rgb(255, 255, 255)");
 
@@ -331,7 +345,9 @@ test("dark mode applies before paint and follows an explicit choice", async ({ p
  * (focus is not taken) plus the consequences it can observe: the field works when
  * tapped, and nothing overflows.
  */
-test("a long catalogue is a filterable sheet that does not grab focus", async ({ page }) => {
+test("a long catalogue is a filterable sheet that does not grab focus", async ({
+  page,
+}) => {
   await createSession(page);
 
   await page.getByRole("button", { name: /^Provider model:/ }).click();
@@ -339,7 +355,9 @@ test("a long catalogue is a filterable sheet that does not grab focus", async ({
   await expect(sheet).toBeVisible();
   await settled(page, sheet);
 
-  const filter = sheet.getByRole("combobox", { name: /filter provider model/i });
+  const filter = sheet.getByRole("combobox", {
+    name: /filter provider model/i,
+  });
   await expect(filter).toBeVisible();
   await expect(filter).not.toBeFocused();
 
@@ -354,7 +372,9 @@ test("a long catalogue is a filterable sheet that does not grab focus", async ({
   await rows.first().tap();
 
   await expect(sheet).toBeHidden();
-  await expect(page.getByRole("button", { name: /^Provider model:/ })).toHaveText(/Qwen 3 Max/);
+  await expect(
+    page.getByRole("button", { name: /^Provider model:/ }),
+  ).toHaveText(/Qwen 3 Max/);
   expect(await overflowingElements(page)).toEqual([]);
 });
 
@@ -366,8 +386,10 @@ test("a long catalogue is a filterable sheet that does not grab focus", async ({
  * bug here is invisible to the desktop suite — at 1280px the same markup is merely
  * roomy.
  */
-test("a request form fits the viewport and is answerable by tapping", async ({ page }) => {
-  await createSession(page);
+test("a request form fits the viewport and is answerable by tapping", async ({
+  page,
+}) => {
+  const sessionId = await createSession(page);
 
   await page.getByLabel("Message", { exact: true }).fill("question please");
   await page.getByRole("button", { name: "Send", exact: true }).tap();
@@ -385,11 +407,28 @@ test("a request form fits the viewport and is answerable by tapping", async ({ p
 
   await panel.getByRole("button", { name: "Send answer" }).tap();
 
-  // The answer the agent received, which the fixture echoes into its result. A
-  // result is collapsed to one line by default, so its body is behind `more`.
-  const result = page.getByRole("region", { name: "Tool result" });
-  await expect(result).toBeVisible({ timeout: 15000 });
-  await result.getByRole("button", { name: "more" }).tap();
+  const { openExecutionGroups } = await import("./fixtures/execution");
+  await expect
+    .poll(async () => {
+      const response = await page.request.get(
+        `/api/v1/sessions/${encodeURIComponent(sessionId)}/turn-state`,
+      );
+      return (await response.json()).turns[0].turn.status;
+    })
+    .toBe("completed");
+  const response = await page.request.get(
+    `/api/v1/sessions/${encodeURIComponent(sessionId)}/turn-state`,
+  );
+  const turnId = (await response.json()).turns[0].turn.id;
+  await openExecutionGroups(page, sessionId, turnId, true);
+  await page
+    .getByRole("region", { name: /tool call/ })
+    .last()
+    .locator("button[aria-expanded]")
+    .tap();
+  const result = page
+    .getByRole("region", { name: "Tool result", exact: true })
+    .last();
   await expect(result).toContainText('"q:0": "Tabs"');
   expect(await overflowingElements(page)).toEqual([]);
 });
@@ -404,31 +443,39 @@ test("a request form fits the viewport and is answerable by tapping", async ({ p
  * levels and focus mode carries the rest. The assertion is the same overflow probe
  * the composer uses, because "does it fit" is the whole question.
  */
-test("a delegation tree three levels deep still fits the viewport", async ({ page }) => {
-  await createSession(page);
-
-  await page.getByLabel("Message", { exact: true }).fill("delegate this please");
-  await page.getByRole("button", { name: "Send", exact: true }).click();
-
-  // The failed branch expands itself to the tool that failed, so this is already
-  // the deepest state the tree reaches without any interaction.
+test("a delegation tree three levels deep still fits the viewport", async ({
+  page,
+}) => {
+  const { runExecution, openExecutionGroups } = await import(
+    "./fixtures/execution"
+  );
+  const { sessionId, turnId } = await runExecution(
+    page,
+    "delegate this please",
+  );
+  await openExecutionGroups(page, sessionId, turnId, true);
   const verify = page.getByRole("region", { name: "Verify delegation" });
-  await expect(verify).toBeVisible({ timeout: 15000 });
-  await expect(verify.getByRole("region", { name: "Worker delegation" })).toBeVisible();
-
-  expect(await overflowingElements(page)).toEqual([]);
-
-  // Open the sibling too: two expanded branches plus the stranded card is the
-  // widest and tallest the timeline gets on this fixture.
+  await verify.locator("button[aria-expanded]").tap();
+  const id = (await verify.getAttribute("data-node-id"))!;
+  const response = await page.request.get(
+    `/api/v1/sessions/${encodeURIComponent(sessionId)}/nodes?parent=${encodeURIComponent(id)}`,
+  );
+  const group = (await response.json()).nodes.find(
+    (node: { event: { kind: string } }) => node.event.kind === "execution",
+  );
   await page
-    .getByRole("region", { name: "Explore delegation" })
-    .getByRole("button", { name: "Explore", exact: true })
+    .locator(
+      `[data-node-id=${JSON.stringify(group.id)}] > button[aria-expanded]`,
+    )
     .tap();
+  await expect(
+    page.getByRole("region", { name: "Worker delegation" }),
+  ).toBeVisible();
   expect(await overflowingElements(page)).toEqual([]);
-
-  // Focus mode re-roots and resets the indent budget, which is the point of it.
-  await verify.getByRole("button", { name: "Focus Verify" }).tap();
-  await expect(page.getByRole("navigation", { name: "Delegation path" })).toBeVisible();
+  await verify.getByRole("button", { name: "Focus this branch" }).tap();
+  await expect(
+    page.getByRole("button", { name: "Back to conversation" }),
+  ).toBeVisible();
   expect(await overflowingElements(page)).toEqual([]);
 });
 
@@ -470,9 +517,14 @@ test("the shortcut overlays fit the viewport and their fields do not trigger zoo
     const size = await field.evaluate((node) =>
       Number.parseFloat(window.getComputedStyle(node).fontSize),
     );
-    expect(size, `filter font size with ${combo} open`).toBeGreaterThanOrEqual(16);
+    expect(size, `filter font size with ${combo} open`).toBeGreaterThanOrEqual(
+      16,
+    );
 
-    expect(await overflowingElements(page), `overflow with ${combo} open`).toEqual([]);
+    expect(
+      await overflowingElements(page),
+      `overflow with ${combo} open`,
+    ).toEqual([]);
 
     await page.keyboard.press("Escape");
     await expect(dialog).toBeHidden();

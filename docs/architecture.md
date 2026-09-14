@@ -354,10 +354,10 @@ one logical fact.
 
 ### Session trace is the transport boundary for delegated work
 
-The session page consumes `GET /sessions/{id}/trace/events`: one monotonic session cursor,
-stable replay from both storage tiers, and a bounded in-memory tail for events that have
-not consolidated yet. This is the only stream that can remain attached when a delegated
-trajectory outlives the turn that opened it.
+The session page consumes the execution node projection described in
+`docs/storage.md` § Execution node projection. The session trace remains an explicit
+replay transport with a monotonic session cursor and records from both storage tiers.
+Node ownership is independent of the turn on which a late event arrives.
 
 The trace envelope carries both `trajectoryId` (in the `streamId`/`span` vocabulary) and
 `arrivalTurnId`. The first declaration establishes trajectory ownership; `arrivalTurnId` is

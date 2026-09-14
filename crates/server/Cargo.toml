@@ -39,6 +39,7 @@ sylph-protocol = { path = "../protocol" }
 # Serialization
 serde = { workspace = true }
 serde_json = { workspace = true }
+percent-encoding = "2"
 # The on-disk config format. TOML rather than JSON because this file is
 # hand-edited and seeded fully commented: JSON has no comments, so a seeded file
 # could not explain itself, and every default would have to be duplicated into

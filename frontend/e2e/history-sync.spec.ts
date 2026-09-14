@@ -56,7 +56,8 @@ async function fixture(page: Page) {
   for (const session of [firstSession, secondSession]) {
     const base = `**${sessionPath(session)}`;
     await page.route(base, (route) => route.fulfill({ json: { session } }));
-    await page.route(`${base}/turns?*`, (route) => route.fulfill({ json: { turns: [], hasMore: false, nextCursor: null, snapshotSeq: -1 } }));
+    await page.route(`${base}/turn-state?*`, (route) => route.fulfill({ json: { turns: [], hasMore: false, nextCursor: null, snapshotSeq: -1 } }));
+    await page.route(`${base}/nodes?*`, (route) => route.fulfill({ json: { parent:"",nodes:[],snapshot:0,nextCursor:null,hasMore:false } }));
     await page.route(`${base}/capabilities`, (route) => route.fulfill({ json: { link: { observe: { available: true }, control: { available: false, reason: "environment_unreachable" } }, supports: [] } }));
     await page.route(`${base}/requests`, (route) => route.fulfill({ json: [] }));
     await page.route(`${base}/controls`, (route) => route.fulfill({ json: { controls: [] } }));
@@ -105,7 +106,10 @@ for (const source of ["native input", "journaled input", "native input with late
       seq: 0, kind: "user", text: source === "journaled input" ? nativeTurn.requestText : "Please use the later correction",
       stability: "stable", source: "server", createdAtMs: 3,
     });
-    await page.route(`**${sessionPath()}/turns?*`, (route) => route.fulfill({ json: { turns: [{ turn: nativeTurn, events }], hasMore: false, snapshotSeq: 1 } }));
+    const projected=[{seq:-1,kind:"user",text:nativeTurn.requestText,stability:"stable",source:"user",createdAtMs:3},...events.filter(event=>event.kind!=="user" || event.text!==nativeTurn.requestText)];
+    await page.route(`**${sessionPath()}/turn-state?*`,(route)=>route.fulfill({json:{turns:[{turn:nativeTurn}]}}));
+    await page.route(`**${sessionPath()}/nodes?*`, (route) => route.fulfill({json:{parent:"",snapshot:1,hasMore:false,nextCursor:null,
+      nodes:projected.map((event,index)=>({id:`node-${index}`,parentId:"",turnId:nativeTurn.id,ordinal:index,orderTie:index,revision:1,bodyRevision:1,event,children:0,tools:0,reads:0,commands:0,thinking:0,failed:0,running:0,waiting:0,activity:""}))}}));
     await gotoReady(page, `/sessions/${encodeURIComponent(firstSession.id)}`);
     const transcript = page.getByRole("main");
     await expect(transcript.getByText(nativeTurn.requestText, { exact: true })).toHaveCount(1);
@@ -115,7 +119,7 @@ for (const source of ["native input", "journaled input", "native input with late
 
 test("an empty agent turn explains the missing content instead of showing an unprompted message", async ({ page }) => {
   await fixture(page);
-  await page.route(`**${sessionPath()}/turns?*`, (route) => route.fulfill({ json: {
+  await page.route(`**${sessionPath()}/turn-state?*`, (route) => route.fulfill({ json: {
     turns: [{ turn: { ...nativeTurn, origin: "agent", requestText: "" }, events: [] }], hasMore: false, snapshotSeq: -1,
   } }));
   await gotoReady(page, `/sessions/${encodeURIComponent(firstSession.id)}`);
@@ -245,7 +249,7 @@ test("switching sessions resets the file tree expansion state", async ({ page })
   await expect(pane.getByRole("treeitem", { name: /src/ }).first()).toHaveAttribute("aria-expanded", "false");
 });
 
-for (const suffix of ["", "/turns", "/capabilities", "/requests", "/files"]) {
+for (const suffix of ["", "/turn-state", "/nodes", "/capabilities", "/requests", "/files"]) {
   test(`switching sessions aborts the outstanding ${suffix || "session"} read`, async ({ page }) => {
     await fixture(page);
     let received = false;

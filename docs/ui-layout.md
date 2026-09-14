@@ -438,7 +438,7 @@ depend on mount order.
 | `Mod+,` | Settings |
 | `Mod+.` | Stop the running turn |
 | `Mod+F` | Filter turns in this session |
-| `Shift+E` / `Shift+C` | Expand / collapse all disclosures |
+| `Shift+C` | Collapse expanded disclosures |
 | `Escape` | Close the top overlay (not rebindable) |
 
 `Mod` is Cmd on macOS and Ctrl elsewhere, resolved at match time. Bindings are
@@ -472,7 +472,7 @@ it would have broken typing.
 real window. The spec asserts on the recorder's refusal instead, which is observable in the
 DOM.
 
-Bare-key combos (`Shift+E`) are suppressed while a text field has focus, so the
+Bare-key combos (`Shift+C`) are suppressed while a text field has focus, so the
 composer keeps its keystrokes; `Mod`-prefixed combos are global on purpose.
 
 Session-scoped actions — stop turn, expand all, find — cannot be handled by the
@@ -667,38 +667,10 @@ moves by a small amount in either direction rather than always dropping.
 
 ### Timeline rows
 
-`components/timeline.tsx` holds the whole canvas as one flat list of row renderers.
-There are no message components, no avatars, and no per-message action bars: those
-belong to the chat shape this canvas rejected, and the reasoning is under
-"Conversation canvas: agent-first, not chat-first" above.
-
-| Row renderer | Renders | Expansion |
-| --- | --- | --- |
-| `UserPrompt` | the typed ask, with attachment chips | always open |
-| `AssistantText` | prose through `Markdown`, streaming-aware | always open |
-| `ThinkingBlock` | reasoning | collapsed by default |
-| `ToolCall` | one operation: the call paired with its `tool_result` | by role, see below |
-| `OrphanResult` | a `tool_result` whose call never arrived | open |
-| `UsageLine` / `StatusLine` | token counts, lifecycle notices | single line |
-
-The oldest loaded turn is preceded by Load earlier turns while older pages exist. Loading
-preserves the reader's current position and exposes failures with a retry action. A turn
-footer shows elapsed time only when its record and explicit endpoints support a measurement.
-Large-body previews have a Load full content action and an inline loading/error state.
-The session menu and sidebar use the same transcript reread operation and share pending,
-result, and concrete error notices in the shell.
-
-`ToolCall` is the anchor row. It draws a bordered region carrying the tool's
-target (`ToolTarget`) and outcome (`StatusMark`), and decides its own expansion
-from the shape rather than from a uniform default: edits open with their diff,
-shell output opens only on failure, reads stay closed. The pairing and the target
-extraction are not in the component — `lib/tool-shape.ts` normalizes the
-adapters' argument spellings into one `ToolShape` (`describeTool`, `resultStatus`),
-which is why that logic is unit-tested and the component is not.
-
-`MemoizedRow` wraps each row and is keyed on event identity, so a delta arriving
-mid-turn re-renders one row instead of the settled history above it. That is the
-mechanism the virtualization decision rests on.
+`components/execution-timeline.tsx` renders the bounded execution projection. The
+disclosure contract lives in § Execution group disclosure. `lib/tool-shape.ts` interprets
+the arguments of a loaded tool for its target, diff and detailed view. It never computes
+subtree state. All body requests remain explicit.
 
 ### Shared primitives
 
@@ -1150,3 +1122,17 @@ A local-first app renders text without the network, an installed PWA works offli
 `next build` runs in E2E on whatever machine is to hand — a build-time font fetch is a
 build-time network dependency. The CJK entries are what keep a mixed Chinese-English string in
 one face rather than falling back per glyph.
+
+### Execution group disclosure
+
+Execution groups default to collapsed at the query boundary. User input and outward
+assistant replies stay visible in narrative order. A light gray summary describes the
+work, followed on expansion by individual execution summaries and then details. Active
+summaries name one stable current activity and the number of other running items.
+Failures and waiting requests use explicit text and an attention color even when closed.
+
+The entire summary row is a keyboard-operable button with `aria-expanded`. Reserve
+chevron space: hide the collapsed chevron until hover or keyboard focus, including on
+touch screens; keep the down chevron visible while open. Active text pulses opacity
+without changing layout, honors reduced motion, and stops when settled. Collapse all
+only closes expanded content. There is no expand-all action or shortcut.

@@ -1,0 +1,49 @@
+{
+  "scenario": "Oversized active single turns with identical bounded root content",
+  "command": "cargo test -p sylph-server --test timeline_nodes -- --nocapture",
+  "rootBudget": {
+    "directNodes": 40,
+    "jsonBytes": 131072
+  },
+  "measurements": [
+    {
+      "coldUs": 1095,
+      "events": 2000,
+      "fullTurnBytes": 2424011,
+      "fullTurnUs": 194537,
+      "journalBytes": 7790592,
+      "journalWalBytes": 4841032,
+      "medianUs": 597,
+      "nodeBytes": 984,
+      "nodePoolWaitUs": 33,
+      "nodeReadUs": 331,
+      "nodes": 2
+    },
+    {
+      "coldUs": 1066,
+      "events": 20000,
+      "fullTurnBytes": 24336013,
+      "fullTurnUs": 1960040,
+      "journalBytes": 104169472,
+      "journalWalBytes": 5075872,
+      "medianUs": 543,
+      "nodeBytes": 1004,
+      "nodePoolWaitUs": 35,
+      "nodeReadUs": 170,
+      "nodes": 2
+    }
+  ],
+  "queryVmSteps": {
+    "2000": 2336,
+    "20000": 2336
+  },
+  "heldHistoryWriteLock": {
+    "fileUs": 1525,
+    "nodeUs": 900
+  },
+  "notes": [
+    "API microbenchmark, not browser or end-to-end sync latency.",
+    "The journal/WAL byte values cover the cumulative synthetic store, including the preceding smaller session.",
+    "Full turn exports are deliberate unbounded-body work and are not used by the interactive timeline."
+  ]
+}

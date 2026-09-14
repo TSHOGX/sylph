@@ -913,6 +913,22 @@ impl HistoryStore {
         Ok(blocks)
     }
 
+    /// Resolve only the archived fragments belonging to an explicitly opened node.
+    pub async fn node_body_blocks(
+        &self,
+        session: &str,
+        kind: &str,
+        seqs: &[i32],
+    ) -> Result<Vec<Block>> {
+        let rows=sqlx::query("SELECT * FROM blocks WHERE session_id=? AND seq IN (SELECT value FROM json_each(?)) AND kind=? ORDER BY seq")
+            .bind(session).bind(serde_json::to_string(seqs)?).bind(kind).fetch_all(&self.readers).await?;
+        let mut blocks = Vec::with_capacity(rows.len());
+        for row in rows {
+            blocks.push(self.row_to_block(row).await?);
+        }
+        Ok(blocks)
+    }
+
     /// Read bounded timeline metadata without hydrating CAS payloads.
     pub async fn block_summaries(
         &self,
@@ -1165,6 +1181,15 @@ impl HistoryStore {
     /// **This is the one read that must stay off any polled path.** Measured, a full-text
     /// query is orders of magnitude slower than every other operation here, and owning the
     /// store makes FTS5 work no cheaper.
+    /// Search one retained session without hydrating matched bodies.
+    pub async fn search_session(&self, session: &str, query: &str) -> Result<Vec<(i32, String)>> {
+        if query.trim().chars().count() < 2 {
+            return Ok(Vec::new());
+        }
+        Ok(sqlx::query_as("SELECT seq,snippet(blocks_fts,0,'','','…',24) FROM blocks_fts WHERE blocks_fts MATCH ? AND session_id=? ORDER BY rank LIMIT 20")
+            .bind(fts5_phrase(query)).bind(session).fetch_all(&self.readers).await?)
+    }
+
     pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
         self.search_page(query, limit, 0).await
     }

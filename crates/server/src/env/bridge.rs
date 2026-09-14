@@ -180,6 +180,10 @@ impl Drop for ReadRegistration {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("native persistence failed: {0}")]
+struct NativePersistenceFailure(String);
+
 /// Owns paired-environment state and the one ingress serialization point.
 #[derive(Clone)]
 pub struct EnvBridge {
@@ -524,9 +528,14 @@ impl EnvBridge {
                 let _ = incoming.send(Err(error)).await;
             }
         });
+        let mut sync_faults = HashMap::new();
         let result: Result<()> = async {
             loop {
-                let bytes = match frames.recv().await.unwrap_or_else(|| Err(anyhow!("envagent reader closed"))) {
+                let bytes = match frames
+                    .recv()
+                    .await
+                    .unwrap_or_else(|| Err(anyhow!("envagent reader closed")))
+                {
                     Ok(bytes) => bytes,
                     Err(error) => {
                         let _ = self.disconnect(&environment, epoch).await;
@@ -669,7 +678,9 @@ impl EnvBridge {
                             &payload_hash,
                             &tx,
                             move || async move {
-                                if text.trim().is_empty() || crate::db::labels::is_native_context(&text) {
+                                if text.trim().is_empty()
+                                    || crate::db::labels::is_native_context(&text)
+                                {
                                     return Ok(());
                                 }
                                 let target_turn = match turn_id_for_effect {
@@ -761,34 +772,38 @@ impl EnvBridge {
                         }))?);
                         let history = self.history.clone();
                         let session_key = session_id.encode();
-                        let result = self.process_message(
-                            &environment,
-                            epoch,
+                        let mut persisted = false;
+                        let result = self
+                            .process_message(
+                                &environment,
+                                epoch,
+                                &producer_id,
+                                producer_seq,
+                                &payload_hash,
+                                &tx,
+                                || async {
+                                    history
+                                        .put_native_blob_chunk(&session_key, &chunk)
+                                        .await
+                                        .map_err(|e| {
+                                            NativePersistenceFailure(format!(
+                                                "could not retain native sidecar: {e:#}"
+                                            ))
+                                        })?;
+                                    persisted = true;
+                                    Ok(())
+                                },
+                            )
+                            .await;
+                        self.finish_native_delivery(
+                            result,
+                            persisted,
+                            &session_id,
                             &producer_id,
-                            producer_seq,
-                            &payload_hash,
                             &tx,
-                            move || async move {
-                                history.put_native_blob_chunk(&session_key, &chunk).await
-                            },
+                            &mut sync_faults,
                         )
-                        .await;
-                        if let Err(error) = result {
-                            if let Some(turn_id) = self.store.running_turn_id(&session_id).await? {
-                                if let Some(closer) = self.turn_closer.read().await.clone() {
-                                    closer.close(
-                                        &session_id,
-                                        &turn_id,
-                                        Outcome::LinkLost {
-                                            detail: Some(format!(
-                                                "could not retain native sidecar: {error:#}"
-                                            )),
-                                        },
-                                    ).await;
-                                }
-                            }
-                            return Err(error);
-                        }
+                        .await?;
                     }
                     DecodedMessage::Known(WireMessage::NativeRecord {
                         session_id,
@@ -813,45 +828,39 @@ impl EnvBridge {
                         }))?);
                         let history = self.history.clone();
                         let session_key = session_id.encode();
-                        let record_source = record.source.clone();
-                        let record_version = record.version;
-                        let result = self.process_message(
-                            &environment,
-                            epoch,
+                        let mut persisted = false;
+                        let result = self
+                            .process_message(
+                                &environment,
+                                epoch,
+                                &producer_id,
+                                producer_seq,
+                                &payload_hash,
+                                &tx,
+                                || async {
+                                    history
+                                        .put_native_record(&session_key, &record)
+                                        .await
+                                        .map_err(|e| {
+                                            NativePersistenceFailure(format!(
+                                                "could not retain native record {}:{}: {e:#}",
+                                                record.source, record.version
+                                            ))
+                                        })?;
+                                    persisted = true;
+                                    Ok(())
+                                },
+                            )
+                            .await;
+                        self.finish_native_delivery(
+                            result,
+                            persisted,
+                            &session_id,
                             &producer_id,
-                            producer_seq,
-                            &payload_hash,
                             &tx,
-                            move || async move {
-                                history.put_native_record(&session_key, &record).await?;
-                                Ok(())
-                            },
+                            &mut sync_faults,
                         )
-                        .await;
-                        if let Err(error) = result {
-                            // A native record is the source of truth for any future
-                            // re-projection.  If retaining it fails, stop the affected
-                            // turn before tearing down the connection so callers observe
-                            // a terminal LINK_LOST outcome instead of a turn that hangs
-                            // until their polling deadline.
-                            if let Some(turn_id) = self.store.running_turn_id(&session_id).await? {
-                                if let Some(closer) = self.turn_closer.read().await.clone() {
-                                    closer
-                                        .close(
-                                            &session_id,
-                                            &turn_id,
-                                            Outcome::LinkLost {
-                                                detail: Some(format!(
-                                                    "could not retain native record {}:{}: {error:#}",
-                                                    record_source, record_version
-                                                )),
-                                            },
-                                        )
-                                        .await;
-                                }
-                            }
-                            return Err(error);
-                        }
+                        .await?;
                     }
                     DecodedMessage::Known(WireMessage::Request {
                         session_id,
@@ -919,7 +928,7 @@ impl EnvBridge {
                                     chosen_option: None,
                                     resolved_input_json: None,
                                     resolved_by: None,
-            created_at_ms: now_ms(),
+                                    created_at_ms: now_ms(),
                                     resolved_at_ms: None,
                                 };
                                 let stored = store.create_pending_request(&pending).await?;
@@ -942,7 +951,7 @@ impl EnvBridge {
                                         arrival_at_ms: now_ms(),
                                         recorded_at_ms: None,
                                         body_ref: None,
-            created_at_ms: now_ms(),
+                                        created_at_ms: now_ms(),
                                         started_at_ms: None,
                                     },
                                 )
@@ -1009,7 +1018,7 @@ impl EnvBridge {
                                         arrival_at_ms: now_ms(),
                                         recorded_at_ms: None,
                                         body_ref: None,
-            created_at_ms: now_ms(),
+                                        created_at_ms: now_ms(),
                                         started_at_ms: None,
                                     },
                                 )
@@ -2450,6 +2459,80 @@ impl EnvBridge {
             .clone()
     }
 
+    /// Storage failure is a synchronization fault, not evidence the agent stopped.
+    /// Nack preserves the producer prefix; command replies keep their independent path.
+    async fn finish_native_delivery(
+        &self,
+        result: Result<()>,
+        persisted: bool,
+        session: &sylph_protocol::SessionId,
+        producer: &ProducerId,
+        tx: &mpsc::Sender<WireMessage>,
+        faults: &mut HashMap<sylph_protocol::SessionId, bool>,
+    ) -> Result<()> {
+        let failed = match result {
+            Ok(()) => None,
+            Err(error) if error.is::<NativePersistenceFailure>() => Some(error.to_string()),
+            Err(error) => return Err(error),
+        };
+        let previous = match faults.get(session) {
+            Some(value) => *value,
+            None => self.store.native_sync_fault(session).await?,
+        };
+        if failed.is_some() && !previous || persisted && previous {
+            let _reservation = self.seq.gate().lock_owned().await;
+            let seq = self.seq.next_inner(session).await?;
+            let now = now_ms();
+            let row = crate::models::Event {
+                id: None,
+                session_id: session.clone(),
+                turn_id: None,
+                seq,
+                kind: if failed.is_some() { "error" } else { "status" }.into(),
+                phase: Some("completed".into()),
+                stream_id: Some("native-sync".into()),
+                span: None,
+                interior_state: None,
+                name: Some("Synchronization".into()),
+                text: failed.as_ref().map_or_else(
+                    || "Synchronization recovered.".into(),
+                    |message| format!("Synchronization paused: {message}"),
+                ),
+                data_json: r#"{"scope":"synchronization"}"#.into(),
+                is_error: failed.is_some(),
+                stability: "stable".into(),
+                source: "server".into(),
+                arrival_at_ms: now,
+                recorded_at_ms: None,
+                created_at_ms: now,
+            };
+            self.store.append_event(&row).await?;
+            self.hub
+                .publish_session(&session.encode(), StreamEvent::from_row(&row))
+                .await;
+        }
+        faults.insert(session.clone(), failed.is_some() || previous && !persisted);
+        if let Some(error) = failed {
+            if previous {
+                tracing::debug!(%error,"native retention is still blocked");
+            } else {
+                tracing::error!(%error,"native retention is blocked; producer records remain unacknowledged");
+            }
+            let through = self
+                .store
+                .env_accepted_through(&session.environment, producer)
+                .await?;
+            tx.send(WireMessage::Nack {
+                producer_id: producer.clone(),
+                expected_next: ProducerSeq::new(through + 1),
+                reason: "native persistence failed; retry the retained producer prefix".into(),
+            })
+            .await
+            .map_err(|_| anyhow!("envagent writer closed"))?;
+        }
+        Ok(())
+    }
+
     /// Run one sequenced non-event message through the same contiguous-prefix
     /// gate as event batches.  The receipt/hash check happens before the
     /// callback, so an exact replay cannot publish or mutate state twice.  The
@@ -3409,6 +3492,162 @@ mod tests {
             second.await.unwrap().unwrap(),
             CommandOutcome::Accepted { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn native_retention_failure_nacks_without_closing_the_connection_or_turn() {
+        use sqlx::Connection;
+        let (bridge, dir) = bridge().await;
+        let environment = EnvironmentId::parse("envsdc2").unwrap();
+        let producer = ProducerId::parse("prodsdc2").unwrap();
+        bridge
+            .store
+            .upsert_environment(
+                &environment,
+                "install-sidecar",
+                "fixture",
+                "development",
+                &hash_secret("sidecar-token"),
+                "[]",
+            )
+            .await
+            .unwrap();
+        let session = Session {
+            id: SessionId::new(
+                environment.clone(),
+                AgentName::parse("claude").unwrap(),
+                sylph_protocol::NativeId::new("sidecar-session"),
+            ),
+            workdir: Some("/tmp".into()),
+            title: None,
+            inject_identity: false,
+            fidelity: sylph_protocol::Fidelity::Blocks,
+            flags_json: "{}".into(),
+            status: "idle".into(),
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        };
+        bridge.store.create_session(&session).await.unwrap();
+        let (mut client, server) = tokio::io::duplex(32 * 1024);
+        let (reader, writer) = tokio::io::split(server);
+        let task = tokio::spawn({
+            let bridge = bridge.clone();
+            async move { bridge.serve_io(reader, writer).await }
+        });
+        let hello = sylph_protocol::Hello::current(
+            "install-sidecar",
+            producer.clone(),
+            Some(environment),
+            0,
+        );
+        write_frame(
+            &mut client,
+            &serde_json::to_vec(&WireMessage::from_hello(hello)).unwrap(),
+        )
+        .await
+        .unwrap();
+        write_frame(&mut client, &serde_json::to_vec("sidecar-token").unwrap())
+            .await
+            .unwrap();
+        let epoch = match sylph_protocol::decode_message(&read_frame(&mut client).await.unwrap())
+            .unwrap()
+        {
+            DecodedMessage::Known(WireMessage::Welcome {
+                connection_epoch, ..
+            }) => connection_epoch,
+            other => panic!("expected welcome, got {other:?}"),
+        };
+
+        let turn_id = bridge
+            .ensure_remote_source_turn_with_origin(&session.id, 10, "user")
+            .await
+            .unwrap();
+        let mut native = sqlx::SqliteConnection::connect_with(
+            &sqlx::sqlite::SqliteConnectOptions::new().filename(dir.path().join("native.db")),
+        )
+        .await
+        .unwrap();
+        sqlx::query("CREATE TRIGGER reject_retention BEFORE INSERT ON native_records BEGIN SELECT RAISE(FAIL,'injected native write failure'); END").execute(&mut native).await.unwrap();
+        let frame = WireMessage::NativeRecord {
+            session_id: session.id.clone(),
+            record: sylph_protocol::NativeRecord {
+                source: "failure.jsonl".into(),
+                version: 1,
+                raw_json: None,
+                payload: serde_json::json!({"preserved":true}),
+                blobs: vec![],
+            },
+            producer_id: producer.clone(),
+            producer_seq: ProducerSeq::new(1),
+            connection_epoch: epoch,
+        };
+        write_frame(&mut client, &serde_json::to_vec(&frame).unwrap())
+            .await
+            .unwrap();
+        let reply =
+            tokio::time::timeout(std::time::Duration::from_secs(2), read_frame(&mut client))
+                .await
+                .unwrap()
+                .unwrap();
+        assert!(
+            matches!(sylph_protocol::decode_message(&reply).unwrap(),DecodedMessage::Known(WireMessage::Nack{expected_next,..}) if expected_next.get()==1)
+        );
+        assert_eq!(
+            bridge
+                .store
+                .get_turn(&turn_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "running"
+        );
+        assert_eq!(
+            bridge
+                .store
+                .env_accepted_through(&session.id.environment, &producer)
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(bridge.store.native_sync_fault(&session.id).await.unwrap());
+        sqlx::query("DROP TRIGGER reject_retention")
+            .execute(&mut native)
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            write_frame(&mut client, &serde_json::to_vec(&frame).unwrap())
+                .await
+                .unwrap();
+            let reply =
+                tokio::time::timeout(std::time::Duration::from_secs(2), read_frame(&mut client))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert!(
+                matches!(sylph_protocol::decode_message(&reply).unwrap(),DecodedMessage::Known(WireMessage::Ack{accepted_through,..}) if accepted_through.get()==1)
+            );
+        }
+        assert_eq!(
+            bridge
+                .history
+                .native_record(&session.id.encode(), "failure.jsonl", 1)
+                .await
+                .unwrap(),
+            Some(serde_json::json!({"preserved":true}))
+        );
+        assert!(!bridge.store.native_sync_fault(&session.id).await.unwrap());
+        assert_eq!(
+            bridge
+                .store
+                .get_turn(&turn_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "running"
+        );
+        task.abort();
     }
 
     #[tokio::test]

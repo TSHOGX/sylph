@@ -16,6 +16,144 @@
     }
   ],
   "paths": {
+    "/api/v1/sessions/{sessionId}/nodes/search": {
+      "get": {
+        "summary": "Search retained node bodies within one session",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Bounded excerpts and event sequence targets"
+          },
+          "404": {
+            "description": "Unknown or unauthorized session"
+          }
+        }
+      }
+    },
+    "/api/v1/sessions/{sessionId}/nodes": {
+      "get": {
+        "summary": "Read bounded execution node children or changes",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "parent",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "changes",
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 40
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Bounded node page with revision snapshot"
+          },
+          "400": {
+            "description": "Invalid cursor"
+          },
+          "404": {
+            "description": "Unknown or unauthorized session"
+          }
+        }
+      }
+    },
+    "/api/v1/sessions/{sessionId}/turn-state": {
+      "get": {
+        "summary": "Read bounded turn control states without transcript bodies",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Recent turn identifiers and states"
+          }
+        }
+      }
+    },
+    "/api/v1/sessions/{sessionId}/nodes/{nodeId}/body": {
+      "get": {
+        "summary": "Read an explicitly expanded execution node body",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "nodeId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Full body"
+          },
+          "404": {
+            "description": "Unknown or unauthorized node"
+          }
+        }
+      }
+    },
     "/api/v1/sessions/{id}/native-queue": {
       "post": {
         "parameters": [

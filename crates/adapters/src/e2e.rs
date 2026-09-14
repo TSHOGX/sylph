@@ -909,6 +909,8 @@ struct ToolPair<'a> {
     /// What the tool answered.
     result: &'a str,
     is_error: bool,
+    /// A deterministic observation window for active-summary regressions.
+    delay_ms: u64,
     data: Option<Value>,
     /// The trajectory this call happened in, or `None` for the root turn.
     span: Option<&'a str>,
@@ -928,6 +930,7 @@ async fn tool(emit: &Emitter, call: ToolPair<'_>) {
         input,
         result,
         is_error,
+        delay_ms,
         data,
         span,
     } = call;
@@ -942,6 +945,9 @@ async fn tool(emit: &Emitter, call: ToolPair<'_>) {
         call = call.span(span);
     }
     emit.event(call.done()).await;
+    if delay_ms > 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+    }
 
     let mut done = Ev::new(EventKind::ToolResult, Some(Phase::Completed))
         .stream_id(stream_id)
@@ -1366,6 +1372,7 @@ async fn delegate(emit: &Emitter) {
         emit,
         ToolPair {
             stream_id: "blk-wk-bash",
+            delay_ms: 0,
             name: "Bash",
             input: json!({"command": "cargo test --lib"}),
             result: "error[E0425]: cannot find value `after`",
@@ -1645,6 +1652,7 @@ async fn promote(emit: &Emitter) {
         emit,
         ToolPair {
             stream_id: "pr-t2-bash",
+            delay_ms: 0,
             name: "Bash",
             input: json!({"command": "cargo test"}),
             result: "error: test failed",
@@ -1829,6 +1837,7 @@ async fn paced(emit: &Emitter) {
         emit,
         ToolPair {
             stream_id: "blk-slow-tool",
+            delay_ms: 700,
             name: "Read",
             input: json!({"file_path": "src/paced.rs"}),
             result: "pub fn paced() {}",
@@ -1992,6 +2001,7 @@ async fn fanout(emit: &Emitter) {
         emit,
         ToolPair {
             stream_id: "fo-tc-bash",
+            delay_ms: 0,
             name: "Bash",
             input: json!({"command": "tsc --noEmit"}),
             result: "error TS2345: argument of the wrong type",

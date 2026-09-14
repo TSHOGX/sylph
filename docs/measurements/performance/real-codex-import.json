@@ -1,0 +1,29 @@
+{
+  "scenario": "read-only import of an existing Codex session",
+  "sourceBytes": 11342103,
+  "sourceLines": 3392,
+  "sourceUnchanged": true,
+  "nativeRecordsRetained": 5683,
+  "projectedNodes": 3949,
+  "importMs": 55908.15808298066,
+  "rootNodes": 40,
+  "rootBytes": 35434,
+  "rootLatencyMs": [
+    7.413291954435408,
+    5.810874979943037,
+    5.711082951165736,
+    5.728667019866407,
+    5.645042052492499
+  ],
+  "expandedDirectChildren": 40,
+  "fileListMs": 2.9643330490216613,
+  "fileListBytes": 1226,
+  "modelTurnsStarted": 0,
+  "offlineBody": {
+    "kind": "tool_result",
+    "textBytes": 174537,
+    "elapsedMs": 14.397792052477598,
+    "envagentConnected": false,
+    "lengthVerified": true
+  }
+}

@@ -286,6 +286,7 @@ impl JournalStore {
         .execute(&mut *tx)
         .await
         .map_err(Error::Database)?;
+        super::project_event(&mut tx, event).await?;
         sqlx::query(
             "INSERT INTO env_event_receipts (
                 environment_id, producer_id, producer_seq, session_env,
@@ -414,6 +415,7 @@ impl JournalStore {
         .await
         .map_err(Error::Database)?;
 
+        super::project_event(&mut tx, event).await?;
         sqlx::query(
             "INSERT INTO env_event_receipts (
                 environment_id, producer_id, producer_seq, session_env,

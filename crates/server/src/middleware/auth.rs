@@ -50,6 +50,7 @@ pub async fn auth_middleware(
     mut request: Request,
     next: Next,
 ) -> Result<Response> {
+    let started = std::time::Instant::now();
     let path = request.uri().path();
 
     // Host header validation: reject non-loopback to prevent DNS rebinding.
@@ -82,7 +83,7 @@ pub async fn auth_middleware(
         && path.ends_with("/invites")
         && request.method() == axum::http::Method::POST;
     if EXEMPT_PATHS.contains(&path) || local_invite_issue {
-        return Ok(next.run(request).await);
+        return Ok(timed_authenticated_response(request, next, started).await);
     }
 
     // Cookie validation: extract and compare against the process token.
@@ -102,7 +103,7 @@ pub async fn auth_middleware(
         request.extensions_mut().insert(SubjectId(subject_id));
         enforce_session_capability(&state, request.uri().path(), request.method(), presented)
             .await?;
-        return Ok(next.run(request).await);
+        return Ok(timed_authenticated_response(request, next, started).await);
     }
     let subject_id = state
         .store
@@ -113,7 +114,23 @@ pub async fn auth_middleware(
 
     enforce_session_capability(&state, request.uri().path(), request.method(), presented).await?;
 
-    Ok(next.run(request).await)
+    Ok(timed_authenticated_response(request, next, started).await)
+}
+
+async fn timed_authenticated_response(
+    request: Request,
+    next: Next,
+    started: std::time::Instant,
+) -> Response {
+    let duration = started.elapsed().as_secs_f64() * 1000.0;
+    let mut response = next.run(request).await;
+    response.headers_mut().append(
+        "Server-Timing",
+        format!("auth;dur={duration:.3}")
+            .parse()
+            .expect("numeric timing header"),
+    );
+    response
 }
 
 async fn enforce_session_capability(
@@ -134,6 +151,14 @@ async fn enforce_session_capability(
     } else {
         first
     };
+    // URI paths are still escaped here; Axum's Path extractor decodes them later.
+    // Decode exactly this segment, so an encoded slash inside a native id cannot
+    // become a path separator or bypass environment authorization.
+    let suffix = rest.strip_prefix(encoded).unwrap_or("");
+    let decoded = percent_encoding::percent_decode_str(encoded)
+        .decode_utf8()
+        .map_err(|_| Error::InvalidRequest("session path is not valid UTF-8".into()))?;
+    let encoded = decoded.as_ref();
     if encoded.starts_with("draft-") || encoded.starts_with("remote-draft-") {
         let subject = state
             .store
@@ -162,7 +187,6 @@ async fn enforce_session_capability(
     let Ok(session) = sylph_protocol::SessionId::decode(encoded) else {
         return Ok(());
     };
-    let suffix = rest.strip_prefix(encoded).unwrap_or("");
     let capability = if *method == axum::http::Method::GET || suffix == "/reread" {
         "observe"
     } else {

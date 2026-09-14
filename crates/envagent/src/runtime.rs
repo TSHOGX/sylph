@@ -151,16 +151,24 @@ impl EventSink for ChannelEventSink {
         for row in events {
             if row.kind != "event" {
                 if !event_group.is_empty() {
-                    last = last.max(self.deliver_event_group(&event_group).await?);
+                    last = self.deliver_event_group(&event_group).await?;
+                    if last < event_group.last().unwrap().producer_seq {
+                        return Ok(last);
+                    }
                     event_group.clear();
                 }
-                last = last.max(self.deliver_diagnostic(row).await?);
-                continue;
+                last = self.deliver_diagnostic(row).await?;
+                // A Nack releases the waiter with the retained prefix. Sending the
+                // suffix now can only produce more gaps; retry from the spool instead.
+                if last < row.producer_seq {
+                    return Ok(last);
+                }
+            } else {
+                event_group.push(row.clone());
             }
-            event_group.push(row.clone());
         }
         if !event_group.is_empty() {
-            last = last.max(self.deliver_event_group(&event_group).await?);
+            last = self.deliver_event_group(&event_group).await?;
         }
         Ok(last)
     }
@@ -4052,5 +4060,39 @@ mod tests {
             ..source
         };
         assert_eq!(read(&rootless.to_command_result()), None);
+    }
+    #[tokio::test]
+    async fn a_nack_stops_delivery_before_later_numbered_records() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
+        let sink = Arc::new(ChannelEventSink::new(
+            sender,
+            EnvironmentId::parse("env7fk2").unwrap(),
+            ProducerId::parse("producer-a").unwrap(),
+            1,
+        ));
+        let rows=vec![SpoolEvent {
+            producer_id:"producer-a".into(),producer_seq:1,kind:"native_record".into(),session_id:"env7fk2:fixture:n".into(),arrival_turn_id:None,
+            payload:serde_json::to_vec(&serde_json::json!({"payload":{"source":"test.jsonl","version":1,"payload":{"kept":true},"blobs":[]}})).unwrap(),source_cursor:None,recorded_at_ms:None,
+        },SpoolEvent {
+            producer_id:"producer-a".into(),producer_seq:2,kind:"event".into(),session_id:"env7fk2:fixture:n".into(),arrival_turn_id:None,
+            payload:serde_json::to_vec(&Event::new(EventKind::Status,None,1)).unwrap(),source_cursor:None,recorded_at_ms:None,
+        }];
+        let sending = sink.clone();
+        let delivery = tokio::spawn(async move { sending.deliver(&rows).await });
+        assert!(matches!(
+            receiver.recv().await.unwrap(),
+            WireMessage::NativeRecord { .. }
+        ));
+        sink.reject_gap(ProducerSeq::new(1)).await;
+        let through = tokio::time::timeout(std::time::Duration::from_secs(2), delivery)
+            .await
+            .expect("Nack must return before sending a later record")
+            .unwrap()
+            .unwrap();
+        assert_eq!(through, 0);
+        assert!(
+            receiver.try_recv().is_err(),
+            "nothing beyond the rejected record may be sent"
+        );
     }
 }

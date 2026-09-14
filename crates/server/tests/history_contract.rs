@@ -91,7 +91,7 @@ async fn equal_millisecond_turns_page_without_loss_or_repeats() {
 }
 
 #[tokio::test]
-async fn history_preview_does_not_hydrate_a_missing_large_body() {
+async fn node_preview_does_not_hydrate_a_missing_large_body() {
     let backend = TestBackend::start().await;
     let session = backend.create_session("mock").await;
     let text = "inspectable body ".repeat(150_000);
@@ -112,11 +112,25 @@ async fn history_preview_does_not_hydrate_a_missing_large_body() {
         .unwrap();
     let page = json_body(
         backend
-            .get_authed(&format!("/api/v1/sessions/{session}/turns"))
+            .get_authed(&format!("/api/v1/sessions/{session}/nodes"))
             .await,
     )
     .await;
-    let event = &page["turns"][0]["events"][0];
+    assert!(page["nodes"][0]["event"].get("bodyRef").is_none());
+    let group = page["nodes"][0]["id"].as_str().unwrap();
+    let calls = backend
+        .state
+        .store
+        .node_page(&session, group, None, false, 40)
+        .await
+        .unwrap();
+    let results = backend
+        .state
+        .store
+        .node_page(&session, &calls.nodes[0].id, None, false, 40)
+        .await
+        .unwrap();
+    let event = serde_json::to_value(&results.nodes[0].event).unwrap();
     assert!(
         event["text"].as_str().unwrap().len()
             <= sylph_server::storage::history::BLOCK_PREVIEW_BYTES

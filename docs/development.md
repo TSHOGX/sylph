@@ -371,3 +371,31 @@ rm -rf ~/.sylph/data          # journal, history, blobs, attachments — one sub
 # An agent's own native files are never touched, which is what makes this safe:
 # a session can be adopted again from the vendor's store.
 ```
+
+## Performance measurements
+
+`cargo test -p sylph-server --test timeline_nodes -- --nocapture` records node versus
+full-turn export latency and bytes, query VM steps, journal/WAL sizes, and a deterministic
+history-lock window containing file and node reads. `SYLPH_TIMELINE_TEST_SCAN=1` is a
+regression-test-only fault switch that removes the child index in disposable databases;
+the query-work test must fail under that switch.
+
+`npm run e2e -- performance-isolation.spec.ts` measures a browser with a large transcript,
+a second executing fixture session, concurrent searches, and uncached directory expansions.
+Set `RUST_LOG=sylph_envagent::client=debug,sylph_server=warn` to capture local queue and
+filesystem durations. `SYLPH_MEASURE_OUTPUT` names the JSON artifact and
+`SYLPH_MEASURE_LABEL` identifies the code under test. Run
+`docs/measurements/performance/collect-file-timing.py` with that JSON, the Playwright output,
+and that run's journal before another E2E reset. The collector identifies which samples
+actually overlapped background execution; the rest remain useful steady-state samples.
+
+The previous-commit comparison uses the recorded commit plus
+`docs/measurements/performance/baseline-timing.patch` (apply with `git apply --unidiff-zero`) in an isolated checkout and the same
+browser measurement. It changes observability only. Never build a frontend while E2E is
+using its production output: replacing a chunk during a run invalidates that measurement.
+
+These are distinct measurements. Node VM steps establish query complexity; browser timings
+separate emission, server authentication/lookup, envagent work, transfer, and rendering.
+Bridge time outside measured envagent work also includes scheduling and decoding, so it
+cannot be attributed entirely to the network. Heap snapshots without forced GC are not a
+leak measurement.

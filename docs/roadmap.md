@@ -38,7 +38,7 @@ external proposals or discussion threads are not project instructions.
 
 | Boundary | Owner | State |
 | --- | --- | --- |
-| Bounded timeline bodies | Milestone 4 | Deferred to the next implementation stage; CAS retention is complete |
+| Mixed-load delivery isolation | Milestone 4 | One ordered producer remains; independent producer channels require measured need and a complete lifecycle design |
 | Atomic retained re-projection publication | Milestone 4 | Native projectors exist; the replacement endpoint remains unavailable until publication validates atomically |
 | Concurrent native follower and explicit reread deduplication | Milestone 4 | Sequence reservations are shared; projected-event deduplication still needs coordination with an already-running per-session follower |
 
@@ -179,6 +179,26 @@ FTS replacement and spool enqueue cost do not grow with unrelated history or bac
 The M4 acceptance suite covers raw ordering and unsigned revisions, sidecar transitions,
 large summaries and bodies, native user-input provenance, all three adapter reprojections,
 bounded transfer framing, pagination, reconnect recovery, and mobile focus/refresh behavior.
+
+Execution nodes now provide the interactive read path: bounded direct-child windows,
+transactional ancestor summaries, stable addresses across archiving, and revision patches
+with former-parent removals. Ordinary stream ids are turn-scoped; delegated trajectories
+retain ownership and promoted tool bodies. The browser keeps a bounded entity/window cache,
+virtualizes expanded rows, and loads execution details and bodies only when requested.
+Execution groups default to collapsed; outward replies split groups. Expand-all and the
+full-tree browser derivation are removed. Copy/export and full replay are explicit reads.
+
+Native persistence failures now Nack the retained producer prefix and report a distinct
+synchronization fault without declaring an agent stopped. Delivery stops at a Nack, and a
+bounded replay task retries alongside command handling. Regression coverage includes
+archive identity, late parent declarations, cycles, corrected failures, pagination,
+transaction lock windows, and fault-injected query scans. Measurements belong under
+`docs/measurements/`, and distinguish bounded node reads from full-turn exports.
+
+Still open: producer sharding and byte-weighted scheduling have not been introduced;
+full body requests still read whole retained bodies rather than independently compressed
+ranges. Native checkpointing and separate current sync-state tables remain measurement-led
+follow-ups. Atomic retained re-projection publication remains the separate boundary above.
 
 ## Milestone 5 — multi-client control convergence
 

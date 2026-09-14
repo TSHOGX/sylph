@@ -8,24 +8,19 @@
  * reads as a single log, and boxing each turn re-introduces chat framing
  * (`docs/ui-layout.md` § Conversation canvas).
  *
- * Live and durable events come from different places and must not both render the
- * same turn: history holds every finished turn, and the SSE stream holds the one
- * in flight. The live turn is filtered out of history until the refetched history
- * actually contains it, which closes the gap where it would vanish for a frame.
+ * The server's execution projection supplies active and archived content through
+ * one bounded read path. Turn metadata supplies control state separately.
  */
 
-import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import dynamic from "next/dynamic";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
   ApiError,
   type Facet,
   type ControlBlock,
-  type Fidelity,
-  type Turn,
-  type TurnWithEvents,
   type UnavailableReason,
 } from "@/lib/api";
 import { useSessionIdParam } from "@/lib/use-session-id-param";
@@ -36,38 +31,26 @@ import { formatTimestamp, sessionLabel } from "@/lib/format";
 import { densityClasses, useSettings } from "@/lib/settings";
 import { relayName, useEnvironments } from "@/lib/environments";
 import { useWorkspaceUI } from "@/lib/workspace-ui";
-import { terminalStateOf, TERMINAL_TURN_STATUSES as TERMINAL } from "@/lib/turn-status";
-import type { SessionTraceStatus } from "@/lib/use-session-trace";
+import { TERMINAL_TURN_STATUSES as TERMINAL } from "@/lib/turn-status";
 import { useAgentSession } from "@/lib/use-agent-session";
-import { useSessionTrace } from "@/lib/use-session-trace";
-import { turnDurationMs } from "@/lib/turn-duration";
 import { refreshRereadsTheStore } from "@/lib/refresh-transcript";
 import { createSubmissionIdentity } from "@/lib/submission-identity";
-import {
-  buildSessionTrace,
-  projectSessionTurnsFromIndex,
-} from "@/lib/trace-index";
 import { ApprovalDialog } from "@/components/approval-dialog";
 import { type StagedAttachment } from "@/components/attachment-picker";
 import { Composer } from "@/components/composer";
-import { Timeline, UserPrompt } from "@/components/timeline";
+import { ExecutionTimeline } from "@/components/execution-timeline";
 import {
   EnvironmentChip,
   FidelityMarker,
   SessionStatusBadge,
-  TurnStatusBadge,
 } from "@/components/badges";
 import { Button, IconButton } from "@/components/ui/button";
 import { MenuButton } from "@/components/ui/menu";
-import {
-  CopyIcon,
-  MoreIcon,
-  RefreshIcon,
-} from "@/components/icons";
+import { CopyIcon, MoreIcon, RefreshIcon } from "@/components/icons";
 
-
-
-const ControlQueue = dynamic(() => import("@/components/control-queue").then((module) => module.ControlQueue));
+const ControlQueue = dynamic(() =>
+  import("@/components/control-queue").then((module) => module.ControlQueue),
+);
 
 export default function SessionPage() {
   const t = useT();
@@ -77,195 +60,59 @@ export default function SessionPage() {
   const sessionId = useSessionIdParam() ?? "";
   const queryClient = useQueryClient();
   const { settings } = useSettings();
-  const { showArtifact, registerSessionActions, setActiveWorkdir, rereadSession, rereadNotice } = useWorkspaceUI();
+  const {
+    showArtifact,
+    registerSessionActions,
+    setActiveWorkdir,
+    rereadSession,
+    rereadNotice,
+  } = useWorkspaceUI();
   const scroller = useRef<HTMLDivElement>(null);
-  const olderAnchor = useRef<{ element: Element; top: number } | null>(null);
 
   const [text, setText] = useState("");
   const [attachments, setAttachments] = useState<StagedAttachment[]>([]);
   const [submissionIdentity] = useState(createSubmissionIdentity);
-  /** Turn started by this tab. Null means "whatever history says is running". */
-  const [sentTurnId, setSentTurnId] = useState<string | null>(null);
-  /** Global expand override from `Shift+E` / `Shift+C`. Null restores per-row
-   *  defaults, so the timeline is not stuck open after one use. */
-  const [expandAll, setExpandAll] = useState<boolean | null>(null);
+  const [sentTurn, setSentTurn] = useState<{
+    id: string;
+    sessionId: string;
+  } | null>(null);
+  const [collapseEpoch, setCollapseEpoch] = useState(0);
   const [find, setFind] = useState<string | null>(null);
   const hasCommittedWork = useRef(false);
 
   const sessionQuery = useQuery({
     queryKey: ["session", sessionId],
     queryFn: ({ signal }) => api.sessions.get(sessionId, signal),
+    refetchInterval: 1000,
   });
 
-  const historyQuery = useInfiniteQuery({
-    queryKey: ["session", sessionId, "history"],
-    queryFn: ({ pageParam, signal }) => api.sessions.history(sessionId, pageParam, signal),
-    initialPageParam: undefined as string | undefined,
-    getNextPageParam: (page) => page.hasMore ? page.nextCursor ?? undefined : undefined,
+  const claim = sentTurn?.sessionId === sessionId ? sentTurn : null;
+  const historyQuery = useQuery({
+    queryKey: ["session", sessionId, "turn-state", claim?.id],
+    gcTime: 0,
+    queryFn: ({ signal }) => api.sessions.turnStates(sessionId, signal),
+    refetchInterval: 1000,
   });
-
   const session = sessionQuery.data?.session;
-  const history = useMemo(() => {
-    const byId = new Map<string, TurnWithEvents>();
-    for (const page of [...(historyQuery.data?.pages ?? [])].reverse()) {
-      for (const entry of page.turns) byId.set(entry.turn.id, entry);
-    }
-    return [...byId.values()].sort((a, b) => a.turn.createdAtMs - b.turn.createdAtMs);
-  }, [historyQuery.data]);
-  const { events: traceEvents, status: traceStatus } = useSessionTrace(
-    sessionId || undefined,
-    Boolean(historyQuery.data),
-    historyQuery.data?.pages[0]?.snapshotSeq ?? -1,
+  const history = useMemo(
+    () => historyQuery.data?.turns ?? [],
+    [historyQuery.data],
   );
 
-  useLayoutEffect(() => {
-    const anchor = olderAnchor.current;
-    if (historyQuery.isFetchingNextPage || !anchor || !scroller.current) return;
-    scroller.current.scrollTop += anchor.element.getBoundingClientRect().top - anchor.top;
-    olderAnchor.current = null;
-  }, [history, historyQuery.isFetchingNextPage]);
-
-  function loadEarlier() {
-    const pane = scroller.current;
-    const top = pane?.getBoundingClientRect().top ?? 0;
-    const firstVisible = pane && [...pane.querySelectorAll("[data-turn-id]")]
-      .find((element) => element.getBoundingClientRect().bottom > top);
-    if (firstVisible) olderAnchor.current = {
-      element: firstVisible, top: firstVisible.getBoundingClientRect().top,
-    };
-    void historyQuery.fetchNextPage();
-  }
-
-  // A late agent report can open a new turn after the history request that loaded the
-  // page has already completed. The session trace carries its arrival turn id immediately,
-  // so refresh history when that id is not represented by a turn row yet. Without this
-  // bridge, the event is durable and visible to the trace subscriber but has no turn
-  // container for the timeline to render it in until a manual reload.
-  const traceHasUnknownTurn = useMemo(() => {
-    const known = new Set(history.map((entry) => entry.turn.id));
-    return traceEvents.some(
-      (event) => Boolean(event.arrivalTurnId) && !known.has(event.arrivalTurnId!),
-    );
-  }, [history, traceEvents]);
-
-  useEffect(() => {
-    if (!traceHasUnknownTurn) return;
-    void queryClient.invalidateQueries({ queryKey: ["session", sessionId, "history"] });
-  }, [queryClient, sessionId, traceHasUnknownTurn]);
-
-  // The first promoted turn can settle before the page's initial session query
-  // finishes. Its terminal trace event is authoritative for the session's
-  // composer state; without refreshing here the page keeps the setup session's
-  // transient `running` status and hides Send for the next user turn.
-  // There is deliberately no empty-session cleanup here any more. `POST /sessions`
-  // starts an agent rather than reserving a row, so a session has no identity until an
-  // agent has assigned one — the empty-draft state this discarded cannot exist, and
-  // the `DELETE /sessions/{id}` it called is gone from the API with it. What it cost
-  // while it existed is worth recording, because it looked like three lines and was
-  // not: three refs mirrored in an effect, a deferred timer so Strict Mode's
-  // setup/cleanup probe could cancel it, and an unmount path that deleted a session
-  // whenever any of its conditions read stale.
-
-  // The turn to stream is derived, not stored: a turn this tab started takes
-  // precedence, otherwise any unfinished turn in history is adopted so reopening
-  // the page mid-run reattaches to the live stream.
-  const adoptedTurnId = useMemo(
-    () => history.find((entry) => !TERMINAL.has(entry.turn.status))?.turn.id ?? null,
-    [history],
-  );
-
-  // This tab's claim expires once history holds its turn as terminal.
-  //
-  // `sentTurnId` has to outrank adoption while a turn this tab started is in flight,
-  // and must stop doing so the moment it is not: an *agent-initiated* turn is adopted
-  // from history, so a claim that never expires means the agent's own turn is never
-  // streamed — it appears only on the next reload, which is how a delivered
-  // notification still reads as a missing one.
-  //
-  // Derived rather than cleared in an effect. Reading it out of history is also what
-  // keeps the handover gapless: the claim ends exactly when history can render the
-  // turn instead, so there is no frame where it is neither live nor in history.
-  const sentIsSettled = useMemo(
-    () =>
-      Boolean(
-        sentTurnId &&
-          history.some(
-            (entry) => entry.turn.id === sentTurnId && TERMINAL.has(entry.turn.status),
-          ),
-      ),
-    [sentTurnId, history],
-  );
-  const watchedTurnId = (sentIsSettled ? null : sentTurnId) ?? adoptedTurnId;
-
-  const traceHasTerminalTurn = useMemo(
-    () => traceEvents.some((event) =>
-      event.arrivalTurnId === watchedTurnId &&
-      terminalStateOf(event) !== null,
-    ),
-    [traceEvents, watchedTurnId],
-  );
-
-  useEffect(() => {
-    if (!traceHasTerminalTurn) return;
-    void queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
-  }, [queryClient, sessionId, traceHasTerminalTurn]);
-
-  const watchedTurn = useQuery({
-    queryKey: ["turn", watchedTurnId],
-    queryFn: () => api.turns.get(watchedTurnId!),
-    enabled: Boolean(watchedTurnId),
-    // A backstop, not the signal. The turn's own stream announces its close — see
-    // `onLiveTurnSettled` below — so this exists for the cases the stream cannot cover:
-    // a turn already terminal when the page loads, and a stream that never delivered
-    // because the connection was down for the whole turn. At 1500ms it was ~40 requests
-    // a minute duplicating a pushed fact.
-    //
-    // A poll landing mid-sweep reads `settling`, which is in flight, so it keeps polling
-    // and the stream stays attached. That is the point of the state existing: this used to
-    // read terminal there and end the claim on a record still being written.
-    refetchInterval: (query) =>
-      query.state.data && TERMINAL.has(query.state.data.turn.status) ? false : 20_000,
-  });
-
-  // What the live stream said, which is *sooner* than the poll but no longer stricter.
-  //
-  // The distinction used to be correctness. The row went terminal before the settle sweep
-  // ran, so acting on it tore down the stream before the sweep's events arrived and
-  // refetched a journal the sweep had not written — and the `status` frame, emitted after
-  // the sweep, was the only trustworthy signal. The server now settles in two phases and a
-  // terminal row means a finished record, so both signals are sound and this one is kept
-  // purely for latency: without it a turn's close waits on the 20s poll below.
-  const [announcedSettle, setAnnouncedSettle] = useState<{
-    turnId: string;
-    state: string;
-  } | null>(null);
-
-  const onLiveTurnSettled = useCallback(
-    (state: string) => {
-      if (watchedTurnId) setAnnouncedSettle({ turnId: watchedTurnId, state });
-    },
-    [watchedTurnId],
-  );
-
-  // Tied to the turn it was announced for, so a stale value cannot settle the next one.
-  const streamSettled = announcedSettle?.turnId === watchedTurnId;
-
-  const watchedStatus = watchedTurn.data?.turn.status;
-  const finished = streamSettled || Boolean(watchedStatus && TERMINAL.has(watchedStatus));
-
-  // Handoff only when history contains the same durable terminal fact. A stale
-  // running snapshot must not replace a live section that has already settled.
-  const absorbed = history.some((entry) => entry.turn.id === watchedTurnId && TERMINAL.has(entry.turn.status));
-  const liveTurnId = watchedTurnId && !(finished && absorbed) ? watchedTurnId : null;
-  const isLive = Boolean(liveTurnId) && !finished;
-
-  // Pull the finished turn into history. A genuine external-system sync.
-  useEffect(() => {
-    if (!finished) return;
-    void queryClient.invalidateQueries({ queryKey: ["session", sessionId, "history"] });
-    void queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
-  }, [finished, queryClient, sessionId]);
-
+  // A new accepted turn changes the metadata query key. A request made before
+  // Send therefore cannot retire the claim by delivering a stale snapshot late.
+  // Once that fresh query succeeds, absence also means settled: this window
+  // includes the active turn even after older terminal turns leave it.
+  const sentState = history.find((entry) => entry.turn.id === claim?.id)?.turn;
+  const sentSettled =
+    claim &&
+    Boolean(historyQuery.data) &&
+    (!sentState || TERMINAL.has(sentState.status));
+  const liveTurnId =
+    (!sentSettled ? claim?.id : null) ??
+    history.find((entry) => !TERMINAL.has(entry.turn.status))?.turn.id ??
+    null;
+  const isLive = Boolean(liveTurnId);
 
   const sendTurn = useMutation({
     // `override` carries a resent turn's text. Its attachments are deliberately
@@ -279,38 +126,68 @@ export default function SessionPage() {
           ? []
           : staged.map(({ name, type, data }) => ({ name, type, data })),
       };
-      const idempotencyKey = submissionIdentity.key({ sessionId, kind: "send", ...payload });
-      const result = await api.turns.create(sessionId, { ...payload, idempotencyKey });
+      const idempotencyKey = submissionIdentity.key({
+        sessionId,
+        kind: "send",
+        ...payload,
+      });
+      const result = await api.turns.create(sessionId, {
+        ...payload,
+        idempotencyKey,
+      });
       submissionIdentity.accepted(idempotencyKey);
       if (override === undefined) {
-        setText((current) => current === draft ? "" : current);
-        setAttachments((current) => current === staged ? [] : current);
+        setText((current) => (current === draft ? "" : current));
+        setAttachments((current) => (current === staged ? [] : current));
       }
       return result;
     },
     onSuccess: (result) => {
       hasCommittedWork.current = true;
-      setSentTurnId(result.turn.id);
+      setSentTurn({ id: result.turn.id, sessionId });
       void queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
-      void queryClient.invalidateQueries({ queryKey: ["session", sessionId, "history"] });
+      void queryClient.invalidateQueries({
+        queryKey: ["session", sessionId, "turn-state"],
+      });
     },
   });
 
   const sendControl = useMutation({
-    mutationFn: async ({ kind, value, turnId }: { kind: "steer" | "queue" | "native_steer" | "native_queue"; value: string; turnId?: string | null }) => {
-      const payload = { sessionId, kind, text: value, ...(kind === "steer" ? { turnId } : {}) };
+    mutationFn: async ({
+      kind,
+      value,
+      turnId,
+    }: {
+      kind: "steer" | "queue" | "native_steer" | "native_queue";
+      value: string;
+      turnId?: string | null;
+    }) => {
+      const payload = {
+        sessionId,
+        kind,
+        text: value,
+        ...(kind === "steer" ? { turnId } : {}),
+      };
       const key = submissionIdentity.key(payload);
-      const result = kind === "steer"
-        ? await api.sessions.steer(sessionId, value, turnId!, key)
-        : kind === "queue"
-          ? await api.sessions.queue(sessionId, value, key)
-          : await api.sessions.nativeQueue(sessionId, value, kind === "native_steer", key);
+      const result =
+        kind === "steer"
+          ? await api.sessions.steer(sessionId, value, turnId!, key)
+          : kind === "queue"
+            ? await api.sessions.queue(sessionId, value, key)
+            : await api.sessions.nativeQueue(
+                sessionId,
+                value,
+                kind === "native_steer",
+                key,
+              );
       submissionIdentity.accepted(key);
-      setText((current) => current === value ? "" : current);
+      setText((current) => (current === value ? "" : current));
       return result;
     },
     onSettled: () => {
-      void queryClient.invalidateQueries({ queryKey: ["session", sessionId, "controls"] });
+      void queryClient.invalidateQueries({
+        queryKey: ["session", sessionId, "controls"],
+      });
     },
   });
 
@@ -328,23 +205,35 @@ export default function SessionPage() {
    * session config and never becomes a turn — the composer routes on `kind`.
    */
   const runCommand = useMutation({
-    mutationFn: async ({ command, args }: { command: string; args: Record<string, string> }) => {
+    mutationFn: async ({
+      command,
+      args,
+    }: {
+      command: string;
+      args: Record<string, string>;
+    }) => {
       const draft = text;
-      const idempotencyKey = submissionIdentity.key({ sessionId, command, args });
+      const idempotencyKey = submissionIdentity.key({
+        sessionId,
+        command,
+        args,
+      });
       const result = await api.turns.create(sessionId, {
         command,
         args,
         idempotencyKey,
       });
       submissionIdentity.accepted(idempotencyKey);
-      setText((current) => current === draft ? "" : current);
+      setText((current) => (current === draft ? "" : current));
       return result;
     },
     onSuccess: (result) => {
       hasCommittedWork.current = true;
-      setSentTurnId(result.turn.id);
+      setSentTurn({ id: result.turn.id, sessionId });
       void queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
-      void queryClient.invalidateQueries({ queryKey: ["session", sessionId, "history"] });
+      void queryClient.invalidateQueries({
+        queryKey: ["session", sessionId, "turn-state"],
+      });
     },
   });
 
@@ -365,9 +254,21 @@ export default function SessionPage() {
   // the agent stays blocked. Keyed by request id, or dismissing one approval
   // would hide the next one too.
   const [dismissedRequest, setDismissedRequest] = useState<string | null>(null);
+  const [selectedRequest, setSelectedRequest] = useState<string | null>(null);
+  const currentRequest =
+    agent.requests.find((request) => request.id === selectedRequest) ??
+    agent.current;
   const pendingRequest =
-    agent.current && agent.current.id !== dismissedRequest ? agent.current : undefined;
+    currentRequest && currentRequest.id !== dismissedRequest
+      ? currentRequest
+      : undefined;
 
+  const mutateTurn=sendTurn.mutate;
+  const resend=useCallback((value:string)=>mutateTurn(value),[mutateTurn]);
+  const reviewRequest = useCallback((id: string) => {
+    setSelectedRequest(id);
+    setDismissedRequest(null);
+  }, []);
   const openFile = useCallback(
     (path: string, line?: number) => {
       // Absolute paths inside the workspace are rewritten to relative ones: the
@@ -400,11 +301,8 @@ export default function SessionPage() {
           case "stopTurn":
             if (isLive && !stopTurn.isPending) stopTurn.mutate();
             return true;
-          case "expandAll":
-            setExpandAll(true);
-            return true;
           case "collapseAll":
-            setExpandAll(false);
+            setCollapseEpoch((value) => value + 1);
             return true;
           case "findInSession":
             setFind((current) => (current === null ? "" : current));
@@ -431,7 +329,10 @@ export default function SessionPage() {
     const error = sessionQuery.error;
     const missing = error instanceof ApiError && error.status === 404;
     return (
-      <div role="alert" className="flex flex-1 items-center justify-center px-4">
+      <div
+        role="alert"
+        className="flex flex-1 items-center justify-center px-4"
+      >
         <div className="max-w-md text-center">
           <h1 className="text-lg font-semibold text-danger">
             {missing ? "Session not found" : "Could not load this session"}
@@ -488,24 +389,25 @@ export default function SessionPage() {
           <FidelityMarker value={session.fidelity} />
           {environments.showEnvironment && (
             <EnvironmentChip
-              name={environments.nameOf(session.environment) ?? session.environment}
+              name={
+                environments.nameOf(session.environment) ?? session.environment
+              }
               reachableVia={relayName(session.environment, environments)}
             />
           )}
-          {session.status === "running" && <SessionStatusBadge status={session.status} />}
+          {session.status === "running" && (
+            <SessionStatusBadge status={session.status} />
+          )}
           <div className="hidden shrink-0 items-center gap-1 md:flex">
-            <Button variant="ghost" onClick={() => setExpandAll(expandAll === true ? null : true)}>
-              {t("session.expandAll")}
-            </Button>
             <Button
               variant="ghost"
-              onClick={() => setExpandAll(expandAll === false ? null : false)}
+              onClick={() => setCollapseEpoch((value) => value + 1)}
             >
               {t("session.collapseAll")}
             </Button>
           </div>
           {/* The same two actions plus the ones that had no home, folded into one
-              button on a phone. `Cmd+F` and `Shift+E`/`Shift+C` reach three of these
+              button on a phone. `Cmd+F` and `Shift+C` reach three of these
               on a desktop, and a phone has no modifier keys at all — so without this
               they were unreachable rather than merely inconvenient. */}
           <div className="shrink-0 md:hidden">
@@ -513,25 +415,37 @@ export default function SessionPage() {
               label={t("session.actions")}
               align="end"
               items={[
-                { label: t("session.expandAllBlocks"), onSelect: () => setExpandAll(true) },
-                { label: t("session.collapseAllBlocks"), onSelect: () => setExpandAll(false) },
+                {
+                  label: t("session.collapseAllBlocks"),
+                  onSelect: () => setCollapseEpoch((value) => value + 1),
+                },
                 {
                   label: t("session.filterTurnsEllipsis"),
                   separated: true,
-                  onSelect: () => setFind((current) => (current === null ? "" : current)),
+                  onSelect: () =>
+                    setFind((current) => (current === null ? "" : current)),
                 },
                 {
                   label: t("session.copyWorkspacePath"),
                   icon: <CopyIcon size={14} />,
                   onSelect: () =>
-                    void navigator.clipboard.writeText(session.workdir).catch(() => {}),
+                    void navigator.clipboard
+                      .writeText(session.workdir)
+                      .catch(() => {}),
                 },
-                ...(refreshRereadsTheStore(session.fidelity) ? [{
-                  label: t("session.refreshTranscript"),
-                  icon: <RefreshIcon size={14} />,
-                  disabled: rereadNotice?.state === "pending" && rereadNotice.sessionId === sessionId,
-                  onSelect: () => rereadSession(sessionId, sessionLabel(session)),
-                }] : []),
+                ...(refreshRereadsTheStore(session.fidelity)
+                  ? [
+                      {
+                        label: t("session.refreshTranscript"),
+                        icon: <RefreshIcon size={14} />,
+                        disabled:
+                          rereadNotice?.state === "pending" &&
+                          rereadNotice.sessionId === sessionId,
+                        onSelect: () =>
+                          rereadSession(sessionId, sessionLabel(session)),
+                      },
+                    ]
+                  : []),
               ]}
             >
               {(trigger) => (
@@ -577,7 +491,12 @@ export default function SessionPage() {
       </header>
 
       {find !== null && (
-        <FindBar value={find} onChange={setFind} onClose={() => setFind(null)} t={t} />
+        <FindBar
+          value={find}
+          onChange={setFind}
+          onClose={() => setFind(null)}
+          t={t}
+        />
       )}
 
       {/* What Sylph can and cannot do with this session right now, when that is not
@@ -586,7 +505,14 @@ export default function SessionPage() {
           since nothing ever reset anything, so it described an absence as a feature on
           every one of those sessions forever. This says something that can actually
           change and that the user can sometimes act on. */}
-      <DriveState control={agent.control} controlBlock={agent.controlBlock} connecting={agent.connecting} error={agent.linkError} onRetry={agent.retryLinkRead} t={t} />
+      <DriveState
+        control={agent.control}
+        controlBlock={agent.controlBlock}
+        connecting={agent.connecting}
+        error={agent.linkError}
+        onRetry={agent.retryLinkRead}
+        t={t}
+      />
 
       {/*
         `data-scroller` rather than being found by its utility class. `LiveTurn` needs
@@ -595,36 +521,26 @@ export default function SessionPage() {
         moment a scroll container is expressed differently, and did break when this
         became the `pane` utility. An explicit contract cannot drift.
       */}
-      <div ref={scroller} data-scroller className="pane min-h-0 flex-1 px-3 py-3 md:px-4">
+      <div
+        ref={scroller}
+        data-scroller
+        tabIndex={0}
+        aria-label="Conversation"
+        className="pane min-h-0 flex-1 px-3 py-3 md:px-4"
+      >
         <div className={`mx-auto max-w-3xl ${density.text}`}>
           <ErrorBoundary label="the transcript">
-            {historyQuery.hasNextPage && (
-              <div className="pb-3 text-center">
-                <Button variant="ghost" onClick={loadEarlier} disabled={historyQuery.isFetchingNextPage}>
-                  {historyQuery.isFetchingNextPage ? "Loading earlier turns..." : "Load earlier turns"}
-                </Button>
-                {historyQuery.isFetchNextPageError && (
-                  <p role="alert" className="mt-1 text-xs text-danger">
-                    {historyQuery.error.message}
-                  </p>
-                )}
-              </div>
-            )}
-            <Transcript
-              history={history}
-              traceEvents={traceEvents}
-              traceStatus={traceStatus}
+            <ExecutionTimeline
+              sessionId={sessionId}
+              scroller={scroller}
               fidelity={session.fidelity}
-              isPending={historyQuery.isPending}
-              error={historyQuery.isFetchNextPageError ? null : historyQuery.error}
-              onRetry={() => void historyQuery.refetch()}
-              liveTurnId={liveTurnId}
-              onLiveTurnSettled={onLiveTurnSettled}
-              isLive={isLive}
-              onResend={(value) => sendTurn.mutate(value)}
+              collapseEpoch={collapseEpoch}
               onOpenFile={openFile}
-              expandAll={expandAll}
-              filter={find}
+              find={find}
+              turns={history}
+              onResend={resend}
+              isLive={isLive}
+              onReviewRequest={reviewRequest}
             />
           </ErrorBoundary>
         </div>
@@ -635,7 +551,10 @@ export default function SessionPage() {
           nothing happened, and the reason is not their mistake. `staleAnswer` was
           computed for this and had no surface. */}
       {agent.staleAnswer && (
-        <p role="status" className="border-t border-line bg-canvas px-3 pt-2 text-2xs text-ink-muted">
+        <p
+          role="status"
+          className="border-t border-line bg-canvas px-3 pt-2 text-2xs text-ink-muted"
+        >
           {t("approval.stale")}
         </p>
       )}
@@ -683,7 +602,9 @@ export default function SessionPage() {
         attachments={attachments}
         onAttachmentsChange={setAttachments}
         onSend={() => sendTurn.mutate(undefined)}
-        sending={sendTurn.isPending || sendControl.isPending || runCommand.isPending}
+        sending={
+          sendTurn.isPending || sendControl.isPending || runCommand.isPending
+        }
         sendError={sendControl.error ?? sendTurn.error ?? runCommand.error}
         onStop={() => stopTurn.mutate()}
         stopping={stopTurn.isPending}
@@ -721,8 +642,15 @@ export default function SessionPage() {
         // The running turn is named as a precondition, so a steer that races the
         // turn boundary is refused rather than delivered into the next conversation.
         canQueueSteering={agent.can("queue_steering")}
-        onNativeQueue={(value, priority) => sendControl.mutate({ kind: priority ? "native_steer" : "native_queue", value })}
-        onSteer={(value) => sendControl.mutate({ kind: "steer", value, turnId: liveTurnId })}
+        onNativeQueue={(value, priority) =>
+          sendControl.mutate({
+            kind: priority ? "native_steer" : "native_queue",
+            value,
+          })
+        }
+        onSteer={(value) =>
+          sendControl.mutate({ kind: "steer", value, turnId: liveTurnId })
+        }
         // No turn id: a queued follow-up is *for* after the turn, so a boundary crossing
         // underneath it changes nothing and there is no precondition to state.
         onQueue={(value) => sendControl.mutate({ kind: "queue", value })}
@@ -733,7 +661,6 @@ export default function SessionPage() {
         blockedCount={pendingRequest ? 0 : agent.requests.length}
         onShowBlocked={() => setDismissedRequest(null)}
       />
-
     </>
   );
 }
@@ -782,10 +709,17 @@ function DriveState({
 
   if (error) {
     return (
-      <aside role="alert" className="shrink-0 border-b border-line bg-sunken px-3 py-2 text-xs">
+      <aside
+        role="alert"
+        className="shrink-0 border-b border-line bg-sunken px-3 py-2 text-xs"
+      >
         <p className="font-medium text-danger">{t("drive.readFailed")}</p>
-        <p className="text-ink-muted">{error instanceof Error ? error.message : String(error)}</p>
-        <Button variant="ghost" onClick={onRetry}>{t("app.retry")}</Button>
+        <p className="text-ink-muted">
+          {error instanceof Error ? error.message : String(error)}
+        </p>
+        <Button variant="ghost" onClick={onRetry}>
+          {t("app.retry")}
+        </Button>
       </aside>
     );
   }
@@ -804,9 +738,12 @@ function DriveState({
     );
   }
 
-  const blockedReason = controlBlock?.kind === "unavailable"
-    ? controlBlock.reason
-    : control?.available ? undefined : control?.reason;
+  const blockedReason =
+    controlBlock?.kind === "unavailable"
+      ? controlBlock.reason
+      : control?.available
+        ? undefined
+        : control?.reason;
   if (!blockedReason) return null;
 
   // Exhaustive over the closed union, so a reason added to the protocol is a compile
@@ -863,7 +800,10 @@ function FindBar({
 
   return (
     <div className="flex shrink-0 items-center gap-2 border-b border-line bg-sunken px-4 py-1">
-      <label htmlFor="find-in-session" className="text-3xs font-medium text-ink-muted">
+      <label
+        htmlFor="find-in-session"
+        className="text-3xs font-medium text-ink-muted"
+      >
         {t("find.label")}
       </label>
       <input
@@ -889,369 +829,5 @@ function FindBar({
         Close
       </button>
     </div>
-  );
-}
-
-/**
- * Flatten a turn into Markdown for the clipboard.
- *
- * Tool calls are included as headings, not only prose: in an agent transcript the tool
- * calls are the record of what happened, so a copy without them is not the conversation.
- */
-async function turnAsText(entry: TurnWithEvents): Promise<string> {
-  const lines = entry.turn.requestText ? [`> ${entry.turn.requestText}`, ""] : [];
-  for (const preview of entry.events) {
-    const event = preview.bodyRef
-      ? { ...preview, ...await api.sessions.eventBody(entry.turn.sessionId, preview.bodyRef.seq) }
-      : preview;
-    if (event.kind === "assistant" && event.text) {
-      lines.push(event.text, "");
-    } else if (event.kind === "tool_call") {
-      lines.push(`- ${event.name ?? "tool"}: ${(event.text ?? "").split("\n")[0]}`);
-    }
-  }
-  return lines.join("\n").trim();
-}
-
-function Transcript({
-    traceStatus,
-  history,
-  traceEvents,
-  fidelity,
-  isPending,
-  error,
-  onRetry,
-  liveTurnId,
-  isLive,
-  onResend,
-  onOpenFile,
-  expandAll,
-  filter,
-  onLiveTurnSettled,
-}: {
-  history: TurnWithEvents[];
-  traceStatus: SessionTraceStatus;
-  traceEvents: import("@/lib/api-types").StreamEvent[];
-  /**
-   * The session's, threaded to every `Timeline` below.
-   *
-   * A property of the *record*, so it is the same for every turn in the session — which
-   * is why it is read once here rather than per turn. It gates whether a delegation
-   * duration may be drawn at all; see `lib/timeline-waterfall.ts`.
-   */
-  fidelity: Fidelity;
-  isPending: boolean;
-  error: unknown;
-  onRetry: () => void;
-  liveTurnId: string | null;
-  isLive: boolean;
-  onResend: (text: string) => void;
-  onOpenFile: (path: string, line?: number) => void;
-  expandAll: boolean | null;
-  filter: string | null;
-  onLiveTurnSettled: (state: string) => void;
-}) {
-  const traceIndex = useMemo(
-    () => buildSessionTrace(history, traceEvents),
-    [history, traceEvents],
-  );
-  const projectedHistory = useMemo(
-    () => projectSessionTurnsFromIndex(history, traceIndex),
-    [history, traceIndex],
-  );
-  const past = useMemo(() => {
-    const rows = projectedHistory.filter((entry) => entry.turn.id !== liveTurnId);
-    const needle = filter?.trim().toLowerCase();
-    if (!needle) return rows;
-    return rows.filter(
-      (entry) =>
-        entry.turn.requestText.toLowerCase().includes(needle) ||
-        entry.events.some((event) => event.text?.toLowerCase().includes(needle)),
-    );
-  }, [projectedHistory, liveTurnId, filter]);
-
-  if (isPending) {
-    return (
-      <output aria-live="polite" className="block py-8 text-center text-sm text-ink-muted">
-        Loading conversation...
-      </output>
-    );
-  }
-
-  if (error) {
-    return (
-      <div role="alert" className="rounded-lg border border-danger-line bg-danger-bg p-4">
-        <p className="text-sm font-medium text-danger">
-          Could not load the conversation history.
-        </p>
-        <p className="mt-1 text-sm text-danger">
-          {error instanceof Error ? error.message : "Unknown error."}
-        </p>
-        <button
-          type="button"
-          onClick={onRetry}
-          className="mt-3 rounded border border-danger-line bg-raised px-3 py-1.5 text-sm font-medium hover:bg-danger-bg focus-ring"
-        >
-          Retry
-        </button>
-      </div>
-    );
-  }
-
-  const filtering = Boolean(filter?.trim());
-  const empty = past.length === 0 && !liveTurnId;
-
-  return (
-    <div>
-      {empty && !filtering && (
-        <div className="py-12 text-center">
-          <p className="text-sm font-medium text-ink-soft">No turns yet</p>
-          <p className="mt-1 text-sm text-ink-muted">
-            Send a message below to start the conversation.
-          </p>
-        </div>
-      )}
-      {empty && filtering && (
-        <p className="py-12 text-center text-sm text-ink-muted">No turns match that text.</p>
-      )}
-
-      {past.map((entry) => (
-        <TurnSection
-          key={entry.turn.id}
-          entry={entry}
-          fidelity={fidelity}
-          onResend={onResend}
-          disabled={isLive}
-          onOpenFile={onOpenFile}
-          expandAll={expandAll}
-        />
-      ))}
-
-      {liveTurnId && !filtering && (
-        <LiveTurn
-          turnId={liveTurnId}
-          status={traceStatus}
-          turn={history.find((entry) => entry.turn.id === liveTurnId)?.turn}
-          // A live turn is always `stream` in fact — it *is* the process's own stdio,
-          // which is the only thing that produces that fidelity — but the session's
-          // value is passed rather than hardcoded here. Two reasons: a hardcoded
-          // `"stream"` is a claim this component is not the authority on, and a watched
-          // session streams events from a *file* the vendor is flushing, where the
-          // record genuinely is coarse while the turn is genuinely live.
-          fidelity={fidelity}
-          traceEvents={liveTurnId ? traceIndex.eventsByTurn.get(liveTurnId) ?? [] : []}
-          isLive={isLive}
-          onOpenFile={onOpenFile}
-          expandAll={expandAll}
-          onSettled={onLiveTurnSettled}
-        />
-      )}
-    </div>
-  );
-}
-
-/**
- * One completed turn.
- *
- * The boundary is a rule with a status line above the events, not a box around
- * them — enough to see where a turn began without fragmenting the log.
- */
-function TurnSection({
-  entry,
-  fidelity,
-  onResend,
-  disabled,
-  onOpenFile,
-  expandAll,
-}: {
-  entry: TurnWithEvents;
-  fidelity: Fidelity;
-  onResend: (text: string) => void;
-  disabled: boolean;
-  onOpenFile: (path: string, line?: number) => void;
-  expandAll: boolean | null;
-}) {
-  const [copied, setCopied] = useState(false);
-
-  // Resending a turn that already succeeded would duplicate work the agent has
-  // done, so it is offered only where the turn produced no usable result.
-  const t = useT();
-  const resendable =
-    entry.turn.status === "failed" ||
-    entry.turn.status === "cancelled" ||
-    entry.turn.status === "interrupted";
-
-  const elapsed = turnDurationMs(entry.turn, fidelity);
-  const duration = elapsed === undefined ? undefined : elapsed / 1000;
-  const hasContent = Boolean(entry.turn.requestText) || entry.events.some((event) =>
-    event.kind !== "turn" && (Boolean(event.text) || ["tool_call", "tool_result", "subagent", "usage"].includes(event.kind)),
-  );
-
-  async function copy() {
-    try {
-      await navigator.clipboard.writeText(await turnAsText(entry));
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
-      // Clipboard access can be refused; a silent success would be misleading.
-      setCopied(false);
-    }
-  }
-
-  return (
-    <section data-turn-id={entry.turn.id} data-turn-status={entry.turn.status} aria-label={`Turn ${entry.turn.id}`} className="border-t border-line pt-1 first:border-t-0">
-      {/* A turn nobody asked for has to say so. Its `requestText` is empty, so
-          unlabelled it renders as an answer to a message the user never wrote —
-          and the thing it is usually reporting is work they had stopped expecting
-          to hear about, which makes the provenance the most useful part. */}
-      {entry.turn.origin === "agent" && hasContent && (
-        <p className="flex items-center gap-1.5 pt-1 text-3xs text-ink-muted">
-          <span className="rounded bg-hover px-1">unprompted</span>
-          <span>the agent reported this on its own</span>
-        </p>
-      )}
-
-      {!hasContent && <p className="py-2 text-xs text-ink-muted">{t("session.emptyTurn")}</p>}
-      <TurnPrompt turn={entry.turn} events={entry.events} />
-
-      <Timeline
-        events={entry.events}
-        fidelity={fidelity}
-        onOpenFile={onOpenFile}
-        expandAll={expandAll}
-      />
-
-      {entry.turn.errorMessage && (
-        <p role="alert" className="mt-1 text-xs text-danger">
-          {entry.turn.errorMessage}
-        </p>
-      )}
-
-      <div className="flex items-center gap-2 py-1 text-3xs text-ink-muted">
-        <TurnStatusBadge status={entry.turn.status} />
-        {duration !== undefined && <span>{duration.toFixed(1)}s</span>}
-        <button
-          type="button"
-          onClick={() => void copy()}
-          className="rounded px-1 hover:bg-hover hover:text-ink-soft focus-ring"
-        >
-          {copied ? t("action.copied") : t("action.copy")}
-        </button>
-        {resendable && entry.turn.requestText && (
-          <button
-            type="button"
-            onClick={() => onResend(entry.turn.requestText)}
-            disabled={disabled}
-            className="rounded px-1 hover:bg-hover hover:text-ink-soft focus-ring disabled:opacity-50"
-          >
-            Resend
-          </button>
-        )}
-      </div>
-    </section>
-  );
-}
-
-function TurnPrompt({ turn, events }: { turn?: Turn; events: import("@/lib/api-types").StreamEvent[] }) {
-  if (!turn?.requestText) return null;
-  // Native input is stored on the turn; Sylph sends also journal user events.
-  // A later steering message must not hide the opening input. Body previews
-  // already have a lazy full-text renderer and must not cause a second prompt.
-  const recorded = events.some((event) => event.kind === "user" && !event.span && (
-    event.text === turn.requestText ||
-    (event.bodyRef && event.text && turn.requestText.startsWith(event.text))
-  ));
-  return recorded ? null : <UserPrompt text={turn.requestText} createdAtMs={turn.createdAtMs} />;
-}
-
-function LiveTurn({
-  status,
-  turnId,
-  turn,
-  fidelity,
-  traceEvents,
-  isLive,
-  onOpenFile,
-  expandAll,
-  onSettled,
-}: {
-  status: SessionTraceStatus;
-  turnId: string;
-  turn?: Turn;
-  fidelity: Fidelity;
-  /** Current-turn projection from the session trace; late child events are included. */
-  traceEvents: import("@/lib/api-types").StreamEvent[];
-  isLive: boolean;
-  onOpenFile: (path: string, line?: number) => void;
-  expandAll: boolean | null;
-  /**
-   * Called with the turn's outcome the moment its own stream announces it.
-   *
-   * The stream is the earliest *and* most complete signal: `TurnCloser::close` emits the
-   * `status` frame after closing whatever trajectories the turn left open, so this fires
-   * once the sweep is done rather than when the turn row commits.
-   */
-  onSettled: (state: string) => void;
-}) {
-  const t = useT();
-  const events = traceEvents;
-  const settled = events.reduce<string | null>((state, event) => terminalStateOf(event) ?? state, null);
-  const turnStatus = settled ?? turn?.status ?? (isLive ? "running" : "queued");
-
-  // Report the close upward. A genuine external-system sync: the stream is the external
-  // system, and the parent owns what a settled turn does to the rest of the page.
-  useEffect(() => {
-    if (settled) onSettled(settled);
-  }, [settled, onSettled]);
-  const anchorRef = useRef<HTMLDivElement>(null);
-  const pinnedRef = useRef(true);
-
-  // Scroll anchoring: follow the stream only while the user is already at the
-  // bottom, so scrolling up to read earlier output is not yanked away.
-  useEffect(() => {
-    const node = anchorRef.current;
-    if (!node) return;
-    const scroller = node.closest("[data-scroller]");
-    if (!scroller) return;
-    const distance = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
-    pinnedRef.current = distance < 120;
-    if (pinnedRef.current) node.scrollIntoView({ block: "end" });
-  }, [events]);
-
-  return (
-    <section data-turn-id={turnId} data-turn-status={turnStatus} aria-label={t("timeline.currentTurn")} className="border-t border-line pt-1">
-      <TurnPrompt turn={turn} events={events} />
-      <Timeline
-        events={events}
-        fidelity={fidelity}
-        onOpenFile={onOpenFile}
-        expandAll={expandAll}
-      />
-
-      <div className="flex items-center gap-1.5 py-1 text-3xs">
-        <span
-          aria-hidden="true"
-          className={`h-1.5 w-1.5 rounded-full ${
-            status === "open"
-              ? "animate-pulse bg-info-solid"
-              : status === "reconnecting"
-                ? "bg-warning-solid"
-                : "bg-line-strong"
-          }`}
-        />
-        <span aria-live="polite" className="text-ink-muted">
-          {status === "open"
-            ? events.length === 0
-              ? "Waiting for the agent to respond..."
-              : "Streaming"
-            : status === "reconnecting"
-              ? "Connection dropped — reconnecting..."
-              : status === "connecting"
-                ? "Connecting..."
-                : "Stream closed"}
-        </span>
-      </div>
-      <div ref={anchorRef} />
-    </section>
   );
 }

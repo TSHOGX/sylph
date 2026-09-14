@@ -30,7 +30,7 @@
  * `ToolShape` used to carry an `icon` string, and each rule below named a Unicode
  * glyph. That put presentation in a pure, unit-tested logic module and forced the
  * choice to be a *character* — which is decided by the reader's installed fonts,
- * not by this project. `kind` is the semantic answer, and `components/timeline.tsx`
+ * not by this project. `kind` is the semantic answer, and `components/execution-timeline.tsx`
  * maps it to an icon. This module stays free of React and testable in `node`.
  */
 
@@ -315,7 +315,7 @@ export function basename(path: string): string {
  * for a producer that does not exist.
  *
  * `data.exitCode` is a different case, and is deliberately still read even though
- * the protocol does not declare it. `components/timeline.tsx:942` renders
+ * the protocol does not declare it. `components/execution-timeline.tsx:942` renders
  * "failed (exit N)" from it, which is the most useful single fact about a failed
  * shell call, but today the only producer is the E2E fixture
  * (`crates/adapters/src/e2e.rs`, `tool`) — the adapters put `exitCode` on a

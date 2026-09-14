@@ -30,3 +30,14 @@ pub use env::{EnvIngestOutcome, EnvIngestResult, EnvReceipt, EnvironmentRow};
 pub use ingest::{IngestReport, NativeIngest};
 pub use store::JournalStore;
 pub use writer::JournalWriter;
+
+pub mod timeline;
+
+/// All projections derived while accepting a canonical event share its transaction.
+pub(crate) async fn project_event(
+    conn: &mut sqlx::SqliteConnection,
+    event: &crate::models::Event,
+) -> crate::error::Result<()> {
+    JournalStore::project_event_title(conn, event).await?;
+    timeline::project(conn, event).await
+}

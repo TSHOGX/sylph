@@ -2304,6 +2304,7 @@ dependencies = [
  "fts5-jieba",
  "futures",
  "hex",
+ "percent-encoding",
  "quick-xml",
  "rustls-pemfile",
  "serde",

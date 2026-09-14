@@ -43,7 +43,7 @@ export function formatRelative(ms: number | null | undefined): string {
  *
  * `0ms` is a legitimate value: a delegation whose start and close land in the same
  * millisecond really did take under one. Whether a duration is *knowable* is a separate
- * question, decided before this is called — `lib/timeline-waterfall.ts` holds that gate,
+ * question, decided before this is called — the record fidelity and observed endpoints decide that,
  * and this function never sees an unmeasurable span.
  */
 export function formatDuration(ms: number): string {

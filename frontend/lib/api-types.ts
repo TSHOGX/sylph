@@ -55,7 +55,7 @@ export interface ControlRequest {
  * **A renderer reads this before drawing a duration.** `stream` means every delta
  * and its arrival time was recorded; the other two mean the source recorded less,
  * and no care downstream recovers a timing that was never written — see
- * `lib/timeline-waterfall.ts`, which refuses to lay out an axis without it.
+ * `lib/execution-store.ts`, which refuses to lay out an axis without it.
  */
 export type Fidelity = "stream" | "blocks" | "messages";
 
@@ -205,11 +205,7 @@ export interface TurnWithEvents {
 }
 
 export interface HistoryPage {
-  turns: TurnWithEvents[];
-  hasMore: boolean;
-  nextCursor?: string | null;
-  /** Session event sequence covered by this snapshot, including compacted history. */
-  snapshotSeq: number;
+  turns: { turn: Pick<Turn, "id" | "status"> }[];
 }
 
 /** A flag declared by an agent's handshake. */

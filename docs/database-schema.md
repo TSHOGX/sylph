@@ -319,3 +319,11 @@ assigned the moment a second file appeared out of order.
 There are no `sqlx::query!` macros here, only runtime `sqlx::query`, so there is no
 `DATABASE_URL` and no `.sqlx` offline directory. A schema mistake surfaces in the store
 tests rather than at compile time, which is why those tests matter.
+
+## Execution nodes
+
+The journal owns the reconstructable execution projection described in
+`docs/storage.md` § Execution node projection. Node identifiers are projection addresses
+within a session, not session identifiers. Parent/order and parent/revision indexes
+bound child pagination and incremental reads. Node rows survive event consolidation;
+original journal and history records retain the bodies.

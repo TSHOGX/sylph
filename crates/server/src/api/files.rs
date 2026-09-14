@@ -295,8 +295,11 @@ pub async fn tree(
     axum::extract::Extension(subject): axum::extract::Extension<SubjectId>,
     AxumPath(id): AxumPath<String>,
     Query(query): Query<TreeQuery>,
-) -> Result<Json<TreeResponse>> {
+) -> Result<axum::response::Response> {
+    let started = std::time::Instant::now();
     if let Some(remote) = remote_target(&state, &id, &subject.0, "observe").await? {
+        let lookup_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let bridge_start = std::time::Instant::now();
         let (environment, draft_id, session_id, workdir) = remote_parts(&remote);
         let value = state
             .env_bridge
@@ -310,6 +313,7 @@ pub async fn tree(
             )
             .await
             .map_err(map_remote_file_error)?;
+        let bridge_ms = bridge_start.elapsed().as_secs_f64() * 1000.0;
         let raw_entries = value.as_array().ok_or_else(|| {
             Error::Internal("remote file listing returned a malformed payload".into())
         })?;
@@ -362,12 +366,20 @@ pub async fn tree(
                 .cmp(&a.is_dir)
                 .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
         });
-        return Ok(Json(TreeResponse {
+        let mut response = Json(TreeResponse {
             root: workdir.to_string(),
             path: paths::normalize_relative(&query.path),
             entries,
             truncated: false,
-        }));
+        })
+        .into_response();
+        response.headers_mut().insert(
+            "Server-Timing",
+            format!("lookup;dur={lookup_ms:.3},bridge;dur={bridge_ms:.3}")
+                .parse()
+                .expect("numeric timing header"),
+        );
+        return Ok(response);
     }
     let (root, target) = resolve(&state, &id, &query.path).await?;
 
@@ -479,7 +491,8 @@ pub async fn tree(
         path: paths::normalize_relative(&query.path),
         entries,
         truncated,
-    }))
+    })
+    .into_response())
 }
 
 #[derive(Serialize)]

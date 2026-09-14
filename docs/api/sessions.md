@@ -962,6 +962,47 @@ depth, so a parent directory's own first exact match can land a thousand or more
 past which a page cap gives up and reports a directory with dozens of sessions as
 **empty**. Bound such a scan in rows examined.
 
+## Execution nodes
+
+`GET /api/v1/sessions/{id}/nodes` is the interactive transcript read path.
+The session grant gate decodes the identity path segment before checking authorization;
+percent-encoded colons or slashes cannot bypass the same observe/control checks. With no
+parent it returns a recent root window; `parent` requests that node's direct
+children and one bounded `parentNode` context. `limit` is capped at 40 direct children and encoded responses at 128 KiB. `cursor`
+is the exclusive `ordinal:orderTie:id` boundary. The admission tie preserves
+input-only turn order when no event sequence separates successive prompts. `hasMore` and `nextCursor` describe the next
+older page; nodes within each page are in narrative order.
+
+The response includes `parent`, `nodes`, `snapshot`, `nextCursor`, `hasMore`, and
+nullable `targetId`. Each node has an opaque projection address, parent, owning turn,
+first ordering key, revision, bounded event preview, direct child count, and materialized
+summary counters. `trajectory` keeps a promoted tool's delegated report separate from
+its call. `structureError` reports repaired cyclic parentage. None of these addresses
+changes the session's identity triple.
+
+`changes=true` changes the cursor to an exclusive revision/address pair and returns
+changed children in revision order, including ancestor summaries and `removed` entries
+for former parents. A read transaction captures the snapshot with the page. Once a
+change page is exhausted, its cursor includes the complete snapshot revision. Clients
+merge by node address and revision, retain removal ordering across parent subscriptions,
+and never overwrite a newer entity with an older page.
+
+`around=seq` resolves a retained event's projection address and reads a bounded window
+ending at the target under its direct parent, in the same read transaction. It does not
+load the containing turn or walk descendant branches. `GET .../nodes/search?q=...`
+searches the retained full-text index for that session and returns bounded excerpts and
+sequence targets. Search is explicit, not polled, and can locate text outside a preview.
+
+`GET .../nodes/{node}/body` reads an explicitly requested body. Ordinary nodes reuse
+`GET .../bodies/{seq}`; a prompt reads its turn-owned input. Journal reads precede history
+reads so archive publication cannot create a transient hole. Missing or corrupt bodies
+fail visibly. Root and child pages never read bodies.
+
+`GET .../turn-state` supplies a bounded list of recent turn identifiers and statuses for
+control state without reading input or event bodies. `GET .../turns` remains an explicit
+export operation; `turn_id` restricts copying to one owned turn. It is not an interactive
+history fallback. Full replay remains separate from the execution projection.
+
 ## Search
 
 ```

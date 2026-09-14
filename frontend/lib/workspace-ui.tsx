@@ -92,7 +92,7 @@ export type MobileDrawer = "none" | "sessions" | "files";
 
 /**
  * Actions the shell handles centrally. Session-scoped actions (`stopTurn`,
- * `expandAll`) cannot be: they need state that only the open session owns, so
+ * `collapseAll`) cannot be: they need state that only the open session owns, so
  * the session page registers a handler and the shell forwards to it.
  */
 export type SessionActionHandler = (action: ShortcutAction) => boolean;

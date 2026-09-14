@@ -200,12 +200,7 @@ export const en = {
   "palette.cmd.showLeft": "Show workspaces sidebar",
   "palette.cmd.hideRight": "Hide artifacts sidebar",
   "palette.cmd.showRight": "Show artifacts sidebar",
-  "palette.cmd.expandAll": "Expand all thinking and tool blocks",
   "palette.cmd.collapseAll": "Collapse all thinking and tool blocks",
-  "palette.cmd.collapseThinking": "Collapse thinking blocks by default",
-  "palette.cmd.expandThinking": "Expand thinking blocks by default",
-  "palette.cmd.collapseToolOutput": "Collapse tool output by default",
-  "palette.cmd.expandToolOutput": "Expand tool output by default",
   // `{density}` is the *translated* value, read from `settings.density.*` rather
   // than interpolated raw — the same words the settings panel shows for it.
   "palette.cmd.density": "Cycle density (currently {density})",
@@ -601,11 +596,6 @@ export const en = {
   "settings.density.compact": "Compact",
   "settings.density.normal": "Normal",
   "settings.density.comfortable": "Comfortable",
-  "settings.expansion.label": "Default expansion",
-  "settings.expansion.hint":
-    "Errors always expand regardless of these, since a failure's output is the answer.",
-  "settings.expansion.thinking": "Expand thinking blocks",
-  "settings.expansion.toolOutput": "Expand tool output on success",
   "settings.section.config": "Configuration",
   "settings.config.failed": "Could not read the resolved configuration.",
   "settings.config.file.label": "Configuration file",
@@ -710,7 +700,6 @@ export const en = {
   "shortcut.toggleRightSidebar": "Toggle artifacts sidebar",
   "shortcut.openSettings": "Open settings",
   "shortcut.stopTurn": "Stop running turn",
-  "shortcut.expandAll": "Expand all blocks",
   "shortcut.collapseAll": "Collapse all blocks",
   "shortcut.findInSession": "Find in session",
 
@@ -817,9 +806,7 @@ export const en = {
 
   // Session header actions. The desktop pair and the phone menu name the same two
   // actions, so they share keys — a second spelling would let the two surfaces drift.
-  "session.expandAll": "Expand all",
   "session.collapseAll": "Collapse all",
-  "session.expandAllBlocks": "Expand all blocks",
   "session.collapseAllBlocks": "Collapse all blocks",
   "session.actions": "Session actions",
   "session.filterTurnsEllipsis": "Filter turns...",

@@ -215,31 +215,15 @@ test("the conversation canvas has no automated accessibility violations", async 
 test("a nested delegation tree has no automated accessibility violations", async ({
   page,
 }) => {
-  await createSession(page);
-
-  await page.getByLabel("Message", { exact: true }).fill("delegate this please");
-  await page.getByRole("button", { name: "Send", exact: true }).click();
-  await expect(page.getByRole("region", { name: "Verify delegation" })).toBeVisible({
-    timeout: 15000,
-  });
-
-  // Open a clean branch too, so both tones are in scope: the failed branch opened
-  // itself, and a card's own colours differ by status.
-  await page
-    .getByRole("region", { name: "Explore delegation" })
-    .getByRole("button", { name: "Explore", exact: true })
-    .click();
-
-  await audit(page, "delegation tree");
-
-  // Focus mode is a different tree: a breadcrumb `nav` plus re-rooted cards.
-  await page
-    .getByRole("region", { name: "Verify delegation" })
-    .getByRole("button", { name: "Focus Verify" })
-    .click();
-  await expect(page.getByRole("navigation", { name: "Delegation path" })).toBeVisible();
-
-  await audit(page, "delegation tree in focus mode");
+  const {runExecution,openExecutionGroups}=await import("./fixtures/execution");
+  const {sessionId,turnId}=await runExecution(page,"delegate this please");
+  await openExecutionGroups(page,sessionId,turnId);
+  const explore=page.getByRole("region",{name:"Explore delegation"});
+  await explore.locator("button[aria-expanded]").click();
+  await audit(page,"delegation tree");
+  await explore.getByRole("button",{name:"Focus this branch"}).click();
+  await expect(page.getByRole("button",{name:"Back to conversation"})).toBeVisible();
+  await audit(page,"delegation tree in focus mode");
 });
 
 /**

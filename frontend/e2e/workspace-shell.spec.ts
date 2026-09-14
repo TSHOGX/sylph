@@ -278,26 +278,17 @@ test("Escape closes an overlay and returns focus to its opener", async ({ page }
   await expect(opener).toBeFocused();
 });
 
-test("settings persist a preference and the timeline honours it", async ({ page }) => {
+test("settings retain display density without overriding collapsed execution", async ({ page }) => {
   await createSession(page);
-
-  await page.getByLabel("Message", { exact: true }).fill("Say something");
-  await page.getByRole("button", { name: "Send", exact: true }).click();
-  await expect(page.getByText("Hello from the E2E runner.")).toBeVisible();
-
-  const thinking = page.getByText("Considering the request.");
-  await expect(thinking).toBeHidden();
-
   await page.keyboard.press("ControlOrMeta+Comma");
-  const dialog = page.getByRole("dialog");
+  const dialog=page.getByRole("dialog");
   await expect(dialog).toBeVisible();
-  await dialog.getByLabel("Expand thinking blocks").check();
+  await expect(dialog.getByRole("checkbox",{name:/expand/i})).toHaveCount(0);
+  await dialog.getByRole("button",{name:"Comfortable",exact:true}).click();
   await page.keyboard.press("Escape");
-
-  // The preference takes effect without a reload, and survives one.
-  await expect(thinking).toBeVisible();
   await page.reload();
-  await expect(page.getByText("Considering the request.")).toBeVisible();
+  await page.keyboard.press("ControlOrMeta+Comma");
+  await expect(page.getByRole("dialog").getByRole("button",{name:"Comfortable",exact:true})).toHaveAttribute("aria-pressed","true");
 });
 
 test("the Artifacts pane browses the workspace and previews a file", async ({ page }) => {
@@ -320,37 +311,11 @@ test("the Artifacts pane browses the workspace and previews a file", async ({ pa
   await expect(pane.getByText(/^\/(private\/)?tmp$/)).toBeVisible();
 });
 
-test("expand-all and collapse-all drive every disclosure in the timeline", async ({
-  page,
-}) => {
+test("expand-all is absent from the session and command palette", async ({ page }) => {
   await createSession(page);
-
-  await page.getByLabel("Message", { exact: true }).fill("Think about this");
-  await page.getByRole("button", { name: "Send", exact: true }).click();
-  await expect(page.getByText("Hello from the E2E runner.")).toBeVisible();
-
-  // Wait for the turn to settle before asserting the collapsed default. Thinking
-  // is deliberately held open *while* it streams, and the reply block now appears
-  // during the turn rather than after it, so the reply alone no longer implies the
-  // turn is over. The composer re-enabling is what actually marks that.
-  await expect(page.getByLabel("Message", { exact: true })).toBeEnabled();
-
-  const thinking = page.getByText("Considering the request.");
-  await expect(thinking).toBeHidden();
-
-  // Shift+E is a bare-key binding, so it must not fire while the composer has
-  // focus. Clicking the transcript first is what a user would do, and is also
-  // what proves the typing-target guard works: pressing it in the composer below
-  // must not expand anything.
-  await page.getByLabel("Message", { exact: true }).focus();
-  await page.keyboard.press("Shift+E");
-  await expect(thinking).toBeHidden();
-
-  await page.getByRole("button", { name: "Expand all" }).click();
-  await expect(thinking).toBeVisible();
-
-  await page.getByRole("button", { name: "Collapse all" }).click();
-  await expect(thinking).toBeHidden();
+  await expect(page.getByRole("button",{name:"Expand all",exact:true})).toHaveCount(0);
+  await page.keyboard.press("ControlOrMeta+Shift+p");
+  await expect(page.getByRole("dialog").getByText(/Expand all/)).toHaveCount(0);
 });
 
 /**

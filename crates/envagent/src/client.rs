@@ -243,6 +243,7 @@ async fn run_connection(
     let mut inventory_tick = tokio::time::interval(Duration::from_secs(5));
     inventory_tick.tick().await;
     let mut inventory = None;
+    let mut replay_failure_reported = false;
     loop {
         tokio::select! {
             maybe = incoming.recv() => {
@@ -285,12 +286,22 @@ async fn run_connection(
                 let runtime = runtime.clone();
                 let sender = sender.clone();
                 let connection_epoch = connection.welcome.connection_epoch;
+                let file_list=match &command {
+                    sylph_protocol::EnvironmentCommand::Files{operation:sylph_protocol::FileOperation::List{relative},..}=>Some(relative.clone()),
+                    _=>None,
+                };
+                let queued_at=std::time::Instant::now();
                 command_tasks.spawn(async move {
                     let _permit = permit;
                     if let Some(predecessor) = predecessor {
                         let _ = predecessor.await;
                     }
+                    let queue_us=queued_at.elapsed().as_micros() as u64;
+                    let executing=std::time::Instant::now();
                     let outcome = runtime.handle_command(command).await;
+                    if let Some(relative)=file_list {
+                        tracing::debug!(%request_id,%relative,queue_us,filesystem_us=executing.elapsed().as_micros() as u64,"file_list_timing");
+                    }
                     let _ = sender
                         .send(sylph_protocol::WireMessage::CommandResult {
                             request_id: request_id.clone(),
@@ -308,10 +319,14 @@ async fn run_connection(
                 reason,
                 ..
             }) => {
-                tracing::warn!(
-                    expected = expected_next.get(),
-                    "server rejected an envagent batch: {reason}"
-                );
+                if !replay_failure_reported {
+                    tracing::error!(expected=expected_next.get(),"server rejected retained delivery: {reason}");
+                    replay_failure_reported=true;
+                } else { tracing::debug!(expected=expected_next.get(),"retained delivery still blocked: {reason}"); }
+                if replay_tasks.is_empty() {
+                    let retry=runtime.clone();
+                    replay_tasks.spawn(async move {tokio::time::sleep(Duration::from_millis(500)).await;retry.flush_snapshot().await});
+                }
             }
             sylph_protocol::DecodedMessage::Unknown { kind, .. } => {
                 tracing::debug!("ignoring unknown server frame {kind}");
@@ -345,7 +360,12 @@ async fn run_connection(
                 }
             }
             Some(completed) = replay_tasks.join_next(), if !replay_tasks.is_empty() => {
-                completed??;
+                if let Err(error)=completed? {
+                    if !replay_failure_reported { tracing::error!(%error,"retained delivery will retry while commands remain available"); replay_failure_reported=true; }
+                    else { tracing::debug!(%error,"retained delivery retry remains blocked"); }
+                    let retry=runtime.clone();
+                    replay_tasks.spawn(async move {tokio::time::sleep(Duration::from_millis(500)).await;retry.flush_snapshot().await});
+                } else { replay_failure_reported=false; }
             }
         }
     }

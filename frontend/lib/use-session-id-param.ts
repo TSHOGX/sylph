@@ -57,7 +57,7 @@
  * `segment()` lives there and this is its natural pair, but `api.ts` imports nothing from
  * React and is not a client module — it is callable from anywhere, and putting a hook in
  * it would make the whole API client depend on a React runtime for one function. The
- * `lib/use-*.ts` convention already exists for exactly this (`use-dialog`, `use-session-trace`,
+ * `lib/use-*.ts` convention already exists for exactly this (`use-dialog`, `use-agent-session`,
  * `use-agent-session`), so the pair is documented rather than co-located.
  */
 

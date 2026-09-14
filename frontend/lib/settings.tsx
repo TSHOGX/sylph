@@ -54,7 +54,6 @@ export type ShortcutAction =
   | "toggleRightSidebar"
   | "openSettings"
   | "stopTurn"
-  | "expandAll"
   | "collapseAll"
   | "findInSession";
 
@@ -83,11 +82,6 @@ export interface Settings {
    * open session keeps whatever it was created with.
    */
   injectSoul: boolean;
-  /** Show thinking blocks expanded on arrival. Off by default: reasoning is
-   *  debugging detail, not primary content. */
-  expandThinking: boolean;
-  /** Expand tool output on success. Errors always expand regardless. */
-  expandToolOutput: boolean;
   /** Combo string -> action. See `lib/shortcuts.ts` for the combo grammar. */
   shortcuts: Record<string, ShortcutAction>;
   /** Left sidebar visible. Persisted so a hidden sidebar stays hidden. */
@@ -127,7 +121,6 @@ export const DEFAULT_SHORTCUTS: Record<string, ShortcutAction> = {
   "Mod+,": "openSettings",
   "Mod+.": "stopTurn",
   "Mod+f": "findInSession",
-  "Shift+e": "expandAll",
   "Shift+c": "collapseAll",
 };
 
@@ -140,8 +133,6 @@ export const DEFAULT_SETTINGS: Settings = {
   // Sylph identity on by default: this is Sylph's own interface, and the
   // backend's own default for a session created without the field.
   injectSoul: true,
-  expandThinking: false,
-  expandToolOutput: false,
   shortcuts: DEFAULT_SHORTCUTS,
   showLeftSidebar: true,
   showRightSidebar: false,
@@ -207,27 +198,11 @@ function hydrate(raw: string | null): Settings {
     locale: isLocale(stored.locale) ? stored.locale : DEFAULT_SETTINGS.locale,
     injectSoul:
       typeof stored.injectSoul === "boolean" ? stored.injectSoul : DEFAULT_SETTINGS.injectSoul,
-    expandThinking:
-      typeof stored.expandThinking === "boolean"
-        ? stored.expandThinking
-        : DEFAULT_SETTINGS.expandThinking,
-    expandToolOutput:
-      typeof stored.expandToolOutput === "boolean"
-        ? stored.expandToolOutput
-        : DEFAULT_SETTINGS.expandToolOutput,
-    // Custom bindings layer over the defaults rather than replacing them, so a
-    // shortcut added in a later release still works for an existing user.
-    //
-    // Then pruned, which is a migration and not merely a filter. A settings write
-    // persists the whole merged map, so anyone who had ever opened the shortcuts
-    // panel has `Mod+n` stored from when it was a default — and that binding
-    // cannot fire, because the browser takes the keystroke first. Left in place it
-    // would keep opening a new browser window with the app's dialog behind it,
-    // and would shadow the replacement binding in the panel's reverse lookup.
+    // Bindings must name a current action and a key the browser lets us receive.
     shortcuts: isStringRecord(stored.shortcuts)
       ? pruneReserved({
           ...DEFAULT_SHORTCUTS,
-          ...(stored.shortcuts as Record<string, ShortcutAction>),
+          ...Object.fromEntries(Object.entries(stored.shortcuts).filter(([,action])=>Object.values(DEFAULT_SHORTCUTS).includes(action as ShortcutAction))) as Record<string,ShortcutAction>,
         })
       : DEFAULT_SHORTCUTS,
     showLeftSidebar:
@@ -240,7 +215,6 @@ function hydrate(raw: string | null): Settings {
         : DEFAULT_SETTINGS.showRightSidebar,
     pinnedWorkspaces: Array.isArray(stored.pinnedWorkspaces)
       ? stored.pinnedWorkspaces.flatMap((p): WorkspaceRef[] => {
-          if (typeof p === "string") return [{ environment: null, path: p }];
           if (
             typeof p === "object" && p !== null &&
             typeof (p as WorkspaceRef).path === "string" &&

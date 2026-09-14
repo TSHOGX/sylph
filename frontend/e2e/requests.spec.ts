@@ -25,42 +25,22 @@ async function ask(page: Page, prompt: string) {
   return panel;
 }
 
-/**
- * The tool result the fixture echoed the answer into, expanded.
- *
- * A result is collapsed to one line by default, so its body sits behind a `more`
- * toggle. Expanding is part of reading it rather than a workaround: what these specs
- * assert is the payload the agent received, and that only exists in the expanded body.
- *
- * # Why the toggle is awaited rather than probed
- *
- * This used to be `if (await more.isVisible()) await more.click()` — a **one-shot** probe,
- * and the region becomes visible a beat before the toggle inside it mounts. Losing that race
- * meant no click, so the body never expanded and the caller's assertion spent its whole 10s
- * budget against the collapsed line.
- *
- * Measured, A/B on one machine, this file run six times each: the probe failed 2 of 6, the
- * awaited toggle 0 of 6. Three *different* callers were the one to fail across those runs
- * and an earlier full-suite check — `:43`, `:80`, `:172` — every one reporting
- * `Received string: "Bash resultsucceededmore"`, the collapsed rendering, with the toggle
- * plainly present by the time the assertion sampled it.
- *
- * Two things there are worth carrying. It presented as *the answer never arrived*, which
- * points at the request pipeline; the answer had arrived every time and only the expansion
- * was missing. And because the loser was arbitrary, it read as flakiness in four specs
- * rather than as one defect in the helper they share.
- *
- * Every caller asserts on the echoed JSON, which only exists expanded, so the toggle is
- * required rather than optional — asserting it beats tolerating its absence, because a
- * payload that stops collapsing should fail here and name the reason instead of failing in
- * four callers that would each blame the app.
- */
+/** Read the echoed answer through the same group/operation disclosures as a user. */
 async function answerReceived(page: Page) {
-  const result = page.getByRole("region", { name: "Tool result" });
-  await expect(result).toBeVisible({ timeout: 15000 });
-  const more = result.getByRole("button", { name: "more" });
-  await expect(more).toBeVisible({ timeout: 10000 });
-  await more.click();
+  const sessionId=decodeURIComponent(new URL(page.url()).pathname.split("/").at(-1)!);
+  const {openExecutionGroups}=await import("./fixtures/execution");
+  await expect.poll(async()=>{
+    const response=await page.request.get(`/api/v1/sessions/${encodeURIComponent(sessionId)}/turn-state`);
+    return (await response.json()).turns[0]?.turn.status;
+  },{timeout:15000}).toMatch(/completed|failed/);
+  const response=await page.request.get(`/api/v1/sessions/${encodeURIComponent(sessionId)}/turn-state`);
+  const turnId=(await response.json()).turns[0].turn.id;
+  await openExecutionGroups(page,sessionId,turnId);
+  const call=page.getByRole("region",{name:/tool call/}).last();
+  await expect(call).toBeVisible();
+  await call.locator("button[aria-expanded]").click();
+  const result=page.getByRole("region",{name:"Tool result",exact:true}).last();
+  await expect(result).toBeVisible();
   return result;
 }
 
@@ -131,7 +111,7 @@ test("declining sends no answers, even while a required field is empty", async (
   await expect(decline).toBeEnabled();
   await decline.click();
 
-  await expect(page.getByText("Declined by the user.")).toBeVisible({ timeout: 15000 });
+  await expect(await answerReceived(page)).toContainText("Declined by the user.");
 });
 
 test("a text request carries its prefill and submits what was typed", async ({
