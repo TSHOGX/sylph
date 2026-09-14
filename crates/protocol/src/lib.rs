@@ -72,13 +72,13 @@ pub use event::{Event, EventKind, InteriorState, Phase, Stability};
 pub use identity::{
     AgentName, EnvironmentId, Fidelity, IdentityError, NativeId, SessionId, ID_DELIMITER,
 };
-pub use link::{AdapterError, Facet, LinkFacets, RefusalCode, UnavailableReason};
+pub use link::{AdapterError, Facet, LinkFacets, RefusalCode, UnavailableReason, VendorRefusal};
 pub use request::{
     Choice, Field, FieldKind, Form, FormAnswer, NotesSpec, Request, RequestKind, RequestOption,
     Resolution, Risk, SelectMode,
 };
 pub use semantic::{
-    CloseReason, CommandOutcome, CommandRequest, CommandRequestId, CommandResult,
+    CloseReason, CommandOutcome, CommandRequest, CommandRequestId, CommandResult, ControlReceipt,
     IdempotencyPolicy, ProducerId, ProducerKey, ProducerSeq, SemanticError, SequencedEvent,
-    ServerSeq, SessionEdge, SessionEdgeRelation, SourceCursor, TurnInputFact,
+    ServerSeq, SessionEdge, SessionEdgeRelation, SourceCursor, TurnInputFact, TurnLease,
 };

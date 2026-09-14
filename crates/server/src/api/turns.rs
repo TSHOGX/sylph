@@ -340,13 +340,35 @@ pub async fn create(
     }
     let text = req.text.unwrap_or_default();
     let now = now_ms();
+    let pending_control = match idempotency_key.as_deref() {
+        Some(key) => {
+            state
+                .store
+                .find_control_request_by_idempotency(&session_id, key)
+                .await?
+        }
+        None => None,
+    };
+    if let Some(request) = pending_control.as_ref() {
+        if request.kind != "queue"
+            || request.state != "queued"
+            || request.origin_subject != subject.0
+        {
+            return Err(Error::InvalidRequest(
+                "Control request is no longer queued".into(),
+            ));
+        }
+        if request.text != text {
+            return Err(Error::SessionAlreadyRunning);
+        }
+    }
     let turn = Turn {
         id: uuid::Uuid::new_v4().to_string(),
         session_id: session_id.clone(),
         status: "queued".into(),
         origin: "user".into(),
         origin_subject: Some(subject.0.clone()),
-        request_text: text.clone(),
+        request_text: String::new(),
         command_invocation_id: req.command.clone(),
         idempotency_key: idempotency_key.clone(),
         error_code: None,
@@ -376,13 +398,25 @@ pub async fn create(
             return Err(Error::SessionAlreadyRunning);
         }
     };
-    if !text.is_empty() {
-        state
-            .env_bridge
-            .emit_server_event(&session_id, &created.id, "user", text.clone(), None)
-            .await
-            .map_err(|error| Error::Internal(format!("could not journal user event: {error:#}")))?;
-    }
+    let control = match pending_control {
+        Some(control) => control,
+        None => {
+            super::links::record_control(
+                &state,
+                &subject.0,
+                &session_id,
+                "send",
+                text.clone(),
+                Some(created.id.clone()),
+                idempotency_key.clone(),
+            )
+            .await?
+        }
+    };
+    state
+        .store
+        .set_control_target(&control.request_id, &created.id)
+        .await?;
     state
         .env_bridge
         .emit_server_event(
@@ -398,13 +432,10 @@ pub async fn create(
         .store
         .set_session_title_if_empty(&session_id, &text)
         .await;
-    let request_id = sylph_protocol::CommandRequestId::parse(
-        idempotency_key
-            .as_deref()
-            .map(|key| format!("send-{}", blake3::hash(key.as_bytes()).to_hex()))
-            .unwrap_or_else(|| format!("send-{}", uuid::Uuid::new_v4().simple())),
-    )
-    .map_err(|error| Error::InvalidRequest(error.to_string()))?;
+    super::controls::transition(&state, &control, "dispatched", None, None).await?;
+    let request_id =
+        sylph_protocol::CommandRequestId::parse(format!("control-{}", control.request_id))
+            .map_err(|error| Error::InvalidRequest(error.to_string()))?;
     let outcome = match state
         .env_bridge
         .dispatch_and_wait(
@@ -430,25 +461,52 @@ pub async fn create(
     {
         Ok(outcome) => outcome,
         Err(error) => {
-            let _ = state
-                .store
-                .finish_turn_at(
-                    &created.id,
-                    "failed",
-                    Some("LINK_LOST"),
-                    Some(&format!("{error:#}")),
-                    now_ms(),
-                )
-                .await;
-            let _ = state.store.update_session_status(&session_id, "idle").await;
+            super::controls::transition(
+                &state,
+                &control,
+                "unconfirmed",
+                None,
+                Some(&format!("Delivery is unconfirmed: {error:#}")),
+            )
+            .await?;
             return Err(Error::LinkFailed(format!("{error:#}")));
         }
     };
     match outcome {
-        sylph_protocol::CommandOutcome::Accepted { .. } => {
+        outcome @ sylph_protocol::CommandOutcome::Accepted { .. } => {
+            if let Err(error) = super::controls::confirm_turn_receipt(&outcome, &created.id) {
+                super::controls::transition(
+                    &state,
+                    &control,
+                    "unconfirmed",
+                    None,
+                    Some(&error.to_string()),
+                )
+                .await?;
+                return Err(error);
+            }
+            let receipt = serde_json::to_string(&outcome)
+                .map_err(|error| Error::Internal(error.to_string()))?;
+            super::controls::transition(&state, &control, "confirmed", Some(&receipt), None)
+                .await?;
+            if !control.text.is_empty() {
+                state
+                    .store
+                    .set_turn_request_text(&session_id, &created.id, &control.text)
+                    .await?;
+                super::controls::journal_message(&state, &control, &created.id).await?;
+            }
             let _ = state.store.mark_turn_running(&created.id).await?;
         }
         sylph_protocol::CommandOutcome::Rejected { code, message } => {
+            super::controls::transition(
+                &state,
+                &control,
+                "rejected",
+                None,
+                Some(&format!("{code}: {message}")),
+            )
+            .await?;
             let _ = state
                 .store
                 .finish_turn_at(&created.id, "failed", Some(&code), Some(&message), now_ms())
@@ -457,17 +515,14 @@ pub async fn create(
             return Err(Error::LinkFailed(format!("{code}: {message}")));
         }
         sylph_protocol::CommandOutcome::Unknown { message } => {
-            let _ = state
-                .store
-                .finish_turn_at(
-                    &created.id,
-                    "failed",
-                    Some("LINK_LOST"),
-                    message.as_deref(),
-                    now_ms(),
-                )
-                .await;
-            let _ = state.store.update_session_status(&session_id, "idle").await;
+            super::controls::transition(
+                &state,
+                &control,
+                "unconfirmed",
+                None,
+                Some(message.as_deref().unwrap_or("Delivery is unconfirmed")),
+            )
+            .await?;
             return Err(Error::LinkFailed(format!(
                 "remote turn outcome is unknown: {}",
                 message.unwrap_or_default()
@@ -639,6 +694,7 @@ pub async fn stop(
     State(state): State<AppState>,
     Extension(subject): Extension<SubjectId>,
     Path(turn_id): Path<String>,
+    headers: axum::http::HeaderMap,
 ) -> Result<(StatusCode, Json<TurnResponse>)> {
     let turn = state
         .store
@@ -653,45 +709,86 @@ pub async fn stop(
         return Err(Error::Forbidden("control capability required".into()));
     }
 
-    if turn.is_terminal() {
-        return Err(Error::StopAlreadyCompleted);
-    }
-
-    // Remote turns have no in-process waiter, so `LinkedSupervisor::stop`
-    // cannot see or settle them.  Claim the interrupted outcome through the
-    // shared closer first (the same ordering as local stop), then forward a
-    // turn-guarded interrupt to the envagent.  The guard prevents a delayed
-    // command from stopping a newer turn on the same long-lived session.
-
+    // Stopping keeps the execution slot occupied until the adapter closes the lease.
+    // An interrupt receipt confirms the request, not that the vendor is already idle.
     let _session_command_guard = state
         .env_bridge
         .session_command_lock(&turn.session_id)
         .await
         .lock_owned()
         .await;
-    let settled = state
-        .env_bridge
-        .interrupt_turn(&turn.session_id, &turn.id)
-        .await;
-    if !settled {
+    let key = headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    if let Some(key) = key.as_deref() {
+        if let Some(existing) = state
+            .store
+            .find_control_request_by_idempotency(&turn.session_id, key)
+            .await?
+        {
+            if existing.kind != "stop"
+                || existing.target_turn_id.as_deref() != Some(&turn.id)
+                || existing.origin_subject != subject.0
+            {
+                return Err(Error::InvalidRequest(
+                    "Idempotency key belongs to a different request".into(),
+                ));
+            }
+            let turn = state
+                .store
+                .get_turn(&turn.id)
+                .await?
+                .ok_or(Error::TurnNotFound)?;
+            return Ok((StatusCode::OK, Json(TurnResponse { turn })));
+        }
+    }
+    if turn.is_terminal() {
         return Err(Error::StopAlreadyCompleted);
     }
-    let outcome = state
-        .env_bridge
-        .remote_session_command(
-            &turn.session_id,
-            sylph_protocol::EnvironmentCommand::Interrupt {
-                session_id: turn.session_id.clone(),
-                expected_turn_id: Some(turn.id.clone()),
-            },
-            sylph_protocol::IdempotencyPolicy::AtMostOnce,
+    let control = super::links::record_control(
+        &state,
+        &subject.0,
+        &turn.session_id,
+        "stop",
+        String::new(),
+        Some(turn.id.clone()),
+        key,
+    )
+    .await?;
+    if !state.store.mark_turn_stopping(&turn.id).await? {
+        super::controls::transition(
+            &state,
+            &control,
+            "rejected",
+            None,
+            Some("Turn already completed"),
         )
-        .await;
+        .await?;
+        return Err(Error::StopAlreadyCompleted);
+    }
+    let outcome = super::controls::dispatch(
+        &state,
+        &control,
+        sylph_protocol::EnvironmentCommand::Interrupt {
+            session_id: turn.session_id.clone(),
+            expected_turn_id: Some(turn.id.clone()),
+        },
+    )
+    .await;
     if let Err(error) = outcome {
-        tracing::warn!(
-            turn = %turn.id,
-            "remote interrupt could not be delivered after cancellation: {error:#}"
-        );
+        let request = state
+            .store
+            .control_request(&control.request_id)
+            .await?
+            .ok_or(Error::RequestNotFound)?;
+        if request.state == "rejected" {
+            // A definitive refusal means the interrupt did not start. Unknown delivery
+            // keeps stopping, since retrying could otherwise interrupt a later turn.
+            sqlx::query("UPDATE turns SET status='running', stopped_at_ms=NULL WHERE id=? AND status='stopping'")
+                .bind(&turn.id).execute(state.store.raw_pool()).await?;
+        }
+        return Err(error);
     }
     let updated = state
         .store

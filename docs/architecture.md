@@ -345,9 +345,9 @@ Two orderings are load-bearing, and both express one principle: **write the row 
 the next action legal first**, because a client will observe between two writes that settle
 one logical fact.
 
-- **`stop` settles the turn before touching the link.** An agent that stops producing
-  looks like a lost link to the drain task, so interrupting first reports `LINK_LOST` for
-  something the user deliberately asked for.
+- **`stop` marks the turn `stopping` before asking the vendor to interrupt.** The
+  execution slot remains occupied until the adapter closes its turn lease. A successful
+  interrupt request is not evidence that the vendor is already idle.
 - **A session returns to `idle` before its turn is marked terminal.** The other order
   leaves a finished turn on a `running` session, which is the state that makes the composer
   refuse the next message.

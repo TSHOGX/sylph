@@ -66,8 +66,7 @@ pub enum Capability {
     /// A correction, and the timing is the whole capability: text that arrives after the
     /// turn is a follow-up, which is [`Self::Queue`]. Offered only by a vendor with a native
     /// steer — `codex`'s `turn/steer`, which requires an `expectedTurnId` and refuses a
-    /// stale one, and `pi`'s own `steer`, which delivers after the current tool calls and
-    /// before the next model call.
+    /// stale one, while pi's unguarded queue is [`Self::QueueSteering`].
     ///
     /// **`claude` does not have one, and declaring it here was a shipped defect.** Measured
     /// on 2.1.251: `"steer"` occurs zero times as a quoted token in the binary while the six
@@ -78,6 +77,9 @@ pub enum Capability {
     /// correction arrived *after* the thing it was meant to prevent, with every layer
     /// reporting success.
     Steer,
+    /// Native priority queue. May cross a turn boundary; acknowledgement proves queue
+    /// insertion, not delivery into the currently active turn.
+    QueueSteering,
     /// Accepts text **for after the running turn**.
     ///
     /// A follow-up rather than a correction, and a distinct capability rather than a

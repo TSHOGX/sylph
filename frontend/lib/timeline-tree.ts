@@ -152,6 +152,14 @@ export function buildRows(events: StreamEvent[]): TimelineRow[] {
 
   for (const event of events) {
     const id = event.streamId;
+    // Content completion seals this identity. A delayed live delta must not append to
+    // a durable replacement or reopen its reasoning disclosure during history handoff.
+    if (id && (event.kind === "thinking" || event.kind === "assistant") &&
+        (event.phase === "delta" || event.phase === "started")) {
+      const prior = rowIndex.get(id);
+      if (prior !== undefined && rows[prior].event.phase === "completed") continue;
+    }
+
 
     if (event.kind === "tool_result") {
       // Attach to the call sharing this id. Runners that do not reuse the id

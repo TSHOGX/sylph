@@ -108,6 +108,8 @@
 //! event's own timestamp rather than `now()`, because that is a real observation about
 //! the transcript and `now()` is a fact about when someone clicked adopt.
 
+use std::collections::HashMap;
+
 use anyhow::{Context, Result};
 use futures::StreamExt;
 use sha2::{Digest, Sha256};
@@ -289,18 +291,6 @@ fn content_digest(event: &StreamEvent) -> String {
     hex::encode(hasher.finalize())
 }
 
-/// What journaling one event concluded.
-///
-/// Two outcomes rather than a `Result`, because the only failure that ends a pass is the
-/// session row being gone — a sequence or write failure skips the one event and the pass
-/// continues, which is the same answer the live drain gives.
-enum Journaled {
-    /// Written, or skipped with the failure logged. Keep reading the stream.
-    Continued,
-    /// The session row has been deleted under the pass. Nothing further can be attributed.
-    SessionGone,
-}
-
 /// When an event happened, preferring the vendor's clock over the server's.
 ///
 /// One function rather than the expression inline at each use, because the pass reads it
@@ -321,6 +311,19 @@ fn event_time(event: &StreamEvent) -> i64 {
 /// would lose content rather than a bracket.
 fn opens_a_turn(event: &StreamEvent) -> bool {
     event.kind == "turn" && event.phase.as_deref() == Some("started")
+}
+
+type HeldEvents = HashMap<String, Option<String>>;
+
+fn remember_held(held: &mut HeldEvents, event: &StreamEvent, turn_id: Option<&str>) {
+    let turn_id = turn_id.map(str::to_string);
+    held.entry(content_digest(event))
+        .and_modify(|existing| {
+            if *existing != turn_id {
+                *existing = None;
+            }
+        })
+        .or_insert(turn_id);
 }
 
 /// Writes a parsed native session into the journal.
@@ -417,18 +420,19 @@ impl NativeIngest {
     }
 
     /// Content digests of every event this session already holds, across both tiers.
-    async fn held_digests(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<std::collections::HashSet<String>> {
-        let mut held = std::collections::HashSet::new();
+    async fn held_digests(&self, session_id: &SessionId) -> Result<HeldEvents> {
+        let mut held = HeldEvents::new();
         // **Ephemeral rows included**, which `turn_events_after` excludes by design. A
         // `turn`/`started` derives `Ephemeral`, so reading through the reader-facing query
         // left every one of them out of this set — and a re-read then re-added one per pass,
         // in the tier a transcript is assembled from. `session_events` is the unfiltered
         // read, and it is one query for the session rather than one per turn.
         for row in self.store.session_events(session_id).await? {
-            held.insert(content_digest(&StreamEvent::from_row(&row)));
+            remember_held(
+                &mut held,
+                &StreamEvent::from_row(&row),
+                row.turn_id.as_deref(),
+            );
         }
         // The other tier. A turn's events live in whichever one consolidation last left
         // them, so reading only the journal would treat every consolidated event as new and
@@ -439,10 +443,15 @@ impl NativeIngest {
         // the oldest turns of a long session, which is the history least recoverable
         // elsewhere.
         for turn in self.store.list_turns(session_id, i64::MAX).await? {
-            if let Ok(blocks) = self.history.turn_blocks(&turn.id).await {
-                for block in &blocks {
-                    held.insert(content_digest(&crate::api::sessions::block_to_event(block)));
-                }
+            let blocks = self.history.turn_blocks(&turn.id).await.with_context(|| {
+                format!("could not read the held projection for turn {}", turn.id)
+            })?;
+            for block in &blocks {
+                remember_held(
+                    &mut held,
+                    &crate::api::sessions::block_to_event(block),
+                    Some(&turn.id),
+                );
             }
         }
         Ok(held)
@@ -459,7 +468,7 @@ impl NativeIngest {
         &self,
         session_id: &SessionId,
         mut stream: EventStream,
-        suppress: Option<std::collections::HashSet<String>>,
+        suppress: Option<HeldEvents>,
     ) -> Result<IngestReport> {
         let mut report = IngestReport::default();
         // The container currently accepting events, with the timestamp of the event that
@@ -475,194 +484,221 @@ impl NativeIngest {
         let mut deferred_opener: Option<StreamEvent> = None;
         let mut pending_input: Option<sylph_protocol::TurnInputFact> = None;
 
-        while let Some(item) = stream.next().await {
-            let message = match item {
-                Ok(message) => message,
-                Err(error) => {
-                    report.read_errors += 1;
-                    // `debug` after the first, following the degraded-dependency rule: a
-                    // file being rewritten under us produces a run of these, and one
-                    // line per record is the 2339-line flood `AGENTS.md` records.
-                    if report.read_errors == 1 {
-                        warn!(
-                            "Could not read part of {}'s native session: {:#}",
-                            session_id, error
-                        );
-                    } else {
-                        debug!(
-                            "Further read error on {} (#{}): {:#}",
-                            session_id, report.read_errors, error
-                        );
-                    }
-                    continue;
-                }
-            };
-
-            let event = match message {
-                SessionMessage::Event(event) => event,
-                SessionMessage::Capabilities(_) => {
-                    report.capability_partials += 1;
-                    continue;
-                }
-                // No native parser emits one, verified across all three; and a request
-                // read back from a store is one somebody already answered, so raising it
-                // would put a dialog on screen for a decision made months ago. Counted
-                // as a read anomaly rather than silently skipped, so a parser that starts
-                // emitting them is visible here rather than invisible.
-                SessionMessage::Request(_) => {
-                    report.read_errors += 1;
-                    warn!(
-                        "Ignoring a pending request read from {}'s native store: a request \
-                         in a recorded transcript was already answered",
-                        session_id
-                    );
-                    continue;
-                }
-                SessionMessage::NativeRecord(record) => {
-                    if let Err(error) = self
-                        .history
-                        .put_native_record(&session_id.encode(), &record)
-                        .await
-                    {
-                        if let Some((turn_id, opened_at)) = open_turn.take() {
-                            let at = report.last_event_ms.unwrap_or(opened_at);
-                            self.settle(&turn_id, true, opened_at, at).await;
+        let result: Result<()> = async {
+            while let Some(item) = stream.next().await {
+                let message = match item {
+                    Ok(message) => message,
+                    Err(error) => {
+                        report.read_errors += 1;
+                        // `debug` after the first, following the degraded-dependency rule: a
+                        // file being rewritten under us produces a run of these, and one
+                        // line per record is the 2339-line flood `AGENTS.md` records.
+                        if report.read_errors == 1 {
+                            warn!(
+                                "Could not read part of {}'s native session: {:#}",
+                                session_id, error
+                            );
+                        } else {
+                            debug!(
+                                "Further read error on {} (#{}): {:#}",
+                                session_id, report.read_errors, error
+                            );
                         }
-                        return Err(error).with_context(|| {
-                            format!(
-                                "could not retain native record {}:{} for {}",
-                                record.source, record.version, session_id
-                            )
-                        });
+                        continue;
                     }
-                    report.raw_records += 1;
-                    // Raw native records do not open or close a turn container.
-                    continue;
-                }
-                SessionMessage::TurnInput(input) => {
-                    // Native user input is provenance for the Sylph turn row, not a
-                    // synthetic transcript event. Keep it until the first projected event
-                    // opens the container, then persist it exactly once.
-                    pending_input = Some(input);
-                    continue;
-                }
-            };
+                };
 
-            let wire = StreamEvent::from_protocol(&event);
-            report.examined += 1;
-            report.last_event_ms = Some(event_time(&wire));
+                let event = match message {
+                    SessionMessage::Event(event) => event,
+                    SessionMessage::Capabilities(_) => {
+                        report.capability_partials += 1;
+                        continue;
+                    }
+                    // No native parser emits one, verified across all three; and a request
+                    // read back from a store is one somebody already answered, so raising it
+                    // would put a dialog on screen for a decision made months ago. Counted
+                    // as a read anomaly rather than silently skipped, so a parser that starts
+                    // emitting them is visible here rather than invisible.
+                    SessionMessage::Request(_) => {
+                        report.read_errors += 1;
+                        warn!(
+                            "Ignoring a pending request read from {}'s native store: a request \
+                         in a recorded transcript was already answered",
+                            session_id
+                        );
+                        continue;
+                    }
+                    SessionMessage::NativeRecord(record) => {
+                        if let Err(error) = self
+                            .history
+                            .put_native_record(&session_id.encode(), &record)
+                            .await
+                        {
+                            return Err(error).with_context(|| {
+                                format!(
+                                    "could not retain native record {}:{} for {}",
+                                    record.source, record.version, session_id
+                                )
+                            });
+                        }
+                        report.raw_records += 1;
+                        // Raw native records do not open or close a turn container.
+                        continue;
+                    }
+                    SessionMessage::TurnInput(input) => {
+                        // Harness context stays in the native envelope, rather than replacing
+                        // the question a person typed. A turn opener can precede the input;
+                        // fill that container immediately even when no further event follows.
+                        if input.text.trim().is_empty()
+                            || crate::db::labels::is_native_context(&input.text)
+                        {
+                            continue;
+                        }
+                        if let Some((turn_id, _)) = &open_turn {
+                            self.attach_input(session_id, turn_id, &input.text).await?;
+                        } else {
+                            pending_input = Some(input);
+                        }
+                        continue;
+                    }
+                };
 
-            // The opening ask, for whatever the parser managed to carry. See
-            // `IngestReport::opening_status` for why this is `completed` and not
-            // phase-less — the phase-less shape is the vendor's own narration, and
-            // filtering on it titled a real session "Model set to openrouter
-            // stealth/ox-alpha" when its opening ask was "hi".
-            if report.opening_status.is_none()
-                && wire.kind == "status"
-                && wire.phase.as_deref() == Some("completed")
-                && !wire.is_error
-            {
-                let text = wire.text.trim();
-                if !text.is_empty() {
-                    report.opening_status = Some(text.to_string());
+                let wire = StreamEvent::from_protocol(&event);
+                report.examined += 1;
+                report.last_event_ms = Some(event_time(&wire));
+
+                // The opening ask, for whatever the parser managed to carry. See
+                // `IngestReport::opening_status` for why this is `completed` and not
+                // phase-less — the phase-less shape is the vendor's own narration, and
+                // filtering on it titled a real session "Model set to openrouter
+                // stealth/ox-alpha" when its opening ask was "hi".
+                if report.opening_status.is_none()
+                    && wire.kind == "status"
+                    && wire.phase.as_deref() == Some("completed")
+                    && !wire.is_error
+                {
+                    let text = wire.text.trim();
+                    if !text.is_empty() {
+                        report.opening_status = Some(text.to_string());
+                    }
                 }
-            }
 
-            // An event a previous pass already journaled. Counted and skipped **before a
-            // container is opened or a sequence allocated**, so a re-read that finds
-            // nothing new adds no empty turn and consumes no sequence numbers — an
-            // otherwise-invisible cost that would accumulate one dead turn per click.
-            //
-            // A turn's opener is the one event no digest can answer for, so it is parked
-            // here and decided by what follows it. See the module header, § A turn's
-            // opener is decided by what follows it.
-            if let Some(held) = &suppress {
-                if held.contains(&content_digest(&wire)) {
-                    report.already_held += 1;
-                    // A held event belongs to a turn a previous pass already recorded, so
-                    // a parked opener is that turn's bracket and was journaled by that
-                    // same pass. This is the one drop site that *knows* the opener was
-                    // held, which is why it is the only one that says so.
-                    if deferred_opener.take().is_some() {
+                // An event a previous pass already journaled. Counted and skipped **before a
+                // container is opened or a sequence allocated**, so a re-read that finds
+                // nothing new adds no empty turn and consumes no sequence numbers — an
+                // otherwise-invisible cost that would accumulate one dead turn per click.
+                //
+                // A turn's opener is the one event no digest can answer for, so it is parked
+                // here and decided by what follows it. See the module header, § A turn's
+                // opener is decided by what follows it.
+                if let Some(held) = &suppress {
+                    if let Some(held_turn) = held.get(&content_digest(&wire)) {
                         report.already_held += 1;
+                        // Suppression must not suppress a newly recovered prompt. Preserve
+                        // the existing container's outcome while repairing only provenance;
+                        // an ambiguous digest has no target and cannot justify a guess.
+                        if let (Some(turn_id), Some(input)) = (held_turn, pending_input.as_ref()) {
+                            self.attach_input(session_id, turn_id, &input.text).await?;
+                            pending_input = None;
+                        }
+                        // A held event belongs to a turn a previous pass already recorded, so
+                        // a parked opener is that turn's bracket and was journaled by that
+                        // same pass. This is the one drop site that *knows* the opener was
+                        // held, which is why it is the only one that says so.
+                        if deferred_opener.take().is_some() {
+                            report.already_held += 1;
+                        }
+                        if wire.kind == "turn" && wire.phase.as_deref() == Some("completed") {
+                            pending_input = None;
+                        }
+                        continue;
                     }
-                    continue;
-                }
-                if opens_a_turn(&wire) {
-                    // Parked, not written. Whether this is the opener of a turn already
-                    // held or of one the vendor has just appended is not decidable from
-                    // the event: both are byte-identical but for the vendor's stamp, and
-                    // the held one survives in neither tier to compare against.
-                    //
-                    // A second opener arriving while one is parked displaces it, which is
-                    // sound for the same reason: unheld content between them would have
-                    // emitted the first already, so a displaced opener bracketed nothing.
-                    // It is counted as examined and nothing else — claiming it was already
-                    // held would assert a previous pass wrote a bracket around no content,
-                    // which this pass has no evidence for.
-                    deferred_opener = Some(wire);
-                    continue;
-                }
-                // Not held, so this event is new work — which is the proof a parked opener
-                // was waiting for. Journaled **first**, so the container opens at the
-                // vendor's own start stamp rather than at this event's, which is the
-                // silently-shortened turn a suppressed opener produces.
-                if let Some(opener) = deferred_opener.take() {
-                    match self
-                        .journal(
+                    if opens_a_turn(&wire) {
+                        // Parked, not written. Whether this is the opener of a turn already
+                        // held or of one the vendor has just appended is not decidable from
+                        // the event: both are byte-identical but for the vendor's stamp, and
+                        // the held one survives in neither tier to compare against.
+                        //
+                        // A second opener arriving while one is parked displaces it, which is
+                        // sound for the same reason: unheld content between them would have
+                        // emitted the first already, so a displaced opener bracketed nothing.
+                        // It is counted as examined and nothing else — claiming it was already
+                        // held would assert a previous pass wrote a bracket around no content,
+                        // which this pass has no evidence for.
+                        deferred_opener = Some(wire);
+                        continue;
+                    }
+                    // Not held, so this event is new work — which is the proof a parked opener
+                    // was waiting for. Journaled **first**, so the container opens at the
+                    // vendor's own start stamp rather than at this event's, which is the
+                    // silently-shortened turn a suppressed opener produces.
+                    if let Some(opener) = deferred_opener.take() {
+                        self.journal(
                             session_id,
                             opener,
                             &mut report,
                             &mut open_turn,
                             pending_input.as_ref(),
                         )
-                        .await
-                    {
-                        Journaled::Continued => {}
-                        Journaled::SessionGone => return Ok(report),
+                        .await?;
+                        pending_input = None;
                     }
                 }
-            }
 
-            match self
-                .journal(
+                self.journal(
                     session_id,
                     wire,
                     &mut report,
                     &mut open_turn,
                     pending_input.as_ref(),
                 )
-                .await
-            {
-                Journaled::Continued => {
-                    // `journal` attaches pending provenance before it can close a
-                    // one-event turn, so no input is lost at the terminal boundary.
-                    pending_input = None;
-                }
-                Journaled::SessionGone => return Ok(report),
+                .await?;
+                pending_input = None;
             }
+
+            // An opener the rest of the stream never justified — the vendor has bracketed a
+            // turn and written nothing into it yet. Dropped rather than written, because
+            // writing it opens the dead empty turn per click that parking exists to avoid, and
+            // it is not a loss: a `turn`/`started` is reader-facing in neither tier, and the
+            // next pass to find real content after it opens a container at that content's own
+            // stamp.
+            //
+            // Counted as examined and nothing else. It is not `already_held` — this store may
+            // never have held it — and it is not ingested. A report that claimed either would
+            // be asserting something this pass did not observe.
+            drop(deferred_opener);
+
+            // Whatever the pass opened and the vendor never closed. Not a bracket: no `turn`
+            // event is written, and the row records no stop reason. See the module header.
+            if let Some((turn_id, opened_at)) = &open_turn {
+                let at = report.last_event_ms.unwrap_or(*opened_at);
+                self.settle(turn_id, false, *opened_at, at).await?;
+                open_turn = None;
+            }
+
+            Ok(())
         }
-
-        // An opener the rest of the stream never justified — the vendor has bracketed a
-        // turn and written nothing into it yet. Dropped rather than written, because
-        // writing it opens the dead empty turn per click that parking exists to avoid, and
-        // it is not a loss: a `turn`/`started` is reader-facing in neither tier, and the
-        // next pass to find real content after it opens a container at that content's own
-        // stamp.
-        //
-        // Counted as examined and nothing else. It is not `already_held` — this store may
-        // never have held it — and it is not ingested. A report that claimed either would
-        // be asserting something this pass did not observe.
-        drop(deferred_opener);
-
-        // Whatever the pass opened and the vendor never closed. Not a bracket: no `turn`
-        // event is written, and the row records no stop reason. See the module header.
-        if let Some((turn_id, opened_at)) = open_turn {
-            let at = report.last_event_ms.unwrap_or(opened_at);
-            self.settle(&turn_id, false, opened_at, at).await;
+        .await;
+        if let Err(error) = result {
+            if let Some((turn_id, opened_at)) = open_turn {
+                let at = report.last_event_ms.unwrap_or(opened_at);
+                if let Err(close_error) = self.settle(&turn_id, true, opened_at, at).await {
+                    warn!("Could not close native turn {turn_id} after ingest failed: {close_error:#}");
+                }
+            }
+            return Err(error);
         }
 
         Ok(report)
+    }
+
+    async fn attach_input(&self, session_id: &SessionId, turn_id: &str, text: &str) -> Result<()> {
+        sqlx::query("UPDATE turns SET request_text=CASE WHEN request_text='' THEN ? ELSE request_text END,origin='user' \
+            WHERE id=? AND session_env=? AND session_agent=? AND session_native=? AND (request_text='' OR (request_text=? AND origin<>'user'))")
+            .bind(text).bind(turn_id).bind(session_id.environment.as_str())
+            .bind(session_id.agent.as_str()).bind(session_id.native_id.as_str()).bind(text)
+            .execute(self.store.raw_pool()).await?;
+        Ok(())
     }
 
     /// Journal one event: resolve its container, allocate its sequence, write it,
@@ -680,47 +716,35 @@ impl NativeIngest {
         report: &mut IngestReport,
         open_turn: &mut Option<(String, i64)>,
         pending_input: Option<&sylph_protocol::TurnInputFact>,
-    ) -> Journaled {
+    ) -> Result<()> {
         let at = event_time(&wire);
         let closes = wire.kind == "turn" && wire.phase.as_deref() == Some("completed");
 
         let (turn_id, opened_at) = match &open_turn {
             Some((id, opened_at)) => (id.clone(), *opened_at),
-            None => match self.open_container(session_id, at).await {
-                Some(id) => {
-                    report.turns += 1;
-                    *open_turn = Some((id.clone(), at));
-                    (id, at)
-                }
-                // The session row is gone — adopt racing a delete. Dropping is the
-                // same answer the live drain gives, and for the same reason: an
-                // unattributed write is worse than a missing one.
-                None => return Journaled::SessionGone,
-            },
+            None => {
+                let id = self.open_container(session_id, at).await?;
+                report.turns += 1;
+                *open_turn = Some((id.clone(), at));
+                (id, at)
+            }
         };
         wire.arrival_turn_id = Some(turn_id.clone());
 
         if let Some(input) = pending_input {
-            if let Err(error) = self
-                .store
-                .update_turn_request_text(&turn_id, &input.text)
-                .await
-            {
-                warn!(
-                    "Could not retain recovered input for turn {}: {}",
-                    turn_id, error
-                );
-            }
+            self.attach_input(session_id, &turn_id, &input.text).await?;
         }
 
-        match self.seq.next(session_id).await {
+        let sequence_gate = self.seq.gate();
+        let sequence_guard = sequence_gate.lock().await;
+        match self.seq.next_inner(session_id).await {
             Ok(seq) => wire.seq = seq,
             Err(error) => {
                 warn!(
                     "Could not allocate a sequence number for {}: {}",
                     session_id, error
                 );
-                return Journaled::Continued;
+                return Err(error.into());
             }
         }
 
@@ -731,14 +755,14 @@ impl NativeIngest {
         // held.
         if let Err(error) = self
             .writer
-            .append(&wire.to_row(session_id, &turn_id), wire.is_stable())
+            .append(&wire.to_row(session_id, &turn_id), true)
             .await
         {
             warn!(
                 "Adopted event seq {} kind '{}' on {} was not journaled: {}",
                 wire.seq, wire.kind, session_id, error
             );
-            return Journaled::Continued;
+            return Err(error);
         }
         report.events += 1;
 
@@ -749,39 +773,31 @@ impl NativeIngest {
         if let Some(hub) = &self.hub {
             hub.publish_trace(&session_id.encode(), wire.clone()).await;
         }
+        drop(sequence_guard);
 
         if closes {
             // The vendor stated an outcome, so the container closes on the vendor's
             // own terms. `finish_turn_at` records the status; the stop reason is
             // already in the journaled `turn` event above, where a reader finds it.
-            self.settle(&turn_id, wire.is_error, opened_at, at).await;
+            self.settle(&turn_id, wire.is_error, opened_at, at).await?;
             *open_turn = None;
         }
-        Journaled::Continued
+        Ok(())
     }
 
     /// Open a container for events the vendor did not bracket.
     ///
-    /// `origin` is `user`, which is true of an adopted transcript — a person typed into a
-    /// terminal — and it carries a known cost worth stating: `request_text` is empty
-    /// because no adapter carries the user's text, and `docs/database-schema.md` names
-    /// `origin: user` with an empty `request_text` as exactly the ambiguity `origin`
-    /// exists to prevent, being indistinguishable from a user who sent nothing.
-    ///
-    /// `agent` is not the honest alternative. It means *the agent spoke unprompted*, and
-    /// `settle_turn` branches on it to tell "no waiter because there never was one" from
-    /// "no waiter because a stop already claimed it" — so marking every adopted turn
-    /// `agent` would misreport who was speaking in order to work around a missing field.
-    /// The ambiguity is reported rather than encoded around; `api::sessions::adopt`
-    /// states it as a finding.
-    async fn open_container(&self, session_id: &SessionId, at_ms: i64) -> Option<String> {
+    /// Adopted input fills `request_text` before or after the opening event. An absent
+    /// input does not prove that the agent spoke unprompted, so a historical container
+    /// keeps user provenance even when the vendor's input record was unavailable.
+    async fn open_container(&self, session_id: &SessionId, at_ms: i64) -> Result<String> {
         let turn = crate::models::Turn {
             id: uuid::Uuid::new_v4().to_string(),
             session_id: session_id.clone(),
             status: "running".to_string(),
             origin: "user".to_string(),
             origin_subject: None,
-            // Empty because no adapter carries it. See this function's doc comment.
+            // Filled from the input fact when the source supplies one.
             request_text: String::new(),
             command_invocation_id: None,
             idempotency_key: None,
@@ -797,16 +813,11 @@ impl NativeIngest {
             stopped_at_ms: None,
         };
 
-        match self.store.create_turn(&turn).await {
-            Ok(created) => Some(created.id),
-            Err(error) => {
-                warn!(
-                    "Could not open a turn for adopted session {}: {}",
-                    session_id, error
-                );
-                None
-            }
-        }
+        self.store
+            .create_turn(&turn)
+            .await
+            .map(|created| created.id)
+            .with_context(|| format!("could not create a native turn container for {session_id}"))
     }
 
     /// Flush this turn's buffered rows, then record its terminal state.
@@ -830,16 +841,19 @@ impl NativeIngest {
     /// Flushing per turn rather than once at the end of the pass, because the window that
     /// matters is the one belonging to the turn being settled, and a long `watch` may
     /// settle many turns before the pass is anywhere near over.
-    async fn settle(&self, turn_id: &str, failed: bool, started_at_ms: i64, at_ms: i64) {
+    async fn settle(
+        &self,
+        turn_id: &str,
+        failed: bool,
+        started_at_ms: i64,
+        at_ms: i64,
+    ) -> Result<()> {
         self.writer.flush_turn(turn_id).await;
         let status = if failed { "failed" } else { "completed" };
-        if let Err(error) = self
-            .store
+        self.store
             .close_adopted_turn(turn_id, status, started_at_ms, at_ms)
-            .await
-        {
-            warn!("Could not close adopted turn {}: {}", turn_id, error);
-        }
+            .await?;
+        Ok(())
     }
 }
 
@@ -897,6 +911,162 @@ mod tests {
 
     fn event(kind: EventKind, phase: Option<Phase>, at_ms: i64) -> Event {
         Event::new(kind, phase, at_ms)
+    }
+
+    #[tokio::test]
+    async fn native_write_failure_closes_the_container_before_returning_error() {
+        let (ingest, store, id, _dir) = harness().await;
+        sqlx::query("CREATE TRIGGER refuse_native_event BEFORE INSERT ON events WHEN NEW.text = 'reject me' BEGIN SELECT RAISE(FAIL, 'fixture write failure'); END")
+            .execute(store.raw_pool()).await.unwrap();
+        let mut rejected = event(EventKind::Assistant, Some(Phase::Completed), 200);
+        rejected.text = "reject me".into();
+        let error = ingest
+            .drain(
+                &id,
+                stream(vec![
+                    event(EventKind::Turn, Some(Phase::Started), 100),
+                    rejected,
+                ]),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("fixture write failure"));
+        let turns = store.list_turns(&id, 10).await.unwrap();
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].status, "failed");
+        assert!(turns[0].completed_at_ms.is_some());
+    }
+
+    #[tokio::test]
+    async fn native_reread_repairs_held_input_without_changing_recorded_errors() {
+        for consolidated in [false, true] {
+            let (ingest, store, id, _dir) = harness().await;
+            let mut answer = event(EventKind::Assistant, Some(Phase::Completed), 200);
+            answer.stream_id = Some("answer".into());
+            answer.text = "the retained answer".into();
+            let events = vec![
+                event(EventKind::Turn, Some(Phase::Started), 100),
+                answer,
+                event(EventKind::Turn, Some(Phase::Completed), 300),
+            ];
+            ingest.drain(&id, stream(events.clone())).await.unwrap();
+            let original = store.list_turns(&id, 10).await.unwrap().remove(0);
+            sqlx::query("UPDATE turns SET origin='agent',status='interrupted',error_code='BACKEND_RESTARTED',error_message='recorded interruption' WHERE id=?")
+                .bind(&original.id).execute(store.raw_pool()).await.unwrap();
+            if consolidated {
+                crate::storage::history::consolidate_turn(&store, &ingest.history, &original.id)
+                    .await
+                    .unwrap();
+            }
+            let mut recovered = vec![
+                SessionMessage::Event(events[0].clone()),
+                SessionMessage::TurnInput(sylph_protocol::TurnInputFact::new(
+                    "the recovered question",
+                )),
+            ];
+            recovered.extend(events[1..].iter().cloned().map(SessionMessage::Event));
+            let report = ingest
+                .reread(
+                    &id,
+                    Box::pin(futures::stream::iter(recovered.into_iter().map(Ok))),
+                )
+                .await
+                .unwrap();
+            assert_eq!(report.events, 0);
+            let turns = store.list_turns(&id, 10).await.unwrap();
+            assert_eq!(turns.len(), 1);
+            assert_eq!(turns[0].id, original.id);
+            assert_eq!(turns[0].request_text, "the recovered question");
+            assert_eq!(turns[0].origin, "user");
+            assert_eq!(turns[0].status, "interrupted");
+            assert_eq!(
+                turns[0].error_message.as_deref(),
+                Some("recorded interruption")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn native_reread_after_restart_starts_above_consolidated_sequences() {
+        let (ingest, store, id, _dir) = harness().await;
+        let mut first = event(EventKind::Assistant, Some(Phase::Completed), 100);
+        first.stream_id = Some("first".into());
+        first.text = "earlier answer".into();
+        let held = vec![first, event(EventKind::Turn, Some(Phase::Completed), 200)];
+        ingest.drain(&id, stream(held.clone())).await.unwrap();
+        let previous_max = store.max_event_seq(&id).await.unwrap();
+        let turn = store.list_turns(&id, 10).await.unwrap().remove(0);
+        crate::storage::history::consolidate_turn(&store, &ingest.history, &turn.id)
+            .await
+            .unwrap();
+        assert!(store.session_events(&id).await.unwrap().is_empty());
+        let fresh = NativeIngest::new(
+            store.clone(),
+            JournalWriter::new(store.clone()),
+            SeqAllocator::new(store.clone()),
+            ingest.history.clone(),
+        );
+        let mut appended = event(EventKind::Assistant, Some(Phase::Completed), 300);
+        appended.stream_id = Some("appended".into());
+        appended.text = "new answer".into();
+        let mut grown = held;
+        grown.extend([
+            appended,
+            event(EventKind::Turn, Some(Phase::Completed), 400),
+        ]);
+        let report = fresh.reread(&id, stream(grown)).await.unwrap();
+        assert_eq!(report.events, 2);
+        let tail = store.session_events(&id).await.unwrap();
+        assert!(
+            tail.iter().all(|event| event.seq > previous_max),
+            "new sequence numbers must not overlap consolidated history"
+        );
+    }
+
+    #[tokio::test]
+    async fn input_after_an_opener_is_retained_even_when_the_source_ends() {
+        let (ingest, store, id, _dir) = harness().await;
+        let messages = vec![
+            SessionMessage::Event(event(EventKind::Turn, Some(Phase::Started), 100)),
+            SessionMessage::TurnInput(sylph_protocol::TurnInputFact::new("recover the transcript")),
+        ];
+        ingest
+            .drain(
+                &id,
+                Box::pin(futures::stream::iter(messages.into_iter().map(Ok))),
+            )
+            .await
+            .unwrap();
+        let turns = store.list_turns(&id, 10).await.unwrap();
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].request_text, "recover the transcript");
+        assert_eq!(turns[0].origin, "user");
+        assert_eq!(turns[0].status, "completed");
+    }
+
+    #[tokio::test]
+    async fn harness_context_does_not_replace_the_recovered_question() {
+        let (ingest, store, id, _dir) = harness().await;
+        let messages = vec![
+            SessionMessage::Event(event(EventKind::Turn, Some(Phase::Started), 100)),
+            SessionMessage::TurnInput(sylph_protocol::TurnInputFact::new(
+                "# AGENTS.md instructions\ncontext",
+            )),
+            SessionMessage::TurnInput(sylph_protocol::TurnInputFact::new("recover the transcript")),
+            SessionMessage::TurnInput(sylph_protocol::TurnInputFact::new(
+                "<environment_context>context</environment_context>",
+            )),
+            SessionMessage::Event(event(EventKind::Assistant, Some(Phase::Completed), 200)),
+        ];
+        ingest
+            .drain(
+                &id,
+                Box::pin(futures::stream::iter(messages.into_iter().map(Ok))),
+            )
+            .await
+            .unwrap();
+        let turns = store.list_turns(&id, 10).await.unwrap();
+        assert_eq!(turns[0].request_text, "recover the transcript");
     }
 
     /// **The property the whole module exists for.** A store that recorded no turn

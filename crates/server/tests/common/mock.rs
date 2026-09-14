@@ -24,6 +24,7 @@
 //! expressible ([`MockAgents::uninstall`]) now that there is no directory to delete.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
 use anyhow::{anyhow, Result};
@@ -213,6 +214,11 @@ pub struct MockAgents {
     /// `grow_stored_session` appends here, and the next parse reports the longer store —
     /// which is what an append to a JSONL transcript looks like to a reader.
     store_growth: Arc<RwLock<Vec<String>>>,
+    extra_native_ids: Arc<RwLock<Vec<String>>>,
+    native_reads: Arc<AtomicUsize>,
+    native_watches: Arc<AtomicUsize>,
+    native_enumerations: Arc<AtomicUsize>,
+    native_read_error: Arc<AtomicBool>,
 }
 
 impl MockAgents {
@@ -228,6 +234,11 @@ impl MockAgents {
             )),
             store_workdir: Arc::new(RwLock::new(None)),
             store_growth: Arc::new(RwLock::new(Vec::new())),
+            extra_native_ids: Arc::new(RwLock::new(Vec::new())),
+            native_reads: Arc::new(AtomicUsize::new(0)),
+            native_watches: Arc::new(AtomicUsize::new(0)),
+            native_enumerations: Arc::new(AtomicUsize::new(0)),
+            native_read_error: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -239,6 +250,29 @@ impl MockAgents {
             .write()
             .expect("the mock store growth log is not poisoned")
             .push(text.to_string());
+    }
+
+    pub fn add_stored_session(&self, native_id: &str) {
+        self.extra_native_ids
+            .write()
+            .unwrap()
+            .push(native_id.into());
+    }
+
+    pub fn native_read_count(&self) -> usize {
+        self.native_reads.load(Ordering::SeqCst)
+    }
+
+    pub fn native_watch_count(&self) -> usize {
+        self.native_watches.load(Ordering::SeqCst)
+    }
+
+    pub fn native_enumeration_count(&self) -> usize {
+        self.native_enumerations.load(Ordering::SeqCst)
+    }
+
+    pub fn set_native_read_error(&self, failed: bool) {
+        self.native_read_error.store(failed, Ordering::SeqCst);
     }
 
     /// Point every stored session at `workdir`.
@@ -333,6 +367,11 @@ impl MockAgents {
                 .read()
                 .expect("the mock store growth log is not poisoned")
                 .clone(),
+            extra_native_ids: self.extra_native_ids.read().unwrap().clone(),
+            native_reads: self.native_reads.clone(),
+            native_watches: self.native_watches.clone(),
+            native_enumerations: self.native_enumerations.clone(),
+            native_read_error: self.native_read_error.clone(),
         }))
     }
 
@@ -377,6 +416,11 @@ struct MockAdapter {
     /// Replies the store gained since it was first read. Snapshotted with the workdir, so
     /// one parse sees one consistent store.
     store_growth: Vec<String>,
+    extra_native_ids: Vec<String>,
+    native_reads: Arc<AtomicUsize>,
+    native_watches: Arc<AtomicUsize>,
+    native_enumerations: Arc<AtomicUsize>,
+    native_read_error: Arc<AtomicBool>,
 }
 
 #[async_trait]
@@ -464,13 +508,15 @@ impl Adapter for MockAdapter {
     /// E2E fixture is exactly that agent — and is what the two tests about "an agent with
     /// no native store" now name.
     async fn adopt(&self, id: &NativeId) -> Result<EventStream> {
+        self.native_reads.fetch_add(1, Ordering::SeqCst);
         if self.behavior == Behavior::NoStore {
             return Err(anyhow!("the {} agent has no native store", self.name));
         }
-        Ok(Box::pin(futures::stream::iter(stored_events(
-            id,
-            &self.store_growth,
-        ))))
+        let mut messages = stored_events(id, &self.store_growth);
+        if self.native_read_error.load(Ordering::SeqCst) {
+            messages.push(Err(anyhow!("native fixture contains an unreadable record")));
+        }
+        Ok(Box::pin(futures::stream::iter(messages)))
     }
 
     /// The same first pass as [`Self::adopt`], then nothing further.
@@ -480,6 +526,7 @@ impl Adapter for MockAdapter {
     /// receiving events would pass vacuously here, so `watch` coverage belongs against a
     /// real adapter. What this does support is the *shape* — a first pass that ingests.
     async fn watch(&self, id: &NativeId) -> Result<EventStream> {
+        self.native_watches.fetch_add(1, Ordering::SeqCst);
         if self.behavior == Behavior::NoStore {
             return Err(anyhow!("the {} agent has no native store", self.name));
         }
@@ -495,10 +542,11 @@ impl Adapter for MockAdapter {
     /// title or timestamp is a lie a journal makes permanent, and this row is what a picker
     /// renders — so the only fields set are the ones a real store genuinely holds.
     async fn enumerate(&self, _filter: &StoreFilter) -> Result<Vec<NativeSummary>> {
+        self.native_enumerations.fetch_add(1, Ordering::SeqCst);
         if self.behavior == Behavior::NoStore {
             return Ok(Vec::new());
         }
-        Ok(vec![NativeSummary {
+        let summary = NativeSummary {
             native_id: NativeId::new(STORED_NATIVE_ID),
             // Set by the harness, because containment is the interesting part of adopting:
             // a workdir is the `current_dir` of a spawned agent, so an adopted row's
@@ -508,13 +556,21 @@ impl Adapter for MockAdapter {
             started_at_ms: Some(1_700_000_000_000),
             ended_at_ms: Some(1_700_000_060_000),
             event_count: Some(2),
+            source_revision: Some(format!("mock-growth-{}", self.store_growth.len())),
             parent_native_id: None,
             parent_relation: None,
             // **Never `Stream`.** No care recovers a timing that was never written, and the
             // handler refuses `stream` from a store outright — so a fixture reporting it
             // would be testing that refusal rather than the adopt path.
             fidelity: Fidelity::Blocks,
-        }])
+        };
+        let mut summaries = vec![summary.clone()];
+        for native_id in &self.extra_native_ids {
+            let mut summary = summary.clone();
+            summary.native_id = NativeId::new(native_id);
+            summaries.push(summary);
+        }
+        Ok(summaries)
     }
 }
 
@@ -753,7 +809,13 @@ impl Session for MockSession {
     /// Returning before the turn finishes is the contract, and it is also what makes
     /// interrupt testable: a turn that blocked here could not be interrupted, because the
     /// session would be unreachable until it finished.
-    async fn send(&self, _turn: TurnInput) -> Result<()> {
+    async fn send(&self, turn: TurnInput) -> Result<()> {
+        if turn.text == "refuse this input" {
+            return Err(sylph_protocol::VendorRefusal {
+                message: "vendor refused input".into(),
+            }
+            .into());
+        }
         let tx = self.emit.clone();
         let behavior = self.behavior;
         tokio::spawn(async move { run_turn(tx, behavior).await });
@@ -776,7 +838,20 @@ impl Session for MockSession {
         Ok(())
     }
 
-    async fn steer(&self, _text: &str, _expected_turn_id: Option<&str>) -> Result<()> {
+    async fn steer(&self, text: &str, _expected_turn_id: Option<&str>) -> Result<()> {
+        if text == "lose this receipt" {
+            anyhow::bail!("connection closed before receipt");
+        }
+        if text == "refuse this steer" {
+            return Err(sylph_protocol::VendorRefusal {
+                message: "vendor refused the active turn".into(),
+            }
+            .into());
+        }
+        if text == "settle before receipt" {
+            emit(&self.emit, Ev::new(EventKind::Turn, Some(Phase::Completed))).await;
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        }
         Ok(())
     }
 

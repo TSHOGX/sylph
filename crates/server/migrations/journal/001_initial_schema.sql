@@ -90,6 +90,7 @@ CREATE TABLE sessions (
   fidelity         TEXT NOT NULL CHECK (fidelity IN ('stream','blocks','messages')),
   flags_json       TEXT NOT NULL DEFAULT '{}',
   status           TEXT NOT NULL DEFAULT 'idle' CHECK (status IN ('idle','running')),
+  next_event_seq   INTEGER NOT NULL DEFAULT 0 CHECK (next_event_seq >= 0),
   -- Ancestry is not a column here. A delegation folds into its parent as a count
   -- while a fork replays its origin's prefix and continues past it, so a listing
   -- must not show both under one label — `session_edges` below carries the relation
@@ -232,6 +233,15 @@ CREATE TABLE events (
     REFERENCES sessions(environment, agent, native_id) ON DELETE CASCADE
 );
 
+-- The cursor survives journal eviction and advances atomically for every writer,
+-- including batched appends, session promotion, and producer receipt transactions.
+CREATE TRIGGER events_advance_sequence AFTER INSERT ON events
+BEGIN
+  UPDATE sessions SET next_event_seq = NEW.seq + 1
+  WHERE environment = NEW.session_env AND agent = NEW.session_agent
+    AND native_id = NEW.session_native AND next_event_seq <= NEW.seq;
+END;
+
 CREATE INDEX events_session_idx
   ON events(session_env, session_agent, session_native, seq);
 CREATE INDEX events_turn_idx ON events(turn_id, seq) WHERE turn_id IS NOT NULL;
@@ -286,6 +296,33 @@ CREATE TABLE pending_requests (
   FOREIGN KEY (session_env, session_agent, session_native)
     REFERENCES sessions(environment, agent, native_id) ON DELETE CASCADE
 );
+
+-- Server-authoritative ledger for every user control intent.  Vendor command
+-- receipts are transport facts; this row is the user-visible lifecycle that
+-- survives retries, reconnects, and a second browser.
+CREATE TABLE control_requests (
+  request_id TEXT PRIMARY KEY,
+  session_env TEXT NOT NULL,
+  session_agent TEXT NOT NULL,
+  session_native TEXT NOT NULL,
+  origin_subject TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('send', 'steer', 'queue', 'native_steer', 'native_queue', 'stop', 'approval')),
+  text TEXT NOT NULL DEFAULT '',
+  target_turn_id TEXT,
+  server_seq INTEGER NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('accepted', 'queued', 'dispatched', 'confirmed', 'unconfirmed', 'consumed', 'rejected', 'failed', 'cancelled')),
+  idempotency_key TEXT,
+  vendor_receipt TEXT,
+  error_message TEXT,
+  created_at_ms INTEGER NOT NULL,
+  consumed_at_ms INTEGER,
+  failed_at_ms INTEGER,
+  revision INTEGER NOT NULL DEFAULT 0,
+  UNIQUE(session_env, session_agent, session_native, idempotency_key),
+  UNIQUE(session_env, session_agent, session_native, server_seq)
+);
+CREATE INDEX control_requests_session_idx
+  ON control_requests(session_env, session_agent, session_native, server_seq);
 
 -- Partial, because resolved rows accumulate without bound and never appear in the
 -- hot "what is this session waiting on" query.
@@ -416,3 +453,39 @@ CREATE TABLE session_edges (
 
 CREATE INDEX session_edges_child_idx
   ON session_edges(child_env, child_agent, child_native);
+
+CREATE TABLE import_jobs (
+  id TEXT PRIMARY KEY,
+  environment_id TEXT NOT NULL,
+  origin_subject TEXT NOT NULL,
+  workdir TEXT,
+  agents_json TEXT,
+  mode TEXT NOT NULL CHECK (mode IN ('import_once', 'import_and_watch')),
+  idempotency_key TEXT NOT NULL,
+  request_json TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('queued','running','completed','cancelled','failed')),
+  scan_complete INTEGER NOT NULL DEFAULT 0,
+  cancel_requested INTEGER NOT NULL DEFAULT 0,
+  error TEXT,
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  UNIQUE(environment_id, origin_subject, idempotency_key)
+);
+CREATE INDEX import_jobs_environment_idx ON import_jobs(environment_id, created_at_ms DESC);
+
+CREATE TABLE import_items (
+  job_id TEXT NOT NULL REFERENCES import_jobs(id) ON DELETE CASCADE,
+  ordinal INTEGER NOT NULL,
+  agent TEXT NOT NULL,
+  native_id TEXT NOT NULL,
+  title TEXT,
+  workdir TEXT,
+  status TEXT NOT NULL CHECK (status IN ('pending','running','imported','refreshed','skipped','failed')),
+  reason TEXT,
+  error_code TEXT,
+  source_revision TEXT,
+  PRIMARY KEY(job_id, agent, native_id),
+  UNIQUE(job_id, ordinal)
+);
+
+CREATE INDEX import_items_native_idx ON import_items(agent, native_id, job_id);

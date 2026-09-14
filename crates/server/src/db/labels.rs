@@ -61,6 +61,21 @@ pub fn is_injected_envelope(text: &str) -> bool {
     trimmed.starts_with("Caveat:")
 }
 
+/// Known native harness context is retained as raw data, but is not a person's ask.
+/// This is narrower than title selection: XML and Markdown can be legitimate prompts.
+pub fn is_native_context(text: &str) -> bool {
+    let text = text.trim_start();
+    [
+        "# AGENTS.md instructions",
+        "<environment_context>",
+        "<permissions instructions>",
+        "<skills_instructions>",
+        "<codex_internal_context ",
+    ]
+    .iter()
+    .any(|prefix| text.starts_with(prefix))
+}
+
 /// Reduce a multi-line ask to one capped line, for use as a title or list label.
 ///
 /// Every caller renders into a single-line row, so a raw ask would carry embedded

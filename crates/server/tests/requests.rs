@@ -424,16 +424,9 @@ async fn requests_on_an_unknown_session_are_a_404() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
-/// Interrupt and steer reach the session's live agent.
-///
-/// This previously asserted the *absence* of one — `create_session` reserved a row and
-/// started nothing, so both controls reported a missing agent. `POST /sessions` now
-/// starts the agent, so the honest assertion is that both reach it. The behaviour the old
-/// name described is still covered, by
-/// `interrupt_and_steer_report_a_missing_agent_once_its_link_is_gone` below, which
-/// detaches first rather than relying on a link never having existed.
+/// A reachable process is not an active turn. Both controls require a turn lease.
 #[tokio::test]
-async fn interrupt_and_steer_reach_a_live_agent() {
+async fn turn_controls_refuse_an_idle_link() {
     let server = TestBackend::start().await;
     let session_id = server.create_session("mock").await;
 
@@ -443,7 +436,11 @@ async fn interrupt_and_steer_reach_a_live_agent() {
             json!({}),
         )
         .await;
-    assert_eq!(interrupted.status(), StatusCode::OK);
+    assert_eq!(interrupted.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        json_body(interrupted).await["error"]["code"],
+        "INVALID_REQUEST"
+    );
 
     let steered = server
         .post_authed(
@@ -451,18 +448,14 @@ async fn interrupt_and_steer_reach_a_live_agent() {
             json!({"text": "also check the tests"}),
         )
         .await;
-    assert_eq!(steered.status(), StatusCode::OK);
+    // No turn is running in this fixture. The server refuses a steer rather than
+    // delivering text into an unknown future turn.
+    assert_eq!(steered.status(), StatusCode::BAD_REQUEST);
 }
 
-/// Without a live agent they report that rather than appearing to succeed, so a UI does
-/// not show a turn as interrupted when nothing was.
-///
-/// The link is torn down explicitly, which is what makes this a test about the *feature*
-/// rather than about how the harness happens to create sessions — the distinction that
-/// made the version of this test above assert the wrong thing once creation started
-/// spawning an agent.
+/// A disconnected environment is reported before attempting steering delivery.
 #[tokio::test]
-async fn interrupt_and_steer_report_a_missing_agent_once_its_link_is_gone() {
+async fn steering_reports_an_unreachable_environment() {
     let server = TestBackend::start().await;
     let session_id = server.create_session("mock").await;
     let typed = common::TestBackend::session_id(&session_id);

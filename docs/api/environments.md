@@ -208,6 +208,47 @@ See `docs/configuration.md` for the settings themselves.
 
 ## Agents and environments
 
+### Bulk native history imports
+
+`POST /api/v1/environments/{environment}/imports` starts a durable import job. The
+request accepts `workdir`, an optional `agents` array, `mode` (`import_once` or
+`import_and_watch`), and an `idempotencyKey`. The response is `202` with `{ "job":
+{ "id": ..., "status": "queued" } }`. A repeated idempotency key returns the original
+job without starting a second scan.
+
+`GET /api/v1/imports/{job}` returns progress (`scanned`, `imported`, `skipped`,
+`failed`, `total`, and `status`). `POST /api/v1/imports/{job}/cancel` requests
+cancellation; workers stop between native sessions and retain completed results.
+`GET /api/v1/imports/{job}/events` is currently a snapshot-compatible endpoint and
+returns the same job object for clients that poll or subscribe later.
+
+Both modes finish the initial finite native pass before an item reports success.
+Existing identities are checked and counted as `refreshed`. An explicit synchronization
+job skips the parse when the existing session's latest successful import has the same
+non-null source revision; a missing revision or a preceding failure forces a retry.
+The individual transcript refresh always forces a re-read. At most one import job runs
+per environment, with bounded concurrent items; each item reports completion as soon as
+its own pass finishes.
+
+`import_and_watch` retains the discovered identity snapshot as a synchronization
+subscription. The server checks subscribed environments every ten seconds after the
+previous pass finishes, sharing one native catalogue per environment and vendor. Only
+identities whose source revision changed are re-read; an absent revision requires a
+conservative re-read. The adapter supplies the revision from its native files, including
+descendant and sidecar dependencies. User-facing timestamps are not change tokens.
+Revisions advance only after a complete pass with zero read errors; a partial `200`
+response leaves the item failed and its previous revision pending for retry.
+Successful revisions are durable, so restarting either process resumes synchronization
+without re-importing unchanged sessions or starting a follower for every imported row.
+
+The latest settled import snapshot covering an identity decides its mode, ordered by
+transaction insertion rather than a wall-clock timestamp or random identifier. A later
+`import_once` snapshot stops continued synchronization for its identities. Synchronization
+does not add identities discovered after the original snapshot, and every pass checks
+the originating Subject's current environment authorization. Active import jobs take
+priority over background synchronization. Failures retain per-item reasons and retry
+without advancing the last successful source revision.
+
 ### `GET /api/v1/environments`
 
 Every paired environment, whether it is connected, and what it can run.

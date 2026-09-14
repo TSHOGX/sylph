@@ -13,6 +13,8 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
@@ -1277,6 +1279,18 @@ fn response_item(
         .and_then(Value::as_str)
         .unwrap_or_default()
     {
+        "message"
+            if era == Era::Paginated
+                && payload.get("role").and_then(Value::as_str) == Some("user") =>
+        {
+            // Codex 0.153.4 paginated rollouts can contain no UserMessage item at all;
+            // their user input survives only in the model transcript. The raw envelope
+            // is retained separately, including harness-injected context.
+            let mut input =
+                sylph_protocol::TurnInputFact::new(flatten_content(payload.get("content")));
+            input.recorded_at_ms = (at_ms != 0).then_some(at_ms);
+            parsed.messages.push(SessionMessage::TurnInput(input));
+        }
         "function_call" | "custom_tool_call" => {
             let Some(call_id) = string_at(payload, "call_id") else {
                 return;
@@ -1501,7 +1515,7 @@ pub(crate) fn reproject_native_record(
 }
 
 /// A stable identity for one filesystem incarnation of a rollout.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct FileIdentity {
     device: u64,
     inode: u64,
@@ -1538,6 +1552,143 @@ fn file_identity(metadata: &std::fs::Metadata) -> FileIdentity {
 struct HeaderCacheEntry {
     stamp: (FileIdentity, u64, u128),
     header: Header,
+}
+
+const INVENTORY_TTL: Duration = Duration::from_millis(250);
+
+#[derive(Default)]
+struct InventorySnapshot {
+    by_id: HashMap<String, (PathBuf, Header)>,
+    children: HashMap<String, Vec<String>>,
+    stamps: HashMap<PathBuf, (FileIdentity, u64, u128)>,
+}
+
+impl InventorySnapshot {
+    fn subtree(&self, id: &NativeId) -> Vec<(PathBuf, Header)> {
+        let mut selected = Vec::new();
+        let mut queue = VecDeque::from([id.as_str().to_string()]);
+        let mut seen = HashSet::new();
+        while let Some(id) = queue.pop_front() {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            let Some(entry) = self.by_id.get(&id) else {
+                continue;
+            };
+            selected.push(entry.clone());
+            if let Some(children) = self.children.get(&id) {
+                queue.extend(children.iter().cloned());
+            }
+        }
+        selected
+    }
+
+    fn revision(&self, id: &NativeId) -> String {
+        use std::hash::{Hash, Hasher};
+        let mut digest = std::collections::hash_map::DefaultHasher::new();
+        for (path, _) in self.subtree(id) {
+            path.hash(&mut digest);
+            self.stamps.get(&path).hash(&mut digest);
+        }
+        format!("{:016x}", digest.finish())
+    }
+}
+
+#[derive(Default)]
+struct NativeInventory {
+    refreshed_at: Option<Instant>,
+    headers: HashMap<PathBuf, HeaderCacheEntry>,
+    snapshot: Arc<InventorySnapshot>,
+    #[cfg(test)]
+    scans: usize,
+}
+
+impl NativeInventory {
+    fn snapshot(&mut self, root: &Path, now: Instant) -> Arc<InventorySnapshot> {
+        if self
+            .refreshed_at
+            .is_some_and(|refreshed| now.saturating_duration_since(refreshed) < INVENTORY_TTL)
+        {
+            return self.snapshot.clone();
+        }
+        let mut snapshot = InventorySnapshot::default();
+        let mut present = HashSet::new();
+        for candidate in candidates(root, is_rollout) {
+            present.insert(candidate.path.clone());
+            let Some(stamp) = file_stamp(&candidate.path) else {
+                continue;
+            };
+            let header = self
+                .headers
+                .get(&candidate.path)
+                .filter(|cached| cached.stamp == stamp)
+                .map(|cached| cached.header.clone())
+                .or_else(|| header_of(&candidate));
+            let Some(header) = header else {
+                continue;
+            };
+            self.headers.insert(
+                candidate.path.clone(),
+                HeaderCacheEntry {
+                    stamp,
+                    header: header.clone(),
+                },
+            );
+            snapshot.stamps.insert(candidate.path.clone(), stamp);
+            if let Some(id) = header.native_id.as_ref() {
+                snapshot
+                    .by_id
+                    .entry(id.as_str().to_string())
+                    .or_insert((candidate.path, header));
+            }
+        }
+        self.headers.retain(|path, _| present.contains(path));
+        for (id, (_, header)) in &snapshot.by_id {
+            if let Some(parent) = header.parent_native_id.as_ref() {
+                snapshot
+                    .children
+                    .entry(parent.as_str().to_string())
+                    .or_default()
+                    .push(id.clone());
+            }
+        }
+        for children in snapshot.children.values_mut() {
+            children.sort();
+        }
+        self.refreshed_at = Some(now.max(Instant::now()));
+        self.snapshot = Arc::new(snapshot);
+        #[cfg(test)]
+        {
+            self.scans += 1;
+        }
+        self.snapshot.clone()
+    }
+}
+
+fn shared_inventory(root: &Path) -> Arc<Mutex<NativeInventory>> {
+    // Every watcher used to stat the complete store four times per second and
+    // retain its own header cache. Share one serialized refresh per store root;
+    // individual cursors still read their own changed bytes on each poll.
+    static INVENTORIES: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<NativeInventory>>>>> =
+        OnceLock::new();
+    let mut inventories = INVENTORIES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(inventory) = inventories.get(root) {
+        return inventory.clone();
+    }
+    inventories.retain(|_, inventory| Arc::strong_count(inventory) > 1);
+    let inventory = Arc::new(Mutex::new(NativeInventory::default()));
+    inventories.insert(root.to_path_buf(), inventory.clone());
+    inventory
+}
+
+fn inventory_snapshot(root: &Path, inventory: &Mutex<NativeInventory>) -> Arc<InventorySnapshot> {
+    inventory
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .snapshot(root, Instant::now())
 }
 
 fn file_stamp(path: &Path) -> Option<(FileIdentity, u64, u128)> {
@@ -1770,7 +1921,7 @@ struct RolloutFollowState {
     root_id: NativeId,
     root_path: PathBuf,
     store_root: PathBuf,
-    header_cache: HashMap<PathBuf, HeaderCacheEntry>,
+    inventory: Arc<Mutex<NativeInventory>>,
     sources: HashMap<PathBuf, RolloutCursor>,
     links: HashMap<String, ChildLink>,
     declared: HashSet<String>,
@@ -1839,8 +1990,8 @@ impl RolloutFollowState {
         Self {
             root_id,
             root_path,
+            inventory: shared_inventory(&store_root),
             store_root,
-            header_cache: HashMap::new(),
             sources,
             links: HashMap::new(),
             declared: HashSet::new(),
@@ -2076,69 +2227,7 @@ impl RolloutFollowState {
     }
 
     fn discover(&mut self) -> Result<Vec<(PathBuf, Header)>> {
-        let mut all = Vec::new();
-        let mut present = HashSet::new();
-        for candidate in candidates(&self.store_root, is_rollout) {
-            present.insert(candidate.path.clone());
-            let stamp = file_stamp(&candidate.path);
-            let header = stamp
-                .as_ref()
-                .and_then(|stamp| {
-                    self.header_cache
-                        .get(&candidate.path)
-                        .and_then(|cached| (cached.stamp == *stamp).then(|| cached.header.clone()))
-                })
-                .or_else(|| header_of(&candidate));
-            if let (Some(header), Some(stamp)) = (header, stamp) {
-                self.header_cache.insert(
-                    candidate.path.clone(),
-                    HeaderCacheEntry {
-                        stamp,
-                        header: header.clone(),
-                    },
-                );
-                all.push((candidate.path, header));
-            }
-        }
-        self.header_cache.retain(|path, _| present.contains(path));
-        let mut by_id: HashMap<String, (PathBuf, Header)> = HashMap::new();
-        for (path, header) in all {
-            let Some(id) = header.native_id.as_ref() else {
-                continue;
-            };
-            // Keep the newest path when a copied/replayed rollout carries the same id.
-            by_id
-                .entry(id.as_str().to_string())
-                .or_insert((path, header));
-        }
-        let mut children_by_parent: HashMap<String, Vec<String>> = HashMap::new();
-        for (id, (_path, header)) in &by_id {
-            if let Some(parent) = header.parent_native_id.as_ref() {
-                children_by_parent
-                    .entry(parent.as_str().to_string())
-                    .or_default()
-                    .push(id.clone());
-            }
-        }
-        for children in children_by_parent.values_mut() {
-            children.sort();
-        }
-        let mut selected = Vec::new();
-        let mut queue = VecDeque::from([self.root_id.as_str().to_string()]);
-        let mut seen = HashSet::new();
-        while let Some(id) = queue.pop_front() {
-            if !seen.insert(id.clone()) {
-                continue;
-            }
-            let Some((path, header)) = by_id.get(&id).cloned() else {
-                continue;
-            };
-            selected.push((path, header));
-            if let Some(children) = children_by_parent.get(&id) {
-                queue.extend(children.iter().cloned());
-            }
-        }
-        Ok(selected)
+        Ok(inventory_snapshot(&self.store_root, &self.inventory).subtree(&self.root_id))
     }
 
     fn rebuild_links(&mut self, inventory: &[(PathBuf, Header)]) {
@@ -2202,10 +2291,11 @@ impl RolloutFollowState {
 /// Follow a rollout until the caller drops the stream. A bounded poll keeps idle sessions cheap
 /// while still observing Codex's item-level flush cadence.
 fn follow_rollout(id: NativeId, path: PathBuf, finalizing: bool) -> EventStream {
-    const POLL: std::time::Duration = std::time::Duration::from_millis(250);
+    const POLL: Duration = INVENTORY_TTL;
     Box::pin(futures::stream::unfold(
-        RolloutFollowState::new(id, path, finalizing),
-        |mut state| async move {
+        Some(RolloutFollowState::new(id, path, finalizing)),
+        |state| async move {
+            let mut state = state?;
             loop {
                 if state.stopped {
                     return None;
@@ -2215,9 +2305,21 @@ fn follow_rollout(id: NativeId, path: PathBuf, finalizing: bool) -> EventStream 
                     tokio::time::sleep(POLL).await;
                 }
                 if let Some(message) = state.pending.pop_front() {
-                    return Some((Ok(message), state));
+                    return Some((Ok(message), Some(state)));
                 }
-                match state.poll() {
+                let polled = tokio::task::spawn_blocking(move || {
+                    let result = state.poll();
+                    (state, result)
+                })
+                .await;
+                let (next_state, result) = match polled {
+                    Ok(polled) => polled,
+                    Err(error) => {
+                        return Some((Err(anyhow!("native rollout reader failed: {error}")), None))
+                    }
+                };
+                state = next_state;
+                match result {
                     Ok(messages) if !messages.is_empty() => {
                         state.pending.extend(messages);
                         continue;
@@ -2231,7 +2333,7 @@ fn follow_rollout(id: NativeId, path: PathBuf, finalizing: bool) -> EventStream 
                         // next item, allowing a producer to repair a mid-write record.
                         state.stopped = state.finalizing;
                         state.retry_after_error = !state.finalizing;
-                        return Some((Err(error), state));
+                        return Some((Err(error), Some(state)));
                     }
                 }
             }
@@ -2255,13 +2357,7 @@ fn locate(id: &NativeId) -> Result<PathBuf> {
     let root = store_root()
         .ok_or_else(|| anyhow!("HOME is not set, so ~/.codex/sessions cannot be located"))?;
     let wanted = id.as_str();
-    for candidate in candidates(&root, is_rollout) {
-        let Some(name) = candidate.path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        if !name.contains(wanted) {
-            continue;
-        }
+    for candidate in candidates(&root, |path| named_for(path, id)) {
         if header_of(&candidate)
             .is_some_and(|header| header.native_id.as_ref().map(NativeId::as_str) == Some(wanted))
         {
@@ -2293,6 +2389,38 @@ fn is_rollout(path: &Path) -> bool {
             .file_name()
             .and_then(|name| name.to_str())
             .is_some_and(|name| name.starts_with("rollout-"))
+}
+
+fn named_for(path: &Path, id: &NativeId) -> bool {
+    is_rollout(path)
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.contains(id.as_str()))
+}
+
+pub fn lookup(id: &NativeId) -> Result<Option<NativeSummary>> {
+    let Some(root) = store_root() else {
+        return Ok(None);
+    };
+    let snapshot = inventory_snapshot(&root, &shared_inventory(&root));
+    let mut summary = lookup_in(&root, id);
+    if let Some(summary) = summary.as_mut() {
+        summary.source_revision = snapshot
+            .by_id
+            .contains_key(id.as_str())
+            .then(|| snapshot.revision(id));
+    }
+    Ok(summary)
+}
+
+fn lookup_in(root: &Path, id: &NativeId) -> Option<NativeSummary> {
+    enumerate_candidates(
+        &StoreFilter::default(),
+        candidates(root, |path| named_for(path, id)),
+    )
+    .into_iter()
+    .find(|row| row.native_id == *id)
 }
 
 /// Parse everything the store already holds for one session, once.
@@ -2362,8 +2490,23 @@ pub fn enumerate(filter: &StoreFilter) -> Result<Vec<NativeSummary>> {
         return Ok(Vec::new());
     }
 
+    let snapshot = inventory_snapshot(&root, &shared_inventory(&root));
+    let mut summaries = enumerate_candidates(filter, candidates(&root, is_rollout));
+    for summary in &mut summaries {
+        summary.source_revision = snapshot
+            .by_id
+            .contains_key(summary.native_id.as_str())
+            .then(|| snapshot.revision(&summary.native_id));
+    }
+    Ok(summaries)
+}
+
+fn enumerate_candidates(
+    filter: &StoreFilter,
+    candidates: Vec<SessionCandidate>,
+) -> Vec<NativeSummary> {
     let mut found = Vec::new();
-    for candidate in candidates(&root, is_rollout) {
+    for candidate in candidates {
         let Some(header) = header_of(&candidate) else {
             continue;
         };
@@ -2417,6 +2560,7 @@ pub fn enumerate(filter: &StoreFilter) -> Result<Vec<NativeSummary>> {
             // count is a number a UI renders as fact. A record count is not an event count
             // here either — one `item_completed` can hold a tool result plus its own timing.
             event_count: None,
+            source_revision: None,
             // The relation this vendor's key already distinguishes, promoted out of the
             // private `LineageKind` so the server can write a typed edge. It was previously
             // reachable only as a string inside a child declaration's `data` blob, which
@@ -2439,7 +2583,7 @@ pub fn enumerate(filter: &StoreFilter) -> Result<Vec<NativeSummary>> {
     // wants. Deliberately not re-sorted on the session's own recorded end: that is a different
     // fact — a file being written has an mtime and no end stamp — and sorting on it would
     // reorder by a field a live session does not have.
-    Ok(found)
+    found
 }
 
 /// A trailing slash is not a different directory.
@@ -2630,6 +2774,26 @@ mod tests {
             .filter(|message| !matches!(message, SessionMessage::NativeRecord(_)))
             .collect();
         assert_eq!(retained, projected);
+    }
+
+    #[test]
+    fn paginated_input_survives_without_a_user_message_item() {
+        let messages = RolloutCursor::new(fixture("user-input-response-item.jsonl"))
+            .poll()
+            .unwrap();
+        let inputs: Vec<_> = messages
+            .iter()
+            .filter_map(|message| match message {
+                SessionMessage::TurnInput(input) => Some(input),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].text, "Recover the missing transcript");
+        assert_eq!(inputs[0].recorded_at_ms, Some(1788920644206));
+        assert!(inputs[0].source_cursor.is_some());
+        assert!(messages.iter().any(|message| matches!(message,
+            SessionMessage::Event(event) if event.text == "The transcript is available.")));
     }
 
     #[test]
@@ -2984,6 +3148,69 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn native_lookup_reads_the_named_headers_own_metadata() {
+        let (root, parent, _) = watch_fixture_dir("lookup");
+        std::fs::rename(&parent, root.join("rollout-watch-parent.jsonl")).unwrap();
+        let summary = lookup_in(&root, &NativeId::new("watch-parent")).unwrap();
+        assert_eq!(summary.native_id.as_str(), "watch-parent");
+        assert_eq!(summary.workdir.as_deref(), Some("/tmp/codex-watch"));
+        std::fs::rename(
+            root.join("rollout-watch-parent.jsonl"),
+            root.join("rollout-wrong-id.jsonl"),
+        )
+        .unwrap();
+        assert!(lookup_in(&root, &NativeId::new("wrong-id")).is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_inventory_is_shared_until_its_bounded_refresh() {
+        let (root, _, child) = watch_fixture_dir("shared-inventory");
+        let first_reader = shared_inventory(&root);
+        let first = inventory_snapshot(&root, &first_reader);
+        assert_eq!(first.subtree(&NativeId::new("watch-parent")).len(), 1);
+        std::fs::copy(fixture("watch-child.jsonl"), &child).unwrap();
+        let second_reader = shared_inventory(&root);
+        let second = inventory_snapshot(&root, &second_reader);
+        assert_eq!(second.subtree(&NativeId::new("watch-parent")).len(), 1);
+        assert_eq!(second_reader.lock().unwrap().scans, 1);
+        let refreshed = second_reader
+            .lock()
+            .unwrap()
+            .snapshot(&root, Instant::now() + INVENTORY_TTL);
+        assert_eq!(refreshed.subtree(&NativeId::new("watch-parent")).len(), 2);
+        assert_eq!(first_reader.lock().unwrap().scans, 2);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_revision_tracks_child_changes_without_unrelated_sessions() {
+        let (root, _, child) = watch_fixture_dir("subtree-revision");
+        let id = NativeId::new("watch-parent");
+        let mut inventory = NativeInventory::default();
+        let now = Instant::now() + Duration::from_secs(1);
+        let first = inventory.snapshot(&root, now).revision(&id);
+        std::fs::copy(fixture("watch-child.jsonl"), &child).unwrap();
+        let with_child = inventory.snapshot(&root, now + INVENTORY_TTL).revision(&id);
+        assert_ne!(first, with_child);
+        std::fs::copy(
+            fixture("ordinary-turn-item-completed-era.jsonl"),
+            root.join("rollout-unrelated.jsonl"),
+        )
+        .unwrap();
+        let with_unrelated = inventory
+            .snapshot(&root, now + INVENTORY_TTL * 2)
+            .revision(&id);
+        assert_eq!(with_child, with_unrelated);
+        std::fs::remove_file(child).unwrap();
+        let removed_child = inventory
+            .snapshot(&root, now + INVENTORY_TTL * 3)
+            .revision(&id);
+        assert_ne!(with_child, removed_child);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     /// A child rollout can be created after the parent watcher starts. The parent declaration
     /// is emitted once, and the child's own records arrive later with the child trajectory as
     /// their span. This is the path that a one-shot `adopt`/`watch` implementation misses.
@@ -3042,6 +3269,7 @@ mod tests {
         );
 
         std::fs::copy(fixture("watch-child.jsonl"), &child).unwrap();
+        std::thread::sleep(INVENTORY_TTL);
         let second = state.poll().unwrap();
         let second_events = watch_events(&second);
         let child_messages: Vec<&Event> = second_events
@@ -3157,7 +3385,12 @@ mod tests {
         );
 
         std::fs::copy(fixture("watch-child.jsonl"), &child).unwrap();
-        let child_events = watch_events(&state.poll().unwrap());
+        std::thread::sleep(INVENTORY_TTL);
+        let child_messages = state.poll().unwrap();
+        assert!(child_messages.iter().any(|message| matches!(message,
+            SessionMessage::NativeRecord(record) if record.source.ends_with("rollout-child.jsonl")
+        )));
+        let child_events = watch_events(&child_messages);
         assert_eq!(
             child_events
                 .iter()

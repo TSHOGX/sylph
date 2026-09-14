@@ -54,8 +54,17 @@ pub trait Adapter: Send + Sync {
 
     /// Which native sessions this machine's store holds.
     async fn enumerate(&self, filter: &StoreFilter) -> Result<Vec<NativeSummary>>;
+
+    /// Read one native session's metadata without summarizing unrelated sessions.
+    async fn lookup(&self, id: &NativeId) -> Result<Option<NativeSummary>>;
 }
 ```
+
+Native summaries carry an opaque `source_revision` when the adapter can detect changes
+to the source bundle. A missing revision requires rereading; a last-event timestamp is
+not a substitute. Codex revisions cover the session's descendant rollouts. Claude and Pi
+use a conservative store-wide file revision, so unrelated native changes may trigger an
+extra read. Lookup and enumeration run filesystem work outside the async executor.
 
 **All three modes emit the same events.** That is the point of the shape: the
 journal, the history fold, the timeline, replay, and search see one vocabulary and

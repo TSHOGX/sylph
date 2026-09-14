@@ -415,23 +415,10 @@ impl Adapter for CodexAdapter {
     }
 
     async fn reproject(&self, records: Vec<NativeRecord>) -> Result<EventStream> {
-        let live = records
-            .iter()
-            .filter(|record| record.source.starts_with("live/"))
-            .collect::<Vec<_>>();
-        if !live.is_empty() {
-            let messages = live::reproject_frames(&live).await?;
-            return Ok(Box::pin(futures::stream::iter(
-                messages.into_iter().map(Ok),
-            )));
-        }
-        let mut projector = native::RolloutProjector::default();
-        let messages = records
-            .iter()
-            .flat_map(|record| native::reproject_native_record(&mut projector, record))
-            .map(Ok)
-            .collect::<Vec<_>>();
-        Ok(Box::pin(futures::stream::iter(messages)))
+        let messages = live::reproject_frames(&records.iter().collect::<Vec<_>>()).await?;
+        Ok(Box::pin(futures::stream::iter(
+            messages.into_iter().map(Ok),
+        )))
     }
 
     async fn watch(&self, id: &NativeId) -> Result<EventStream> {
@@ -439,7 +426,13 @@ impl Adapter for CodexAdapter {
     }
 
     async fn enumerate(&self, filter: &StoreFilter) -> Result<Vec<NativeSummary>> {
-        native::enumerate(filter)
+        let filter = filter.clone();
+        tokio::task::spawn_blocking(move || native::enumerate(&filter)).await?
+    }
+
+    async fn lookup(&self, id: &NativeId) -> Result<Option<NativeSummary>> {
+        let id = id.clone();
+        tokio::task::spawn_blocking(move || native::lookup(&id)).await?
     }
 }
 
@@ -469,6 +462,47 @@ async fn version() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn retained_reprojection_keeps_native_and_live_messages() {
+        use futures::TryStreamExt;
+        use serde_json::json;
+        use sylph_protocol::SessionMessage;
+        let record = |source: &str, version, payload| NativeRecord {
+            source: source.to_string(),
+            version,
+            payload,
+            raw_json: None,
+            blobs: Vec::new(),
+        };
+        let records = vec![
+            record(
+                "root.jsonl",
+                1,
+                json!({"type":"session_meta","payload":{"id":"mixed","history_mode":"paginated"}}),
+            ),
+            record(
+                "root.jsonl",
+                2,
+                json!({"type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","id":"native-item","content":[{"type":"Text","text":"native answer"}]}}}),
+            ),
+            record(
+                "live/stdout/run.jsonl",
+                1,
+                json!({"method":"item/completed","params":{"threadId":"mixed","turnId":"live-turn","item":{"type":"agentMessage","id":"live-item","text":"live answer"}}}),
+            ),
+        ];
+        let messages: Vec<_> = CodexAdapter
+            .reproject(records)
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        for expected in ["native answer", "live answer"] {
+            assert!(messages.iter().any(|message| matches!(message, SessionMessage::Event(event) if event.text == expected)), "missing {expected}: {messages:?}");
+        }
+    }
 
     #[test]
     fn native_store_observation_does_not_advertise_control() {

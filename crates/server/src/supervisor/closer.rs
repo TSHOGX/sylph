@@ -287,19 +287,16 @@ impl TurnCloser {
         turn_id: &str,
         mut event: StreamEvent,
     ) -> crate::error::Result<()> {
+        let _sequence_guard = self.seq.gate().lock_owned().await;
         event.arrival_turn_id = Some(turn_id.to_string());
-        event.seq = self.seq.next(session_id).await?;
+        event.seq = self.seq.next_inner(session_id).await?;
 
         if event.is_stable() {
             // Journaled before publishing, so a client reconnecting immediately after
             // seeing an event always finds it in replay.
-            if let Err(error) = self
-                .store
+            self.store
                 .append_event(&event.to_row(session_id, turn_id))
-                .await
-            {
-                error!("Failed to journal event seq {}: {}", event.seq, error);
-            }
+                .await?;
         }
 
         self.hub.publish(turn_id, event.clone()).await;

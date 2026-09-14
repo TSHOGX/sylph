@@ -904,6 +904,19 @@ configuration that turn will use. The layout rule is that **the message owns its
 own row** and the controls sit beneath it, which is what makes it usable on a
 phone.
 
+While a turn runs, Steer and Queue are explicit modes above the message. Their availability
+comes from the live capability surface, and an unavailable mode states its reason. The Send
+control remains visible on touch screens. Text stays editable while a submission is pending;
+only sending again is disabled. Attachments belong to ordinary turns, and cannot silently
+drop from a mid-turn text submission.
+
+The shared pending queue sits above the composer as a compact list. Each item names its
+submitter, text, delivery mode, state, and failure when present. Accepted or queued items
+offer edit, cancel, and immediate steer when the session can steer. A dispatched item is
+immutable, because its consumption may be uncertain. Recent finished requests are available
+behind a disclosure; pending rows appear in server sequence order with bounded rendering.
+The queue is read from the server after navigation, refresh, and reconnect.
+
 ```
 ┌──────────────────────────────────────────────┐
 │ ▣ screenshot.png  1.2 MB              ✕      │  attachments (when present)

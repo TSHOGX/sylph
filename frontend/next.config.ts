@@ -51,6 +51,10 @@ const config: NextConfig = {
    * excludes `.next/static` and `public`, which `scripts/install.sh` copies in.
    */
   output: "standalone",
+  // Next's proxy-request implementation defaults to 30s even in production.
+  // Let the backend's native-read deadline return its typed error before the
+  // proxy closes the socket; navigation still cancels obsolete reads immediately.
+  experimental: { proxyTimeout: 330_000 },
   ...(allowedDevOrigins.length > 0 && { allowedDevOrigins }),
   async rewrites() {
     return [

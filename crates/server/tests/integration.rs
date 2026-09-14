@@ -1652,8 +1652,8 @@ async fn session_trace_merges_history_journal_and_live_with_arrival_provenance()
                 arrival_at_ms: 400,
                 recorded_at_ms: None,
                 created_at_ms: 400,
-            started_at_ms: None,
-            body_ref: None,
+                started_at_ms: None,
+                body_ref: None,
             },
         )
         .await;

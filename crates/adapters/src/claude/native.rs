@@ -144,9 +144,10 @@ pub fn enumerate(filter: &StoreFilter) -> Result<Vec<NativeSummary>> {
         return Ok(Vec::new());
     }
 
+    let revision = crate::native::inventory_revision(&root);
     let mut found = Vec::new();
     for candidate in candidates(&root, |path| is_root_transcript(&root, path)) {
-        let Some(summary) = summarize(&candidate) else {
+        let Some(mut summary) = summarize(&candidate) else {
             continue;
         };
         if let Some(wanted) = &filter.workdir {
@@ -171,6 +172,7 @@ pub fn enumerate(filter: &StoreFilter) -> Result<Vec<NativeSummary>> {
                 continue;
             }
         }
+        summary.source_revision = revision.clone();
         found.push(summary);
     }
 
@@ -180,6 +182,30 @@ pub fn enumerate(filter: &StoreFilter) -> Result<Vec<NativeSummary>> {
         found.truncate(limit);
     }
     Ok(found)
+}
+
+pub fn lookup(id: &NativeId) -> Result<Option<NativeSummary>> {
+    let Some(root) = store_root() else {
+        return Ok(None);
+    };
+    let revision = crate::native::inventory_revision(&root);
+    let mut summary = lookup_in(&root, id);
+    if let Some(summary) = summary.as_mut() {
+        summary.source_revision = revision;
+    }
+    Ok(summary)
+}
+
+fn lookup_in(root: &Path, id: &NativeId) -> Option<NativeSummary> {
+    candidates(root, |path| named_root_transcript(root, path, id))
+        .into_iter()
+        .filter_map(|candidate| summarize(&candidate))
+        .find(|row| row.native_id == *id)
+}
+
+fn named_root_transcript(root: &Path, path: &Path, id: &NativeId) -> bool {
+    is_root_transcript(root, path)
+        && path.file_stem().and_then(|name| name.to_str()) == Some(id.as_str())
 }
 
 /// A trailing slash is not a different directory.
@@ -235,16 +261,13 @@ struct SessionFiles {
 fn locate(id: &NativeId) -> Result<SessionFiles> {
     let root = store_root()
         .ok_or_else(|| anyhow!("HOME is not set, so ~/.claude/projects cannot be located"))?;
-    let wanted = format!("{}.jsonl", id.as_str());
 
     // The project directory is a mangled `cwd` and is **not derivable from the session
     // id**, so the store has to be walked. Measured over the whole store and well under the
     // per-session parse cost, which is why there is no index here to keep in sync.
-    let transcript = candidates(&root, |path| is_root_transcript(&root, path))
+    let transcript = candidates(&root, |path| named_root_transcript(&root, path, id))
         .into_iter()
-        .find(|candidate| {
-            candidate.path.file_name().and_then(|name| name.to_str()) == Some(wanted.as_str())
-        })
+        .next()
         .map(|candidate| candidate.path)
         .ok_or_else(|| anyhow!("no `claude` session {} in {}", id.as_str(), root.display()))?;
 
@@ -421,6 +444,7 @@ fn summarize(candidate: &SessionCandidate) -> Option<NativeSummary> {
         // say cheaply", and a record count is not an event count anyway — one assistant
         // record can hold several content blocks.
         event_count: None,
+        source_revision: None,
         // Always a fork on this vendor: `forkedFrom.sessionId` above is the only
         // session-level pointer claude records, and a subagent's transcript carries no
         // parent id at all (it is reached through its host's tool call). So there is no
@@ -2553,6 +2577,32 @@ fn read_complete_range(path: &Path, offset: u64, end: u64) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_lookup_excludes_delegates_and_reads_root_metadata() {
+        let root =
+            std::env::temp_dir().join(format!("sylph-claude-lookup-{}", uuid::Uuid::new_v4()));
+        let project = root.join("project");
+        let nested = project.join("owner/subagents");
+        std::fs::create_dir_all(&nested).unwrap();
+        let id = NativeId::new("04905097-e558-4cd8-a563-3e03c46d42ee");
+        let name = format!("{id}.jsonl");
+        std::fs::copy(
+            fixture("ordinary-turn-session-start.jsonl"),
+            nested.join(&name),
+        )
+        .unwrap();
+        assert!(lookup_in(&root, &id).is_none());
+        std::fs::copy(
+            fixture("ordinary-turn-session-start.jsonl"),
+            project.join(name),
+        )
+        .unwrap();
+        let summary = lookup_in(&root, &id).unwrap();
+        assert_eq!(summary.native_id, id);
+        assert_eq!(summary.workdir.as_deref(), Some("/Users/hsw/.agents"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     /// The fixture directory, from this file's location rather than the process cwd.
     ///

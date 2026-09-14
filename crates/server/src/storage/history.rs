@@ -937,21 +937,6 @@ impl HistoryStore {
         })
     }
 
-    /// Return the next sequence number occupied by this session in history.
-    ///
-    /// The journal and history tiers share one session-wide sequence space, but
-    /// consolidation removes journal rows. Remote ingest therefore needs this
-    /// cursor as well as the journal's max, or a late event can reuse a sequence
-    /// that a consolidated block still owns.
-    pub async fn next_seq(&self, session_id: &str) -> Result<i32> {
-        let max: Option<i32> =
-            sqlx::query_scalar("SELECT MAX(seq) FROM blocks WHERE session_id = ?")
-                .bind(session_id)
-                .fetch_one(&self.pool)
-                .await?;
-        Ok(max.unwrap_or(-1).saturating_add(1))
-    }
-
     /// One turn's blocks, for a timeline that renders a single exchange.
     pub async fn turn_blocks(&self, turn_id: &str) -> Result<Vec<Block>> {
         let rows = sqlx::query("SELECT * FROM blocks WHERE turn_id = ? ORDER BY seq")

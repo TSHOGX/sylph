@@ -53,7 +53,7 @@ is reachable only through a relay.
   case here, and a state library would add a dependency for a store that holds
   about a dozen fields.
 - **Not the `EventSource` API.** SSE is read with `fetch` and a hand-written frame
-  parser (`lib/use-sse.ts`, `lib/sse-parse.ts`); § SSE Connection Management states
+  parser (`lib/use-session-trace.ts`, `lib/sse-parse.ts`); § SSE Connection Management states
   the three properties that reach.
 
 **UI components:**
@@ -125,6 +125,12 @@ Configuration sits at the root: `next.config.ts` (proxy rewrite, standalone outp
 `vitest.config.ts`, `playwright.config.ts`. Unit tests live beside the code they cover
 rather than in a parallel tree.
 
+The rewrite proxy timeout is set in `frontend/next.config.ts` above the backend's
+native-read deadline. Next defaults this socket timeout to thirty seconds, which can
+close a healthy long-running history read with an empty proxy error before the backend
+can answer. Query cancellation still releases the connection when the user navigates
+away; the longer proxy deadline does not retain abandoned page reads.
+
 **Why the shell lives in the root layout.** `AppShell` wraps `children` in
 `app/layout.tsx` rather than being placed per page. A layout does not remount on
 navigation, so the sidebars keep their expanded groups and scroll position when
@@ -161,10 +167,37 @@ Query keys follow a hierarchical structure:
 - Turn completed → invalidate `['sessions', sessionId]`, `['turns', turnId]`
 - Agent refresh → invalidate `['agents']`
 
-**Optimistic updates:**
-- Send message → immediately append to local cache
-- Stop turn → immediately update status to 'stopping'
-- Revert on error via `onError` rollback
+Session detail, history, capabilities, pending requests, and directory reads consume
+TanStack Query's abort signal. Leaving the session releases unfinished reads instead of
+letting obsolete requests occupy the browser's connection pool. Directory expansion state
+belongs to the selected session and resets on navigation.
+
+Native-history import completion refreshes the affected session projections and file
+queries as well as the listings. An explicit transcript reread refreshes that session's
+file tree, including a cached failure. Import mode is a submitted request snapshot; an
+active job displays the server's accepted mode, and reopening the panel reads that mode
+from the job instead of inventing a one-time-import default. A failed import submission
+retains its idempotency key for the same payload, including a manual retry of an automatic
+import. Acceptance retires the key; another accepted run or a changed scope/mode receives
+a new one.
+
+An imported turn's `requestText` is the recorded user input even when no `user` event
+exists. The transcript renders that input once, preserving independently journaled
+steering messages. A turn containing no transcript content says so; its origin label
+does not stand in for a missing message.
+
+A failed capabilities request is an API error, not an unavailable facet. Only a
+successful response can declare the environment disconnected. Failed reads show their
+error with a read retry; they never synthesize an `environment_unreachable` reason.
+
+**Control submissions:**
+- The composer keeps its draft until the server accepts the request.
+- A retry of that submission retains its idempotency key; another accepted submission,
+  including identical text, receives a new key.
+- Acceptance clears only the draft still matching the submitted snapshot. Text written
+  while waiting remains in the composer.
+- Control records are server state under `['session', id, 'controls']`. The session
+  notification stream invalidates them on `control_changed` and reconnect.
 
 ### Client State
 
@@ -313,6 +346,16 @@ animation frame, bounding repaints by the display rather than by the model's spe
 staying far below the ~100ms at which a human perceives lag.
 
 Reconnection is covered in § Error handling.
+
+### Turn lifecycle
+
+The terminal `status` event and the durable turn row describe the same completed record.
+Live and historical turn sections expose `data-turn-id` and `data-turn-status` from that
+fact. Send and Stop describe available actions and never serve as lifecycle signals.
+Running history snapshots preserve producer phase, stability and block identity; only
+terminal turns use the archival fold. A sealed content block rejects late deltas.
+The session trace is the sole live event projection; a second turn stream must not merge
+its independently timed block replacements into the same renderer.
 
 ### Event rendering
 
@@ -467,11 +510,15 @@ question is whether the caller already names a working directory (`docs/ui-layou
 § Creating a session). On success it invalidates the session list and navigates to the new
 session.
 
-**Sending a turn** — `POST /sessions/{id}/turns` with an idempotency key, optimistically
-appending the turn so the composer clears immediately, rolling back on error. The
-idempotency key is what makes the retry safe rather than the optimism.
+**Sending or steering a turn, or queueing a follow-up** — every submission has a stable
+idempotency key and a server control record. The composer clears after acceptance, guarded
+against overwriting a newer draft. A failed request keeps both its text and retry identity.
+The dynamically loaded queue panel reads the shared resource, including immutable dispatched
+rows and failure details. Edits and cancellation carry the displayed revision, so concurrent
+changes produce a visible conflict followed by a resource refresh. Rendering is paged within
+the bounded recent ledger, while every pending item remains reachable.
 
-**Streaming a turn** — `lib/use-sse.ts` reads the body and hands frames to the page, which
+**Streaming a turn** — `lib/use-session-trace.ts` reads the body and hands frames to the page, which
 merges them into the live projection and refetches history when the turn settles. The
 handover from live stream to durable history is the subtle part: the live turn is filtered
 out of history until the refetched history actually contains it, which closes the frame

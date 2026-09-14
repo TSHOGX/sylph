@@ -238,8 +238,8 @@ impl JournalStore {
                 server_seq,
             });
         }
-        let max_event: Option<i64> = sqlx::query_scalar(
-            "SELECT MAX(seq) FROM events WHERE session_env = ? AND session_agent = ? AND session_native = ?",
+        let durable_next: i64 = sqlx::query_scalar(
+            "SELECT next_event_seq FROM sessions WHERE environment = ? AND agent = ? AND native_id = ?",
         )
         .bind(event.session_id.environment.as_str())
         .bind(event.session_id.agent.as_str())
@@ -247,23 +247,7 @@ impl JournalStore {
         .fetch_one(&mut *tx)
         .await
         .map_err(Error::Database)?;
-        let max_receipt: Option<i64> = sqlx::query_scalar(
-            "SELECT MAX(server_seq) FROM env_event_receipts \
-             WHERE session_env = ? AND session_agent = ? AND session_native = ?",
-        )
-        .bind(event.session_id.environment.as_str())
-        .bind(event.session_id.agent.as_str())
-        .bind(event.session_id.native_id.as_str())
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(Error::Database)?;
-        let next = max_event
-            .into_iter()
-            .chain(max_receipt)
-            .chain(std::iter::once(i64::from(min_next_seq.saturating_sub(1))))
-            .max()
-            .unwrap_or(-1)
-            .saturating_add(1);
+        let next = durable_next.max(i64::from(min_next_seq));
         let server_seq = ServerSeq::new(
             u64::try_from(next).map_err(|_| Error::Internal("server sequence overflow".into()))?,
         );

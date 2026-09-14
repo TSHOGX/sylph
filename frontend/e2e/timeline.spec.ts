@@ -55,20 +55,14 @@ async function runFanoutLive(page: Page) {
   await expect(page.getByText("Hello from the E2E runner.")).toBeVisible({
     timeout: 15_000,
   });
-  await expect(
-    page.getByRole("button", { name: "Stop", exact: true }),
-    "the fixture's post-reply hold should still be running",
-  ).toBeVisible();
+  await expect(page.locator("section[data-turn-id]").filter({ hasText: "fanout across agents please" })).toHaveAttribute("data-turn-status", "running");
 }
 
 /** The fan-out after its turn settles, which is the state a user scrolls back to. */
 async function runFanoutSettled(page: Page) {
   await sendFanout(page);
-  // The Send/Stop swap back is the settle signal, for the reason above.
-  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeVisible({
-    timeout: 20_000,
-  });
-  await expect(page.getByRole("button", { name: "Stop", exact: true })).toHaveCount(0);
+  const turn = page.locator("section[data-turn-id]").filter({ hasText: "fanout across agents please" });
+  await expect(turn).toHaveAttribute("data-turn-status", "completed", { timeout: 20_000 });
 }
 
 test("tool calls render as work, with target, status, and no bubbles", async ({ page }) => {

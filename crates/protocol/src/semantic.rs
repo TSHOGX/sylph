@@ -535,3 +535,20 @@ mod tests {
         );
     }
 }
+
+/// A session-scoped, non-reusable turn generation. The envagent opens this lease
+/// on a successful send and closes it on adapter settlement or stream loss.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnLease {
+    pub turn_id: String,
+}
+
+/// A vendor acknowledgement states its delivery scope; queue insertion never
+/// proves that text belongs to the active turn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "delivery", rename_all = "snake_case")]
+pub enum ControlReceipt {
+    ActiveTurn { lease: TurnLease },
+    NativeQueue,
+}

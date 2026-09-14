@@ -1,11 +1,15 @@
 //! Outbound envagent connection wiring.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch, Semaphore};
+
+const MAX_INTERACTIVE_COMMANDS: usize = 8;
+const MAX_HISTORY_COMMANDS: usize = 2;
 
 use crate::runtime::{ChannelEventSink, EventSink};
 use crate::transport::{ConnectionSupervisor, FramedConnection};
@@ -103,8 +107,8 @@ pub async fn run_runtime(
     config: crate::runtime::EnvAgentConfig,
 ) -> Result<()> {
     let connection = connect(address, hello, credential).await?;
-    let runtime = crate::runtime::EnvAgent::open(config, connection.sink.clone()).await?;
-    run_connection(&runtime, connection).await
+    let runtime = Arc::new(crate::runtime::EnvAgent::open(config, connection.sink.clone()).await?);
+    run_connection(runtime, connection).await
 }
 
 /// Run an envagent over an already-connected duplex stream.
@@ -209,25 +213,36 @@ where
         sender: out_tx,
         heartbeat_stop,
     };
-    let runtime = crate::runtime::EnvAgent::open_with_adapters(config, sink, adapters).await?;
-    run_connection(&runtime, connection).await
+    let runtime =
+        Arc::new(crate::runtime::EnvAgent::open_with_adapters(config, sink, adapters).await?);
+    run_connection(runtime, connection).await
 }
 
 async fn run_connection(
-    runtime: &crate::runtime::EnvAgent,
+    runtime: Arc<crate::runtime::EnvAgent>,
     connection: ClientConnection,
 ) -> Result<()> {
     runtime.set_sink(connection.sink.clone()).await;
-    // Reconnects resume from the first unacknowledged producer sequence.  A
-    // failed flush must tear down this connection; otherwise the runtime can
-    // continue accepting commands while its durable prefix is stuck behind a
-    // dead sink.
-    runtime.flush_pending(128).await?;
+    // Replay a fixed durable prefix alongside commands. Waiting here blocks Files
+    // during reconnect, while a single batch strands the rest of an ended source.
+    let mut replay_tasks = tokio::task::JoinSet::new();
+    let replay_runtime = runtime.clone();
+    replay_tasks.spawn(async move { replay_runtime.flush_snapshot().await });
     let sender = connection.sender.clone();
     let mut incoming = connection.incoming;
+    // A native re-read can take minutes and must not hold the receive loop hostage:
+    // Files, heartbeat, and control commands still need a response while it runs.
+    // History has a separate bound: one shared pool still lets bulk import consume
+    // every slot needed by Files and stop commands. Saturation refuses undispatched
+    // work immediately instead of letting an invisible queue outlive the RPC deadline.
+    let interactive_slots = Arc::new(Semaphore::new(MAX_INTERACTIVE_COMMANDS));
+    let history_slots = Arc::new(Semaphore::new(MAX_HISTORY_COMMANDS));
+    let mut command_tails = HashMap::new();
+    let mut command_tasks = tokio::task::JoinSet::new();
+    let mut inventory_tasks = tokio::task::JoinSet::new();
     let mut inventory_tick = tokio::time::interval(Duration::from_secs(5));
     inventory_tick.tick().await;
-    let mut inventory = runtime.inventory().await;
+    let mut inventory = None;
     loop {
         tokio::select! {
             maybe = incoming.recv() => {
@@ -238,15 +253,55 @@ async fn run_connection(
                 idempotency,
                 command,
             }) => {
-                let outcome = runtime.handle_command(command).await;
-                sender
-                    .send(sylph_protocol::WireMessage::CommandResult {
-                        request_id,
-                        outcome,
-                        connection_epoch: connection.welcome.connection_epoch,
-                        idempotency: Some(idempotency),
-                    })
-                    .await?;
+                let slots = if is_history_command(&command) {
+                    &history_slots
+                } else {
+                    &interactive_slots
+                };
+                let permit = match slots.clone().try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        sender.send(sylph_protocol::WireMessage::CommandResult {
+                            request_id,
+                            outcome: sylph_protocol::CommandOutcome::Rejected {
+                                code: "COMMAND_OVERLOADED".into(),
+                                message: "envagent command capacity is full; this request was not executed".into(),
+                            },
+                            connection_epoch: connection.welcome.connection_epoch,
+                            idempotency: Some(idempotency),
+                        }).await?;
+                        continue;
+                    }
+                };
+                // Link predecessors before spawning: acquiring a mutex inside each
+                // task would let executor scheduling reorder commands from the wire.
+                let key = command_session_key(&command);
+                let (completion, next) = oneshot::channel::<()>();
+                let predecessor = key.as_ref().and_then(|key| {
+                    command_tails
+                        .insert(key.clone(), (request_id.clone(), next))
+                        .map(|(_, previous)| previous)
+                });
+                let runtime = runtime.clone();
+                let sender = sender.clone();
+                let connection_epoch = connection.welcome.connection_epoch;
+                command_tasks.spawn(async move {
+                    let _permit = permit;
+                    if let Some(predecessor) = predecessor {
+                        let _ = predecessor.await;
+                    }
+                    let outcome = runtime.handle_command(command).await;
+                    let _ = sender
+                        .send(sylph_protocol::WireMessage::CommandResult {
+                            request_id: request_id.clone(),
+                            outcome,
+                            connection_epoch,
+                            idempotency: Some(idempotency),
+                        })
+                        .await;
+                    let _ = completion.send(());
+                    (key, request_id)
+                });
             }
             sylph_protocol::DecodedMessage::Known(sylph_protocol::WireMessage::Nack {
                 expected_next,
@@ -267,19 +322,113 @@ async fn run_connection(
                 }
             }
             _ = inventory_tick.tick() => {
-                let current = runtime.inventory().await;
-                if current != inventory {
+                if inventory_tasks.is_empty() {
+                    let runtime = runtime.clone();
+                    inventory_tasks.spawn(async move { runtime.inventory().await });
+                }
+            }
+            Some(completed) = inventory_tasks.join_next(), if !inventory_tasks.is_empty() => {
+                let current = completed?;
+                if inventory.as_ref() != Some(&current) {
                     sender.send(sylph_protocol::WireMessage::Agents {
                         connection_epoch: connection.welcome.connection_epoch,
                         agents: current.clone(),
                     }).await?;
-                    inventory = current;
+                    inventory = Some(current);
                 }
+            }
+            Some(completed) = command_tasks.join_next(), if !command_tasks.is_empty() => {
+                if let Ok((Some(key), request_id)) = completed {
+                    if command_tails.get(&key).is_some_and(|(tail, _)| *tail == request_id) {
+                        command_tails.remove(&key);
+                    }
+                }
+            }
+            Some(completed) = replay_tasks.join_next(), if !replay_tasks.is_empty() => {
+                completed??;
             }
         }
     }
+    connection.sink.fail_pending().await;
+    command_tasks.abort_all();
+    inventory_tasks.abort_all();
+    replay_tasks.abort_all();
+    while command_tasks.join_next().await.is_some() {}
+    while inventory_tasks.join_next().await.is_some() {}
+    while replay_tasks.join_next().await.is_some() {}
     let _ = connection.heartbeat_stop.send(());
     Err(anyhow!("envagent server connection closed"))
+}
+
+fn is_history_command(command: &sylph_protocol::EnvironmentCommand) -> bool {
+    matches!(
+        command,
+        sylph_protocol::EnvironmentCommand::Adopt { .. }
+            | sylph_protocol::EnvironmentCommand::Watch { .. }
+            | sylph_protocol::EnvironmentCommand::Reread { .. }
+            | sylph_protocol::EnvironmentCommand::Reproject { .. }
+            | sylph_protocol::EnvironmentCommand::Enumerate { .. }
+    )
+}
+
+/// Return the serialization domain for commands that mutate a hosted source.
+/// Observation commands deliberately have no key: a slow history parse or file
+/// listing must not hold up an unrelated read, while sends/stops/adopts retain
+/// their arrival order for one session.
+fn command_session_key(command: &sylph_protocol::EnvironmentCommand) -> Option<String> {
+    use sylph_protocol::EnvironmentCommand;
+    match command {
+        EnvironmentCommand::Prepare { draft_id, .. }
+        | EnvironmentCommand::DraftSetConfig { draft_id, .. }
+        | EnvironmentCommand::DraftClose { draft_id } => Some(format!("draft:{draft_id}")),
+        EnvironmentCommand::Files {
+            session_id,
+            operation:
+                sylph_protocol::FileOperation::Write { .. }
+                | sylph_protocol::FileOperation::Mkdir { .. }
+                | sylph_protocol::FileOperation::Remove { .. },
+            ..
+        } => Some(format!("session:{session_id}")),
+        EnvironmentCommand::DraftFiles {
+            draft_id,
+            operation:
+                sylph_protocol::FileOperation::Write { .. }
+                | sylph_protocol::FileOperation::Mkdir { .. }
+                | sylph_protocol::FileOperation::Remove { .. },
+        } => Some(format!("draft:{draft_id}")),
+        EnvironmentCommand::Files { .. }
+        | EnvironmentCommand::Capabilities { .. }
+        | EnvironmentCommand::BrowseRoots
+        | EnvironmentCommand::BrowseTree { .. }
+        | EnvironmentCommand::Enumerate { .. }
+        | EnvironmentCommand::DraftCapabilities { .. }
+        | EnvironmentCommand::DraftFiles { .. }
+        | EnvironmentCommand::Health => None,
+        EnvironmentCommand::Run {
+            session_id,
+            draft_id,
+            ..
+        } => session_id
+            .as_ref()
+            .map(|id| format!("session:{id}"))
+            .or_else(|| draft_id.as_ref().map(|id| format!("draft:{id}"))),
+        EnvironmentCommand::Send { session_id, .. }
+        | EnvironmentCommand::Interrupt { session_id, .. }
+        | EnvironmentCommand::Steer { session_id, .. }
+        | EnvironmentCommand::QueueSteering { session_id, .. }
+        | EnvironmentCommand::Queue { session_id, .. }
+        | EnvironmentCommand::SetConfig { session_id, .. }
+        | EnvironmentCommand::Resolve { session_id, .. }
+        | EnvironmentCommand::Watch { session_id, .. }
+        | EnvironmentCommand::Adopt { session_id, .. }
+        | EnvironmentCommand::NativeTransfer { session_id, .. }
+        | EnvironmentCommand::Activate { session_id }
+        | EnvironmentCommand::Close {
+            session_id: Some(session_id),
+        } => Some(format!("session:{session_id}")),
+        EnvironmentCommand::Close { session_id: None } => None,
+        EnvironmentCommand::Reread { .. } | EnvironmentCommand::Reproject { .. } => None,
+    }
 }
 
 /// Keep an envagent attached while the server or network is temporarily
@@ -292,10 +441,11 @@ pub async fn run_runtime_reconnecting(
     config: crate::runtime::EnvAgentConfig,
 ) -> Result<()> {
     let mut backoff = crate::transport::Backoff::default();
-    let runtime = crate::runtime::EnvAgent::open(config, Arc::new(DisconnectedSink)).await?;
+    let runtime =
+        Arc::new(crate::runtime::EnvAgent::open(config, Arc::new(DisconnectedSink)).await?);
     loop {
         match connect(address.clone(), hello.clone(), credential.clone()).await {
-            Ok(connection) => match run_connection(&runtime, connection).await {
+            Ok(connection) => match run_connection(runtime.clone(), connection).await {
                 Ok(()) => {
                     backoff.reset();
                     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -365,6 +515,7 @@ async fn reader_loop<R: AsyncRead + Unpin>(
                     server_seq_through: *server_seq_through,
                 };
                 sink.acknowledge(&ack).await;
+                continue;
             }
             if let sylph_protocol::DecodedMessage::Known(sylph_protocol::WireMessage::Nack {
                 producer_id,
@@ -390,6 +541,7 @@ async fn reader_loop<R: AsyncRead + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod scheduling;
     use crate::runtime::EventSink;
     use crate::spool::SpoolEvent;
     use sylph_protocol::{EnvironmentId, Event, EventKind, ProducerId, WireMessage};

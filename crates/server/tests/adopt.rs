@@ -100,6 +100,65 @@ async fn adopting_a_stored_session_records_it_and_reads_its_transcript() {
     );
 }
 
+#[tokio::test]
+async fn a_finite_import_returns_only_after_its_full_transcript_is_readable() {
+    let backend = TestBackend::start().await;
+    let environment = backend.environment_id().await;
+    for index in 0..200 {
+        backend
+            .agents
+            .grow_stored_session(&format!("native history row {index}"));
+    }
+    let response = backend
+        .post_authed(
+            "/api/v1/sessions/adopt",
+            json!({
+                "environment": environment, "agent": "mock",
+                "nativeId": common::MockAgents::stored_native_id(), "watch": false,
+            }),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let created = json_body(response).await;
+    let id = created["session"]["id"].as_str().unwrap();
+    let texts = transcript(&backend, id).await;
+    assert!(texts.iter().any(|text| text == "native history row 199"));
+    let turns = json_body(
+        backend
+            .get_authed(&format!("/api/v1/sessions/{}/turns", segment(id)))
+            .await,
+    )
+    .await;
+    assert!(turns["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|entry| entry["turn"]["status"] == "completed"));
+}
+
+#[tokio::test]
+async fn an_adopt_retry_reads_the_repaired_source_instead_of_replaying_its_refusal() {
+    let backend = TestBackend::start().await;
+    let environment = backend.environment_id().await;
+    let request = json!({"environment": environment, "agent": "mock",
+        "nativeId": common::MockAgents::stored_native_id(), "watch": false});
+    backend.agents.set_store_workdir(None);
+    let first = backend
+        .post_authed("/api/v1/sessions/adopt", request.clone())
+        .await;
+    assert_eq!(first.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    backend
+        .agents
+        .set_store_workdir(Some(backend.workdir().display().to_string()));
+    let second = backend.post_authed("/api/v1/sessions/adopt", request).await;
+    assert_eq!(
+        second.status(),
+        StatusCode::CREATED,
+        "{}",
+        common::body_string(second).await
+    );
+}
+
 /// An adopted row carries the store's fidelity, never `stream`.
 ///
 /// `stream` is what a *live* link yields, because it holds the process's own stdio. A record

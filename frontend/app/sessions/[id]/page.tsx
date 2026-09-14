@@ -16,6 +16,7 @@
 
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
+import dynamic from "next/dynamic";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   api,
@@ -35,11 +36,13 @@ import { formatTimestamp, sessionLabel } from "@/lib/format";
 import { densityClasses, useSettings } from "@/lib/settings";
 import { relayName, useEnvironments } from "@/lib/environments";
 import { useWorkspaceUI } from "@/lib/workspace-ui";
-import { useSSE } from "@/lib/use-sse";
+import { terminalStateOf, TERMINAL_TURN_STATUSES as TERMINAL } from "@/lib/turn-status";
+import type { SessionTraceStatus } from "@/lib/use-session-trace";
 import { useAgentSession } from "@/lib/use-agent-session";
 import { useSessionTrace } from "@/lib/use-session-trace";
 import { turnDurationMs } from "@/lib/turn-duration";
 import { refreshRereadsTheStore } from "@/lib/refresh-transcript";
+import { createSubmissionIdentity } from "@/lib/submission-identity";
 import {
   buildSessionTrace,
   projectSessionTurnsFromIndex,
@@ -47,7 +50,7 @@ import {
 import { ApprovalDialog } from "@/components/approval-dialog";
 import { type StagedAttachment } from "@/components/attachment-picker";
 import { Composer } from "@/components/composer";
-import { Timeline } from "@/components/timeline";
+import { Timeline, UserPrompt } from "@/components/timeline";
 import {
   EnvironmentChip,
   FidelityMarker,
@@ -62,12 +65,9 @@ import {
   RefreshIcon,
 } from "@/components/icons";
 
-const TERMINAL: ReadonlySet<Turn["status"]> = new Set([
-  "completed",
-  "failed",
-  "cancelled",
-  "interrupted",
-]);
+
+
+const ControlQueue = dynamic(() => import("@/components/control-queue").then((module) => module.ControlQueue));
 
 export default function SessionPage() {
   const t = useT();
@@ -83,6 +83,7 @@ export default function SessionPage() {
 
   const [text, setText] = useState("");
   const [attachments, setAttachments] = useState<StagedAttachment[]>([]);
+  const [submissionIdentity] = useState(createSubmissionIdentity);
   /** Turn started by this tab. Null means "whatever history says is running". */
   const [sentTurnId, setSentTurnId] = useState<string | null>(null);
   /** Global expand override from `Shift+E` / `Shift+C`. Null restores per-row
@@ -93,12 +94,12 @@ export default function SessionPage() {
 
   const sessionQuery = useQuery({
     queryKey: ["session", sessionId],
-    queryFn: () => api.sessions.get(sessionId),
+    queryFn: ({ signal }) => api.sessions.get(sessionId, signal),
   });
 
   const historyQuery = useInfiniteQuery({
     queryKey: ["session", sessionId, "history"],
-    queryFn: ({ pageParam }) => api.sessions.history(sessionId, pageParam),
+    queryFn: ({ pageParam, signal }) => api.sessions.history(sessionId, pageParam, signal),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (page) => page.hasMore ? page.nextCursor ?? undefined : undefined,
   });
@@ -111,7 +112,7 @@ export default function SessionPage() {
     }
     return [...byId.values()].sort((a, b) => a.turn.createdAtMs - b.turn.createdAtMs);
   }, [historyQuery.data]);
-  const { events: traceEvents } = useSessionTrace(
+  const { events: traceEvents, status: traceStatus } = useSessionTrace(
     sessionId || undefined,
     Boolean(historyQuery.data),
     historyQuery.data?.pages[0]?.snapshotSeq ?? -1,
@@ -199,8 +200,7 @@ export default function SessionPage() {
   const traceHasTerminalTurn = useMemo(
     () => traceEvents.some((event) =>
       event.arrivalTurnId === watchedTurnId &&
-      event.kind === "turn" &&
-      event.phase === "completed",
+      terminalStateOf(event) !== null,
     ),
     [traceEvents, watchedTurnId],
   );
@@ -253,7 +253,9 @@ export default function SessionPage() {
   const watchedStatus = watchedTurn.data?.turn.status;
   const finished = streamSettled || Boolean(watchedStatus && TERMINAL.has(watchedStatus));
 
-  const absorbed = history.some((entry) => entry.turn.id === watchedTurnId);
+  // Handoff only when history contains the same durable terminal fact. A stale
+  // running snapshot must not replace a live section that has already settled.
+  const absorbed = history.some((entry) => entry.turn.id === watchedTurnId && TERMINAL.has(entry.turn.status));
   const liveTurnId = watchedTurnId && !(finished && absorbed) ? watchedTurnId : null;
   const isLive = Boolean(liveTurnId) && !finished;
 
@@ -268,22 +270,47 @@ export default function SessionPage() {
   const sendTurn = useMutation({
     // `override` carries a resent turn's text. Its attachments are deliberately
     // not resent: they were staged from local files this tab no longer holds.
-    mutationFn: (override?: string) =>
-      api.turns.create(sessionId, {
-        text: (override ?? text).trim(),
+    mutationFn: async (override?: string) => {
+      const draft = text;
+      const staged = attachments;
+      const payload = {
+        text: (override ?? draft).trim(),
         attachments: override
           ? []
-          : attachments.map(({ name, type, data }) => ({ name, type, data })),
-        // A retried POST must not start a second run of the same message.
-        idempotencyKey: crypto.randomUUID(),
-      }),
+          : staged.map(({ name, type, data }) => ({ name, type, data })),
+      };
+      const idempotencyKey = submissionIdentity.key({ sessionId, kind: "send", ...payload });
+      const result = await api.turns.create(sessionId, { ...payload, idempotencyKey });
+      submissionIdentity.accepted(idempotencyKey);
+      if (override === undefined) {
+        setText((current) => current === draft ? "" : current);
+        setAttachments((current) => current === staged ? [] : current);
+      }
+      return result;
+    },
     onSuccess: (result) => {
       hasCommittedWork.current = true;
       setSentTurnId(result.turn.id);
-      setText("");
-      setAttachments([]);
       void queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
       void queryClient.invalidateQueries({ queryKey: ["session", sessionId, "history"] });
+    },
+  });
+
+  const sendControl = useMutation({
+    mutationFn: async ({ kind, value, turnId }: { kind: "steer" | "queue" | "native_steer" | "native_queue"; value: string; turnId?: string | null }) => {
+      const payload = { sessionId, kind, text: value, ...(kind === "steer" ? { turnId } : {}) };
+      const key = submissionIdentity.key(payload);
+      const result = kind === "steer"
+        ? await api.sessions.steer(sessionId, value, turnId!, key)
+        : kind === "queue"
+          ? await api.sessions.queue(sessionId, value, key)
+          : await api.sessions.nativeQueue(sessionId, value, kind === "native_steer", key);
+      submissionIdentity.accepted(key);
+      setText((current) => current === value ? "" : current);
+      return result;
+    },
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: ["session", sessionId, "controls"] });
     },
   });
 
@@ -301,12 +328,18 @@ export default function SessionPage() {
    * session config and never becomes a turn — the composer routes on `kind`.
    */
   const runCommand = useMutation({
-    mutationFn: ({ command, args }: { command: string; args: Record<string, string> }) =>
-      api.turns.create(sessionId, {
+    mutationFn: async ({ command, args }: { command: string; args: Record<string, string> }) => {
+      const draft = text;
+      const idempotencyKey = submissionIdentity.key({ sessionId, command, args });
+      const result = await api.turns.create(sessionId, {
         command,
         args,
-        idempotencyKey: crypto.randomUUID(),
-      }),
+        idempotencyKey,
+      });
+      submissionIdentity.accepted(idempotencyKey);
+      setText((current) => current === draft ? "" : current);
+      return result;
+    },
     onSuccess: (result) => {
       hasCommittedWork.current = true;
       setSentTurnId(result.turn.id);
@@ -553,7 +586,7 @@ export default function SessionPage() {
           since nothing ever reset anything, so it described an absence as a feature on
           every one of those sessions forever. This says something that can actually
           change and that the user can sometimes act on. */}
-      <DriveState control={agent.control} controlBlock={agent.controlBlock} connecting={agent.connecting} t={t} />
+      <DriveState control={agent.control} controlBlock={agent.controlBlock} connecting={agent.connecting} error={agent.linkError} onRetry={agent.retryLinkRead} t={t} />
 
       {/*
         `data-scroller` rather than being found by its utility class. `LiveTurn` needs
@@ -580,6 +613,7 @@ export default function SessionPage() {
             <Transcript
               history={history}
               traceEvents={traceEvents}
+              traceStatus={traceStatus}
               fidelity={session.fidelity}
               isPending={historyQuery.isPending}
               error={historyQuery.isFetchNextPageError ? null : historyQuery.error}
@@ -631,6 +665,12 @@ export default function SessionPage() {
         </div>
       )}
 
+      <ControlQueue
+        sessionId={sessionId}
+        canSteer={agent.can("steer")}
+        canQueue={agent.can("queue")}
+        turnId={liveTurnId}
+      />
       <Composer
         session={session}
         agents={environment?.agents ?? []}
@@ -643,8 +683,8 @@ export default function SessionPage() {
         attachments={attachments}
         onAttachmentsChange={setAttachments}
         onSend={() => sendTurn.mutate(undefined)}
-        sending={sendTurn.isPending}
-        sendError={sendTurn.error ?? runCommand.error}
+        sending={sendTurn.isPending || sendControl.isPending || runCommand.isPending}
+        sendError={sendControl.error ?? sendTurn.error ?? runCommand.error}
         onStop={() => stopTurn.mutate()}
         stopping={stopTurn.isPending}
         // The agent's own list, read from its live handshake. A detached
@@ -656,9 +696,10 @@ export default function SessionPage() {
         // composer cannot tell them apart from the list alone — an empty surface
         // means "Sylph cannot reach it", never "there is nothing there".
         agentConnecting={agent.connecting}
+        capabilityError={agent.linkError}
         control={agent.control}
         controlBlock={agent.controlBlock}
-        onReattach={() => agent.reattach()}
+        onReattach={agent.linkError ? agent.retryLinkRead : agent.reattach}
         // Typed config from the live agent, which is what a control command like
         // `/model` resolves against instead of being sent as prompt text.
         config={agent.link?.capabilities?.config ?? []}
@@ -671,7 +712,7 @@ export default function SessionPage() {
         configError={agent.configError}
         // Gated on what the agent declared rather than offered unconditionally: an
         // interrupt button on an agent with no interrupt is a promise the handshake
-        // already told us we cannot keep. `pi` supports both; a minimal adapter
+        // already told us we cannot keep. Native queues declare their own semantics; a minimal adapter
         // may support neither.
         canInterrupt={agent.can("interrupt")}
         onInterrupt={() => agent.interrupt()}
@@ -679,10 +720,12 @@ export default function SessionPage() {
         canQueue={agent.can("queue")}
         // The running turn is named as a precondition, so a steer that races the
         // turn boundary is refused rather than delivered into the next conversation.
-        onSteer={(value) => agent.steer(value, liveTurnId ?? undefined)}
+        canQueueSteering={agent.can("queue_steering")}
+        onNativeQueue={(value, priority) => sendControl.mutate({ kind: priority ? "native_steer" : "native_queue", value })}
+        onSteer={(value) => sendControl.mutate({ kind: "steer", value, turnId: liveTurnId })}
         // No turn id: a queued follow-up is *for* after the turn, so a boundary crossing
         // underneath it changes nothing and there is no precondition to state.
-        onQueue={(value) => agent.queue(value)}
+        onQueue={(value) => sendControl.mutate({ kind: "queue", value })}
         // Dismissing hides a panel without answering, so the agent stays blocked.
         // Reported here because with the panel gone nothing else on screen would
         // say so, and a blocked session that merely looks idle leaves the user
@@ -724,14 +767,28 @@ function DriveState({
   control,
   controlBlock,
   connecting,
+  error,
+  onRetry,
   t,
 }: {
-  control: Facet;
+  control?: Facet;
   controlBlock?: ControlBlock;
   connecting: boolean;
+  error: unknown;
+  onRetry: () => void;
   t: Translate;
 }) {
   if (connecting) return null;
+
+  if (error) {
+    return (
+      <aside role="alert" className="shrink-0 border-b border-line bg-sunken px-3 py-2 text-xs">
+        <p className="font-medium text-danger">{t("drive.readFailed")}</p>
+        <p className="text-ink-muted">{error instanceof Error ? error.message : String(error)}</p>
+        <Button variant="ghost" onClick={onRetry}>{t("app.retry")}</Button>
+      </aside>
+    );
+  }
 
   if (controlBlock?.kind === "unauthorized") {
     return (
@@ -749,7 +806,7 @@ function DriveState({
 
   const blockedReason = controlBlock?.kind === "unavailable"
     ? controlBlock.reason
-    : control.available ? undefined : control.reason;
+    : control?.available ? undefined : control?.reason;
   if (!blockedReason) return null;
 
   // Exhaustive over the closed union, so a reason added to the protocol is a compile
@@ -857,6 +914,7 @@ async function turnAsText(entry: TurnWithEvents): Promise<string> {
 }
 
 function Transcript({
+    traceStatus,
   history,
   traceEvents,
   fidelity,
@@ -872,6 +930,7 @@ function Transcript({
   onLiveTurnSettled,
 }: {
   history: TurnWithEvents[];
+  traceStatus: SessionTraceStatus;
   traceEvents: import("@/lib/api-types").StreamEvent[];
   /**
    * The session's, threaded to every `Timeline` below.
@@ -971,6 +1030,8 @@ function Transcript({
       {liveTurnId && !filtering && (
         <LiveTurn
           turnId={liveTurnId}
+          status={traceStatus}
+          turn={history.find((entry) => entry.turn.id === liveTurnId)?.turn}
           // A live turn is always `stream` in fact — it *is* the process's own stdio,
           // which is the only thing that produces that fidelity — but the session's
           // value is passed rather than hardcoded here. Two reasons: a hardcoded
@@ -1022,6 +1083,9 @@ function TurnSection({
 
   const elapsed = turnDurationMs(entry.turn, fidelity);
   const duration = elapsed === undefined ? undefined : elapsed / 1000;
+  const hasContent = Boolean(entry.turn.requestText) || entry.events.some((event) =>
+    event.kind !== "turn" && (Boolean(event.text) || ["tool_call", "tool_result", "subagent", "usage"].includes(event.kind)),
+  );
 
   async function copy() {
     try {
@@ -1035,17 +1099,20 @@ function TurnSection({
   }
 
   return (
-    <section data-turn-id={entry.turn.id} aria-label={`Turn ${entry.turn.id}`} className="border-t border-line pt-1 first:border-t-0">
+    <section data-turn-id={entry.turn.id} data-turn-status={entry.turn.status} aria-label={`Turn ${entry.turn.id}`} className="border-t border-line pt-1 first:border-t-0">
       {/* A turn nobody asked for has to say so. Its `requestText` is empty, so
           unlabelled it renders as an answer to a message the user never wrote —
           and the thing it is usually reporting is work they had stopped expecting
           to hear about, which makes the provenance the most useful part. */}
-      {entry.turn.origin === "agent" && (
+      {entry.turn.origin === "agent" && hasContent && (
         <p className="flex items-center gap-1.5 pt-1 text-3xs text-ink-muted">
           <span className="rounded bg-hover px-1">unprompted</span>
           <span>the agent reported this on its own</span>
         </p>
       )}
+
+      {!hasContent && <p className="py-2 text-xs text-ink-muted">{t("session.emptyTurn")}</p>}
+      <TurnPrompt turn={entry.turn} events={entry.events} />
 
       <Timeline
         events={entry.events}
@@ -1085,8 +1152,22 @@ function TurnSection({
   );
 }
 
+function TurnPrompt({ turn, events }: { turn?: Turn; events: import("@/lib/api-types").StreamEvent[] }) {
+  if (!turn?.requestText) return null;
+  // Native input is stored on the turn; Sylph sends also journal user events.
+  // A later steering message must not hide the opening input. Body previews
+  // already have a lazy full-text renderer and must not cause a second prompt.
+  const recorded = events.some((event) => event.kind === "user" && !event.span && (
+    event.text === turn.requestText ||
+    (event.bodyRef && event.text && turn.requestText.startsWith(event.text))
+  ));
+  return recorded ? null : <UserPrompt text={turn.requestText} createdAtMs={turn.createdAtMs} />;
+}
+
 function LiveTurn({
+  status,
   turnId,
+  turn,
   fidelity,
   traceEvents,
   isLive,
@@ -1094,7 +1175,9 @@ function LiveTurn({
   expandAll,
   onSettled,
 }: {
+  status: SessionTraceStatus;
   turnId: string;
+  turn?: Turn;
   fidelity: Fidelity;
   /** Current-turn projection from the session trace; late child events are included. */
   traceEvents: import("@/lib/api-types").StreamEvent[];
@@ -1111,19 +1194,9 @@ function LiveTurn({
   onSettled: (state: string) => void;
 }) {
   const t = useT();
-  const { events: turnEvents, status, settled } = useSSE({ turnId, enabled: isLive });
-  const events = useMemo(() => {
-    // The session trace is the authoritative projection for rendering. Keep the
-    // turn stream as a compatibility tail while older backends roll out the new
-    // endpoint, and while a trace frame is still in flight. Sequence ids make the
-    // merge deterministic and prevent double-rendering the same tool delta.
-    const bySeq = new Map<number, import("@/lib/api-types").StreamEvent>();
-    for (const event of traceEvents) bySeq.set(event.seq, event);
-    for (const event of turnEvents) {
-      if (!bySeq.has(event.seq)) bySeq.set(event.seq, event);
-    }
-    return [...bySeq.values()].sort((a, b) => a.seq - b.seq);
-  }, [traceEvents, turnEvents]);
+  const events = traceEvents;
+  const settled = events.reduce<string | null>((state, event) => terminalStateOf(event) ?? state, null);
+  const turnStatus = settled ?? turn?.status ?? (isLive ? "running" : "queued");
 
   // Report the close upward. A genuine external-system sync: the stream is the external
   // system, and the parent owns what a settled turn does to the rest of the page.
@@ -1146,7 +1219,8 @@ function LiveTurn({
   }, [events]);
 
   return (
-    <section aria-label={t("timeline.currentTurn")} className="border-t border-line pt-1">
+    <section data-turn-id={turnId} data-turn-status={turnStatus} aria-label={t("timeline.currentTurn")} className="border-t border-line pt-1">
+      <TurnPrompt turn={turn} events={events} />
       <Timeline
         events={events}
         fidelity={fidelity}

@@ -53,6 +53,12 @@ grouping.
   means.
 - `fidelity` is `stream` | `blocks` | `messages`, a property of the record rather than of
   who started the session. A renderer reads it to decide whether it may draw a duration.
+- `next_event_seq` is the durable next event sequence for the session. An event-insert
+  trigger advances it monotonically in the same transaction as every journal append,
+  including a batch or a producer receipt. Consolidation and retention do not lower it.
+  Allocators and startup repair read this field instead of deriving a cursor from rows
+  that may already have moved to history. In-memory reservations may raise a producer's
+  allocation floor further; a failed write never authorizes reusing a reservation.
 
 **There is no session class and no incarnation table** (`docs/architecture.md` § One class
 of session). Nothing records who started a session, and nothing may replace a session's

@@ -2,7 +2,7 @@ use crate::db::labels::summarize_line;
 use crate::error::{Error, Result};
 use crate::events::data_from_column;
 use crate::models::now_ms;
-use crate::models::{Event, PendingRequest, Session, Turn};
+use crate::models::{ControlRequest, Event, PendingRequest, Session, Turn};
 use sqlx::sqlite::{
     SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions, SqliteSynchronous,
 };
@@ -11,7 +11,7 @@ use sylph_protocol::SessionId;
 
 #[derive(Clone)]
 pub struct JournalStore {
-    pool: SqlitePool,
+    pub(super) pool: SqlitePool,
 }
 
 /// Narrowing criteria for a session listing. `None` means "do not narrow on
@@ -63,6 +63,80 @@ impl Default for SessionFilter {
 }
 
 impl JournalStore {
+    /// Insert one user control intent and assign its monotonic session sequence.
+    /// The idempotency uniqueness constraint makes retries return the original row.
+    pub async fn create_control_request(&self, request: &ControlRequest) -> Result<ControlRequest> {
+        sqlx::query_as::<_, ControlRequest>(
+            "INSERT INTO control_requests
+             (request_id, session_env, session_agent, session_native, origin_subject, kind, text,
+              target_turn_id, server_seq, state, idempotency_key, created_at_ms)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?,
+               COALESCE((SELECT MAX(server_seq) + 1 FROM control_requests
+                 WHERE session_env = ? AND session_agent = ? AND session_native = ?), 0),
+               ?, ?, ?) RETURNING *",
+        )
+        .bind(&request.request_id)
+        .bind(request.session_id.environment.as_str())
+        .bind(request.session_id.agent.as_str())
+        .bind(request.session_id.native_id.as_str())
+        .bind(&request.origin_subject)
+        .bind(&request.kind)
+        .bind(&request.text)
+        .bind(&request.target_turn_id)
+        .bind(request.session_id.environment.as_str())
+        .bind(request.session_id.agent.as_str())
+        .bind(request.session_id.native_id.as_str())
+        .bind(&request.state)
+        .bind(&request.idempotency_key)
+        .bind(request.created_at_ms)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Error::Database)
+    }
+
+    pub async fn find_control_request_by_idempotency(
+        &self,
+        session_id: &SessionId,
+        key: &str,
+    ) -> Result<Option<ControlRequest>> {
+        sqlx::query_as::<_, ControlRequest>(
+            "SELECT * FROM control_requests WHERE session_env = ? AND session_agent = ? AND session_native = ? AND idempotency_key = ?"
+        )
+        .bind(session_id.environment.as_str()).bind(session_id.agent.as_str()).bind(session_id.native_id.as_str()).bind(key)
+        .fetch_optional(&self.pool).await.map_err(Error::Database)
+    }
+
+    pub async fn update_control_request(
+        &self,
+        request_id: &str,
+        state: &str,
+        receipt: Option<&str>,
+        error: Option<&str>,
+    ) -> Result<Option<ControlRequest>> {
+        let now = now_ms();
+        sqlx::query_as::<_, ControlRequest>(
+            "UPDATE control_requests SET state = ?, vendor_receipt = COALESCE(?, vendor_receipt),
+             error_message = ?, consumed_at_ms = CASE WHEN ? = 'consumed' THEN ? ELSE consumed_at_ms END,
+             failed_at_ms = CASE WHEN ? IN ('failed','rejected') THEN ? ELSE failed_at_ms END,
+             revision = revision + 1 WHERE request_id = ? AND (
+               (state='accepted' AND ? IN ('queued','dispatched','rejected','failed')) OR
+               (state='queued' AND ? IN ('dispatched','failed')) OR
+               (state='dispatched' AND ? IN ('confirmed','unconfirmed','rejected','failed')) OR
+               (state='confirmed' AND ? = 'consumed')
+             ) RETURNING *"
+        )
+        .bind(state).bind(receipt).bind(error).bind(state).bind(now).bind(state).bind(now).bind(request_id).bind(state).bind(state).bind(state).bind(state)
+        .fetch_optional(&self.pool).await.map_err(Error::Database)
+    }
+
+    pub async fn list_control_requests(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Vec<ControlRequest>> {
+        sqlx::query_as::<_, ControlRequest>("SELECT * FROM control_requests WHERE session_env = ? AND session_agent = ? AND session_native = ? ORDER BY server_seq")
+            .bind(session_id.environment.as_str()).bind(session_id.agent.as_str()).bind(session_id.native_id.as_str())
+            .fetch_all(&self.pool).await.map_err(Error::Database)
+    }
     pub async fn upsert_subject(
         &self,
         id: &str,
@@ -718,26 +792,32 @@ impl JournalStore {
         .map_err(Error::Database)
     }
 
-    /// Page turns oldest-to-newest without loading an unbounded session into memory.
-    /// The cursor is the exclusive `created_at_ms` boundary from the previous page.
+    /// Page turns newest-first without loading an unbounded session into memory.
+    /// The cursor is the exclusive `(created_at_ms, id)` boundary from the previous page;
+    /// the id tie-breaker keeps equal-millisecond turns from being skipped.
     pub async fn list_turns_page(
         &self,
         session_id: &SessionId,
         cursor: Option<&str>,
         limit: i64,
     ) -> Result<Vec<Turn>> {
-        let boundary = cursor.and_then(|value| value.parse::<i64>().ok());
+        let (boundary_ms, boundary_id) = cursor
+            .and_then(|value| value.split_once(':'))
+            .and_then(|(ms, id)| ms.parse::<i64>().ok().map(|ms| (ms, id.to_string())))
+            .map_or((None, None), |(ms, id)| (Some(ms), Some(id)));
         sqlx::query_as::<_, Turn>(
             "SELECT * FROM turns
              WHERE session_env = ? AND session_agent = ? AND session_native = ?
-               AND (? IS NULL OR created_at_ms < ?)
-             ORDER BY created_at_ms DESC LIMIT ?",
+               AND (? IS NULL OR created_at_ms < ? OR (created_at_ms = ? AND id < ?))
+             ORDER BY created_at_ms DESC, id DESC LIMIT ?",
         )
         .bind(session_id.environment.as_str())
         .bind(session_id.agent.as_str())
         .bind(session_id.native_id.as_str())
-        .bind(boundary)
-        .bind(boundary)
+        .bind(boundary_ms)
+        .bind(boundary_ms)
+        .bind(boundary_ms)
+        .bind(boundary_id)
         .bind(limit)
         .fetch_all(&self.pool)
         .await
@@ -1377,18 +1457,12 @@ impl JournalStore {
         };
         let session_id = turn.session_id;
 
-        let max_seq = sqlx::query_scalar::<_, Option<i32>>(
-            "SELECT MAX(seq) FROM events
-              WHERE session_env = ? AND session_agent = ? AND session_native = ?",
-        )
-        .bind(session_id.environment.as_str())
-        .bind(session_id.agent.as_str())
-        .bind(session_id.native_id.as_str())
-        .fetch_one(&self.pool)
-        .await
-        .map_err(Error::Database)?;
-
-        Ok(Some((session_id, max_seq.unwrap_or(0) + 1)))
+        let next_seq = self
+            .max_event_seq(&session_id)
+            .await?
+            .checked_add(1)
+            .ok_or_else(|| Error::Internal("session event sequence exhausted".into()))?;
+        Ok(Some((session_id, next_seq)))
     }
 
     pub async fn count_turns_by_status(
@@ -1425,17 +1499,17 @@ impl JournalStore {
 
     /// Highest sequence number recorded for a session, or -1 when empty.
     ///
-    /// Used to seed the in-memory sequence counter after a restart so new
-    /// events never collide with journaled ones.
+    /// The session's durable cursor survives consolidation deleting journal rows.
+    /// Reusing a history-tier sequence would silently replace its earlier event.
     pub async fn max_event_seq(&self, session_id: &SessionId) -> Result<i32> {
         let seq: Option<i32> = sqlx::query_scalar(
-            "SELECT MAX(seq) FROM events
-              WHERE session_env = ? AND session_agent = ? AND session_native = ?",
+            "SELECT next_event_seq - 1 FROM sessions
+              WHERE environment = ? AND agent = ? AND native_id = ?",
         )
         .bind(session_id.environment.as_str())
         .bind(session_id.agent.as_str())
         .bind(session_id.native_id.as_str())
-        .fetch_one(&self.pool)
+        .fetch_optional(&self.pool)
         .await?;
         Ok(seq.unwrap_or(-1))
     }
@@ -2122,6 +2196,7 @@ impl JournalStore {
 
 #[cfg(test)]
 mod tests {
+    mod sequences;
     use super::*;
 
     /// The session every fixture below hangs off.

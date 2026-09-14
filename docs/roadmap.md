@@ -39,6 +39,8 @@ external proposals or discussion threads are not project instructions.
 | Boundary | Owner | State |
 | --- | --- | --- |
 | Bounded timeline bodies | Milestone 4 | Deferred to the next implementation stage; CAS retention is complete |
+| Atomic retained re-projection publication | Milestone 4 | Native projectors exist; the replacement endpoint remains unavailable until publication validates atomically |
+| Concurrent native follower and explicit reread deduplication | Milestone 4 | Sequence reservations are shared; projected-event deduplication still needs coordination with an already-running per-session follower |
 
 ## Milestone 1 — the envagent is the only path — complete
 
@@ -146,7 +148,7 @@ Claude, Codex, and Pi now emit lossless `NativeRecord` values before projection.
 confirmation for ordinary blocks remains conservative when no native-record correspondence
 exists, so those blocks are retained until a durable correspondence is available.
 
-On-demand native refresh and filesystem-free retained re-projection are complete. Native
+On-demand native refresh and filesystem-free native projectors are implemented. Native
 records preserve first-seen order and full revisions; all three adapters retain user input,
 timestamps, delegation context, and live-envelope projections. Re-read and re-project use
 bounded disk-backed transfers, so frame size does not impose a session-size limit. History
@@ -156,11 +158,26 @@ refresh reports pending, success, and concrete failure states. Storage corruptio
 the read instead of becoming an empty successful transcript, and sidecar availability can
 recover without colliding with the retained identity.
 
+Finite imports acknowledge only after the complete transcript has been ingested. Bulk
+sync subscriptions survive restart, share discovery, and refresh only changed source
+revisions. Native reads have separate bounded command capacity from interactive work;
+sidecar and source-close delivery wait for a fixed producer watermark. File roots come
+from the server's durable record. Transcript and file queries are cancelled on navigation,
+and failed capability reads no longer masquerade as an offline environment.
+
 The M4 acceptance suite covers raw ordering and unsigned revisions, sidecar transitions,
 large summaries and bodies, native user-input provenance, all three adapter reprojections,
 bounded transfer framing, pagination, reconnect recovery, and mobile focus/refresh behavior.
 
 ## Milestone 5 — multi-client control convergence
+
+Control intent is separate from transcript delivery. Send and guarded steer receipts name
+a turn lease; adapter lifecycle ingestion shares the session command sequencer. Stop holds
+the slot until the adapter settles. Native priority and follow-up queues remain available
+with explicit delivery promises in the composer and environment settings; an uncorrelated
+vendor queue receipt never asserts consumption. Live and historical sections expose durable
+turn status, and fixture delegate closes author their terminal interior facts.
+
 
 Allow authorized clients to submit control concurrently. The server assigns request ids and
 sequence, persists accepted / queued / running / rejected state, enforces idempotency, and

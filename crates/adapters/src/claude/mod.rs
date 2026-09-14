@@ -473,7 +473,13 @@ impl Adapter for ClaudeAdapter {
     }
 
     async fn enumerate(&self, filter: &StoreFilter) -> Result<Vec<NativeSummary>> {
-        native::enumerate(filter)
+        let filter = filter.clone();
+        tokio::task::spawn_blocking(move || native::enumerate(&filter)).await?
+    }
+
+    async fn lookup(&self, id: &NativeId) -> Result<Option<NativeSummary>> {
+        let id = id.clone();
+        tokio::task::spawn_blocking(move || native::lookup(&id)).await?
     }
 }
 

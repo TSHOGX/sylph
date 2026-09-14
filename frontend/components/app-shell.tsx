@@ -238,7 +238,7 @@ function ShellFrame({
         */}
         <aside
           aria-label={t("shell.workspaces")}
-          className={`${leftOpen ? "md:flex" : "md:hidden"} hidden w-60 shrink-0 flex-col border-r border-line bg-sunken`}
+          className={`${leftOpen ? "md:flex" : "md:hidden"} hidden min-w-0 w-60 shrink-0 flex-col overflow-hidden border-r border-line bg-sunken`}
         >
           <WorkspaceSidebar />
         </aside>

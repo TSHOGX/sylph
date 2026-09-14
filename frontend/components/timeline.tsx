@@ -211,7 +211,7 @@ function FocusedReport({ node }: { node: TimelineNode }) {
   const reportEvent = node.row.event.kind === "subagent" ? node.row.event : node.row.trajectoryClose;
   if (!reportEvent) return null;
   return (
-    <div aria-label="Delegation report" className="min-w-0 py-1 text-sm text-ink-soft">
+    <section aria-label="Delegation report" className="min-w-0 py-1 text-sm text-ink-soft">
       <EventBody event={reportEvent} label="Load full report">
         {(event) => {
           const progress = (event.data as { progress?: unknown } | undefined)?.progress;
@@ -219,7 +219,7 @@ function FocusedReport({ node }: { node: TimelineNode }) {
           return text ? <Markdown text={text} /> : null;
         }}
       </EventBody>
-    </div>
+    </section>
   );
 }
 
@@ -698,7 +698,7 @@ function TimelineRowContent({ row, onOpenFile, expandAll }: {
 
   switch (event.kind) {
     case "user":
-      return <UserPrompt event={event} />;
+      return <UserPrompt text={event.text ?? ""} createdAtMs={event.createdAtMs} />;
     case "thinking":
       return <ThinkingBlock event={event} streaming={streaming} expandAll={expandAll} />;
     case "tool_call":
@@ -740,7 +740,7 @@ function TimelineRowContent({ row, onOpenFile, expandAll }: {
 }
 
 /** The user's own request. A `›` marker, not a bubble. */
-function UserPrompt({ event }: { event: StreamEvent }) {
+export function UserPrompt({ text, createdAtMs }: { text: string; createdAtMs: number }) {
   return (
     <div className="flex gap-2 pt-2">
       <span aria-hidden="true" className="select-none pt-px font-mono text-sm text-ink-muted">
@@ -748,14 +748,14 @@ function UserPrompt({ event }: { event: StreamEvent }) {
       </span>
       <div className="min-w-0 flex-1">
         <p className="whitespace-pre-wrap break-words text-sm font-medium text-ink">
-          {event.text}
+          {text}
         </p>
       </div>
       <time
         className="shrink-0 pt-0.5 text-3xs text-ink-muted"
-        dateTime={new Date(event.createdAtMs).toISOString()}
+        dateTime={new Date(createdAtMs).toISOString()}
       >
-        {formatTime(event.createdAtMs)}
+        {formatTime(createdAtMs)}
       </time>
     </div>
   );

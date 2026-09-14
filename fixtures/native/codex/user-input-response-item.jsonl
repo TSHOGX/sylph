@@ -1,0 +1,5 @@
+{"timestamp":"2026-09-09T02:24:04.205Z","type":"session_meta","payload":{"id":"response-user","cwd":"/tmp/work","history_mode":"paginated","cli_version":"0.153.4"}}
+{"timestamp":"2026-09-09T02:24:04.205Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-user"}}
+{"timestamp":"2026-09-09T02:24:04.206Z","type":"response_item","payload":{"type":"message","id":"ask-1","role":"user","content":[{"type":"input_text","text":"Recover the missing transcript"}],"internal_chat_message_metadata_passthrough":null}}
+{"timestamp":"2026-09-09T02:24:05.000Z","type":"event_msg","payload":{"type":"item_completed","thread_id":"response-user","item":{"type":"AgentMessage","id":"answer-1","content":[{"type":"Text","text":"The transcript is available."}],"phase":"final_answer"}}}
+{"timestamp":"2026-09-09T02:24:05.001Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-user"}}

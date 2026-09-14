@@ -4,9 +4,9 @@ use std::io::{BufRead, Write};
 
 use anyhow::{bail, ensure, Context, Result};
 use sylph_protocol::{
-    CommandOutcome, EnvironmentCommand, EventStream, IdempotencyPolicy, NativeRecord,
-    NativeTransfer, NativeTransferChunk, NativeTransferItem, NativeTransferOperation, SessionId,
-    SessionMessage, NATIVE_TRANSFER_CHUNK_BYTES,
+    CommandOutcome, EnvironmentCommand, EventStream, IdempotencyPolicy, NativeTransfer,
+    NativeTransferChunk, NativeTransferItem, NativeTransferOperation, SessionId, SessionMessage,
+    NATIVE_TRANSFER_CHUNK_BYTES,
 };
 
 use crate::AppState;
@@ -50,41 +50,6 @@ pub(super) async fn release(state: &AppState, session: &SessionId, id: String) {
     if let Err(error) = operation(state, session, NativeTransferOperation::Release { id }).await {
         tracing::debug!("native transfer cleanup: {error:#}");
     }
-}
-
-pub(super) async fn upload_records(
-    state: &AppState,
-    session: &SessionId,
-    records: Vec<NativeRecord>,
-) -> Result<NativeTransfer> {
-    let mut transfer: NativeTransfer =
-        serde_json::from_value(operation(state, session, NativeTransferOperation::Begin).await?)?;
-    let result = async {
-        for record in records {
-            let mut bytes = serde_json::to_vec(&record)?;
-            bytes.push(b'\n');
-            for chunk in bytes.chunks(NATIVE_TRANSFER_CHUNK_BYTES) {
-                transfer = serde_json::from_value(
-                    operation(
-                        state,
-                        session,
-                        NativeTransferOperation::Append {
-                            id: transfer.id.clone(),
-                            offset: transfer.bytes,
-                            bytes: chunk.to_vec(),
-                        },
-                    )
-                    .await?,
-                )?;
-            }
-        }
-        Ok(transfer.clone())
-    }
-    .await;
-    if result.is_err() {
-        release(state, session, transfer.id).await;
-    }
-    result
 }
 
 pub(super) struct DownloadedPass {

@@ -270,3 +270,11 @@ mod tests {
         );
     }
 }
+
+/// A negative response received from the vendor, distinct from a lost response.
+/// Only this evidence (or local validation) permits classifying dispatch as rejected.
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub struct VendorRefusal {
+    pub message: String,
+}

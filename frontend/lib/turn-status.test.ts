@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { StreamEvent } from "@/lib/api-types";
-import { terminalStateOf } from "@/lib/use-sse";
+import { terminalStateOf } from "@/lib/turn-status";
 
 /**
  * Reading a turn's outcome off its own event stream.
@@ -41,6 +41,7 @@ describe("terminalStateOf", () => {
     expect(terminalStateOf(frame({ data: { state: "completed" } }))).toBe("completed");
     expect(terminalStateOf(frame({ data: { state: "failed" } }))).toBe("failed");
     expect(terminalStateOf(frame({ data: { state: "cancelled" } }))).toBe("cancelled");
+    expect(terminalStateOf(frame({ data: { state: "interrupted" } }))).toBe("interrupted");
   });
 
   it("ignores a status frame that reports a state the turn can still leave", () => {

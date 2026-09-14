@@ -19,6 +19,30 @@
 
 export type SessionStatus = "idle" | "running";
 
+export type ControlKind = "send" | "steer" | "queue" | "native_steer" | "native_queue" | "stop" | "approval";
+export type ControlState =
+  | "accepted" | "queued" | "dispatched" | "confirmed" | "unconfirmed" | "consumed"
+  | "rejected" | "failed" | "cancelled";
+
+/** Server-authoritative intent, separate from the vendor's transcript and receipts. */
+export interface ControlRequest {
+  requestId: string;
+  sessionId: string;
+  originSubject: string;
+  kind: ControlKind;
+  text: string;
+  targetTurnId: string | null;
+  serverSeq: number;
+  state: ControlState;
+  idempotencyKey: string | null;
+  vendorReceipt?: unknown;
+  errorMessage: string | null;
+  createdAtMs: number;
+  consumedAtMs: number | null;
+  failedAtMs: number | null;
+  revision: number;
+}
+
 /**
  * How much resolution the record of a session has.
  *

@@ -11,6 +11,7 @@
  * string would be most visible.
  */
 
+import { CONTROL_DELIVERIES } from "@/lib/control-delivery";
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type Agent } from "@/lib/api";
@@ -32,6 +33,7 @@ import { IdentitySection } from "@/components/settings-identity";
 import { ConfigSection } from "@/components/settings-config";
 import { MenuButton, type MenuItem } from "@/components/ui/menu";
 import { ChevronDownIcon } from "@/components/icons";
+import { ImportHistory } from "@/components/import-history";
 
 type Section = "general" | "identity" | "environments" | "workspaces" | "config" | "shortcuts";
 
@@ -335,6 +337,7 @@ function EnvironmentsSection() {
   const t = useT();
   const environments = useEnvironments();
   const { adoptFrom } = useWorkspaceUI();
+  const [importEnvironment, setImportEnvironment] = useState<string | null>(null);
 
   /**
    * Agents to offer as a *preference*, across every reachable machine.
@@ -414,6 +417,18 @@ function EnvironmentsSection() {
                         .join(" · ")}
                 </p>
 
+                <details className="mt-1 text-2xs text-ink-muted">
+                  <summary className="cursor-pointer">{t("control.deliveryMode")}</summary>
+                  {environment.agents.map((agent) => (
+                    <dl key={agent.name} className="mt-2 space-y-1">
+                      <dt className="font-medium text-ink-soft">{agent.name}</dt>
+                      {CONTROL_DELIVERIES.filter((mode) => agent.supports.includes(mode.capability)).map((mode) => (
+                        <dd key={mode.id}><strong>{t(mode.label)}:</strong> {t(mode.hint)}</dd>
+                      ))}
+                    </dl>
+                  ))}
+                </details>
+
                 {/*
                   The way in to this machine's own sessions, and the gate on it is the
                   point rather than a precaution.
@@ -443,6 +458,7 @@ function EnvironmentsSection() {
                   withheld on a guess.
                 */}
                 {environment.connected && (
+                  <div className="mt-1.5 flex flex-wrap gap-2">
                   <button
                     type="button"
                     onClick={() => adoptFrom(environment.id)}
@@ -454,11 +470,14 @@ function EnvironmentsSection() {
                     aria-label={t("settings.environments.adoptFrom", {
                       name: environment.name,
                     })}
-                    className="mt-1.5 rounded border border-line-strong px-2 py-0.5 text-2xs font-medium hover:bg-sunken focus-ring"
+                    className="rounded border border-line-strong px-2 py-0.5 text-2xs font-medium hover:bg-sunken focus-ring"
                   >
                     {t("settings.environments.adopt")}
                   </button>
+                  <button type="button" onClick={() => setImportEnvironment(environment.id)} className="rounded border border-line-strong px-2 py-0.5 text-2xs font-medium hover:bg-sunken focus-ring">Import all history</button>
+                  </div>
                 )}
+                {importEnvironment === environment.id && <ImportHistory environment={environment.id} onClose={() => setImportEnvironment(null)} />}
               </li>
             ))}
           </ul>
@@ -608,6 +627,8 @@ function WorkspacesSection() {
     return combo ? formatCombo(combo, isMac) : t("shortcut.quickStart");
   }, [settings.shortcuts, isMac, t]);
 
+  const syncedWorkspaces = settings.pinnedWorkspaces.filter((workspace) => workspace.environment);
+
   return (
     <div className="space-y-4">
       {/* Read-only, and the only thing this section holds.
@@ -627,6 +648,24 @@ function WorkspacesSection() {
       </Field>
 
       <p className="text-xs text-ink-muted">{t("settings.workspaces.managed")}</p>
+
+      <Field
+        label={t("settings.workspaces.sync.label")}
+        hint={t("settings.workspaces.sync.hint")}
+      >
+        {syncedWorkspaces.length === 0 ? (
+          <p className="text-xs text-ink-muted">{t("settings.workspaces.sync.empty")}</p>
+        ) : (
+          <div className="space-y-3">
+            {syncedWorkspaces.map((workspace) => (
+              <section key={`${workspace.environment}\u0000${workspace.path}`} className="min-w-0 rounded border border-line bg-sunken">
+                <p className="truncate px-2 pt-2 text-xs font-medium" title={workspace.path}>{workspace.path}</p>
+                <ImportHistory environment={workspace.environment!} workdir={workspace.path} />
+              </section>
+            ))}
+          </div>
+        )}
+      </Field>
     </div>
   );
 }

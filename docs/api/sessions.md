@@ -181,6 +181,11 @@ the derived one.
 **Response 201:** the session object, with `fidelity` reflecting what the vendor's store
 actually holds — `blocks` or `messages`, never `stream`.
 
+For a finite import, `201` means the complete pass has been retained and its transcript
+is readable. The envagent returns a sealed transfer; the server downloads and ingests it
+before acknowledging the import. Accepting an event pump is not completion. A failed
+pass reports an error while keeping the successfully retained prefix for a later reread.
+
 **Policy-relevant fields are derived from the store, not from the request.** The
 working directory comes from the session's own recorded environment context; the title
 falls back to the opening user turn. `injectIdentity` defaults to **false** here,
@@ -233,7 +238,12 @@ follower, and it does not change the session's `fidelity`.
 
 ### `POST /api/v1/sessions/{id}/reproject`
 
-Re-projects native envelopes already retained by Sylph through the owning envagent. The
+This endpoint currently returns `501 NOT_IMPLEMENTED`. Re-projection is refused until the
+server can validate a complete replacement projection before publishing it; appending a
+corrected projection beside stale events would corrupt the transcript and is therefore not
+an acceptable fallback.
+
+When implemented, this will re-project native envelopes already retained by Sylph through the owning envagent. The
 vendor's source files are not read, so the operation remains available after rotation or
 deletion of the native store. The response uses the same `RereadReport` shape; `examined`
 counts retained projected events and `ingested` counts the replacement events. Publication
@@ -658,7 +668,7 @@ History is unaffected. The next turn re-establishes.
 Asks the agent to stop producing. Session-scoped rather than turn-scoped, and so are
 `steer` and `config`: all three act on the *agent*, and the session is what holds a
 link. A turn-scoped route would force a caller to know a turn id in order to interrupt
-the only turn running.
+the only turn running. An idle link has no turn lease and returns `400 INVALID_REQUEST`.
 
 ### `POST /api/v1/sessions/{id}/steer`
 
@@ -666,34 +676,36 @@ the only turn running.
 { "text": "actually, use the existing helper", "turnId": "t_abc" }
 ```
 
-`turnId` is optional, because a client with no turn in view is steering "whatever is
-running", which is a coherent ask rather than a missing field.
+`turnId` is optional at the HTTP boundary; omission selects the active generation under
+the session command sequencer. The envagent must confirm that exact lease and the vendor
+must enforce its captured turn identity. The response is the control ledger entry. A
+refusal leaves a rejected intent and no user transcript event.
 
 ### `POST /api/v1/sessions/{id}/queue`
 
 ```json
-{ "text": "then run the tests" }
+{ "text": "then run the tests", "idempotencyKey": "follow-up-1" }
 ```
 
-Answers `{"queued": true}`. Requires `Capability::Queue`; an agent without it answers
-`UNSUPPORTED_FIELD`, which a client renders by retiring the control rather than leaving
-it clickable.
+Returns a server-owned queued control entry. Requires Queue capability. The oldest queued
+entry starts a new turn after the active lease settles; its text remains editable and
+cancellable before dispatch, with revision checks.
 
-**Not `steer` with a flag**, and the difference is *when the agent reads the text*
-rather than how it is delivered. A steer is a correction, so it carries a turn
-precondition: text that misses its turn lands in the wrong conversation, and naming the
-turn is what turns that into a refusal. A queued follow-up is *for* after the turn, so
-it has no such precondition — a turn boundary crossing underneath it changes nothing,
-and queueing with nothing running is a coherent ask that becomes the next turn's opening
-text. Hence no `turnId` here at all, where one endpoint serving both meanings would need
-a field that is required for one and meaningless for the other.
+### `POST /api/v1/sessions/{id}/native-queue`
 
-That shape is what let a vendor claim the wrong word for what it does: `claude` declared
-`Steer` while its only mid-turn channel is stdin, which `--input-format stream-json`
-reads through one iterator the turn loop awaits — so the text is not read until the turn
-ends. A user's correction arrived after the thing it was meant to prevent, with every
-layer reporting success. All three agents have `Queue` and each spells it differently;
-only `codex` and `pi` also have a real steer (`docs/agents.md` § Capability matrix).
+```json
+{ "text": "check the tests too", "priority": true, "idempotencyKey": "native-1" }
+```
+
+Preserves harness scheduling: `priority: true` calls QueueSteering (pi's `steer`), and
+`false` calls Queue (the vendor's follow-up channel). An unsupported operation is refused
+by the adapter. Neither request targets a turn. The confirmed ledger entry means native
+queue insertion; it does not establish consumption or write a user transcript event.
+Native user messages observed later are recorded where the vendor actually emits them.
+These entries cannot be edited or cancelled through Sylph's server-queue endpoints.
+
+The composer and Settings → Machines show the delivery promise for each offered capability.
+[ADR-0004](../adr/0004-concurrent-control-ordering.md) owns state transitions and receipts.
 
 ### `POST /api/v1/sessions/{id}/config`
 

@@ -257,6 +257,10 @@ pub struct NativeSummary {
     /// How many events one pass would yield, when the store can say cheaply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event_count: Option<i64>,
+    /// Opaque revision of every native source contributing to this session. Absence
+    /// requires a fresh read; timestamps of the last projected event are not revisions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_revision: Option<String>,
     /// The session this one was delegated from or forked out of, as the vendor recorded
     /// it.
     ///
@@ -481,6 +485,12 @@ pub trait Session: Send + Sync {
     /// `202`. Completion arrives on [`Self::events`].
     async fn send(&self, turn: TurnInput) -> Result<()>;
 
+    /// Vendor identity from the last successful send receipt, not a live-state query.
+    /// The envagent binds it to its non-reusable turn generation for guarded controls.
+    async fn last_sent_turn_id(&self) -> Option<String> {
+        None
+    }
+
     /// Start the first turn of a prepared session and return the native identity.
     ///
     /// A prepared link is useful before it has a durable identity, because capabilities
@@ -507,6 +517,11 @@ pub trait Session: Send + Sync {
     /// precondition. `None` means "whatever is running", which is a coherent ask from a
     /// client with no turn in view.
     async fn steer(&self, text: &str, expected_turn_id: Option<&str>) -> Result<()>;
+
+    /// Insert into a native priority queue, without promising a target turn.
+    async fn queue_steering(&self, _text: &str) -> Result<()> {
+        Err(crate::AdapterError::unsupported_field("Native steering queue is unavailable").into())
+    }
 
     /// Add text to run **after** the current turn.
     ///
@@ -707,6 +722,16 @@ pub trait Adapter: Send + Sync {
     /// which is the difference between a listing that is affordable and one that is not.
     /// **An adapter that implements this by parsing each session has not implemented it.**
     async fn enumerate(&self, filter: &StoreFilter) -> Result<Vec<NativeSummary>>;
+
+    /// Read one session's metadata. Vendor adapters narrow by native identity before
+    /// reading unrelated transcript tails; small injected adapters can use enumeration.
+    async fn lookup(&self, id: &NativeId) -> Result<Option<NativeSummary>> {
+        Ok(self
+            .enumerate(&StoreFilter::default())
+            .await?
+            .into_iter()
+            .find(|row| row.native_id == *id))
+    }
 }
 
 #[cfg(test)]

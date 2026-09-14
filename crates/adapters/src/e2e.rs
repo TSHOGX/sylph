@@ -1375,12 +1375,36 @@ async fn delegate(emit: &Emitter) {
         },
     )
     .await;
-    close_delegate(emit, "sub-worker", Some("sub-verify"), "", false).await;
+    close_delegate(
+        emit,
+        "sub-worker",
+        Some("sub-verify"),
+        "",
+        false,
+        sylph_protocol::InteriorState::Full,
+    )
+    .await;
 
     // Closes clean, but its descendant failed: the card must still report a failure, or
     // collapsing hides it.
-    close_delegate(emit, "sub-verify", None, "", false).await;
-    close_delegate(emit, "sub-explore", None, "Found 3 call sites.", false).await;
+    close_delegate(
+        emit,
+        "sub-verify",
+        None,
+        "",
+        false,
+        sylph_protocol::InteriorState::Full,
+    )
+    .await;
+    close_delegate(
+        emit,
+        "sub-explore",
+        None,
+        "Found 3 call sites.",
+        false,
+        sylph_protocol::InteriorState::Full,
+    )
+    .await;
 
     // Opened and never closed. The turn settling is what resolves it, so a spec can assert
     // it does not spin forever.
@@ -1449,6 +1473,7 @@ async fn unprompted_after_settle(emit: &Emitter) {
         Some("up-host"),
         "the background worker finished",
         false,
+        sylph_protocol::InteriorState::Full,
     )
     .await;
     emit.event(Ev::new(EventKind::Turn, Some(Phase::Started)).done())
@@ -1525,6 +1550,7 @@ async fn close_delegate(
     span: Option<&str>,
     text: &str,
     failed: bool,
+    interior: sylph_protocol::InteriorState,
 ) {
     let mut event = Ev::new(EventKind::Subagent, Some(Phase::Completed)).stream_id(stream_id);
     if let Some(span) = span {
@@ -1536,7 +1562,9 @@ async fn close_delegate(
     if failed {
         event = event.failed();
     }
-    emit.event(event.done()).await;
+    let mut event = event.done();
+    event.interior_state = Some(interior);
+    emit.event(event).await;
 }
 
 /// Delegation that is never **declared** — the shape every delegating tool outside
@@ -1601,7 +1629,15 @@ async fn promote(emit: &Emitter) {
             .done(),
     )
     .await;
-    close_delegate(emit, "pr-task-1", Some("pr-host-a"), "agent-1 done", false).await;
+    close_delegate(
+        emit,
+        "pr-task-1",
+        Some("pr-host-a"),
+        "agent-1 done",
+        false,
+        sylph_protocol::InteriorState::Full,
+    )
+    .await;
 
     // A failure inside the second delegate, so a spec can assert the promoted host reports
     // it *while collapsed*.
@@ -1618,7 +1654,15 @@ async fn promote(emit: &Emitter) {
         },
     )
     .await;
-    close_delegate(emit, "pr-task-2", Some("pr-host-a"), "agent-2 failed", true).await;
+    close_delegate(
+        emit,
+        "pr-task-2",
+        Some("pr-host-a"),
+        "agent-2 failed",
+        true,
+        sylph_protocol::InteriorState::Full,
+    )
+    .await;
     host_result(emit, "pr-host-a", "Workflow", "workflow finished").await;
 
     // Host 2: reports that delegated work ran and forwards none of it.
@@ -1629,7 +1673,15 @@ async fn promote(emit: &Emitter) {
     // delegating tool the interior cannot be attributed at all — saying so only after the
     // click is the lossy collapse the tree exists to avoid.
     host_call(emit, "pr-host-b", "Agent", json!({"task": "summarize"})).await;
-    close_delegate(emit, "pr-host-b", None, "reported nothing", false).await;
+    close_delegate(
+        emit,
+        "pr-host-b",
+        None,
+        "reported nothing",
+        false,
+        sylph_protocol::InteriorState::ForwardsNothing,
+    )
+    .await;
 
     // Host 3: promoted, and left **open**. Only the server closes this, so a spec can assert
     // a promoted host does not spin forever either — the path that reading the call's
@@ -1901,13 +1953,37 @@ async fn fanout(emit: &Emitter) {
     open_delegate(emit, "fo-probe", Some("Deep probe"), Some("fo-survey")).await;
 
     tokio::time::sleep(Duration::from_millis(100)).await;
-    close_delegate(emit, "fo-format", None, "formatted", false).await;
+    close_delegate(
+        emit,
+        "fo-format",
+        None,
+        "formatted",
+        false,
+        sylph_protocol::InteriorState::Full,
+    )
+    .await;
     // Closed with no name on this phase either, so the row is nameless for its whole life
     // rather than acquiring one at the end.
-    close_delegate(emit, "fo-nameless", None, "", false).await;
+    close_delegate(
+        emit,
+        "fo-nameless",
+        None,
+        "",
+        false,
+        sylph_protocol::InteriorState::Full,
+    )
+    .await;
 
     tokio::time::sleep(Duration::from_millis(150)).await;
-    close_delegate(emit, "fo-lint", None, "clean", false).await;
+    close_delegate(
+        emit,
+        "fo-lint",
+        None,
+        "clean",
+        false,
+        sylph_protocol::InteriorState::Full,
+    )
+    .await;
 
     tokio::time::sleep(Duration::from_millis(150)).await;
     // A failure in a **fast** delegate, so "slowest" and "failed" are on different rows: a
@@ -1925,7 +2001,15 @@ async fn fanout(emit: &Emitter) {
         },
     )
     .await;
-    close_delegate(emit, "fo-typecheck", None, "type errors", true).await;
+    close_delegate(
+        emit,
+        "fo-typecheck",
+        None,
+        "type errors",
+        true,
+        sylph_protocol::InteriorState::Full,
+    )
+    .await;
 
     // Closed having forwarded nothing: the overview must say so rather than drawing an empty
     // bar, which is the same lie as offering an empty card.
@@ -1934,10 +2018,26 @@ async fn fanout(emit: &Emitter) {
     // with the outlier's, and a tie has no unique slowest row, so any spec asserting one would
     // be asserting a coin flip.
     tokio::time::sleep(Duration::from_millis(150)).await;
-    close_delegate(emit, "fo-audit", None, "reported nothing", false).await;
+    close_delegate(
+        emit,
+        "fo-audit",
+        None,
+        "reported nothing",
+        false,
+        sylph_protocol::InteriorState::ForwardsNothing,
+    )
+    .await;
 
     tokio::time::sleep(Duration::from_millis(200)).await;
-    close_delegate(emit, "fo-compile", None, "built", false).await;
+    close_delegate(
+        emit,
+        "fo-compile",
+        None,
+        "built",
+        false,
+        sylph_protocol::InteriorState::Full,
+    )
+    .await;
 
     // The outlier, and the row every assertion about "slowest" is about. Closed well after
     // every sibling, with its nested delegate closing just before it.
@@ -1945,8 +2045,24 @@ async fn fanout(emit: &Emitter) {
     // `span` on the close as well — see `close_delegate`, where the consolidation trap this
     // guards against is recorded. Every other scenario happens to set it on both phases,
     // which is why nothing caught it.
-    close_delegate(emit, "fo-probe", Some("fo-survey"), "probed", false).await;
-    close_delegate(emit, "fo-survey", None, "surveyed 412 files", false).await;
+    close_delegate(
+        emit,
+        "fo-probe",
+        Some("fo-survey"),
+        "probed",
+        false,
+        sylph_protocol::InteriorState::Full,
+    )
+    .await;
+    close_delegate(
+        emit,
+        "fo-survey",
+        None,
+        "surveyed 412 files",
+        false,
+        sylph_protocol::InteriorState::Full,
+    )
+    .await;
 
     // Left open, so the turn-settle sweep closes it. Its end is when we stopped listening,
     // not when the work stopped, and the row has to say so.

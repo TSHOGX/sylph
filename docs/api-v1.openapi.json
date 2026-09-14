@@ -16,6 +16,89 @@
     }
   ],
   "paths": {
+    "/api/v1/sessions/{id}/native-queue": {
+      "post": {
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "text",
+                  "priority",
+                  "idempotencyKey"
+                ],
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  },
+                  "priority": {
+                    "type": "boolean"
+                  },
+                  "idempotencyKey": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Control intent with scoped delivery receipt",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ControlRequest"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/sessions/{id}/control-requests": {
+      "get": { "parameters": [{"name":"id","in":"path","required":true,"schema":{"type":"string"}}], "responses":{"200":{"description":"Control requests"}} }
+    },
+    "/api/v1/control-requests/{id}": {
+      "patch": { "parameters": [{"name":"id","in":"path","required":true,"schema":{"type":"string"}}], "requestBody":{"required":true,"content":{"application/json":{"schema":{"type":"object"}}}}, "responses":{"200":{"description":"Updated control request"}} },
+      "delete": { "parameters": [{"name":"id","in":"path","required":true,"schema":{"type":"string"}}], "requestBody":{"required":true,"content":{"application/json":{"schema":{"type":"object"}}}}, "responses":{"200":{"description":"Cancelled control request"}} }
+    },
+    "/api/v1/control-requests/{id}/steer": {
+      "post": { "parameters": [{"name":"id","in":"path","required":true,"schema":{"type":"string"}}], "requestBody":{"required":true,"content":{"application/json":{"schema":{"type":"object"}}}}, "responses":{"200":{"description":"Steered control request"}} }
+    },
+    "/api/v1/environments/{environment}/imports": {
+      "post": { "parameters": [{"name":"environment","in":"path","required":true,"schema":{"type":"string"}}], "requestBody":{"required":true,"content":{"application/json":{"schema":{"type":"object"}}}}, "responses":{"202":{"description":"Queued"}} }
+    },
+    "/api/v1/environments/{environment}/imports/list": {
+      "get": { "parameters": [{"name":"environment","in":"path","required":true,"schema":{"type":"string"}}], "responses":{"200":{"description":"Jobs"}} }
+    },
+    "/api/v1/imports/{id}": {
+      "get": { "parameters": [{"name":"id","in":"path","required":true,"schema":{"type":"string"}}], "responses":{"200":{"description":"Job"}} }
+    },
+    "/api/v1/imports/{id}/items": {
+      "get": { "parameters": [{"name":"id","in":"path","required":true,"schema":{"type":"string"}}], "responses":{"200":{"description":"Items"}} }
+    },
+    "/api/v1/imports/{id}/events": {
+      "get": { "parameters": [{"name":"id","in":"path","required":true,"schema":{"type":"string"}}], "responses":{"200":{"description":"Events"}} }
+    },
+    "/api/v1/imports/{id}/cancel": {
+      "post": { "parameters": [{"name":"id","in":"path","required":true,"schema":{"type":"string"}}], "responses":{"200":{"description":"Cancelled"}} }
+    },
+    "/api/v1/imports/{id}/retry": {
+      "post": { "parameters": [{"name":"id","in":"path","required":true,"schema":{"type":"string"}}], "responses":{"200":{"description":"Retried"}} }
+    },
     "/api/v1/health": {
       "get": {
         "security": [],
@@ -2051,7 +2134,7 @@
             "required": true,
             "schema": {
               "type": "string",
-              "description": "The identity triple `<environment>:<agent>:<native_id>`, percent-encoded as one path segment. Not a UUID: a native id is the vendor's own value and may contain `/`. See § A session id in a path is the identity triple."
+              "description": "The identity triple `<environment>:<agent>:<native_id>`, percent-encoded as one path segment. Not a UUID: a native id is the vendor's own value and may contain `/`. See \u00a7 A session id in a path is the identity triple."
             }
           }
         ],
@@ -2067,11 +2150,11 @@
         },
         "responses": {
           "200": {
-            "description": "Link state after steering",
+            "description": "Control intent with scoped delivery receipt",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/LinkState"
+                  "$ref": "#/components/schemas/ControlRequest"
                 }
               }
             }
@@ -2122,7 +2205,7 @@
     "/api/v1/sessions/{sessionId}/queue": {
       "post": {
         "summary": "Queue text to run after the turn in flight",
-        "description": "A follow-up, not a correction. `steer` reaches the agent *inside* the running turn; this is read after it ends, and queueing with nothing running is a coherent ask that becomes the next turn's opening text. So there is no `turnId` precondition: a turn boundary crossing underneath this changes nothing.\n\nRequires `Capability::Queue`. An agent without it answers 409 `UNSUPPORTED_FIELD`, which a client renders by retiring the control rather than leaving it clickable.",
+        "description": "An editable server-owned follow-up. Dispatch starts a new turn after the active lease settles. Native harness queues use the native-queue endpoint.",
         "parameters": [
           {
             "name": "sessionId",
@@ -2130,7 +2213,7 @@
             "required": true,
             "schema": {
               "type": "string",
-              "description": "The identity triple `<environment>:<agent>:<native_id>`, percent-encoded as one path segment. Not a UUID: a native id is the vendor's own value and may contain `/`. See § A session id in a path is the identity triple."
+              "description": "The identity triple `<environment>:<agent>:<native_id>`, percent-encoded as one path segment. Not a UUID: a native id is the vendor's own value and may contain `/`. See \u00a7 A session id in a path is the identity triple."
             }
           }
         ],
@@ -2146,11 +2229,11 @@
         },
         "responses": {
           "200": {
-            "description": "The text was accepted for after the running turn",
+            "description": "Control intent with scoped delivery receipt",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/QueueAccepted"
+                  "$ref": "#/components/schemas/ControlRequest"
                 }
               }
             }
@@ -4073,15 +4156,100 @@
           }
         }
       },
-      "QueueAccepted": {
+      "ControlRequest": {
         "type": "object",
         "required": [
-          "queued"
+          "requestId",
+          "sessionId",
+          "originSubject",
+          "kind",
+          "text",
+          "targetTurnId",
+          "serverSeq",
+          "state",
+          "revision"
         ],
         "properties": {
-          "queued": {
-            "type": "boolean",
-            "description": "Always true; a refusal arrives as an error envelope rather than false."
+          "requestId": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "originSubject": {
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "send",
+              "steer",
+              "queue",
+              "native_steer",
+              "native_queue",
+              "stop",
+              "approval"
+            ]
+          },
+          "text": {
+            "type": "string"
+          },
+          "targetTurnId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "serverSeq": {
+            "type": "integer"
+          },
+          "state": {
+            "enum": [
+              "accepted",
+              "queued",
+              "dispatched",
+              "confirmed",
+              "unconfirmed",
+              "consumed",
+              "rejected",
+              "failed",
+              "cancelled"
+            ]
+          },
+          "revision": {
+            "type": "integer"
+          },
+          "vendorReceipt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "errorMessage": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "idempotencyKey": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "createdAtMs": {
+            "type": "integer"
+          },
+          "consumedAtMs": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "failedAtMs": {
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         }
       },
@@ -4094,6 +4262,12 @@
           "text": {
             "type": "string",
             "description": "The follow-up to run after the current turn. Must not be blank."
+          },
+          "idempotencyKey": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -4898,6 +5072,12 @@
           "turnId": {
             "type": "string",
             "description": "The turn the client believes is running. Optional: a client with no turn in view is steering whatever is running, which is a coherent ask."
+          },
+          "idempotencyKey": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },

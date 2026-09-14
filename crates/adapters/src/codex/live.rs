@@ -75,6 +75,7 @@ struct State {
     /// but found Y`), which is the vendor implementing the precondition
     /// `docs/session-protocol.md` asks for rather than the adapter simulating it.
     turn: Option<String>,
+    last_sent_turn: Option<String>,
     /// Approvals raised and not yet answered, keyed by the id a [`Resolution`] echoes.
     ///
     /// The value is the request's own `availableDecisions`, verbatim, because
@@ -288,10 +289,32 @@ impl Translator {
                 event.span = thread_span;
                 event
             }
-            // The vocabulary has no `user` kind, and the server owns a turn's
-            // `request_text`. Echoing the user's own message back as an event would
-            // double every prompt in the transcript.
-            "userMessage" => return Vec::new(),
+            "userMessage" => {
+                // Native queue entries carry their client identity. Opening inputs and
+                // guarded steers have server receipt events, so their untagged echoes
+                // are omitted. Never correlate a native queue by comparing its text.
+                if phase != Phase::Completed
+                    || item.get("clientId").and_then(Value::as_str).is_none()
+                {
+                    return Vec::new();
+                }
+                let mut event = Event::new(EventKind::Other("user".into()), Some(phase), at_ms);
+                event.stream_id = stream_id;
+                event.span = thread_span;
+                event.text = item
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .map(|content| {
+                        content
+                            .iter()
+                            .filter_map(|part| part.get("text").and_then(Value::as_str))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+                    .unwrap_or_default();
+                event.data = Some(json!({"vendorMessage": item}));
+                event
+            }
             // `plan` is reserved by `docs/session-protocol.md` and **no adapter emits it
             // and no timeline branch handles it**, so it would land as `Other("plan")` —
             // a row that draws as nothing. It arrives when its renderer does.
@@ -336,7 +359,9 @@ impl Translator {
             return Vec::new();
         }
         if let Some(id) = turn.get("id").and_then(Value::as_str) {
-            self.state.lock().await.turn = Some(id.to_string());
+            let mut state = self.state.lock().await;
+            state.last_sent_turn = Some(id.to_string());
+            state.turn = Some(id.to_string());
         }
         let mut event = Event::new(EventKind::Turn, Some(Phase::Started), at_ms);
         event.stream_id = turn.get("id").and_then(Value::as_str).map(str::to_string);
@@ -344,7 +369,7 @@ impl Translator {
     }
 }
 
-/// Reuse the live frame projector with isolated state and no process or wall clock.
+/// Reuse both projectors in retained arrival order, with isolated state and no process.
 pub(super) async fn reproject_frames(records: &[&NativeRecord]) -> Result<Vec<SessionMessage>> {
     let thread = records.iter().find_map(|record| {
         let params = record.payload.get("params")?;
@@ -363,7 +388,14 @@ pub(super) async fn reproject_frames(records: &[&NativeRecord]) -> Result<Vec<Se
         settings_echo: Arc::new(Notify::new()),
     };
     let mut messages = Vec::new();
+    let mut native = super::native::RolloutProjector::default();
     for record in records {
+        // One session can start as imported history and continue over app-server.
+        // Neither family is a session-wide mode: preserve both in first-seen order.
+        if !record.source.starts_with("live/") {
+            messages.extend(super::native::reproject_native_record(&mut native, record));
+            continue;
+        }
         for message in translator.frame_at(&record.payload, 0).await {
             let message = message?;
             if matches!(
@@ -1316,15 +1348,25 @@ impl Session for CodexSession {
         // sent immediately after `send` needs `expectedTurnId`, and `turn/started` arrives
         // 13 ms later — measured. Waiting for the notification would make a fast client's
         // steer fail its own precondition.
-        if let Some(id) = reply
+        let id = reply
             .get("result")
             .and_then(|result| result.get("turn"))
             .and_then(|turn| turn.get("id"))
             .and_then(Value::as_str)
-        {
-            self.state.lock().await.turn = Some(id.to_string());
-        }
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| {
+                anyhow!(
+                    "codex accepted turn/start without a turn identity; delivery is unconfirmed"
+                )
+            })?;
+        let mut state = self.state.lock().await;
+        state.last_sent_turn = Some(id.to_string());
+        state.turn = Some(id.to_string());
         Ok(())
+    }
+
+    async fn last_sent_turn_id(&self) -> Option<String> {
+        self.state.lock().await.last_sent_turn.clone()
     }
 
     /// Start a prepared link's first turn.  Codex assigns a thread id in
@@ -1337,7 +1379,14 @@ impl Session for CodexSession {
 
     /// End the running turn, keeping the session.
     async fn interrupt(&self) -> Result<()> {
-        let turn = self.state.lock().await.turn.clone().ok_or_else(|| {
+        // The vendor reader may already know a successor while the envagent is still
+        // closing our lease. Keep the id captured by send rather than redirecting this
+        // interrupt to whichever turn most recently appeared on the vendor stream.
+        let turn = {
+            let state = self.state.lock().await;
+            state.last_sent_turn.clone().or_else(|| state.turn.clone())
+        }
+        .ok_or_else(|| {
             // Not an `AdapterError`: `Capability::Interrupt` *is* offered, so this is not a
             // refusal about the control. It is "there is nothing running", which must stay
             // distinguishable — a client disabling its stop button over this would lose it
@@ -1734,7 +1783,10 @@ async fn request(child: &Child, method: &str, params: Value) -> Result<Value> {
             .get("message")
             .and_then(Value::as_str)
             .unwrap_or("codex refused the request without a message");
-        return Err(anyhow!("{message}"));
+        return Err(sylph_protocol::VendorRefusal {
+            message: message.to_string(),
+        }
+        .into());
     }
     Ok(reply)
 }
@@ -2887,6 +2939,7 @@ mod tests {
             printf '{"method":"thread/settings/updated","params":{"threadId":"01a0460c-c359-7ed3-9e13-212c0a33d6c0","threadSettings":{"model":"gpt-5.6-sol","effort":"low","approvalPolicy":"never","sandboxPolicy":{"type":"workspaceWrite"}}}}\n'
             ;;
           *'"method":"turn/interrupt"'*|*'"method":"turn/steer"'*)
+            # RECORD_CONTROL
             printf '{"id":%s,"result":{}}\n' "$id"
             ;;
           *)
@@ -3043,6 +3096,32 @@ mod tests {
             .interrupt()
             .await
             .expect("an interrupt reaches the vendor");
+    }
+
+    #[tokio::test]
+    async fn an_interrupt_keeps_the_accepted_turn_identity_when_live_state_advances() {
+        let log =
+            std::env::temp_dir().join(format!("sylph-codex-interrupt-{}", uuid::Uuid::new_v4()));
+        let script = SCRIPTED_APP_SERVER.replace(
+            "# RECORD_CONTROL",
+            &format!("printf '%s\\n' \"$line\" >> '{}'", log.display()),
+        );
+        let session = open_against(&script).await.unwrap();
+        session
+            .send(TurnInput {
+                text: "start".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let accepted = session.last_sent_turn_id().await.unwrap();
+        // The vendor reader can already know a successor while the envagent still
+        // holds the previous lease. Make that window explicit before dispatch.
+        session.state.lock().await.turn = Some("later-native-turn".into());
+        session.interrupt().await.unwrap();
+        let command: Value = serde_json::from_str(&std::fs::read_to_string(&log).unwrap()).unwrap();
+        assert_eq!(command["params"]["turnId"], accepted);
+        std::fs::remove_file(log).unwrap();
     }
 
     /// **A turn with neither text nor an attachment is refused rather than sent empty.**

@@ -368,6 +368,48 @@ impl ChannelEventSink {
     }
 }
 
+fn adapter_outcome(result: Result<()>) -> sylph_protocol::CommandOutcome {
+    use sylph_protocol::{AdapterError, CommandOutcome, RefusalCode, VendorRefusal};
+    match result {
+        Ok(()) => CommandOutcome::accepted(),
+        Err(error) => {
+            if let Some(refusal) = error.downcast_ref::<AdapterError>() {
+                CommandOutcome::Rejected {
+                    code: match refusal.code {
+                        RefusalCode::UnsupportedField => "UNSUPPORTED_FIELD",
+                        RefusalCode::InvalidValue => "INVALID_VALUE",
+                    }
+                    .into(),
+                    message: refusal.message.clone(),
+                }
+            } else if let Some(refusal) = error.downcast_ref::<VendorRefusal>() {
+                CommandOutcome::Rejected {
+                    code: "VENDOR_REFUSED".into(),
+                    message: refusal.message.clone(),
+                }
+            } else {
+                // A timeout, broken pipe or malformed receipt says nothing about whether
+                // the vendor acted. Calling it rejected would make an unsafe retry look safe.
+                CommandOutcome::Unknown {
+                    message: Some(format!("{error:#}")),
+                }
+            }
+        }
+    }
+}
+
+fn native_queue_receipt(outcome: sylph_protocol::CommandOutcome) -> sylph_protocol::CommandOutcome {
+    match outcome {
+        sylph_protocol::CommandOutcome::Accepted { .. } => {
+            sylph_protocol::CommandOutcome::accepted_with_result(
+                serde_json::to_value(sylph_protocol::ControlReceipt::NativeQueue)
+                    .expect("receipt serializes"),
+            )
+        }
+        other => other,
+    }
+}
+
 fn diagnostic_message(
     row: &SpoolEvent,
     session_id: Option<SessionId>,
@@ -482,6 +524,14 @@ impl HostedSource {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+enum NativeSnapshotError {
+    #[error("native session '{0}' was not found")]
+    NotFound(NativeId),
+    #[error("native session '{0}' has no recorded workdir")]
+    MissingWorkdir(NativeId),
+}
+
 /// Which id to open a **new** session under, decided by what the agent reports.
 ///
 /// `Dictate` when [`sylph_protocol::AgentInfo::dictates_native_id`] is true, `New` when it
@@ -567,12 +617,10 @@ impl HostedSession {
         self.session.lock().await.interrupt().await
     }
 
-    pub async fn steer(&self, text: &str, expected_turn_id: Option<&str>) -> Result<()> {
-        self.session
-            .lock()
-            .await
-            .steer(text, expected_turn_id)
-            .await
+    pub async fn steer(&self, text: &str) -> Result<()> {
+        let session = self.session.lock().await;
+        let vendor_turn = session.last_sent_turn_id().await;
+        session.steer(text, vendor_turn.as_deref()).await
     }
 
     pub async fn queue(&self, text: &str) -> Result<()> {
@@ -622,7 +670,7 @@ pub struct EnvAgent {
     /// descriptors; putting them only in `workdirs` leaked the source task.
     native_sources: Arc<RwLock<HashSet<SessionId>>>,
     workdirs: Arc<RwLock<std::collections::HashMap<SessionId, std::path::PathBuf>>>,
-    active_turns: Arc<RwLock<std::collections::HashMap<SessionId, String>>>,
+    active_turns: Arc<RwLock<std::collections::HashMap<SessionId, sylph_protocol::TurnLease>>>,
     native_pump_handles:
         Arc<Mutex<std::collections::HashMap<SessionId, tokio::task::JoinHandle<()>>>>,
     /// Event pumps for remote commands wait until their command result has
@@ -943,7 +991,7 @@ impl EnvAgent {
         if expected_turn_id.is_none_or(|expected| {
             active
                 .get(session_id)
-                .is_some_and(|actual| actual == expected)
+                .is_some_and(|actual| actual.turn_id == expected)
         }) {
             active.remove(session_id);
         }
@@ -1050,7 +1098,10 @@ impl EnvAgent {
         // event pump is released, so the first producer batch cannot outrun the
         // server-side turn row.
         if let (Some(turn_id), Some(session_id)) = (initial_turn_id, hosted.session_id().await) {
-            self.active_turns.write().await.insert(session_id, turn_id);
+            self.active_turns
+                .write()
+                .await
+                .insert(session_id, sylph_protocol::TurnLease { turn_id });
         }
         self.spawn_event_pump(events, identity, gate);
         if let Some(session_id) = hosted.session_id().await {
@@ -1077,14 +1128,43 @@ impl EnvAgent {
         }
     }
 
-    pub async fn adopt(&self, agent: &str, native_id: NativeId) -> Result<HostedSource> {
-        self.start_native_source(agent, native_id, false, false, None)
-            .await
-    }
-
-    pub async fn watch(&self, agent: &str, native_id: NativeId) -> Result<HostedSource> {
-        self.start_native_source(agent, native_id, true, false, None)
-            .await
+    async fn adopt_snapshot(&self, agent: &str, native_id: NativeId) -> Result<serde_json::Value> {
+        let adapter = self
+            .adapters
+            .for_agent(agent)
+            .ok_or_else(|| anyhow!("agent '{agent}' is not installed on this environment"))?;
+        let summary = adapter
+            .lookup(&native_id)
+            .await?
+            .ok_or_else(|| NativeSnapshotError::NotFound(native_id.clone()))?;
+        let recorded = summary
+            .workdir
+            .as_deref()
+            .ok_or_else(|| NativeSnapshotError::MissingWorkdir(native_id.clone()))?;
+        let workdir = self.config.path_policy.contain(recorded)?;
+        let session_id = SessionId::new(
+            self.environment.clone(),
+            AgentName::parse(agent.to_string())?,
+            native_id.clone(),
+        );
+        let transfer = self
+            .transfer_stream(&session_id, adapter.adopt(&native_id).await?, true)
+            .await?;
+        let source = HostedSource {
+            session_id: session_id.clone(),
+            workdir: workdir.display().to_string(),
+            title: summary.title,
+            fidelity: summary.fidelity,
+            started_at_ms: summary.started_at_ms,
+            ended_at_ms: summary.ended_at_ms,
+            parent_native_id: summary.parent_native_id,
+            parent_relation: summary.parent_relation,
+        };
+        self.native_sources.write().await.insert(session_id.clone());
+        self.workdirs.write().await.insert(session_id, workdir);
+        let mut result = source.to_command_result();
+        result["transfer"] = transfer;
+        Ok(result)
     }
 
     /// One bare parse of a native session, exposed as a bounded transfer.
@@ -1112,13 +1192,8 @@ impl EnvAgent {
             .for_agent(agent)
             .ok_or_else(|| anyhow!("agent '{agent}' is not installed on this environment"))?;
         let summary = adapter
-            .enumerate(&sylph_protocol::StoreFilter {
-                limit: None,
-                ..Default::default()
-            })
+            .lookup(&native_id)
             .await?
-            .into_iter()
-            .find(|summary| summary.native_id == native_id)
             .ok_or_else(|| anyhow!("native session '{}' was not found", native_id))?;
         let recorded_workdir = summary
             .workdir
@@ -1140,16 +1215,24 @@ impl EnvAgent {
     ) -> Result<serde_json::Value> {
         use std::io::Write;
         use sylph_protocol::NativeTransferItem;
-        let mut file = self.transfers.temporary_file()?;
+        // serde_json emits tiny fragments, especially for raw byte arrays. Buffer
+        // them so one retained record does not become thousands of write syscalls.
+        let mut file =
+            std::io::BufWriter::with_capacity(256 * 1024, self.transfers.temporary_file()?);
         let mut read_errors = 0;
         let mut skipped = 0;
+        let mut written = 0usize;
+        let mut sidecars_through = 0;
         while let Some(item) = stream.next().await {
             let item = match item {
                 Ok(SessionMessage::Event(event)) => NativeTransferItem::Event(event),
                 Ok(SessionMessage::TurnInput(input)) => NativeTransferItem::TurnInput(input),
                 Ok(SessionMessage::NativeRecord(record)) => {
                     NativeTransferItem::Record(if retain_sidecars {
-                        self.retain_native_sidecars(session_id, record).await?
+                        let (record, through) =
+                            self.retain_native_sidecars(session_id, record).await?;
+                        sidecars_through = sidecars_through.max(through);
+                        record
                     } else {
                         record
                     })
@@ -1170,6 +1253,14 @@ impl EnvAgent {
             };
             serde_json::to_writer(&mut file, &item)?;
             file.write_all(b"\n")?;
+            written += 1;
+            // JSON encoding and the synchronous temp-file writer are intentionally
+            // kept off the wire, but a very large history can still monopolize a
+            // Tokio worker between adapter yields. Give concurrent Files/health
+            // commands a scheduling point without flushing or changing ordering.
+            if written.is_multiple_of(128) {
+                tokio::task::yield_now().await;
+            }
         }
         serde_json::to_writer(
             &mut file,
@@ -1179,8 +1270,13 @@ impl EnvAgent {
             },
         )?;
         file.write_all(b"\n")?;
+        let file = file.into_inner().map_err(|error| error.into_error())?;
         file.as_file().sync_all()?;
-        while self.flush_pending(64).await? > 0 {}
+        // Sidecar bytes travel through the producer spool, so their prefix must be
+        // durable before the server receives a transfer that references them. Freeze
+        // the target at this pass's last sidecar; draining until the global queue is
+        // empty also waits for unrelated events that may keep arriving forever.
+        self.flush_through(sidecars_through).await?;
         Ok(serde_json::to_value(
             self.transfers.insert(session_id, file, true).await?,
         )?)
@@ -1200,7 +1296,6 @@ impl EnvAgent {
         &self,
         agent: &str,
         native_id: NativeId,
-        follow: bool,
         defer_events: bool,
         arrival_turn_id: Option<String>,
     ) -> Result<HostedSource> {
@@ -1215,13 +1310,8 @@ impl EnvAgent {
         // before starting the watcher; accepting an id first and checking later
         // would let `watch`/`adopt` bypass the same path policy `run` enforces.
         let summary = adapter
-            .enumerate(&sylph_protocol::StoreFilter {
-                limit: None,
-                ..Default::default()
-            })
+            .lookup(&native_id)
             .await?
-            .into_iter()
-            .find(|summary| summary.native_id == native_id)
             .ok_or_else(|| anyhow!("native session '{}' was not found", native_id))?;
         let recorded_workdir = summary
             .workdir
@@ -1232,11 +1322,7 @@ impl EnvAgent {
             .path_policy
             .contain(recorded_workdir)
             .map_err(|error| anyhow!(error))?;
-        let events = if follow {
-            adapter.watch(&native_id).await?
-        } else {
-            adapter.adopt(&native_id).await?
-        };
+        let events = adapter.watch(&native_id).await?;
         let session_id = SessionId::new(self.environment.clone(), agent_name.clone(), native_id);
         // Native sources always have an identity before their first record.
         let identity = Arc::new(IdentityState::new(
@@ -1255,14 +1341,18 @@ impl EnvAgent {
             self.active_turns
                 .write()
                 .await
-                .insert(session_id.clone(), turn_id);
+                .insert(session_id.clone(), sylph_protocol::TurnLease { turn_id });
         }
         self.native_sources.write().await.insert(session_id.clone());
         let pump = self.spawn_event_pump(events, identity, gate);
-        self.native_pump_handles
+        if let Some(previous) = self
+            .native_pump_handles
             .lock()
             .await
-            .insert(session_id.clone(), pump);
+            .insert(session_id.clone(), pump)
+        {
+            previous.abort();
+        }
         self.workdirs
             .write()
             .await
@@ -1418,7 +1508,7 @@ impl EnvAgent {
                             self.active_turns
                                 .write()
                                 .await
-                                .insert(session_id.clone(), turn_id);
+                                .insert(session_id.clone(), sylph_protocol::TurnLease { turn_id });
                         }
                         // The prepared stream was not consumed while the draft was
                         // idle; attach it only after promotion and keep the same
@@ -1541,6 +1631,12 @@ impl EnvAgent {
                         message: "no live session on this environment".into(),
                     };
                 };
+                if self.active_turns.read().await.contains_key(&session_id) {
+                    return sylph_protocol::CommandOutcome::Rejected {
+                        code: "TURN_MOVED".into(),
+                        message: "The previous turn lease is still open".into(),
+                    };
+                }
                 let input = match self
                     .local_turn_input(input, &session_id.to_string(), &turn_id)
                     .await
@@ -1555,16 +1651,27 @@ impl EnvAgent {
                         }
                     }
                 };
-                self.active_turns
-                    .write()
-                    .await
-                    .insert(session_id.clone(), turn_id);
-                match session.send(input).await {
-                    Ok(()) => sylph_protocol::CommandOutcome::accepted(),
-                    Err(error) => sylph_protocol::CommandOutcome::Rejected {
-                        code: sylph_protocol::RejectCode::SendFailed.as_str().into(),
-                        message: format!("{error:#}"),
+                self.active_turns.write().await.insert(
+                    session_id.clone(),
+                    sylph_protocol::TurnLease {
+                        turn_id: turn_id.clone(),
                     },
+                );
+                match session.send(input).await {
+                    Ok(()) => sylph_protocol::CommandOutcome::accepted_with_result(
+                        serde_json::to_value(sylph_protocol::ControlReceipt::ActiveTurn {
+                            lease: sylph_protocol::TurnLease { turn_id },
+                        })
+                        .expect("receipt serializes"),
+                    ),
+                    Err(error) => {
+                        let outcome = adapter_outcome(Err(error));
+                        if matches!(outcome, sylph_protocol::CommandOutcome::Rejected { .. }) {
+                            self.clear_active_turn_if_matches(&session_id, Some(&turn_id))
+                                .await;
+                        }
+                        outcome
+                    }
                 }
             }
             EnvironmentCommand::Interrupt {
@@ -1572,7 +1679,12 @@ impl EnvAgent {
                 expected_turn_id,
             } => {
                 if let Some(expected) = expected_turn_id.as_deref() {
-                    let current = self.active_turns.read().await.get(&session_id).cloned();
+                    let current = self
+                        .active_turns
+                        .read()
+                        .await
+                        .get(&session_id)
+                        .map(|lease| lease.turn_id.clone());
                     if current.as_deref() != Some(expected) {
                         return sylph_protocol::CommandOutcome::Rejected {
                             code: "TURN_MOVED".into(),
@@ -1591,17 +1703,56 @@ impl EnvAgent {
                 text,
                 expected_turn_id,
             } => {
-                self.control_session(&session_id, |session| async move {
-                    session.steer(&text, expected_turn_id.as_deref()).await
-                })
-                .await
+                // This id is the server generation, never the vendor's turn id. Keep the
+                // lease locked through dispatch; the adapter enforces its vendor binding.
+                let active = self.active_turns.read().await;
+                let Some(expected) = expected_turn_id.as_deref() else {
+                    return sylph_protocol::CommandOutcome::Rejected {
+                        code: "TURN_MOVED".into(),
+                        message: "Steer requires a turn lease".into(),
+                    };
+                };
+                if active.get(&session_id).map(|lease| lease.turn_id.as_str()) != Some(expected) {
+                    return sylph_protocol::CommandOutcome::Rejected {
+                        code: "TURN_MOVED".into(),
+                        message: "The target turn lease has closed".into(),
+                    };
+                }
+                drop(active);
+                let outcome =
+                    self.control_session(&session_id, |session| async move {
+                        session.steer(&text).await
+                    })
+                    .await;
+                match outcome {
+                    sylph_protocol::CommandOutcome::Accepted { .. } => {
+                        sylph_protocol::CommandOutcome::accepted_with_result(
+                            serde_json::to_value(sylph_protocol::ControlReceipt::ActiveTurn {
+                                lease: sylph_protocol::TurnLease {
+                                    turn_id: expected.to_string(),
+                                },
+                            })
+                            .expect("receipt serializes"),
+                        )
+                    }
+                    other => other,
+                }
+            }
+            EnvironmentCommand::QueueSteering { session_id, text } => {
+                let outcome = self
+                    .control_session(&session_id, |session| async move {
+                        session.session.lock().await.queue_steering(&text).await
+                    })
+                    .await;
+                native_queue_receipt(outcome)
             }
             EnvironmentCommand::Queue { session_id, text } => {
-                self.control_session(
-                    &session_id,
-                    |session| async move { session.queue(&text).await },
-                )
-                .await
+                let outcome =
+                    self.control_session(&session_id, |session| async move {
+                        session.queue(&text).await
+                    })
+                    .await;
+                native_queue_receipt(outcome)
             }
             EnvironmentCommand::SetConfig {
                 session_id,
@@ -1670,7 +1821,7 @@ impl EnvAgent {
                 turn_id,
                 session_id: _,
             } => match self
-                .start_native_source(&agent, native_id, true, true, turn_id)
+                .start_native_source(&agent, native_id, true, turn_id)
                 .await
             {
                 Ok(source) => {
@@ -1682,22 +1833,29 @@ impl EnvAgent {
                 },
             },
             EnvironmentCommand::Adopt {
-                agent,
-                native_id,
-                turn_id,
-                session_id: _,
-            } => match self
-                .start_native_source(&agent, native_id, false, true, turn_id)
-                .await
-            {
-                Ok(source) => {
-                    sylph_protocol::CommandOutcome::accepted_with_result(source.to_command_result())
-                }
+                agent, native_id, ..
+            } => match self.adopt_snapshot(&agent, native_id).await {
+                Ok(result) => sylph_protocol::CommandOutcome::accepted_with_result(result),
                 Err(error) => sylph_protocol::CommandOutcome::Rejected {
-                    code: if self.adapters.is_known(&agent) {
-                        "NATIVE_SESSION_NOT_FOUND"
-                    } else {
+                    code: if !self.adapters.is_known(&agent) {
                         "AGENT_UNKNOWN"
+                    } else if matches!(
+                        error.downcast_ref::<NativeSnapshotError>(),
+                        Some(NativeSnapshotError::NotFound(_))
+                    ) {
+                        "NATIVE_SESSION_NOT_FOUND"
+                    } else if matches!(
+                        error.downcast_ref::<NativeSnapshotError>(),
+                        Some(NativeSnapshotError::MissingWorkdir(_))
+                    ) {
+                        "NATIVE_SESSION_NOT_RESUMABLE"
+                    } else if matches!(
+                        error.downcast_ref::<crate::path::ContainmentError>(),
+                        Some(crate::path::ContainmentError::Outside(_))
+                    ) {
+                        "POLICY_VIOLATION"
+                    } else {
+                        "INTERNAL"
                     }
                     .into(),
                     message: format!("{error:#}"),
@@ -2023,9 +2181,11 @@ impl EnvAgent {
                 sylph_protocol::CommandOutcome::accepted()
             }
             EnvironmentCommand::Files {
-                session_id,
-                operation,
-            } => self.file_command(&session_id, operation).await,
+                workdir, operation, ..
+            } => {
+                self.file_command_at_root(std::path::Path::new(&workdir), operation)
+                    .await
+            }
             EnvironmentCommand::DraftCapabilities { draft_id } => {
                 match self.prepared.read().await.get(&draft_id).cloned() {
                     Some(prepared) => match self
@@ -2127,27 +2287,18 @@ impl EnvAgent {
         }
     }
 
-    async fn file_command(
-        &self,
-        session_id: &SessionId,
-        operation: sylph_protocol::FileOperation,
-    ) -> sylph_protocol::CommandOutcome {
-        let Some(root) = self.workdirs.read().await.get(session_id).cloned() else {
-            return sylph_protocol::CommandOutcome::Rejected {
-                code: "WORKDIR_UNKNOWN".into(),
-                message: "the envagent has no recorded workdir for this session".into(),
-            };
-        };
-        self.file_command_at_root(&root, operation).await
-    }
-
     async fn file_command_at_root(
         &self,
         root: &std::path::Path,
         operation: sylph_protocol::FileOperation,
     ) -> sylph_protocol::CommandOutcome {
-        let policy = &self.config.path_policy;
         let result: Result<serde_json::Value> = (|| {
+            // The server supplies the durable root. Browse roots govern new sessions;
+            // existing file operations stay bounded by this directory after a restart
+            // or a narrowed browse policy, without querying a vendor's native store.
+            let policy = PathPolicy::from_roots([root.to_path_buf()])?;
+            let root = &policy.roots()[0];
+            let policy = &policy;
             use sylph_protocol::FileOperation;
             match operation {
                 FileOperation::List { relative } => {
@@ -2313,28 +2464,7 @@ impl EnvAgent {
     {
         let session = self.sessions.read().await.get(session_id).cloned();
         match session {
-            Some(session) => match operation(session).await {
-                Ok(()) => sylph_protocol::CommandOutcome::accepted(),
-                Err(error) => {
-                    if let Some(refusal) = error.downcast_ref::<sylph_protocol::AdapterError>() {
-                        sylph_protocol::CommandOutcome::Rejected {
-                            code: match refusal.code {
-                                sylph_protocol::RefusalCode::UnsupportedField => {
-                                    "UNSUPPORTED_FIELD"
-                                }
-                                sylph_protocol::RefusalCode::InvalidValue => "INVALID_VALUE",
-                            }
-                            .into(),
-                            message: refusal.message.clone(),
-                        }
-                    } else {
-                        sylph_protocol::CommandOutcome::Rejected {
-                            code: "CONTROL_FAILED".into(),
-                            message: format!("{error:#}"),
-                        }
-                    }
-                }
-            },
+            Some(session) => adapter_outcome(operation(session).await),
             None => sylph_protocol::CommandOutcome::Rejected {
                 code: "SESSION_NOT_HOSTED".into(),
                 message: "no live session on this environment".into(),
@@ -2344,12 +2474,39 @@ impl EnvAgent {
 
     /// Replay every unacknowledged event, preserving producer order.
     pub async fn flush_pending(&self, max_events: usize) -> Result<usize> {
+        self.flush_pending_up_to(max_events, u64::MAX).await
+    }
+
+    pub(crate) async fn flush_snapshot(&self) -> Result<()> {
+        let through = self
+            .spool
+            .pending_watermark(&self.config.producer_id)
+            .await?;
+        self.flush_through(through).await
+    }
+
+    async fn flush_through(&self, through: u64) -> Result<()> {
+        while self.spool.acked_through(&self.config.producer_id).await? < through {
+            if self.flush_pending_up_to(64, through).await? == 0
+                && self.spool.acked_through(&self.config.producer_id).await? < through
+            {
+                anyhow::bail!("producer delivery made no progress toward sequence {through}");
+            }
+        }
+        Ok(())
+    }
+
+    async fn flush_pending_up_to(&self, max_events: usize, through: u64) -> Result<usize> {
         let _guard = self.send_gate.lock().await;
         let acked_through = self.spool.acked_through(&self.config.producer_id).await?;
-        let pending = self
+        if acked_through >= through {
+            return Ok(0);
+        }
+        let mut pending = self
             .spool
             .pending(&self.config.producer_id, max_events)
             .await?;
+        pending.retain(|event| event.producer_seq <= through);
         if pending.is_empty() {
             return Ok(0);
         }
@@ -2510,6 +2667,22 @@ impl EnvAgent {
             if let Some(gate) = gate {
                 gate.notified().await;
             }
+            // Spooling and lifecycle observation must not wait for a remote ack. Otherwise
+            // the server waiting for a control receipt can fill the adapter's output queue
+            // and prevent its reader from ever reaching that receipt. One bounded wake-up
+            // channel drains the durable spool independently; reconnect replays failures.
+            let (flush_tx, mut flush_rx) = tokio::sync::mpsc::channel::<()>(1);
+            let delivery = runtime.clone();
+            tokio::spawn(async move {
+                while flush_rx.recv().await.is_some() {
+                    loop {
+                        match delivery.flush_pending(64).await {
+                            Ok(count) if count >= 64 => continue,
+                            _ => break,
+                        }
+                    }
+                }
+            });
             let mut pending_events: Vec<Event> = Vec::new();
             const MAX_PENDING_IDENTITY: usize = 256;
             while let Some(message) = events.next().await {
@@ -2531,8 +2704,12 @@ impl EnvAgent {
                             }
                             if let Some(session_id) = identity.session_id().await {
                                 for buffered in pending_events.drain(..) {
-                                    let turn_id =
-                                        runtime.active_turns.read().await.get(&session_id).cloned();
+                                    let turn_id = runtime
+                                        .active_turns
+                                        .read()
+                                        .await
+                                        .get(&session_id)
+                                        .map(|lease| lease.turn_id.clone());
                                     let terminal = buffered.kind == sylph_protocol::EventKind::Turn
                                         && buffered.phase == Some(sylph_protocol::Phase::Completed);
                                     if let Err(error) = runtime
@@ -2564,7 +2741,12 @@ impl EnvAgent {
                             }
                             continue;
                         };
-                        let turn_id = runtime.active_turns.read().await.get(&session_id).cloned();
+                        let turn_id = runtime
+                            .active_turns
+                            .read()
+                            .await
+                            .get(&session_id)
+                            .map(|lease| lease.turn_id.clone());
                         let terminal = event.kind == sylph_protocol::EventKind::Turn
                             && event.phase == Some(sylph_protocol::Phase::Completed);
                         if let Err(error) = runtime
@@ -2586,7 +2768,7 @@ impl EnvAgent {
                             break;
                         };
                         let record = match runtime.retain_native_sidecars(&session, record).await {
-                            Ok(record) => record,
+                            Ok((record, _)) => record,
                             Err(error) => {
                                 warn!("could not snapshot native sidecar: {error:#}");
                                 break;
@@ -2634,7 +2816,12 @@ impl EnvAgent {
                             warn!("turn-input fact arrived before a native id; refusing a fake identity");
                             break;
                         };
-                        let turn_id = runtime.active_turns.read().await.get(&session_id).cloned();
+                        let turn_id = runtime
+                            .active_turns
+                            .read()
+                            .await
+                            .get(&session_id)
+                            .map(|lease| lease.turn_id.clone());
                         if let Err(error) =
                             runtime.enqueue_turn_input(&session_id, turn_id, fact).await
                         {
@@ -2658,9 +2845,7 @@ impl EnvAgent {
                         debug!("adapter event read error: {error:#}");
                     }
                 }
-                // Best effort delivery. Failure leaves rows in the spool;
-                // reconnect calls flush_pending and starts at the same prefix.
-                let _ = runtime.flush_pending(64).await;
+                let _ = flush_tx.try_send(());
             }
             // A stream ending means no later event can legitimately belong to
             // this turn. Drop the association even when the adapter ended
@@ -2679,13 +2864,16 @@ impl EnvAgent {
                     // event. Keep the source termination visible to the
                     // server's diagnostic/settlement path.
                     let value = serde_json::json!({"reason": "source_closed"});
-                    if let Err(error) = runtime
+                    match runtime
                         .enqueue_json(&session_id.encode(), "source_closed", &value, None)
                         .await
                     {
-                        warn!("could not spool native source close: {error:#}");
-                    } else {
-                        let _ = runtime.flush_pending(64).await;
+                        Err(error) => warn!("could not spool native source close: {error:#}"),
+                        Ok(through) => {
+                            if let Err(error) = runtime.flush_through(through).await {
+                                warn!("could not deliver native source close: {error:#}");
+                            }
+                        }
                     }
                 }
             }
@@ -2700,8 +2888,9 @@ impl EnvAgent {
         &self,
         session_id: &SessionId,
         mut record: sylph_protocol::NativeRecord,
-    ) -> Result<sylph_protocol::NativeRecord> {
+    ) -> Result<(sylph_protocol::NativeRecord, u64)> {
         use std::io::Read;
+        let mut sidecars_through = 0;
         for blob in &mut record.blobs {
             let Some(locator) = blob.locator.take() else {
                 continue;
@@ -2760,22 +2949,26 @@ impl EnvAgent {
                     final_chunk: offset + length == size,
                 };
                 let value = serde_json::to_value(chunk)?;
-                if let Err(error) = self
+                sidecars_through = match self
                     .enqueue_json(&session_id.encode(), "native_blob_chunk", &value, None)
                     .await
                 {
-                    if !matches!(
-                        error.downcast_ref::<crate::spool::SpoolError>(),
-                        Some(crate::spool::SpoolError::Overflow { .. })
-                    ) {
-                        return Err(error);
+                    Ok(through) => through,
+                    Err(error) => {
+                        if !matches!(
+                            error.downcast_ref::<crate::spool::SpoolError>(),
+                            Some(crate::spool::SpoolError::Overflow { .. })
+                        ) {
+                            return Err(error);
+                        }
+                        // Flush only the prefix present at overflow. If competing
+                        // producers refill it before the retry, surface the overflow
+                        // instead of waiting indefinitely for an empty global queue.
+                        self.flush_snapshot().await?;
+                        self.enqueue_json(&session_id.encode(), "native_blob_chunk", &value, None)
+                            .await?
                     }
-                    // A connected server can consume an object larger than the spool.
-                    // If delivery fails, every accepted chunk stays durable for reconnect.
-                    while self.flush_pending(64).await? > 0 {}
-                    self.enqueue_json(&session_id.encode(), "native_blob_chunk", &value, None)
-                        .await?;
-                }
+                };
                 offset += length;
             }
             if blob.error.is_none() {
@@ -2796,16 +2989,17 @@ impl EnvAgent {
                     data: String::new(),
                     final_chunk: true,
                 };
-                self.enqueue_json(
-                    &session_id.encode(),
-                    "native_blob_chunk",
-                    &serde_json::to_value(chunk)?,
-                    None,
-                )
-                .await?;
+                sidecars_through = self
+                    .enqueue_json(
+                        &session_id.encode(),
+                        "native_blob_chunk",
+                        &serde_json::to_value(chunk)?,
+                        None,
+                    )
+                    .await?;
             }
         }
-        Ok(record)
+        Ok((record, sidecars_through))
     }
 }
 
@@ -2957,6 +3151,7 @@ pub struct RuntimeCommand {
 mod tests {
     use super::*;
     use crate::path::PathPolicy;
+    use sylph_protocol::EventKind;
 
     /// An agent that declares whether it dictates, and records the spec it was opened with.
     ///
@@ -3362,6 +3557,134 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_delivery_reports_an_ack_that_cannot_reach_its_watermark() {
+        struct NoProgressSink;
+
+        #[async_trait]
+        impl EventSink for NoProgressSink {
+            async fn deliver(&self, events: &[SpoolEvent]) -> Result<u64> {
+                Ok(events.first().unwrap().producer_seq - 1)
+            }
+        }
+
+        let (runtime, _spy, _dir) = spy_runtime(false).await;
+        runtime.set_sink(Arc::new(NoProgressSink)).await;
+        let session = SessionId::new(
+            runtime.environment.clone(),
+            AgentName::parse("claude").unwrap(),
+            NativeId::new("stalled"),
+        );
+        let through = runtime
+            .enqueue_event(&session, &Event::new(EventKind::Status, None, 0))
+            .await
+            .unwrap();
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            runtime.flush_through(through),
+        )
+        .await
+        .expect("a stalled acknowledgement must not spin forever")
+        .unwrap_err();
+        assert!(error.to_string().contains("made no progress"));
+        assert_eq!(runtime.spool.pending("p", 10).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn native_transfer_waits_for_its_sidecars_without_draining_later_events() {
+        let (runtime, _spy, _dir) = spy_runtime(false).await;
+        let sink = Arc::new(RecordingSink::default());
+        runtime.set_sink(sink.clone()).await;
+        let session = SessionId::new(
+            runtime.environment.clone(),
+            AgentName::parse("claude").unwrap(),
+            NativeId::new("transfer"),
+        );
+        let sidecar = std::path::PathBuf::from(workdir_of(&runtime)).join("body.txt");
+        std::fs::write(&sidecar, b"retained body").unwrap();
+        let record = sylph_protocol::NativeRecord {
+            source: "transcript.jsonl".into(),
+            version: 1,
+            raw_json: None,
+            payload: serde_json::json!({}),
+            blobs: vec![sylph_protocol::NativeBlob {
+                name: "body.txt".into(),
+                size: 13,
+                bytes: None,
+                locator: Some(sidecar.to_string_lossy().into_owned()),
+                error: None,
+            }],
+        };
+        let producer = runtime.clone();
+        let later_session = session.clone();
+        let stream = Box::pin(
+            futures::stream::once(async { Ok(SessionMessage::NativeRecord(record)) }).chain(
+                futures::stream::once(async move {
+                    for stamp in 0..130 {
+                        producer
+                            .enqueue_event(
+                                &later_session,
+                                &Event::new(EventKind::Status, None, stamp),
+                            )
+                            .await?;
+                    }
+                    Ok(SessionMessage::Event(Event::new(
+                        EventKind::Status,
+                        None,
+                        131,
+                    )))
+                }),
+            ),
+        );
+        let transfer = runtime
+            .transfer_stream(&session, stream, true)
+            .await
+            .unwrap();
+        assert!(transfer["bytes"].as_u64().unwrap() > 0);
+        let delivered = sink.events().await;
+        assert_eq!(
+            delivered.len(),
+            1,
+            "the referenced sidecar must precede the transfer handle"
+        );
+        assert_eq!(delivered[0].kind, "native_blob_chunk");
+        assert_eq!(runtime.spool.pending("p", 200).await.unwrap().len(), 130);
+    }
+
+    #[tokio::test]
+    async fn native_source_eof_delivers_its_close_past_a_full_batch() {
+        let (runtime, _spy, _dir) = spy_runtime(false).await;
+        let sink = Arc::new(RecordingSink::default());
+        runtime.set_sink(sink.clone()).await;
+        let session = SessionId::new(
+            runtime.environment.clone(),
+            AgentName::parse("claude").unwrap(),
+            NativeId::new("source"),
+        );
+        for stamp in 0..129 {
+            runtime
+                .enqueue_event(&session, &Event::new(EventKind::Status, None, stamp))
+                .await
+                .unwrap();
+        }
+        runtime.native_sources.write().await.insert(session.clone());
+        runtime
+            .spawn_event_pump(
+                Box::pin(futures::stream::empty()),
+                Arc::new(IdentityState::new(
+                    session.environment,
+                    session.agent,
+                    Some(session.native_id),
+                )),
+                None,
+            )
+            .await
+            .unwrap();
+        let delivered = sink.events().await;
+        assert_eq!(delivered.last().unwrap().kind, "source_closed");
+        assert_eq!(delivered.len(), 130);
+    }
+
+    #[tokio::test]
     async fn native_sidecars_larger_than_the_spool_survive_vendor_removal() {
         let dir = tempfile::tempdir().unwrap();
         let sidecar = dir.path().join("tool-output.txt");
@@ -3397,7 +3720,7 @@ mod tests {
                 error: None,
             }],
         };
-        let retained = runtime
+        let (retained, _) = runtime
             .retain_native_sidecars(&session, record)
             .await
             .unwrap();
@@ -3445,7 +3768,7 @@ mod tests {
                 error: None,
             }],
         };
-        let retained = runtime
+        let (retained, _) = runtime
             .retain_native_sidecars(&session, record)
             .await
             .unwrap();
@@ -3506,10 +3829,10 @@ mod tests {
             AgentName::parse("fixture").unwrap(),
             NativeId::new("n1"),
         );
-        runtime.workdirs.write().await.insert(session.clone(), root);
         let created = runtime
             .handle_command(sylph_protocol::EnvironmentCommand::Files {
                 session_id: session.clone(),
+                workdir: workdir_of(&runtime),
                 operation: sylph_protocol::FileOperation::Write {
                     relative: "a.txt".into(),
                     data: base64::engine::general_purpose::STANDARD.encode(b"one"),
@@ -3524,6 +3847,7 @@ mod tests {
         let refused = runtime
             .handle_command(sylph_protocol::EnvironmentCommand::Files {
                 session_id: session.clone(),
+                workdir: workdir_of(&runtime),
                 operation: sylph_protocol::FileOperation::Write {
                     relative: "a.txt".into(),
                     data: base64::engine::general_purpose::STANDARD.encode(b"two"),
@@ -3539,6 +3863,7 @@ mod tests {
         let escaped = runtime
             .handle_command(sylph_protocol::EnvironmentCommand::Files {
                 session_id: session.clone(),
+                workdir: workdir_of(&runtime),
                 operation: sylph_protocol::FileOperation::Read {
                     relative: "../outside.txt".into(),
                     limit: None,
@@ -3553,6 +3878,7 @@ mod tests {
         let absolute = runtime
             .handle_command(sylph_protocol::EnvironmentCommand::Files {
                 session_id: session,
+                workdir: workdir_of(&runtime),
                 operation: sylph_protocol::FileOperation::Read {
                     relative: "/etc/passwd".into(),
                     limit: None,
@@ -3588,11 +3914,10 @@ mod tests {
             AgentName::parse("fixture").unwrap(),
             NativeId::new("n1"),
         );
-        runtime.workdirs.write().await.insert(session.clone(), root);
-
         let outcome = runtime
             .handle_command(sylph_protocol::EnvironmentCommand::Files {
                 session_id: session,
+                workdir: workdir_of(&runtime),
                 operation: sylph_protocol::FileOperation::Read {
                     relative: "large.bin".into(),
                     limit: Some(128),

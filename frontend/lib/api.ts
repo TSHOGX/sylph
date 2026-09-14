@@ -13,7 +13,7 @@
 export * from "./api-types";
 import type {
   AdoptSessionRequest, BrowseResponse, BrowseRootsResponse, ConfigReport,
-  CreateSessionRequest, CreateTurnRequest, DocumentWindow, EnumerateFilters,
+  CreateSessionRequest, CreateTurnRequest, ControlRequest, DocumentWindow, EnumerateFilters,
   EnumerateResponse, EnvironmentsResponse, FileContentResponse, FileDocumentResponse,
   FileTreeResponse, LinkState, MkdirRequest, MkdirResponse, PendingRequest, SearchResponse,
   PairingGrant,
@@ -68,7 +68,7 @@ export function sessionFlags(session: Session): Record<string, string> {
   }
 }
 
-async function fetchAPI<T>(path: string, init?: RequestInit): Promise<T> {
+export async function fetchAPI<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response;
   try {
     response = await fetch(`${API_BASE}${path}`, {
@@ -79,13 +79,14 @@ async function fetchAPI<T>(path: string, init?: RequestInit): Promise<T> {
         ...init?.headers,
       },
     });
-  } catch {
-    // fetch only rejects on transport failure, which locally means the backend
-    // is not listening. Say so, instead of surfacing "Failed to fetch".
+  } catch (error) {
+    if (init?.signal?.aborted) throw error;
+    // A transport failure identifies the broken request, not which machine or
+    // process is down. Aborted queries have already retained their own error.
     throw new ApiError(
       0,
       "backend_unreachable",
-      "Cannot reach the Sylph Web backend on port 4317. Start it with `cd crates/server && cargo run`.",
+      "Could not reach the Sylph API. Check the connection and try again.",
     );
   }
 
@@ -96,9 +97,8 @@ async function fetchAPI<T>(path: string, init?: RequestInit): Promise<T> {
     // than falling through to `statusText`. That fallback is what turned an
     // unreachable endpoint into the word "Not Found" rendered inside a file
     // tree: the pane said the *directory* was missing when the truth was that
-    // the running backend had no files endpoint at all. Anything answering
-    // `/api/v1/*` without the envelope is not a current Sylph backend — it is a
-    // stale build, or a proxy answering in its place.
+    // the running backend had no files endpoint at all. A proxy timeout can also
+    // omit this envelope while the backend is still processing the request.
     if (!body?.error) {
       throw new ApiError(
         response.status,
@@ -124,17 +124,19 @@ async function fetchAPI<T>(path: string, init?: RequestInit): Promise<T> {
  * Explain a response that carried no error envelope.
  *
  * The backend documents every `/api/v1/*` failure as `{error: {code, message}}`,
- * including router-level ones, so a bodiless failure means the request never
- * reached a current backend. Naming that is the whole point: the alternative is
- * `statusText`, and "Not Found" alone sends the reader looking for a missing
- * file instead of a stale process.
+ * including router-level ones. A proxy may replace that response or time out
+ * before it arrives, so a bodiless failure must not imply a missing directory
+ * or a crashed backend.
  */
 function describeEnvelopeless(status: number, path: string): string {
   if (status === 404) {
     return `The backend has no ${path} endpoint. It is probably an older build than this UI — restart it with \`cd crates/server && cargo run\`.`;
   }
   if (status === 502 || status === 503 || status === 504) {
-    return "The backend did not answer. Check that it is running on the port the frontend proxies to.";
+    return "The backend or its proxy did not answer in time. The request may still be running; check its status before retrying.";
+  }
+  if (status === 500) {
+    return `The backend or its proxy could not complete ${path} and returned no details. Check the frontend and backend logs for a timeout or failure.`;
   }
   return `Request to ${path} failed (${status}) with no error details.`;
 }
@@ -214,7 +216,7 @@ export const api = {
   sessions: {
     list: (filters: SessionFilters = {}) =>
       fetchAPI<{ sessions: Session[] }>(`/sessions${queryString({ ...filters })}`),
-    get: (id: string) => fetchAPI<{ session: Session }>(`/sessions/${segment(id)}`),
+    get: (id: string, signal?: AbortSignal) => fetchAPI<{ session: Session }>(`/sessions/${segment(id)}`, { signal }),
     /**
      * Start an agent in a directory.
      *
@@ -259,10 +261,10 @@ export const api = {
       }),
     discardPrepared: (draftId: string) =>
       fetchAPI<void>(`/sessions/draft/${segment(draftId)}`, { method: "DELETE" }),
-    history: (id: string, before?: string) => {
+    history: (id: string, before?: string, signal?: AbortSignal) => {
       const query = new URLSearchParams({ limit: "100" });
       if (before) query.set("before", before);
-      return fetchAPI<HistoryPage>(`/sessions/${segment(id)}/turns?${query}`);
+      return fetchAPI<HistoryPage>(`/sessions/${segment(id)}/turns?${query}`, { signal });
     },
     eventBody: (id: string, seq: number) =>
       fetchAPI<{ text: string; data?: unknown }>(`/sessions/${segment(id)}/bodies/${seq}`),
@@ -313,8 +315,8 @@ export const api = {
      * readable when its agent is gone. `lib/use-agent-session.ts` owns what that
      * means for caching.
      */
-    capabilities: (id: string) =>
-      fetchAPI<LinkState>(`/sessions/${segment(id)}/capabilities`),
+    capabilities: (id: string, signal?: AbortSignal) =>
+      fetchAPI<LinkState>(`/sessions/${segment(id)}/capabilities`, { signal }),
     /** Start the agent eagerly, before the user finishes typing. */
     attach: (id: string) =>
       fetchAPI<LinkState>(`/sessions/${segment(id)}/link`, { method: "POST" }),
@@ -338,8 +340,8 @@ export const api = {
         method: "POST",
       }),
     /** What the agent is currently blocked on. */
-    requests: (id: string) =>
-      fetchAPI<PendingRequest[]>(`/sessions/${segment(id)}/requests`),
+    requests: (id: string, signal?: AbortSignal) =>
+      fetchAPI<PendingRequest[]>(`/sessions/${segment(id)}/requests`, { signal }),
     /**
      * End the current turn but keep the agent loaded.
      *
@@ -358,27 +360,20 @@ export const api = {
      * boundary would otherwise be delivered into the *next* turn, succeeding
      * silently with the text in the wrong conversation. A mismatch is a 409.
      */
-    steer: (id: string, text: string, turnId?: string) =>
-      fetchAPI<{ steered: boolean }>(`/sessions/${segment(id)}/steer`, {
+    steer: (id: string, text: string, turnId: string, idempotencyKey: string) =>
+      fetchAPI<ControlRequest>(`/sessions/${segment(id)}/steer`, {
         method: "POST",
-        body: JSON.stringify({ text, turnId }),
+        body: JSON.stringify({ text, turnId, idempotencyKey }),
       }),
-    /**
-     * Add text to run **after** the turn in flight.
-     *
-     * No `turnId`, and its absence is the difference rather than an omission: a queued
-     * follow-up is *for* after the turn, so a boundary crossing underneath it changes
-     * nothing. A steer carries the precondition because it is a correction and text that
-     * misses its turn lands in the wrong conversation.
-     *
-     * Which of the two a session offers is `agent.can("steer")` against
-     * `agent.can("queue")`, and they are genuinely different per vendor: `claude` has only
-     * queueing — its stdin is read once the turn ends — while `pi` and `codex` have both.
-     */
-    queue: (id: string, text: string) =>
-      fetchAPI<{ queued: boolean }>(`/sessions/${segment(id)}/queue`, {
+    /** Submit to the harness's own queue without claiming turn-scoped delivery. */
+    nativeQueue: (id: string, text: string, priority: boolean, idempotencyKey: string) =>
+      fetchAPI<ControlRequest>(`/sessions/${segment(id)}/native-queue`, {
+        method: "POST", body: JSON.stringify({ text, priority, idempotencyKey }),
+      }),
+    queue: (id: string, text: string, idempotencyKey: string) =>
+      fetchAPI<ControlRequest>(`/sessions/${segment(id)}/queue`, {
         method: "POST",
-        body: JSON.stringify({ text }),
+        body: JSON.stringify({ text, idempotencyKey }),
       }),
     /**
      * Set one typed config option on a live session.
@@ -392,6 +387,25 @@ export const api = {
       fetchAPI<LinkState>(`/sessions/${segment(id)}/config`, {
         method: "POST",
         body: JSON.stringify({ configId, value }),
+      }),
+  },
+  controls: {
+    list: (sessionId: string) =>
+      fetchAPI<{ requests: ControlRequest[] }>(`/sessions/${segment(sessionId)}/control-requests`),
+    edit: (sessionId: string, requestId: string, text: string, revision: number) =>
+      fetchAPI<{ request: ControlRequest }>(`/control-requests/${segment(requestId)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ text, revision }),
+      }),
+    cancel: (sessionId: string, requestId: string, revision: number) =>
+      fetchAPI<{ request: ControlRequest }>(`/control-requests/${segment(requestId)}`, {
+        method: "DELETE",
+        body: JSON.stringify({ revision }),
+      }),
+    steer: (sessionId: string, requestId: string, revision: number, turnId: string, idempotencyKey: string) =>
+      fetchAPI<{ request: ControlRequest }>(`/control-requests/${segment(requestId)}/steer`, {
+        method: "POST",
+        body: JSON.stringify({ revision, turnId, idempotencyKey }),
       }),
   },
   requests: {
@@ -412,8 +426,8 @@ export const api = {
       }),
   },
   files: {
-    tree: (sessionId: string, path = "") =>
-      fetchAPI<FileTreeResponse>(filesPath(sessionId, queryString({ path }))),
+    tree: (sessionId: string, path = "", signal?: AbortSignal) =>
+      fetchAPI<FileTreeResponse>(filesPath(sessionId, queryString({ path })), { signal }),
     content: (sessionId: string, path: string) =>
       fetchAPI<FileContentResponse>(filesPath(sessionId, `/content${queryString({ path })}`)),
     /**

@@ -82,7 +82,7 @@ async function environmentId(page: Page): Promise<string> {
  * fast machine: it surfaced in 1 of 4 identical suite runs, failing two specs that
  * had passed hundreds of times.
  *
- * Gating on `New session` is what makes this sound rather than a sleep. That button
+ * Gating on `Open settings` is what makes this sound rather than a sleep. That button
  * does not exist until React has hydrated *and* `AuthGate` has resolved, and the
  * shell owning the listener is its ancestor — so once the button is on screen, the
  * effect that attaches the listener has necessarily run.
@@ -93,7 +93,7 @@ async function environmentId(page: Page): Promise<string> {
  */
 export async function gotoReady(page: Page, url = "/") {
   await page.goto(url);
-  await expect(page.getByRole("button", { name: /New session/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open settings", exact: true })).toBeVisible();
 }
 
 /**

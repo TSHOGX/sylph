@@ -152,6 +152,7 @@ export function projectSessionTurnsFromIndex(
   turns: TurnWithEvents[],
   index: SessionTraceIndex,
 ): TurnWithEvents[] {
+  const arrivalTurns = new Set(index.events.map((event) => event.arrivalTurnId));
   return turns
     .map((entry) => ({
       ...entry,
@@ -162,7 +163,9 @@ export function projectSessionTurnsFromIndex(
     // empty `unprompted` section adds a second, blank card and makes the user think
     // the report itself was lost. A non-empty agent turn remains visible because it
     // carries the agent's own narration, which is a legitimate turn-level result.
-    .filter((entry) => entry.turn.origin !== "agent" || entry.events.length > 0);
+    // An originally empty turn was not emptied by projection: keep its record so
+    // the renderer can report missing imported content instead of "No turns yet".
+    .filter((entry) => entry.turn.origin !== "agent" || entry.events.length > 0 || !arrivalTurns.has(entry.turn.id));
 }
 
 function withArrivalTurn(event: StreamEvent, fallback?: string): TraceEvent {

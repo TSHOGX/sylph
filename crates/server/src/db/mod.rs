@@ -6,6 +6,7 @@
 //! product invariant that this tier is authoritative only while a turn is active:
 //! the old filename claimed exactly the property the invariant limits.
 
+pub mod controls;
 pub mod env;
 /// Writing an adapter's parse of a vendor's native store into this journal.
 ///

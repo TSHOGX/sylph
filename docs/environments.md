@@ -85,6 +85,31 @@ chunks, and spools those chunks before the record. The server retains the comple
 CAS before acknowledging the record; a locator is never opened by the server and is never
 used as a backup after projection.
 
+File commands carry the session's recorded `workdir` from the server. The envagent
+canonicalizes that root and confines every operation to it; a process-local hosted link
+or vendor-store scan is not a prerequisite. Restarting an envagent or narrowing its
+browse roots therefore cannot discard the file root of a session already recorded.
+
+A transfer handle is published only after its last sidecar producer sequence is
+acknowledged. Finite source EOF likewise waits through its close diagnostic. Both waits
+target a fixed producer prefix; newer events cannot extend their work indefinitely.
+
+**History work cannot consume interactive command capacity.** Native enumeration,
+adoption, following, and re-reading share a bounded pool separate from file access and
+session control. Saturation returns `COMMAND_OVERLOADED` before execution, with no
+hidden queue whose wait can exceed the caller's deadline. Independent commands run
+concurrently; mutations for one session or prepared draft retain wire arrival order.
+Agent inventory probes run independently of command reception. A disconnected epoch
+cancels unfinished command tasks and releases its acknowledgement waiters; it never
+replays an ambiguous at-most-once operation automatically.
+
+Stateless reads use fresh replayable request identities and connection-local waiters.
+File listings and reads, catalogue enumeration, capability and health probes, and native
+transfer chunk reads do not persist command receipts or response bodies. Their deadline
+includes socket queueing, and late replies after timeout or disconnect are discarded.
+Mutating commands retain the durable ambiguity and outcome ledger, so this optimization
+cannot make a vendor input retryable after an unknown outcome.
+
 ## Agent availability
 
 Which agents an environment can run is discovered, not configured, and it is a fact about
@@ -119,6 +144,22 @@ So availability is per environment and time-varying, and `GET /api/v1/environmen
 where it is read. A picker offering an agent must name the environment it will run in,
 since the answer differs across environments and the failure otherwise arrives after
 creation rather than before it.
+
+## Turn control receipts
+
+A session's unique turn generation is carried as a TurnLease. Send receipts confirm the
+lease; guarded steer must match the envagent's open lease and the vendor's captured turn
+identity. Native queue receipts describe submission to the harness channel and never name
+a turn or assert consumption. A vendor refusal is typed separately from a transport error:
+only a negative vendor response or local validation proves rejection. An unanswered command
+remains unknown.
+
+The envagent spools adapter output without waiting for network acknowledgement, then drains
+the spool through a bounded delivery wake-up. The server reads command replies independently
+of ordered event ingestion. This breaks the wait cycle between a command holding the session
+sequencer and lifecycle events preceding its reply. A bounded ingress queue may disconnect
+on overflow; the durable producer prefix replays on reconnect. Batch boundaries never defer
+a turn's settlement past an event that opens its successor.
 
 ## Spooling, and why the record survives a dropped connection
 

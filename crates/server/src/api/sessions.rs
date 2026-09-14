@@ -257,6 +257,10 @@ fn default_history_limit() -> i64 {
     100
 }
 
+fn turn_cursor(turn: &Turn) -> String {
+    format!("{}:{}", turn.created_at_ms, turn.id)
+}
+
 /// GET /api/v1/sessions/{id}/turns — durable conversation history.
 ///
 /// The SSE endpoint covers a single turn, which is enough to watch work happen but
@@ -286,14 +290,7 @@ pub async fn history(
     // oldest-first.
     // Capture before the page so a concurrent arrival may be replayed twice but can
     // never be skipped between reading history and opening the trace connection.
-    let snapshot_seq = state.store.max_event_seq(&id).await?.max(
-        state
-            .history
-            .next_seq(&id.encode())
-            .await
-            .map_err(|error| Error::Internal(error.to_string()))?
-            .saturating_sub(1),
-    );
+    let snapshot_seq = state.store.max_event_seq(&id).await?;
     let mut turns = state
         .store
         .list_turns_page(&id, query.cursor.as_deref(), limit + 1)
@@ -303,7 +300,7 @@ pub async fn history(
         turns.truncate(limit as usize);
     }
     let next_cursor = if has_more {
-        turns.last().map(|turn| turn.created_at_ms.to_string())
+        turns.last().map(turn_cursor)
     } else {
         None
     };
@@ -311,35 +308,31 @@ pub async fn history(
 
     let mut out = Vec::with_capacity(turns.len());
     for turn in turns {
-        // Both tiers, because a turn's events live in exactly one of them and which
-        // one depends on whether consolidation has run. Reading only the journal would
-        // make history vanish from the UI moments after a turn finished, which is the
-        // bug this exists to prevent.
-        //
-        // **Both tiers project through `consolidate`, so there is one derivation of a
-        // transcript rather than one per tier.** Reading the journal's stable rows
-        // directly is the obvious shape and is wrong: a `Block` carries fields an
-        // `Event` row has no column for — `started_at_ms` above all — so a turn read
-        // before its sweep ran was missing the anchor every duration is measured from,
-        // and acquired it seconds later when the tier changed underneath the reader.
-        // Nothing failed; the number simply appeared. That is why the shared projection
-        // is the fix and not a second mapping kept in step by hand: the two agreed
-        // whenever a test happened to read after consolidation, which is exactly when
-        // nobody was looking at the disagreement.
+        // Live snapshots retain producer phase and stability. Applying the terminal
+        // fold to an open block calls it `incomplete` and stable, collapsing reasoning
+        // in the browser before its completed event exists. Only sealed turns fold;
+        // both sealed storage tiers still use the same projection and time anchors.
         let journalled = state.store.turn_events_for_consolidation(&turn.id).await?;
         let events: Vec<StreamEvent> = if journalled.is_empty() {
             state
                 .history
-                .turn_blocks(&turn.id)
+                .turn_block_summaries(&turn.id)
                 .await
                 .map_err(|error| Error::Internal(format!("could not read transcript: {error:#}")))?
                 .iter()
-                .map(block_to_event)
+                .map(block_summary_to_event)
+                .collect()
+        } else if !turn.is_terminal() {
+            journalled
+                .iter()
+                .map(StreamEvent::from_row)
+                .map(bound_event)
                 .collect()
         } else {
             crate::storage::history::consolidate(&journalled)
                 .iter()
                 .map(block_to_event)
+                .map(bound_event)
                 .collect()
         };
         out.push(TurnWithEvents { turn, events });
@@ -351,6 +344,41 @@ pub async fn history(
         next_cursor,
         snapshot_seq,
     }))
+}
+
+/// Render a bounded history summary without hydrating the complete body.
+fn block_summary_to_event(summary: &crate::storage::history::BlockSummary) -> StreamEvent {
+    let mut event = block_to_event(&summary.block);
+    event.text = summary.block.text.clone();
+    event.data = summary.block.data.clone();
+    event.body_ref = summary.has_body.then_some(crate::events::BodyRef {
+        seq: summary.block.seq,
+        text_bytes: summary.text_bytes,
+        data_bytes: summary.data_bytes,
+    });
+    event
+}
+
+/// Keep the default history response bounded even while a turn is still in the journal.
+fn bound_event(mut event: StreamEvent) -> StreamEvent {
+    let text_bytes = event.text.len() as u64;
+    let data_bytes = event.data.as_ref().map_or(0, |data| data.to_string().len()) as u64;
+    let text_large = text_bytes as usize > crate::storage::history::BLOCK_PREVIEW_BYTES;
+    let data_large = data_bytes as usize > crate::storage::history::BLOCK_PREVIEW_BYTES;
+    if text_large {
+        event.text = crate::storage::history::text_preview(&event.text);
+    }
+    if data_large {
+        event.data = crate::storage::history::data_preview(event.data.as_ref());
+    }
+    if text_large || data_large {
+        event.body_ref = Some(crate::events::BodyRef {
+            seq: event.seq,
+            text_bytes,
+            data_bytes,
+        });
+    }
+    event
 }
 
 /// Fetch one full event body after a bounded timeline preview.
@@ -1034,34 +1062,10 @@ pub async fn enumerate(
 /// (`sylph_protocol::NativeSummary::fidelity`). No care recovers a timing that was never
 /// written.
 ///
-/// # What the title fallback can and cannot reach, measured
-///
-/// The spec says the title "falls back to the opening user turn" through
-/// [`crate::db::labels`]. That rule is implemented here and it **cannot see the opening
-/// ask for two of the three agents**, which is a disagreement between the spec and the
-/// parsers rather than a gap in this handler:
-///
-/// | Agent | Vendor title | The user's own text |
-/// | --- | --- | --- |
-/// | `claude` | ~93% of sessions | dropped by its parser |
-/// | `codex` | never | dropped by its parser |
-/// | `pi` | never | arrives as a `status` event |
-///
-/// Both parsers drop it citing the same reason — the vocabulary has no `user` kind and
-/// "the server owns a turn's `request_text`" — but `SessionMessage` has three variants and
-/// none of them carries user text, so there is nothing for the server to own it *from*.
-/// The consequence is larger than a title: an adopted `claude` or `codex` transcript holds
-/// the agent's half of the conversation and not the user's, and every turn's
-/// `request_text` is empty. `crate::db::ingest` records the same finding from the
-/// ingestion side.
-///
-/// So this reaches, in order: the client's override, the vendor's own recorded title, then
-/// the opening phase-less `status` event through [`crate::db::labels::summarize_line`] —
-/// which applies the envelope rule, because an agent's injected context arrives as leading
-/// pseudo user turns and taking one verbatim labels most sessions with boilerplate that is
-/// byte-identical across every session of that agent. The rule stays **narrow**: an earlier
-/// version also treated a leading `You are ` as boilerplate and discarded 44 genuine
-/// labels, because subagent briefs legitimately open that way.
+/// Native user input arrives as `TurnInputFact`, independently of timeline events.
+/// It supplies the turn's question and the opening-ask fallback used by
+/// [`crate::db::labels`]. The lossless native record also keeps injected context;
+/// that context must not replace the question shown on a turn.
 ///
 /// # Ingestion, and why `watch` does not block the response
 ///
@@ -1107,17 +1111,9 @@ pub async fn adopt(
     if state.store.get_session(&remote_session_id).await?.is_some() {
         return Err(Error::SessionAlreadyPresent);
     }
-    let command_payload = serde_json::json!({
-        "environment": environment,
-        "agent": agent,
-        "nativeId": req.native_id.trim(),
-        "watch": req.watch,
-    });
-    let request_id = sylph_protocol::CommandRequestId::parse(format!(
-        "adopt-{}",
-        blake3::hash(command_payload.to_string().as_bytes()).to_hex()
-    ))
-    .map_err(|error| Error::InvalidRequest(error.to_string()))?;
+    let request_id =
+        sylph_protocol::CommandRequestId::parse(format!("adopt-{}", uuid::Uuid::new_v4().simple()))
+            .map_err(|error| Error::InvalidRequest(error.to_string()))?;
     let native_id_for_command = remote_session_id.native_id.clone();
     let command_kind = if req.watch {
         sylph_protocol::EnvironmentCommand::Watch {
@@ -1146,12 +1142,13 @@ pub async fn adopt(
     };
     let command = sylph_protocol::Command::new(
         request_id,
-        sylph_protocol::IdempotencyPolicy::AtMostOnce,
+        sylph_protocol::IdempotencyPolicy::Replayable,
         command_kind,
     );
+    let timeout = crate::env::bridge::command_timeout(&command.command);
     let outcome = state
         .env_bridge
-        .dispatch_and_wait(&environment, command, std::time::Duration::from_secs(30))
+        .dispatch_and_wait(&environment, command, timeout)
         .await
         .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
     let result = match outcome {
@@ -1163,11 +1160,13 @@ pub async fn adopt(
         }
         sylph_protocol::CommandOutcome::Rejected { code, message } => {
             return Err(match code.as_str() {
-                "NATIVE_SESSION_NOT_FOUND" | "ADOPT_FAILED" => {
+                "NATIVE_SESSION_NOT_FOUND" => {
                     Error::NativeSessionNotFound(native_id_for_command.to_string())
                 }
                 "AGENT_UNKNOWN" => Error::InvalidRequest(format!("Unknown agent: {agent}")),
-                _ => Error::InvalidRequest(format!("{code}: {message}")),
+                "NATIVE_SESSION_NOT_RESUMABLE" => Error::NativeSessionNotResumable,
+                "POLICY_VIOLATION" => Error::Forbidden(message),
+                _ => Error::LinkFailed(format!("{code}: {message}")),
             })
         }
         sylph_protocol::CommandOutcome::Unknown { message } => {
@@ -1200,10 +1199,12 @@ pub async fn adopt(
     let record = Session {
         id: session_id.clone(),
         workdir,
-        title: result
-            .get("title")
-            .and_then(|value| value.as_str())
-            .map(str::to_string),
+        title: req.title.or_else(|| {
+            result
+                .get("title")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        }),
         inject_identity: req.inject_identity,
         fidelity: result
             .get("fidelity")
@@ -1243,9 +1244,40 @@ pub async fn adopt(
             .and_then(|value| serde_json::from_value(value).ok()),
     )
     .await;
-    if let Err(error) = state.env_bridge.activate_remote(&session_id).await {
-        let _ = state.env_bridge.close_remote_session(&session_id).await;
-        return Err(Error::LinkFailed(format!("{error:#}")));
+    if req.watch {
+        if let Err(error) = state.env_bridge.activate_remote(&session_id).await {
+            let _ = state.env_bridge.close_remote_session(&session_id).await;
+            return Err(Error::LinkFailed(format!("{error:#}")));
+        }
+    } else {
+        let transfer =
+            serde_json::from_value(result.get("transfer").cloned().ok_or_else(|| {
+                Error::LinkFailed("remote adopt returned no transcript transfer".into())
+            })?)
+            .map_err(|error| {
+                Error::LinkFailed(format!(
+                    "remote adopt returned an invalid transfer: {error}"
+                ))
+            })?;
+        let pass = super::native_transfer::download(&state, &session_id, transfer)
+            .await
+            .map_err(|error| {
+                Error::LinkFailed(format!("could not download adopted transcript: {error:#}"))
+            })?;
+        let read_errors = pass.read_errors;
+        let report = state
+            .ingest
+            .drain(&session_id, pass.stream())
+            .await
+            .map_err(|error| {
+                Error::LinkFailed(format!("could not retain adopted transcript: {error:#}"))
+            })?;
+        if read_errors + report.read_errors > 0 {
+            return Err(Error::LinkFailed(format!(
+                "native transcript contains {} unreadable records",
+                read_errors + report.read_errors
+            )));
+        }
     }
     Ok((
         StatusCode::CREATED,
@@ -1410,56 +1442,16 @@ pub async fn reproject(
         .get_session(&session_id)
         .await?
         .ok_or(Error::SessionNotFound)?;
-    let records = state
-        .history
-        .native_records(&session_id.encode())
-        .await
-        .map_err(|error| {
-            Error::Internal(format!("could not read retained native records: {error:#}"))
-        })?;
-    let transfer = crate::api::native_transfer::upload_records(&state, &session_id, records)
-        .await
-        .map_err(|error| {
-            Error::Internal(format!("could not upload retained records: {error:#}"))
-        })?;
-    let outcome = state
-        .env_bridge
-        .remote_session_command(
-            &session_id,
-            sylph_protocol::EnvironmentCommand::Reproject {
-                session_id: session_id.clone(),
-                agent: session_id.agent.to_string(),
-                transfer_id: transfer.id,
-            },
-            sylph_protocol::IdempotencyPolicy::AtMostOnce,
-        )
-        .await
-        .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
-    let value = match outcome {
-        sylph_protocol::CommandOutcome::Accepted { result } => result.unwrap_or_default(),
-        sylph_protocol::CommandOutcome::Rejected { code, message } => {
-            return Err(Error::Internal(format!("{code}: {message}")))
-        }
-        sylph_protocol::CommandOutcome::Unknown { message } => {
-            return Err(Error::LinkFailed(message.unwrap_or_default()))
-        }
-    };
-    let transfer: sylph_protocol::NativeTransfer =
-        serde_json::from_value(value).map_err(|error| {
-            Error::Internal(format!(
-                "remote re-projection transfer was malformed: {error}"
-            ))
-        })?;
-    let downloaded = crate::api::native_transfer::download(&state, &session_id, transfer)
-        .await
-        .map_err(|error| {
-            Error::Internal(format!(
-                "could not download native re-projection: {error:#}"
-            ))
-        })?;
-    let read_errors = downloaded.read_errors;
-    Ok(Json(
-        ingest_reread_pass(&state, &session_id, downloaded.stream(), read_errors).await?,
+
+    // Re-projection must be a validate-then-replace operation. The current ingest path is
+    // append-oriented and cannot stage a complete projection across the journal and history
+    // databases, so allowing this endpoint to continue would append corrected events beside
+    // stale ones and make a successful response corrupt the transcript. Refuse explicitly
+    // until a transactional replacement path exists; a clear 501 is safer than a plausible
+    // duplicate history.
+    Err(Error::NotImplemented(
+        "re-project is unavailable until validate-then-replace publication is implemented"
+            .to_string(),
     ))
 }
 

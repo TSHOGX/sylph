@@ -159,6 +159,27 @@ struct CommandWaiter {
 
 type CommandWaiters = Arc<Mutex<HashMap<(EnvironmentId, String), Vec<CommandWaiter>>>>;
 
+const EPHEMERAL_READ_PREFIX: &str = "read-";
+type ReadWaiters = Arc<
+    std::sync::Mutex<
+        HashMap<(EnvironmentId, String), tokio::sync::oneshot::Sender<CommandOutcome>>,
+    >,
+>;
+
+struct ReadRegistration {
+    key: (EnvironmentId, String),
+    waiters: ReadWaiters,
+}
+
+impl Drop for ReadRegistration {
+    fn drop(&mut self) {
+        self.waiters
+            .lock()
+            .expect("read waiter mutex poisoned")
+            .remove(&self.key);
+    }
+}
+
 /// Owns paired-environment state and the one ingress serialization point.
 #[derive(Clone)]
 pub struct EnvBridge {
@@ -170,6 +191,7 @@ pub struct EnvBridge {
     leases: Arc<RwLock<HashMap<EnvironmentId, Lease>>>,
     command_policies: Arc<RwLock<HashMap<(EnvironmentId, String), IdempotencyPolicy>>>,
     command_waiters: CommandWaiters,
+    read_waiters: ReadWaiters,
     next_waiter_id: Arc<AtomicU64>,
     ingest_gate: Arc<Mutex<()>>,
     remote_drafts: Arc<Mutex<HashMap<String, RemoteDraft>>>,
@@ -233,6 +255,7 @@ impl EnvBridge {
             leases: Arc::new(RwLock::new(HashMap::new())),
             command_policies: Arc::new(RwLock::new(HashMap::new())),
             command_waiters: Arc::new(Mutex::new(HashMap::new())),
+            read_waiters: Arc::new(std::sync::Mutex::new(HashMap::new())),
             next_waiter_id: Arc::new(AtomicU64::new(1)),
             ingest_gate: Arc::new(Mutex::new(())),
             remote_drafts: Arc::new(Mutex::new(HashMap::new())),
@@ -277,8 +300,9 @@ impl EnvBridge {
         text: String,
         data: Option<serde_json::Value>,
     ) -> Result<()> {
+        let _sequence_guard = self.seq.gate().lock_owned().await;
         let event = crate::events::StreamEvent {
-            seq: self.seq.next(session_id).await?,
+            seq: self.seq.next_inner(session_id).await?,
             arrival_turn_id: Some(turn_id.to_string()),
             kind: kind.to_string(),
             phase: None,
@@ -445,9 +469,62 @@ impl EnvBridge {
         });
         let environment = welcome.environment_id.clone();
         let epoch = welcome.connection_epoch;
+        // Read receipts independently: event ingestion may wait for the session command
+        // that is itself awaiting this receipt. Never hold the wire reader behind it.
+        // Other frames retain their wire order. Overflow closes the connection; the
+        // durable producer spool replays the unacknowledged suffix after reconnect.
+        let (incoming, mut frames) = mpsc::channel(64);
+        let buffered_bytes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let queued_bytes = buffered_bytes.clone();
+        let bridge = self.clone();
+        let receipt_environment = environment.clone();
+        let reader_task = tokio::spawn(async move {
+            let result: Result<()> = async {
+                loop {
+                    let bytes = read_frame(&mut reader).await?;
+                    if let DecodedMessage::Known(WireMessage::CommandResult {
+                        request_id,
+                        outcome,
+                        connection_epoch,
+                        idempotency,
+                    }) = sylph_protocol::decode_message(&bytes)?
+                    {
+                        if connection_epoch != epoch {
+                            return Err(BridgeError::StaleEpoch.into());
+                        }
+                        bridge
+                            .record_command_result(
+                                &receipt_environment,
+                                &sylph_protocol::CommandResultMessage {
+                                    request_id,
+                                    outcome,
+                                    connection_epoch,
+                                    idempotency,
+                                },
+                            )
+                            .await?;
+                    } else {
+                        let previous = queued_bytes
+                            .fetch_add(bytes.len(), std::sync::atomic::Ordering::Relaxed);
+                        if previous.saturating_add(bytes.len()) > sylph_protocol::MAX_FRAME_BYTES {
+                            return Err(anyhow!(
+                                "envagent ingress bytes exceeded the frame budget"
+                            ));
+                        }
+                        incoming
+                            .try_send(Ok(bytes))
+                            .map_err(|_| anyhow!("envagent ingress backlog exceeded its bound"))?;
+                    }
+                }
+            }
+            .await;
+            if let Err(error) = result {
+                let _ = incoming.send(Err(error)).await;
+            }
+        });
         let result: Result<()> = async {
             loop {
-                let bytes = match read_frame(&mut reader).await {
+                let bytes = match frames.recv().await.unwrap_or_else(|| Err(anyhow!("envagent reader closed"))) {
                     Ok(bytes) => bytes,
                     Err(error) => {
                         let _ = self.disconnect(&environment, epoch).await;
@@ -455,6 +532,7 @@ impl EnvBridge {
                         return Err(error);
                     }
                 };
+                buffered_bytes.fetch_sub(bytes.len(), std::sync::atomic::Ordering::Relaxed);
                 match sylph_protocol::decode_message(&bytes)? {
                     DecodedMessage::Known(WireMessage::EventBatch {
                         environment_id,
@@ -492,26 +570,6 @@ impl EnvBridge {
                         tx.send(response)
                             .await
                             .map_err(|_| anyhow!("envagent writer closed"))?;
-                    }
-                    DecodedMessage::Known(WireMessage::CommandResult {
-                        request_id,
-                        outcome,
-                        connection_epoch: result_epoch,
-                        idempotency,
-                    }) => {
-                        if result_epoch != epoch {
-                            return Err(BridgeError::StaleEpoch.into());
-                        }
-                        self.record_command_result(
-                            &environment,
-                            &sylph_protocol::CommandResultMessage {
-                                request_id,
-                                outcome,
-                                connection_epoch: result_epoch,
-                                idempotency,
-                            },
-                        )
-                        .await?;
                     }
                     DecodedMessage::Known(WireMessage::Heartbeat {
                         connection_epoch, ..
@@ -609,17 +667,31 @@ impl EnvBridge {
                             &payload_hash,
                             &tx,
                             move || async move {
+                                if text.trim().is_empty() || crate::db::labels::is_native_context(&text) {
+                                    return Ok(());
+                                }
                                 let target_turn = match turn_id_for_effect {
                                     Some(turn_id) => turn_id,
                                     None => {
                                         bridge
-                                            .ensure_remote_source_turn(
+                                            .ensure_remote_source_turn_with_origin(
                                                 &session_for_effect,
                                                 recorded_at_ms,
+                                                "user",
                                             )
                                             .await?
                                     }
                                 };
+                                let _ = sqlx::query(
+                                    "UPDATE turns SET origin='user' WHERE id=? AND session_env=? \
+                                     AND session_agent=? AND session_native=? AND origin='agent'",
+                                )
+                                .bind(&target_turn)
+                                .bind(session_for_effect.environment.as_str())
+                                .bind(session_for_effect.agent.as_str())
+                                .bind(session_for_effect.native_id.as_str())
+                                .execute(store.raw_pool())
+                                .await?;
                                 let _ = store
                                     .set_turn_request_text(&session_for_effect, &target_turn, &text)
                                     .await?;
@@ -1060,6 +1132,7 @@ impl EnvBridge {
             }
         }
         .await;
+        reader_task.abort();
         let _ = self.disconnect(&environment, epoch).await;
         writer_task.abort();
         result
@@ -1416,10 +1489,11 @@ impl EnvBridge {
         idempotency: IdempotencyPolicy,
     ) -> Result<CommandOutcome> {
         let request_id = remote_request_id(environment, &command, idempotency)?;
+        let timeout = command_timeout(&command);
         self.dispatch_and_wait(
             environment,
             Command::new(request_id, idempotency, command),
-            std::time::Duration::from_secs(30),
+            timeout,
         )
         .await
     }
@@ -1490,10 +1564,21 @@ impl EnvBridge {
                 draft_id,
                 operation,
             },
-            None => sylph_protocol::EnvironmentCommand::Files {
-                session_id: session_id.ok_or_else(|| anyhow!("missing remote session id"))?,
-                operation,
-            },
+            None => {
+                let session_id = session_id.ok_or_else(|| anyhow!("missing remote session id"))?;
+                let workdir = self
+                    .store
+                    .get_session(&session_id)
+                    .await?
+                    .ok_or_else(|| anyhow!("session not found"))?
+                    .workdir
+                    .ok_or_else(|| anyhow!("session has no recorded working directory"))?;
+                sylph_protocol::EnvironmentCommand::Files {
+                    session_id,
+                    workdir,
+                    operation,
+                }
+            }
         };
         let idempotency = match &command {
             sylph_protocol::EnvironmentCommand::Files { operation, .. }
@@ -1568,10 +1653,11 @@ impl EnvBridge {
             command_name(&command),
             uuid::Uuid::new_v4().simple()
         ))?;
+        let timeout = command_timeout(&command);
         self.dispatch_and_wait(
             &session_id.environment,
             Command::new(request_id, idempotency, command),
-            std::time::Duration::from_secs(30),
+            timeout,
         )
         .await
     }
@@ -1883,6 +1969,25 @@ impl EnvBridge {
         let Some(actual_epoch) = actual_epoch else {
             return Err(BridgeError::StaleEpoch.into());
         };
+        let reads = {
+            let mut waiters = self
+                .read_waiters
+                .lock()
+                .expect("read waiter mutex poisoned");
+            let keys: Vec<_> = waiters
+                .keys()
+                .filter(|(env, _)| env == environment)
+                .cloned()
+                .collect();
+            keys.into_iter()
+                .filter_map(|key| waiters.remove(&key))
+                .collect::<Vec<_>>()
+        };
+        for waiter in reads {
+            let _ = waiter.send(CommandOutcome::Unknown {
+                message: Some("connection closed before read result".into()),
+            });
+        }
         if let Some(row) = self.store.environment_row(environment).await? {
             let _ = self
                 .store
@@ -1992,16 +2097,26 @@ impl EnvBridge {
         if lease.1 != batch.producer_id {
             return Err(BridgeError::ProducerMismatch.into());
         }
+        // Acquire in a deterministic order before sequence allocation. All commands and
+        // adapter lifecycle events for these sessions now share the same sequencer.
+        let sessions: std::collections::BTreeSet<_> = batch
+            .events
+            .iter()
+            .map(|item| item.session_id.encode())
+            .collect();
+        let mut command_guards = Vec::with_capacity(sessions.len());
+        for session in sessions {
+            let session = sylph_protocol::SessionId::decode(&session)?;
+            command_guards.push(self.session_command_lock(&session).await.lock_owned().await);
+        }
         let _gate = self.ingest_gate.lock().await;
         // Remote events derive their canonical sequence from SQLite. Hold the
         // allocator gate through that transaction and cursor update so a
         // concurrent server-authored frame cannot reserve the same number.
         let seq_gate = self.seq.gate();
-        let _seq_gate = seq_gate.lock().await;
+        let mut seq_guard = seq_gate.lock().await;
         let mut terminal_items: Vec<(sylph_protocol::SessionId, String, sylph_protocol::Event)> =
             Vec::new();
-        let mut history_next_seq: std::collections::HashMap<String, i32> =
-            std::collections::HashMap::new();
         let mut accepted_through = self
             .store
             .env_accepted_through(&environment, &batch.producer_id)
@@ -2065,6 +2180,12 @@ impl EnvBridge {
                         ));
                     }
                 }
+                if !terminal_items.is_empty() {
+                    drop(seq_guard);
+                    self.settle_remote_terminals(std::mem::take(&mut terminal_items))
+                        .await;
+                    seq_guard = seq_gate.lock().await;
+                }
                 continue;
             }
 
@@ -2088,23 +2209,20 @@ impl EnvBridge {
                 Some(turn_id)
             } else {
                 Some(
-                    self.ensure_remote_source_turn(&item.session_id, row.created_at_ms)
-                        .await?,
+                    self.ensure_remote_source_turn_with_origin(
+                        &item.session_id,
+                        row.created_at_ms,
+                        if row.kind == "user" && row.span.is_none() {
+                            "user"
+                        } else {
+                            "agent"
+                        },
+                    )
+                    .await?,
                 )
             };
             row.turn_id = arrival_turn_id.clone();
-            let session_key = item.session_id.encode();
-            let min_next_seq = if let Some(next) = history_next_seq.get(&session_key).copied() {
-                next
-            } else {
-                let next = self
-                    .history
-                    .next_seq(&session_key)
-                    .await
-                    .map_err(|error| anyhow!(error))?;
-                history_next_seq.insert(session_key, next);
-                next
-            };
+            let min_next_seq = self.seq.reserved_floor_inner(&item.session_id).await;
             let ingest = self
                 .store
                 .ingest_env_event_auto(
@@ -2115,14 +2233,7 @@ impl EnvBridge {
                     &payload_hash,
                     min_next_seq,
                 )
-                .await;
-            let ingest = match ingest {
-                Ok(value) => value,
-                Err(error) => {
-                    self.seq.reset_session(&item.session_id).await;
-                    return Err(error.into());
-                }
-            };
+                .await?;
             match ingest.result {
                 EnvIngestResult::Inserted => {
                     // Remote ingest allocates the canonical sequence in the same
@@ -2132,7 +2243,13 @@ impl EnvBridge {
                     // constraint.
                     if let Ok(next_seq) = i32::try_from(ingest.server_seq.get().saturating_add(1)) {
                         self.seq.observe_inner(&item.session_id, next_seq).await;
-                        history_next_seq.insert(item.session_id.encode(), next_seq);
+                    }
+                    if row.kind == "user" && row.span.is_none() {
+                        if let Some(turn_id) = arrival_turn_id.as_deref() {
+                            self.store
+                                .set_turn_request_text(&item.session_id, turn_id, &row.text)
+                                .await?;
+                        }
                     }
                     let published = StreamEvent::from_row(&row);
                     if let Some(turn_id) = arrival_turn_id.as_deref() {
@@ -2192,9 +2309,28 @@ impl EnvBridge {
                 }
             }
             accepted_through = seq;
+            // A batch can cross a turn boundary. Seal before assigning the next
+            // item, otherwise the next agent-initiated turn inherits the old generation.
+            if !terminal_items.is_empty() {
+                drop(seq_guard);
+                self.settle_remote_terminals(std::mem::take(&mut terminal_items))
+                    .await;
+                seq_guard = seq_gate.lock().await;
+            }
         }
         drop(_gate);
-        drop(_seq_gate);
+        drop(seq_guard);
+        Ok(IngestResult::Ack(Ack {
+            producer_id: batch.producer_id,
+            accepted_through: ProducerSeq::new(accepted_through),
+            server_seq_through: last_server,
+        }))
+    }
+
+    async fn settle_remote_terminals(
+        &self,
+        terminal_items: Vec<(sylph_protocol::SessionId, String, sylph_protocol::Event)>,
+    ) {
         if let Some(closer) = self.turn_closer.read().await.clone() {
             for (session_id, turn_id, event) in terminal_items {
                 let stop_reason = event
@@ -2221,17 +2357,13 @@ impl EnvBridge {
                 closer.close(&session_id, &turn_id, outcome).await;
             }
         }
-        Ok(IngestResult::Ack(Ack {
-            producer_id: batch.producer_id,
-            accepted_through: ProducerSeq::new(accepted_through),
-            server_seq_through: last_server,
-        }))
     }
 
-    async fn ensure_remote_source_turn(
+    async fn ensure_remote_source_turn_with_origin(
         &self,
         session_id: &sylph_protocol::SessionId,
         at_ms: i64,
+        origin: &str,
     ) -> Result<String> {
         if let Some(id) = self
             .remote_source_turns
@@ -2256,7 +2388,7 @@ impl EnvBridge {
             // No HTTP request opened this turn: it is the remote agent speaking
             // after the prior turn settled, so preserve that provenance in the
             // durable turn row just as the live link path does.
-            origin: "agent".into(),
+            origin: origin.into(),
             origin_subject: None,
             request_text: String::new(),
             command_invocation_id: None,
@@ -2391,6 +2523,17 @@ impl EnvBridge {
         environment: &EnvironmentId,
         command: Command,
     ) -> Result<DispatchResult> {
+        anyhow::ensure!(
+            !is_stateless_read(&command.command),
+            "stateless reads must use the read waiter dispatch path"
+        );
+        anyhow::ensure!(
+            !command
+                .request_id
+                .as_str()
+                .starts_with(EPHEMERAL_READ_PREFIX),
+            "read request ids are reserved for stateless reads"
+        );
         if let Some(outcome) = self
             .store
             .command_outcome(environment, command.request_id.as_str())
@@ -2449,6 +2592,11 @@ impl EnvBridge {
         command: Command,
         timeout_duration: std::time::Duration,
     ) -> Result<CommandOutcome> {
+        if is_stateless_read(&command.command) {
+            return self
+                .dispatch_read_and_wait(environment, command.command, timeout_duration)
+                .await;
+        }
         let key = (environment.clone(), command.request_id.to_string());
         let (tx, rx) = tokio::sync::oneshot::channel();
         let waiter_id = self.next_waiter_id.fetch_add(1, Ordering::Relaxed);
@@ -2525,11 +2673,80 @@ impl EnvBridge {
         }
     }
 
+    async fn dispatch_read_and_wait(
+        &self,
+        environment: &EnvironmentId,
+        command: sylph_protocol::EnvironmentCommand,
+        timeout_duration: std::time::Duration,
+    ) -> Result<CommandOutcome> {
+        let request_id = sylph_protocol::CommandRequestId::parse(format!(
+            "{EPHEMERAL_READ_PREFIX}{}",
+            uuid::Uuid::new_v4().simple()
+        ))?;
+        let key = (environment.clone(), request_id.to_string());
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let (outgoing, registration) = {
+            let leases = self.leases.read().await;
+            let lease = leases.get(environment).ok_or(BridgeError::NotConnected)?;
+            self.read_waiters
+                .lock()
+                .expect("read waiter mutex poisoned")
+                .insert(key.clone(), sender);
+            (
+                lease.sender.clone(),
+                ReadRegistration {
+                    key,
+                    waiters: self.read_waiters.clone(),
+                },
+            )
+        };
+        // The deadline includes waiting for a socket queue slot. A synchronous
+        // registration guard also removes the waiter when an HTTP future is dropped.
+        let outcome = tokio::time::timeout(timeout_duration, async {
+            outgoing
+                .send(WireMessage::Command {
+                    request_id,
+                    idempotency: IdempotencyPolicy::Replayable,
+                    command,
+                })
+                .await
+                .map_err(|_| BridgeError::NotConnected)?;
+            Ok::<_, anyhow::Error>(receiver.await.unwrap_or_else(|_| CommandOutcome::Unknown {
+                message: Some("connection closed before read result".into()),
+            }))
+        })
+        .await;
+        drop(registration);
+        outcome.unwrap_or_else(|_| {
+            Ok(CommandOutcome::Unknown {
+                message: Some("read result timed out".into()),
+            })
+        })
+    }
+
     pub async fn record_command_result(
         &self,
         environment: &EnvironmentId,
         result: &sylph_protocol::CommandResultMessage,
     ) -> Result<()> {
+        // This namespace is minted only by typed stateless dispatch and rejected
+        // for durable commands. It identifies late replies after timeout/reconnect
+        // without retaining unbounded tombstones or writing read payloads to SQLite.
+        if result
+            .request_id
+            .as_str()
+            .starts_with(EPHEMERAL_READ_PREFIX)
+        {
+            let waiter = self
+                .read_waiters
+                .lock()
+                .expect("read waiter mutex poisoned")
+                .remove(&(environment.clone(), result.request_id.to_string()));
+            if let Some(waiter) = waiter {
+                let _ = waiter.send(result.outcome.clone());
+            }
+            return Ok(());
+        }
         let policy = if let Some(policy) = result.idempotency {
             policy
         } else {
@@ -2568,6 +2785,35 @@ impl EnvBridge {
     }
 }
 
+fn is_stateless_read(command: &sylph_protocol::EnvironmentCommand) -> bool {
+    use sylph_protocol::{EnvironmentCommand, FileOperation, NativeTransferOperation};
+    matches!(
+        command,
+        EnvironmentCommand::Health
+            | EnvironmentCommand::Capabilities { .. }
+            | EnvironmentCommand::DraftCapabilities { .. }
+            | EnvironmentCommand::BrowseRoots
+            | EnvironmentCommand::BrowseTree { .. }
+            | EnvironmentCommand::Enumerate { .. }
+            | EnvironmentCommand::Files {
+                operation: FileOperation::Read { .. }
+                    | FileOperation::List { .. }
+                    | FileOperation::Stat { .. },
+                ..
+            }
+            | EnvironmentCommand::DraftFiles {
+                operation: FileOperation::Read { .. }
+                    | FileOperation::List { .. }
+                    | FileOperation::Stat { .. },
+                ..
+            }
+            | EnvironmentCommand::NativeTransfer {
+                operation: NativeTransferOperation::Read { .. },
+                ..
+            }
+    )
+}
+
 fn hash_secret(secret: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(secret.as_bytes());
@@ -2591,6 +2837,20 @@ async fn take_command_waiters(
     waiters.lock().await.remove(key).unwrap_or_default()
 }
 
+pub(crate) fn command_timeout(command: &sylph_protocol::EnvironmentCommand) -> std::time::Duration {
+    use sylph_protocol::EnvironmentCommand;
+    // Native snapshots are bounded by their data size, not an interactive handshake.
+    // Their separate scheduler capacity keeps this longer deadline from blocking files.
+    match command {
+        EnvironmentCommand::Reread { .. }
+        | EnvironmentCommand::Adopt { .. }
+        | EnvironmentCommand::Watch { .. }
+        | EnvironmentCommand::Enumerate { .. }
+        | EnvironmentCommand::Reproject { .. } => std::time::Duration::from_secs(300),
+        _ => std::time::Duration::from_secs(30),
+    }
+}
+
 fn command_name(command: &sylph_protocol::EnvironmentCommand) -> &'static str {
     use sylph_protocol::EnvironmentCommand;
     match command {
@@ -2600,6 +2860,7 @@ fn command_name(command: &sylph_protocol::EnvironmentCommand) -> &'static str {
         EnvironmentCommand::Interrupt { .. } => "interrupt",
         EnvironmentCommand::Steer { .. } => "steer",
         EnvironmentCommand::Queue { .. } => "queue",
+        EnvironmentCommand::QueueSteering { .. } => "queue-steering",
         EnvironmentCommand::SetConfig { .. } => "set-config",
         EnvironmentCommand::Resolve { .. } => "resolve",
         EnvironmentCommand::Watch { .. } => "watch",
@@ -2785,7 +3046,9 @@ async fn write_frame<W: AsyncWrite + Unpin>(writer: &mut W, payload: &[u8]) -> R
 
 #[cfg(test)]
 mod tests {
+    mod sequence;
     use super::*;
+    mod read_commands;
     use crate::models::Session;
     use sylph_protocol::{AgentName, EnvironmentId, Event, EventKind, Phase, SessionId};
 
@@ -2812,6 +3075,35 @@ mod tests {
             AgentName::parse("claude").unwrap(),
             sylph_protocol::NativeId::new(native),
         )
+    }
+
+    #[tokio::test]
+    async fn native_turn_input_opens_a_user_turn() {
+        let (bridge, _dir) = bridge().await;
+        let id = session("input-origin");
+        bridge
+            .store
+            .create_session(&Session {
+                id: id.clone(),
+                workdir: Some("/tmp".into()),
+                title: None,
+                inject_identity: false,
+                fidelity: sylph_protocol::Fidelity::Messages,
+                flags_json: "{}".into(),
+                status: "idle".into(),
+                created_at_ms: 1,
+                updated_at_ms: 1,
+            })
+            .await
+            .unwrap();
+
+        let turn_id = bridge
+            .ensure_remote_source_turn_with_origin(&id, 10, "user")
+            .await
+            .unwrap();
+        let turn = bridge.store.get_turn(&turn_id).await.unwrap().unwrap();
+        assert_eq!(turn.origin, "user");
+        assert_eq!(turn.status, "running");
     }
 
     #[tokio::test]
@@ -2982,7 +3274,9 @@ mod tests {
         let command = Command::new(
             sylph_protocol::CommandRequestId::parse("request-1").unwrap(),
             IdempotencyPolicy::Replayable,
-            sylph_protocol::EnvironmentCommand::Health,
+            sylph_protocol::EnvironmentCommand::Activate {
+                session_id: session("persisted-command"),
+            },
         );
         let waiter = {
             let bridge = bridge.clone();
@@ -3049,7 +3343,10 @@ mod tests {
         let command = Command::new(
             sylph_protocol::CommandRequestId::parse("same-request").unwrap(),
             IdempotencyPolicy::AtMostOnce,
-            sylph_protocol::EnvironmentCommand::Health,
+            sylph_protocol::EnvironmentCommand::Interrupt {
+                session_id: session("concurrent-command"),
+                expected_turn_id: None,
+            },
         );
         let first = {
             let bridge = bridge.clone();
@@ -3420,12 +3717,43 @@ mod tests {
                 writer,
             ))
             .await;
+        let mut batch = batch;
+        let mut next = Event::new(EventKind::Assistant, Some(Phase::Completed), 3);
+        next.text = "A new agent-initiated turn".into();
+        batch.events.push(sylph_protocol::SequencedEvent::pending(
+            batch.producer_id.clone(),
+            ProducerSeq::new(2),
+            session_id.clone(),
+            next,
+            None,
+        ));
         bridge.ingest_batch(batch.clone()).await.unwrap();
         let settled = bridge.store.get_turn(&turn_id).await.unwrap().unwrap();
         assert_eq!(settled.status, "completed");
         assert_eq!(
             bridge.store.session_status(&session_id).await.as_deref(),
-            Some("idle")
+            Some("running")
+        );
+
+        let current = bridge
+            .store
+            .running_turn_id(&session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(
+            current, turn_id,
+            "an event after a close in the same batch belongs to a new generation"
+        );
+        assert_eq!(
+            bridge
+                .store
+                .get_turn(&current)
+                .await
+                .unwrap()
+                .unwrap()
+                .origin,
+            "agent"
         );
 
         // A reconnect can replay the already committed terminal item. The

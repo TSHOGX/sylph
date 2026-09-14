@@ -84,6 +84,13 @@ async fn remote_target(
                     Error::Forbidden(message)
                 }
             })?;
+        if !state
+            .env_bridge
+            .environment_connected(&draft.environment)
+            .await
+        {
+            return Err(Error::EnvironmentUnreachable(draft.environment.to_string()));
+        }
         return Ok(Some(RemoteTarget::Draft {
             environment: draft.environment,
             draft_id: id.to_string(),
@@ -100,9 +107,25 @@ async fn remote_target(
     let Some(session) = state.store.get_session(&session_id).await? else {
         return Err(Error::SessionNotFound);
     };
-    let workdir = session.workdir.ok_or_else(|| {
-        Error::InvalidRequest("This session has no recorded working directory".into())
-    })?;
+    if !state
+        .store
+        .has_capability(subject, session_id.environment.as_str(), "observe")
+        .await?
+    {
+        return Err(Error::SessionNotFound);
+    }
+    if !state
+        .env_bridge
+        .environment_connected(&session_id.environment)
+        .await
+    {
+        return Err(Error::EnvironmentUnreachable(
+            session_id.environment.to_string(),
+        ));
+    }
+    let workdir = session
+        .workdir
+        .ok_or_else(|| Error::NativeSessionNotResumable)?;
     Ok(Some(RemoteTarget::Session {
         environment: session_id.environment.clone(),
         session_id,
@@ -134,7 +157,9 @@ fn remote_parts(
 
 fn map_remote_file_error(error: anyhow::Error) -> Error {
     let text = format!("{error:#}");
-    if text.contains("DRAFT_NOT_FOUND") || text.contains("SESSION_NOT_HOSTED") {
+    if text.contains("not currently available") || text.contains("NotConnected") {
+        Error::EnvironmentUnreachable("selected environment".into())
+    } else if text.contains("DRAFT_NOT_FOUND") || text.contains("SESSION_NOT_HOSTED") {
         Error::LinkGone
     } else if text.contains("outside")
         || text.contains("escapes")
@@ -1784,5 +1809,13 @@ mod tests {
         // Bytes above 0x7f exercise the shift arithmetic, where a sign-extension
         // bug would show up.
         assert_eq!(base64_encode(&[0xff, 0xfe, 0xfd]), "//79");
+    }
+
+    #[test]
+    fn disconnected_remote_file_errors_are_environment_unreachable() {
+        assert!(matches!(
+            map_remote_file_error(anyhow::anyhow!("connection is not currently available")),
+            Error::EnvironmentUnreachable(_)
+        ));
     }
 }

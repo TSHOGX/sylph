@@ -106,10 +106,17 @@ const FullscreenViewer = dynamic(
 );
 
 export function ArtifactsPane() {
-  const t = useT();
   // Decoded, or the file endpoints receive a double-encoded id and the pane reports
   // "Could not list the working directory" — see `use-session-id-param`.
   const sessionId = useSessionIdParam();
+  // Expansion and file operations belong to one session. The shell survives
+  // navigation, so key this state boundary instead of loading an old expansion
+  // tree against every newly selected session.
+  return <SessionArtifactsPane key={sessionId ?? ""} sessionId={sessionId} />;
+}
+
+function SessionArtifactsPane({ sessionId }: { sessionId: string | undefined }) {
+  const t = useT();
   const {
     artifact,
     showArtifact,
@@ -365,7 +372,10 @@ function FileTree({
 
   const root = useQuery({
     queryKey: ["files", sessionId, ""],
-    queryFn: () => api.files.tree(sessionId, ""),
+    queryFn: ({ signal }) => api.files.tree(sessionId, "", signal),
+    retry: false,
+    refetchOnWindowFocus: false,
+    staleTime: 15_000,
   });
 
   /** Right-click on empty space: the root's own menu. */
@@ -553,11 +563,13 @@ function Directory({
   const t = useT();
   const { data, isPending, error, refetch } = useQuery({
     queryKey: ["files", sessionId, path],
-    queryFn: () => api.files.tree(sessionId, path),
+    queryFn: ({ signal }) => api.files.tree(sessionId, path, signal),
     // Only the root and expanded directories are fetched; a collapsed one costs
     // nothing until it is opened.
     enabled: depth === 0 || expanded.has(path),
     staleTime: 15_000,
+    retry: false,
+    refetchOnWindowFocus: false,
   });
 
   if (isPending && (depth === 0 || expanded.has(path))) {
@@ -733,6 +745,8 @@ function describeTreeError(error: unknown, path: string, t: Translate): string {
         return t("files.error.gone", { where });
       case "SESSION_NOT_FOUND":
         return t("files.error.sessionGone");
+      case "ENVIRONMENT_UNREACHABLE":
+        return t("files.error.environmentUnreachable");
       case "POLICY_VIOLATION":
         return t("files.error.outside", { where });
       // Router-level and envelopeless failures: the endpoint, not the path.

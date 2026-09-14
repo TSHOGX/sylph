@@ -282,6 +282,10 @@ pub enum EnvironmentCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_turn_id: Option<String>,
     },
+    QueueSteering {
+        session_id: SessionId,
+        text: String,
+    },
     Queue {
         session_id: SessionId,
         text: String,
@@ -337,6 +341,8 @@ pub enum EnvironmentCommand {
     },
     Files {
         session_id: SessionId,
+        /// The server's recorded root, independent of any process-local hosted link.
+        workdir: String,
         operation: FileOperation,
     },
     DraftCapabilities {

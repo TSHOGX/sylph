@@ -248,7 +248,7 @@ impl AppState {
         );
         retention.spawn();
 
-        Ok(Self {
+        let state = Self {
             store,
             config,
             hub,
@@ -258,7 +258,12 @@ impl AppState {
             ingest,
             native_index: crate::api::native_index::NativeIndex::new(),
             env_bridge,
-        })
+        };
+        state.store.recover_control_requests().await?;
+        crate::api::imports::recover_state(&state.store).await?;
+        crate::api::imports::spawn_sync(state.clone());
+        crate::api::controls::spawn_dispatcher(state.clone());
+        Ok(state)
     }
 }
 
@@ -370,6 +375,19 @@ pub fn router(state: AppState) -> Router {
         // store. Replaces `POST /sessions/import`, which named a row in a separate
         // archive that no longer exists.
         .route("/api/v1/sessions/adopt", post(api::sessions::adopt))
+        .route(
+            "/api/v1/environments/{environment}/imports",
+            post(api::imports::create),
+        )
+        .route(
+            "/api/v1/environments/{environment}/imports/list",
+            get(api::imports::list),
+        )
+        .route("/api/v1/imports/{id}", get(api::imports::get))
+        .route("/api/v1/imports/{id}/items", get(api::imports::items))
+        .route("/api/v1/imports/{id}/events", get(api::imports::events))
+        .route("/api/v1/imports/{id}/cancel", post(api::imports::cancel))
+        .route("/api/v1/imports/{id}/retry", post(api::imports::retry))
         // What native sessions an environment holds, without adopting any. This is what
         // makes adopt offerable in a UI rather than requiring a user to know a vendor
         // id. A literal path, so it is declared beside `adopt` and above
@@ -455,6 +473,18 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/sessions/{id}/requests",
             get(api::links::list_requests),
         )
+        .route(
+            "/api/v1/sessions/{id}/control-requests",
+            get(api::links::control_requests),
+        )
+        .route(
+            "/api/v1/control-requests/{id}",
+            axum::routing::patch(api::controls::edit).delete(api::controls::cancel),
+        )
+        .route(
+            "/api/v1/control-requests/{id}/steer",
+            post(api::controls::steer),
+        )
         .route("/api/v1/requests/{id}/resolve", post(api::links::resolve))
         // Scoped to the session rather than the turn: both act on the agent, and
         // the session is what holds a link. A turn-scoped route would need the
@@ -468,6 +498,10 @@ pub fn router(state: AppState) -> Router {
         // which decides what the request means: a steer carries a turn precondition and a
         // queued follow-up cannot have one. See `api::links::queue`.
         .route("/api/v1/sessions/{id}/queue", post(api::links::queue))
+        .route(
+            "/api/v1/sessions/{id}/native-queue",
+            post(api::links::native_queue),
+        )
         // Typed session config: what `/model` and `/permissions` resolve to, so a
         // control command is a typed set rather than prose sent as a prompt.
         .route("/api/v1/sessions/{id}/config", post(api::links::set_config))

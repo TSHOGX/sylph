@@ -48,6 +48,7 @@
  * fixed pair of dropdowns would be wrong for `codex` on the first render.
  */
 
+import { CONTROL_DELIVERIES } from "@/lib/control-delivery";
 import dynamic from "next/dynamic";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
@@ -166,6 +167,7 @@ export function Composer({
   commands = [],
   config = [],
   agentConnecting = false,
+  capabilityError,
   control,
   controlBlock,
   onReattach,
@@ -180,6 +182,8 @@ export function Composer({
   canInterrupt = false,
   onInterrupt,
   canSteer = false,
+  canQueueSteering = false,
+  onNativeQueue,
   canQueue = false,
   onSteer,
   onQueue,
@@ -221,6 +225,7 @@ export function Composer({
    * when a user opening a session types the first slash.
    */
   agentConnecting?: boolean;
+  capabilityError?: unknown;
   /** Why there is no live agent, when an attempt failed. */
   /**
    * Whether Sylph can send to this session, and why not.
@@ -230,7 +235,7 @@ export function Composer({
    * someone else's terminal" it is, and a bare false made all of them the dead
    * keystroke this prop exists to prevent.
    */
-  control: Facet;
+  control?: Facet;
   /** Server-derived caller authorization and reachability decision. */
   controlBlock?: ControlBlock;
   /** Retry establishing the link. Absent when there is nothing to retry. */
@@ -263,6 +268,8 @@ export function Composer({
   onInterrupt?: () => void;
   /** Whether the agent declared it accepts text mid-turn. */
   canSteer?: boolean;
+  canQueueSteering?: boolean;
+  onNativeQueue?: (text: string, priority: boolean) => void;
   /** Whether the agent accepts text for *after* the running turn. */
   canQueue?: boolean;
   onSteer?: (text: string) => void;
@@ -291,6 +298,7 @@ export function Composer({
   const [slashIndexFor, setSlashIndexFor] = useState<string | undefined>(undefined);
   // Which config option a control command opened, or `ALL_CONFIG` for all of them.
   const [openConfigId, setOpenConfigId] = useState<string | null>(null);
+  const [deliveryMode, setDeliveryMode] = useState<"steer" | "queue" | "native_steer" | "native_queue" | null>(null);
 
   // The menu is open when the text *is* a command being typed: a leading slash,
   // no whitespace yet. Derived rather than a state flag, so there is no way to
@@ -318,7 +326,7 @@ export function Composer({
     matchCount: slashMatches.length,
     commandCount: commands.length,
     connecting: agentConnecting,
-    failed: !control.available,
+    failed: !control?.available,
   });
 
   // Reset the highlight when the candidate set changes, or a narrowing query
@@ -350,14 +358,16 @@ export function Composer({
     // to the queue delivers it after the thing it was meant to prevent — which is exactly
     // what happened while `claude` declared a steer it does not have. Where only queueing
     // exists the composer says so rather than silently doing the weaker thing.
-    if (isLive && canSteer && onSteer) {
-      onSteer(text);
-      onTextChange("");
+    if (nativeQueueing && onNativeQueue) {
+      onNativeQueue(text, selectedMode === "native_steer");
       return;
     }
-    if (isLive && canQueue && onQueue) {
+    if (steering && onSteer) {
+      onSteer(text);
+      return;
+    }
+    if (queueing && onQueue) {
       onQueue(text);
-      onTextChange("");
       return;
     }
 
@@ -410,9 +420,16 @@ export function Composer({
   // Either channel keeps the textarea usable mid-turn; neither disables it. The two are
   // distinguished at submit and in the placeholder, not here — what this decides is only
   // whether the user may type at all.
-  const steering = isLive && canSteer;
-  const queueing = isLive && !canSteer && canQueue;
-  const disabled = (isLive && !steering && !queueing) || sending;
+  const modes = CONTROL_DELIVERIES.map((mode) => ({
+    ...mode,
+    available: mode.capability === "steer" ? canSteer : mode.capability === "queue_steering" ? canQueueSteering : canQueue,
+  }));
+  const selectedMode = modes.find((mode) => mode.id === deliveryMode && mode.available)?.id
+    ?? (canSteer ? "steer" : canQueueSteering ? "native_steer" : "queue");
+  const steering = isLive && selectedMode === "steer" && canSteer;
+  const queueing = isLive && selectedMode === "queue" && canQueue;
+  const nativeQueueing = isLive && (selectedMode === "native_steer" ? canQueueSteering : selectedMode === "native_queue" && canQueue);
+  const disabled = (isLive && ((!steering && !queueing && !nativeQueueing) || attachments.length > 0)) || sending;
   const canSend = text.trim().length > 0 && !disabled;
 
   // The agent is fixed once the conversation has content. Switching it would
@@ -785,10 +802,32 @@ export function Composer({
             <div className="absolute inset-x-0 bottom-full z-30 mb-2">
               <SlashStatus
                 status={status}
+                capabilityError={capabilityError}
                 control={control}
                 controlBlock={controlBlock}
                 onReattach={onReattach}
               />
+            </div>
+          )}
+          {isLive && (
+            <div className="border-b border-line px-3 py-1.5">
+              <div role="group" aria-label={t("control.deliveryMode")} className="flex flex-wrap items-center gap-1">
+                {modes.filter((mode) => mode.available).map((mode) => (
+                  <button
+                    key={mode.id}
+                    type="button"
+                    aria-pressed={selectedMode === mode.id}
+                                        onClick={() => setDeliveryMode(mode.id)}
+                    className="tap-row rounded px-2 text-xs text-ink-soft hover:bg-hover aria-pressed:bg-active aria-pressed:text-ink disabled:opacity-50 focus-ring"
+                  >
+                    {t(mode.label)}
+                  </button>
+                ))}
+              </div>
+              <p className="mt-1 text-3xs text-ink-muted">{t(modes.find((mode) => mode.id === selectedMode)!.hint)}</p>
+              {!canQueue && <p className="mt-1 text-3xs text-ink-muted">{t("control.queueUnsupported", { agent: session.agent })}</p>}
+              {!canSteer && !canQueueSteering && <p className="mt-1 text-3xs text-ink-muted">{t("control.steerUnsupported", { agent: session.agent })}</p>}
+              {attachments.length > 0 && <p role="status" className="mt-1 text-3xs text-ink-muted">{t("control.attachmentsWait")}</p>}
             </div>
           )}
           <textarea
@@ -876,7 +915,6 @@ export function Composer({
                     ? t("composer.placeholderBusy")
                     : t("composer.placeholder")
             }
-            disabled={disabled}
             aria-describedby={problem ? problemId : undefined}
             // `text-base` on mobile is not a style choice: mobile Safari zooms the
             // page when a focused field's text is under 16px and does not zoom back
@@ -1001,6 +1039,18 @@ export function Composer({
               </Button>
             )}
 
+            {isLive && (steering || queueing || nativeQueueing) && (
+              <Button
+                type="submit"
+                variant="primary"
+                disabled={!canSend}
+                aria-label={t("action.send")}
+                className="shrink-0 max-md:h-9 max-md:w-9 max-md:rounded-full max-md:p-0"
+              >
+                <SendIcon size={16} />
+                <span className="max-md:hidden">{t("action.send")}</span>
+              </Button>
+            )}
             {isLive ? (
               <Button
                 variant="danger"
@@ -1148,12 +1198,14 @@ export function Composer({
  */
 function SlashStatus({
   status,
+  capabilityError,
   control,
   controlBlock,
   onReattach,
 }: {
   status: SlashStatus;
-  control: Facet;
+  capabilityError?: unknown;
+  control?: Facet;
   controlBlock?: ControlBlock;
   onReattach?: () => void;
 }) {
@@ -1161,18 +1213,20 @@ function SlashStatus({
 
   const reason = controlBlock?.kind === "unavailable"
     ? controlBlock.reason
-    : control.available
+    : control?.available
       ? undefined
-      : control.reason;
+      : control?.reason;
 
   // Whether a retry can change the answer is the protocol's rule, not this
   // component's: `isRetryable` mirrors `UnavailableReason::is_retryable`, so the button
   // cannot come to disagree with the cache lifetime in `use-agent-session.ts` that is
   // decided from the same rule. Offering a retry for `no_agent` would invite the user
   // to keep paying a process spawn for an outcome that cannot change.
-  const retryable = status === "unavailable" && Boolean(reason && isRetryable(reason));
+  const retryable = status === "unavailable" && Boolean(capabilityError || (reason && isRetryable(reason)));
 
-  const label = controlBlock?.kind === "unauthorized"
+  const label = capabilityError
+    ? t("drive.readFailed")
+    : controlBlock?.kind === "unauthorized"
     ? controlBlock.reason === "expired"
       ? t("drive.unauthorized.expired")
       : t("drive.unauthorized.notGranted")

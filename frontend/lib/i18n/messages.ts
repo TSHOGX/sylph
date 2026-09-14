@@ -79,6 +79,28 @@ export const en = {
   "action.expand": "Expand",
   "action.collapse": "Collapse",
   "action.send": "Send",
+  "action.steer": "Steer",
+  "action.queue": "Queue",
+  "control.currentTurn": "Current turn",
+  "control.currentTurnHint": "Targets this turn only. Refused if the turn has ended.",
+  "control.nativeSteer": "Harness priority queue",
+  "control.nativeSteerHint": "Inserted before a later model call. May remain queued for the next turn; cannot be edited here.",
+  "control.nativeQueue": "Harness follow-up",
+  "control.nativeQueueHint": "The harness decides when to consume this follow-up. Cannot be edited here.",
+  "control.serverQueue": "Next turn (Sylph)",
+  "control.serverQueueHint": "Waits for this turn to settle, then starts a new turn. Editable until dispatched.",
+  "control.nativeReceipt": "Submitted to harness; consumption is not confirmed.",
+  "control.deliveryMode": "Delivery mode",
+  "control.queueUnsupported": "Queue is unavailable for {agent}.",
+  "control.steerUnsupported": "Steering is unavailable for {agent}.",
+  "control.attachmentsWait": "Attachments are available when starting a new turn.",
+  "control.queueTitle": "Pending controls",
+  "control.queueCount": "Queue ({count})",
+  "control.queueUnavailable": "Queue is unavailable for this agent.",
+  "control.save": "Save edit",
+  "control.edit": "Edit queued item",
+  "control.steerNow": "Steer now",
+  "control.queueUnsupportedShort": "Queue unsupported",
   "action.sending": "Sending",
   "action.sendingEllipsis": "Sending...",
   "action.stop": "Stop",
@@ -430,6 +452,7 @@ export const en = {
   "files.error.workingDirectory": "the working directory",
   "files.error.gone": "{where} no longer exists on disk.",
   "files.error.sessionGone": "This session is no longer in the journal.",
+  "files.error.environmentUnreachable": "The machine hosting this session is offline. History remains available, but files need the machine to reconnect.",
   "files.error.outside": "{where} is outside this session's working directory.",
   "files.error.list": "Could not list {where}: {message}",
   "files.error.listPlain": "Could not list {where}.",
@@ -770,7 +793,7 @@ export const en = {
   "drive.label": "What Sylph can do with this session",
   "drive.environmentUnreachable.headline": "That machine is not connected.",
   "drive.environmentUnreachable.detail":
-    "History reads from Sylph\u2019s own record, so the transcript is complete. Nothing can be sent until the machine is back.",
+    "History already saved in Sylph remains readable. It may not include the machine's latest changes. Nothing can be sent until the machine is back.",
   "drive.notOursToDrive.headline": "Running in a terminal.",
   "drive.notOursToDrive.detail":
     "This agent offers no channel to a second party, so Sylph can follow the session but cannot send to it.",
@@ -789,6 +812,8 @@ export const en = {
   "timeline.delegationPath": "Delegation path",
   "timeline.toolResult": "Tool result",
   "timeline.currentTurn": "Current turn",
+  "session.emptyTurn": "No transcript content has been saved for this turn.",
+  "drive.readFailed": "Could not read session capabilities.",
 
   // Session header actions. The desktop pair and the phone menu name the same two
   // actions, so they share keys — a second spelling would let the two surfaces drift.
@@ -830,6 +855,12 @@ export const en = {
   "history.adoptHint":
     "Sessions started outside Sylph are not listed until they are imported.",
   "history.adoptAction": "Look for sessions on this machine",
+  "imports.modeHint": "Choose how this workspace's native history should be synchronized.",
+  "imports.modeLocked": "Import is running with the selected mode. These options unlock when it finishes.",
+  "imports.progress": "Import progress",
+  "settings.workspaces.sync.label": "History synchronization",
+  "settings.workspaces.sync.hint": "Manage one-time imports and ongoing history sync for pinned workspaces.",
+  "settings.workspaces.sync.empty": "Pin a workspace to manage its history synchronization here.",
 } as const;
 
 /** Every key in the catalogue. Derived from English, which is the source. */

@@ -332,6 +332,7 @@ fn command_name(command: &EnvironmentCommand) -> &'static str {
         EnvironmentCommand::Interrupt { .. } => "interrupt",
         EnvironmentCommand::Steer { .. } => "steer",
         EnvironmentCommand::Queue { .. } => "queue",
+        EnvironmentCommand::QueueSteering { .. } => "queue-steering",
         EnvironmentCommand::SetConfig { .. } => "set_config",
         EnvironmentCommand::Resolve { .. } => "resolve",
         EnvironmentCommand::Watch { .. } => "watch",

@@ -23,6 +23,15 @@ function ev(partial: Partial<StreamEvent> & { kind: string }): StreamEvent {
 }
 
 describe("buildRows", () => {
+  it("keeps a sealed reasoning block authoritative over a late delta", () => {
+    const rows = buildRows([
+      ev({ kind: "thinking", phase: "completed", streamId: "reasoning", text: "final reasoning", stability: "stable" }),
+      ev({ kind: "thinking", phase: "delta", streamId: "reasoning", text: "late fragment", stability: "ephemeral" }),
+    ]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].event.text).toBe("final reasoning");
+    expect(rows[0].event.phase).toBe("completed");
+  });
   it("accumulates deltas and replaces them with the completed payload", () => {
     const rows = buildRows([
       ev({ kind: "assistant", phase: "started", streamId: "a" }),

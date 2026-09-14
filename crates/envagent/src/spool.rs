@@ -386,6 +386,17 @@ impl Spool {
             .unwrap_or(0))
     }
 
+    pub async fn pending_watermark(&self, producer_id: &str) -> Result<u64, SpoolError> {
+        let through: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(producer_seq), 0) FROM spool_events WHERE producer_id = ?",
+        )
+        .bind(producer_id)
+        .fetch_one(&self.pool)
+        .await?;
+        u64::try_from(through)
+            .map_err(|_| sqlx::Error::Protocol("negative producer sequence".into()).into())
+    }
+
     pub async fn size_bytes(&self) -> Result<u64, SpoolError> {
         let value: i64 =
             sqlx::query_scalar("SELECT COALESCE(SUM(length(payload)), 0) FROM spool_events")

@@ -228,6 +228,7 @@ export function WorkspaceUIProvider({
       ({ reread }) => {
         setRereadNotice({ state: "success", sessionId, sessionLabel, report: reread });
         void queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+        void queryClient.invalidateQueries({ queryKey: ["files", sessionId] });
         void queryClient.invalidateQueries({ queryKey: ["sessions"] });
       },
       (error: unknown) => setRereadNotice({

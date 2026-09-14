@@ -261,20 +261,11 @@ impl Adapter for PiAdapter {
             name: AGENT_NAME.to_string(),
             version: version().await,
             flags: Self::flags(),
-            // Each gates exactly one method on `Session`. `interrupt` is pi's `abort`,
-            // steering is pi's own `steer` — the discipline that delivers after the
-            // current tool calls and before the next model call, which is what "change
-            // course now" means — and `set_config` maps onto `set_model` and
-            // `set_thinking_level`.
-            //
-            // **This vendor offers both `Steer` and `Queue`, which is what makes them two
-            // capabilities rather than one.** `steer` reaches the running turn and
-            // `follow_up` waits for it, and pi implements them as separate verbs with
-            // separate delivery disciplines — so a client offering only one of them is
-            // withholding something the session can do.
+            // Native priority insertion has no atomic turn precondition. Keep it as
+            // QueueSteering, separately from turn-scoped Steer and follow-up Queue.
             supports: vec![
                 Capability::Interrupt,
-                Capability::Steer,
+                Capability::QueueSteering,
                 Capability::Queue,
                 Capability::SetConfig,
             ],
@@ -300,16 +291,13 @@ impl Adapter for PiAdapter {
     async fn reproject(&self, records: Vec<NativeRecord>) -> Result<EventStream> {
         let mut messages = Vec::new();
         let mut live = std::collections::HashMap::new();
-        let has_live = records
-            .iter()
-            .any(|record| record.source.starts_with("live/"));
         for record in records {
             if record.source.starts_with("live/") {
                 let correlation = live
                     .entry(record.source)
                     .or_insert_with(translate::Correlation::new);
                 messages.extend(correlation.translate(&record.payload, 0).messages);
-            } else if !has_live {
+            } else {
                 messages.extend(native::reproject_native_record(&record)?);
             }
         }
@@ -323,7 +311,13 @@ impl Adapter for PiAdapter {
     }
 
     async fn enumerate(&self, filter: &StoreFilter) -> Result<Vec<NativeSummary>> {
-        native::enumerate(filter)
+        let filter = filter.clone();
+        tokio::task::spawn_blocking(move || native::enumerate(&filter)).await?
+    }
+
+    async fn lookup(&self, id: &NativeId) -> Result<Option<NativeSummary>> {
+        let id = id.clone();
+        tokio::task::spawn_blocking(move || native::lookup(&id)).await?
     }
 }
 
@@ -353,6 +347,57 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
     use sylph_protocol::RequestedNativeId;
+
+    #[tokio::test]
+    async fn retained_reprojection_keeps_native_and_live_messages() {
+        use futures::TryStreamExt;
+        use serde_json::json;
+        use sylph_protocol::SessionMessage;
+        let record = |source: &str, version, payload| NativeRecord {
+            source: source.to_string(),
+            version,
+            payload,
+            raw_json: None,
+            blobs: Vec::new(),
+        };
+        let records = vec![
+            record(
+                "root.jsonl",
+                1,
+                json!({"type":"message","id":"native-item","message":{"role":"assistant","content":[{"type":"text","text":"native answer"}]}}),
+            ),
+            record(
+                "live/stdout/run.jsonl",
+                1,
+                json!({"type":"message_start","message":{"role":"assistant"}}),
+            ),
+            record(
+                "live/stdout/run.jsonl",
+                2,
+                json!({"type":"message_update","assistantMessageEvent":{"type":"text_start","contentIndex":0}}),
+            ),
+            record(
+                "live/stdout/run.jsonl",
+                3,
+                json!({"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"live answer"}}),
+            ),
+            record(
+                "live/stdout/run.jsonl",
+                4,
+                json!({"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":0,"content":"live answer"}}),
+            ),
+        ];
+        let messages: Vec<_> = PiAdapter
+            .reproject(records)
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        for expected in ["native answer", "live answer"] {
+            assert!(messages.iter().any(|message| matches!(message, SessionMessage::Event(event) if event.text == expected)), "missing {expected}: {messages:?}");
+        }
+    }
 
     fn spec() -> RunSpec {
         RunSpec {
@@ -1479,6 +1524,7 @@ pub mod translate {
         /// one settled turn — a retry, a compaction, a queued continuation — so a second
         /// `turn`/`started` would bracket a turn that is already bracketed.
         turn_open: bool,
+        pub(super) opening_echo_pending: bool,
         /// The outcome the vendor last reported, held until `agent_settled` closes the turn.
         ///
         /// **`agent_settled` carries no payload** — its declared shape is `{type}` alone
@@ -1542,14 +1588,6 @@ pub mod translate {
             }
         }
 
-        /// Whether a turn is currently open.
-        ///
-        /// Exposed because the session half needs it and a second copy of the flag there
-        /// would be a second answer to one question.
-        pub fn turn_is_open(&self) -> bool {
-            self.turn_open
-        }
-
         /// One vendor event, projected.
         ///
         /// An unrecognized `type` produces an empty [`Emission`] rather than an error: pi
@@ -1580,6 +1618,23 @@ pub mod translate {
                     self.message_seq += 1;
                     self.message_id = format!("pi-{}", self.message_seq);
                     self.blocks.clear();
+                    if let Some(message) = payload.get("message").filter(|message| {
+                        message.get("role").and_then(Value::as_str) == Some("user")
+                    }) {
+                        if self.opening_echo_pending {
+                            self.opening_echo_pending = false;
+                        } else {
+                            let mut event = Event::new(
+                                EventKind::Other("user".into()),
+                                Some(Phase::Completed),
+                                at_ms,
+                            );
+                            event.stream_id = Some(self.message_id.clone());
+                            event.text = flatten(message.get("content").unwrap_or(&Value::Null));
+                            event.data = Some(json!({"vendorMessage": message}));
+                            out.push(event);
+                        }
+                    }
                     // The model the vendor says it is running, when the message names one.
                     // Read here rather than tracked, because it is the vendor's claim.
                     out.observed_model = observed_model(payload.get("message"));
@@ -1901,6 +1956,22 @@ pub mod translate {
     mod tests {
         use super::*;
 
+        #[test]
+        fn native_queue_echo_is_retained_even_when_its_text_equals_the_opening_input() {
+            let mut correlation = Correlation::new();
+            correlation.opening_echo_pending = true;
+            let message = json!({"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"same text"}]}});
+            assert!(correlation.translate(&message, 1).events().is_empty());
+            let emitted = correlation.translate(&message, 2);
+            let user = emitted
+                .events()
+                .into_iter()
+                .find(|event| event.kind.as_str() == "user")
+                .unwrap();
+            assert_eq!(user.text, "same text");
+            assert_eq!(user.stream_id.as_deref(), Some("pi-2"));
+        }
+
         /// Feed a turn's payloads through one correlation, as the vendor sends them.
         fn turn(payloads: &[Value]) -> Vec<Event> {
             let mut link = Correlation::new();
@@ -2130,6 +2201,7 @@ pub mod native {
 
     use crate::native::{
         candidates, epoch_millis_from_iso, epoch_millis_from_json, timestamp::Unit,
+        SessionCandidate,
     };
 
     /// Where `pi` keeps its sessions, `$HOME`-relative.
@@ -3628,18 +3700,8 @@ pub mod native {
     fn locate(id: &NativeId) -> Result<PathBuf> {
         let root = store_root()
             .ok_or_else(|| anyhow!("HOME is not set, so ~/.pi/agent/sessions cannot be located"))?;
-        for candidate in candidates(&root, is_session_file) {
-            if let Ok(header) = read_header(&candidate.path, false) {
-                if header.native_id.as_ref() == Some(id) {
-                    return Ok(candidate.path);
-                }
-            }
-        }
-        Err(anyhow!(
-            "no `pi` session {} in {}",
-            id.as_str(),
-            root.display()
-        ))
+        find_in_root(&root, id)
+            .ok_or_else(|| anyhow!("no `pi` session {} in {}", id.as_str(), root.display()))
     }
 
     /// Whether this path is a session transcript.
@@ -3651,6 +3713,25 @@ pub mod native {
     /// `"id": null`, and that is where it is filtered ([`Header::native_id`]).
     fn is_session_file(path: &Path) -> bool {
         path.extension().is_some_and(|ext| ext == "jsonl")
+    }
+
+    pub fn lookup(id: &NativeId) -> Result<Option<NativeSummary>> {
+        let Some(root) = store_root() else {
+            return Ok(None);
+        };
+        let revision = crate::native::inventory_revision(&root);
+        let mut summary = lookup_in(&root, id);
+        if let Some(summary) = summary.as_mut() {
+            summary.source_revision = revision;
+        }
+        Ok(summary)
+    }
+
+    fn lookup_in(root: &Path, id: &NativeId) -> Option<NativeSummary> {
+        let candidate = SessionCandidate::of(&find_in_root(root, id)?)?;
+        enumerate_candidates(&StoreFilter::default(), vec![candidate])
+            .into_iter()
+            .find(|row| row.native_id == *id)
     }
 
     /// Which native sessions this machine's store holds.
@@ -3678,8 +3759,20 @@ pub mod native {
             return Ok(Vec::new());
         }
 
+        let revision = crate::native::inventory_revision(&root);
+        let mut summaries = enumerate_candidates(filter, candidates(&root, is_session_file));
+        for summary in &mut summaries {
+            summary.source_revision = revision.clone();
+        }
+        Ok(summaries)
+    }
+
+    fn enumerate_candidates(
+        filter: &StoreFilter,
+        candidates: Vec<SessionCandidate>,
+    ) -> Vec<NativeSummary> {
         let mut found = Vec::new();
-        for candidate in candidates(&root, is_session_file) {
+        for candidate in candidates {
             // Resolved, because a listing is where lineage is rendered and the cost is one
             // extra open on the 67 headers that carry a pointer.
             let Ok(header) = read_header(&candidate.path, true) else {
@@ -3731,6 +3824,7 @@ pub mod native {
                 ended_at_ms,
                 // Absent rather than estimated: see the note above.
                 event_count: None,
+                source_revision: None,
                 // Always a fork: the header's parent is resolved from `fork_pointer` and
                 // nothing else (`Header::parent_native_id`), so a delegation cannot reach
                 // this field. `parent_session`/`parentSession` occurs 0 times in the whole
@@ -3753,7 +3847,7 @@ pub mod native {
         // listing wants. Deliberately not re-sorted on the session's own recorded end: that
         // is a different fact — a file being written has an mtime and no end stamp — and
         // sorting on it would reorder by a field a live session does not have.
-        Ok(found)
+        found
     }
 
     /// A trailing slash is not a different directory.
@@ -3845,6 +3939,24 @@ pub mod native {
             Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../../fixtures/native/pi")
                 .join(name)
+        }
+
+        #[test]
+        fn native_lookup_uses_the_header_even_when_the_filename_is_unrelated() {
+            let root =
+                std::env::temp_dir().join(format!("sylph-pi-lookup-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::copy(
+                fixture("ordinary-turn.jsonl"),
+                root.join("unrelated-name.jsonl"),
+            )
+            .unwrap();
+            let id = NativeId::new("019f364f-c1e5-7e4f-a3e5-7c7ed13b17aa");
+            let summary = lookup_in(&root, &id).unwrap();
+            assert_eq!(summary.native_id, id);
+            assert_eq!(summary.workdir.as_deref(), Some("/Users/hsw"));
+            assert!(lookup_in(&root, &NativeId::new("absent")).is_none());
+            std::fs::remove_dir_all(root).unwrap();
         }
 
         /// **The per-field spelling resolution, against a file that genuinely mixes them.**
@@ -4601,12 +4713,8 @@ pub mod session {
         /// ordering a property of the code rather than of the scheduler.
         refreshing: Arc<Mutex<()>>,
         dialogs: Dialogs,
-        /// The turn state, shared with the pump.
-        ///
-        /// **Shared rather than mirrored.** [`translate::Correlation::turn_is_open`] exists
-        /// because the session half needs the answer, and a second copy of the flag here
-        /// would be a second answer to one question — the `is_stable()`-versus-`stability`
-        /// defect `AGENTS.md` records, one layer over.
+        /// Shared input correlation: send reserves the opening echo before the reader can
+        /// observe it; native queue messages remain vendor-authored transcript events.
         correlation: Arc<Mutex<translate::Correlation>>,
         /// The identity preamble's file, deleted on [`Session::close`].
         preamble: Option<std::path::PathBuf>,
@@ -4824,7 +4932,11 @@ pub mod session {
                     object.insert("images".to_string(), Value::Array(images));
                 }
             }
-            self.call("prompt", fields).await?;
+            self.correlation.lock().await.opening_echo_pending = true;
+            if let Err(error) = self.call("prompt", fields).await {
+                self.correlation.lock().await.opening_echo_pending = false;
+                return Err(error);
+            }
             Ok(())
         }
 
@@ -4856,32 +4968,17 @@ pub mod session {
                 .context("pi would not accept an abort")
         }
 
-        /// Add text to a running turn, through pi's own `steer`.
-        ///
-        /// pi's steer is the discipline that means "change course now": it is delivered
-        /// after the current assistant turn finishes its tool calls and **before the next
-        /// model call**, rather than being queued for after the turn (which is `follow_up`,
-        /// deliberately not offered — Sylph has no word for it).
-        ///
-        /// # `expected_turn_id` can only be checked for presence here
-        ///
-        /// **pi puts no turn id on the wire at all** — its `turn_start`/`turn_end` carry
-        /// none, and neither does any command's reply — so there is nothing to compare a
-        /// caller's id against. What the precondition exists to prevent is a steer racing a
-        /// turn boundary and landing in the *next* conversation, and the half of that this
-        /// vendor can answer is whether a turn is open: a caller that named a turn is
-        /// refused when none is running, because the turn it named has ended and pi would
-        /// otherwise queue the text for whatever runs next.
-        ///
-        /// `None` means "whatever is running" and is forwarded as-is, which is a coherent ask
-        /// from a client with no turn in view. Stated rather than silently ignored, because a
-        /// weaker check presented as the real one is worse than a documented weaker check.
-        async fn steer(&self, text: &str, expected_turn_id: Option<&str>) -> Result<()> {
-            if expected_turn_id.is_some() && !self.correlation.lock().await.turn_is_open() {
-                return Err(anyhow!(
-                    "no turn is running, so this steer would be delivered into the next one"
-                ));
-            }
+        // The RPC queue insertion is unconditional (`AgentSession._queueSteer`). A
+        // local turn-open read races vendor settlement, even while holding our mutex.
+        // Preserve the native primitive under its own delivery semantics.
+        async fn steer(&self, _text: &str, _expected_turn_id: Option<&str>) -> Result<()> {
+            Err(sylph_protocol::AdapterError::unsupported_field(
+                "Pi offers a native steering queue, not turn-scoped steering",
+            )
+            .into())
+        }
+
+        async fn queue_steering(&self, text: &str) -> Result<()> {
             self.call("steer", json!({"message": text})).await?;
             Ok(())
         }
@@ -5129,9 +5226,7 @@ pub mod session {
             }
 
             let emission = {
-                // Scoped tightly: the lock must not be held across the send below, or
-                // backpressure from a slow consumer would block `steer`'s read of
-                // `turn_is_open` for as long as the channel stays full.
+                // Never hold input correlation across bounded channel backpressure.
                 let mut correlation = state.correlation.lock().await;
                 correlation.translate(&payload, at_ms)
             };
@@ -5336,7 +5431,10 @@ pub mod session {
                 .get("error")
                 .and_then(Value::as_str)
                 .unwrap_or("pi refused it and said nothing further");
-            return Err(anyhow!("pi refused `{command}`: {reason}"));
+            return Err(sylph_protocol::VendorRefusal {
+                message: format!("pi refused `{command}`: {reason}"),
+            }
+            .into());
         }
         Ok(reply.get("data").cloned().unwrap_or_else(|| json!({})))
     }
@@ -6218,67 +6316,21 @@ done
             );
         }
 
-        /// **A steer that names a turn is refused when no turn is running.**
-        ///
-        /// pi puts no turn id on the wire, so the id itself cannot be compared — what the
-        /// precondition prevents is a steer racing a turn boundary and being delivered into the
-        /// *next* conversation, and presence is the half this vendor can answer. `None` means
-        /// "whatever is running" and is forwarded, which is a coherent ask from a client with no
-        /// turn in view.
         #[tokio::test]
-        async fn a_steer_naming_a_turn_is_refused_when_none_is_open() {
-            let (session, log) = scripted("steer-precondition", &[]).await;
-
+        async fn native_queue_priority_is_available_without_a_turn_scoped_promise() {
+            let (session, log) = scripted("steer-queue", &[]).await;
             session
-                .steer("keep going", Some("turn-7"))
+                .steer("guarded", Some("turn-7"))
                 .await
-                .expect_err("naming a turn that is not running must not be delivered");
-            // Forwarded without an expectation, because "whatever is running" is answerable.
+                .expect_err("Pi cannot bind a steer to a turn");
             session
-                .steer("keep going", None)
+                .steer("unguarded", None)
                 .await
-                .expect("an unconditional steer is pi's to accept or refuse");
-
+                .expect_err("absence of a lease cannot change delivery semantics");
+            session.queue_steering("priority").await.unwrap();
             let lines = sent(&log, 1).await;
-            let steers: Vec<&Value> = lines
-                .iter()
-                .filter(|line| line.get("type").and_then(Value::as_str) == Some("steer"))
-                .collect();
-            assert_eq!(
-                steers.len(),
-                1,
-                "exactly the unconditional one reached pi: {lines:?}"
-            );
-        }
-
-        /// **A steer naming a turn is delivered once a turn is genuinely open.**
-        ///
-        /// The other half of the test above, and the one that stops the guard from being
-        /// satisfied by an implementation that refuses every named steer. The turn state is read
-        /// from the shared [`translate::Correlation`] rather than from a copy, which is what
-        /// makes one answer to "is a turn open" impossible to disagree with.
-        #[tokio::test]
-        async fn a_named_steer_is_delivered_while_a_turn_is_open() {
-            let (mut session, log) = scripted("steer-open", &[r#"{"type":"agent_start"}"#]).await;
-            let mut stream = session.events().unwrap();
-
-            // Drained so the pump has processed `agent_start` before the steer is attempted —
-            // otherwise this would pass or fail on scheduling rather than on the guard.
-            let opened = next_message(&mut stream, 2000)
-                .await
-                .expect("the turn must open");
-            let SessionMessage::Event(event) = opened else {
-                panic!("expected the turn open, got {opened:?}");
-            };
-            assert_eq!(event.kind, EventKind::Turn);
-            assert_eq!(event.phase, Some(Phase::Started));
-
-            session
-                .steer("change course", Some("turn-7"))
-                .await
-                .expect("a turn is open, so the steer belongs to it");
-            let lines = sent(&log, 1).await;
-            assert_eq!(lines[0].get("type").and_then(Value::as_str), Some("steer"));
+            assert_eq!(lines[0]["type"], "steer");
+            assert_eq!(lines[0]["message"], "priority");
         }
 
         /// **The vendor reporting a different model publishes a `config`-only facet.**

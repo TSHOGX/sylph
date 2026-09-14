@@ -8,8 +8,9 @@
 //! writes would fail — intermittently, under concurrency, which is the worst way
 //! to find out.
 //!
-//! Deriving the next number from `MAX(seq)` per event instead would be racy for
-//! the same reason and cost a database read on the hot path.
+//! The durable session cursor survives consolidation and seeds the hot counter
+//! after restart. Recomputing it from the remaining journal rows would reuse
+//! sequences already held by the history tier.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -41,21 +42,22 @@ impl SeqAllocator {
     }
 
     /// Shared reservation gate. A bridge ingest holds this through its SQLite
-    /// transaction and cursor update; server producers acquire it in `next`.
+    /// transaction and cursor update; server producers hold it from allocation
+    /// through append and publication.
     pub(crate) fn gate(&self) -> Arc<Mutex<()>> {
         self.gate.clone()
     }
 
     /// The next sequence number for a session.
     ///
-    /// Seeded from `MAX(seq)` on first use so numbering keeps climbing across a
+    /// Seeded from the durable session cursor so numbering keeps climbing across a
     /// restart rather than restarting at zero and colliding with journaled rows.
     pub async fn next(&self, session_id: &SessionId) -> Result<i32> {
         let _gate = self.gate.lock().await;
         self.next_inner(session_id).await
     }
 
-    async fn next_inner(&self, session_id: &SessionId) -> Result<i32> {
+    pub(crate) async fn next_inner(&self, session_id: &SessionId) -> Result<i32> {
         // Keyed on the encoded triple rather than on `SessionId` itself: the map is
         // hot — one lookup per event — and the encoding has a single producer, so the
         // two spellings cannot diverge.
@@ -83,6 +85,17 @@ impl SeqAllocator {
         Ok(counter.fetch_add(1, Ordering::SeqCst))
     }
 
+    /// Read the next unreserved value while the caller holds `Self::gate`.
+    /// Database maxima cannot see a reservation whose append has not committed.
+    pub(crate) async fn reserved_floor_inner(&self, session_id: &SessionId) -> i32 {
+        self.counters
+            .read()
+            .await
+            .get(&session_id.encode())
+            .map(|counter| counter.load(Ordering::SeqCst))
+            .unwrap_or(0)
+    }
+
     /// Advance the next value after a sequence allocated by another producer.
     ///
     /// Envagent events receive their canonical sequence inside the ingest
@@ -95,7 +108,7 @@ impl SeqAllocator {
         self.observe_inner(session_id, next_seq).await;
     }
 
-    /// Advance the cursor while the caller already holds [`Self::gate`].
+    /// Advance the cursor while the caller already holds `Self::gate`.
     pub(crate) async fn observe_inner(&self, session_id: &SessionId, next_seq: i32) {
         let key = session_id.encode();
         let counter = {
@@ -121,14 +134,6 @@ impl SeqAllocator {
                 Err(updated) => current = updated,
             }
         }
-    }
-
-    /// Forget an optimistic in-memory counter after a transaction fails.
-    ///
-    /// The next allocation is reseeded from the durable journal, so a failed
-    /// envagent ingest cannot permanently consume a canonical sequence.
-    pub async fn reset_session(&self, session_id: &SessionId) {
-        self.counters.write().await.remove(&session_id.encode());
     }
 }
 

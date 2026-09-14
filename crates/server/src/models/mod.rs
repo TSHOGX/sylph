@@ -1,8 +1,10 @@
+pub mod control_request;
 pub mod event;
 pub mod request;
 pub mod session;
 pub mod turn;
 
+pub use control_request::*;
 pub use event::*;
 pub use request::*;
 pub use session::*;

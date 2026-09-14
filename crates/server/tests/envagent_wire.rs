@@ -294,7 +294,7 @@ async fn wait_for_connected(bridge: &sylph_server::env::EnvBridge, environment: 
     // workspace suite is running under one executor.  Poll the observable lease
     // for a bounded but generous window rather than turning scheduler pressure
     // into a false transport failure.
-    for _ in 0..1000 {
+    for _ in 0..6000 {
         if bridge.environment_connected(environment).await {
             return;
         }

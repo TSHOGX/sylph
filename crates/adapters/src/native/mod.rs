@@ -165,6 +165,38 @@ pub fn candidates(root: &Path, keep: impl Fn(&Path) -> bool) -> Vec<SessionCandi
     found
 }
 
+// Bundle sidefiles may change without appending to the root transcript. A store-wide
+// revision conservatively refreshes unrelated sessions too, but never substitutes a
+// projected end timestamp for a filesystem change detector.
+pub fn inventory_revision(root: &Path) -> Option<String> {
+    use std::hash::{Hash, Hasher};
+    let mut paths: Vec<_> = candidates(root, |_| true)
+        .into_iter()
+        .map(|candidate| candidate.path)
+        .collect();
+    paths.sort();
+    let mut digest = std::collections::hash_map::DefaultHasher::new();
+    for path in paths {
+        let metadata = fs::metadata(&path).ok()?;
+        path.hash(&mut digest);
+        metadata.len().hash(&mut digest);
+        metadata
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_nanos()
+            .hash(&mut digest);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            metadata.dev().hash(&mut digest);
+            metadata.ino().hash(&mut digest);
+        }
+    }
+    Some(format!("{:016x}", digest.finish()))
+}
+
 /// Call `visit` with every JSON object one line of `path` holds.
 ///
 /// # A malformed line is skipped, and the pass continues
@@ -415,5 +447,21 @@ mod tests {
         fs::write(&path, "{\"a\":1}\n{\"a\":2}\n").unwrap();
         let after = SessionCandidate::of(&path).unwrap().fingerprint();
         assert_ne!(before, after);
+    }
+
+    #[test]
+    fn native_inventory_revision_includes_bundle_sidefiles_and_removals() {
+        let root = temp_dir("inventory-revision");
+        fs::write(root.join("session.jsonl"), "{}\n").unwrap();
+        let first = inventory_revision(&root).unwrap();
+        let bundle = root.join("session/workflows");
+        fs::create_dir_all(&bundle).unwrap();
+        fs::write(bundle.join("manifest.json"), "{}\n").unwrap();
+        let with_manifest = inventory_revision(&root).unwrap();
+        assert_ne!(first, with_manifest);
+        fs::write(bundle.join("manifest.json"), "{\"completed\":true}\n").unwrap();
+        assert_ne!(with_manifest, inventory_revision(&root).unwrap());
+        fs::remove_file(bundle.join("manifest.json")).unwrap();
+        assert_eq!(first, inventory_revision(&root).unwrap());
     }
 }

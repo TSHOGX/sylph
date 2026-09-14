@@ -20,8 +20,77 @@ use sylph_protocol::SessionId;
 use crate::error::{Error, Result};
 use crate::link_state::LinkState;
 use crate::middleware::auth::SubjectId;
-use crate::models::{PendingRequest, ResolveRequest};
+use crate::models::{ControlRequest, PendingRequest, ResolveRequest};
 use crate::AppState;
+
+pub(crate) async fn record_control(
+    state: &AppState,
+    subject: &str,
+    session_id: &SessionId,
+    kind: &str,
+    text: String,
+    target_turn_id: Option<String>,
+    idempotency_key: Option<String>,
+) -> Result<ControlRequest> {
+    if let Some(key) = idempotency_key.as_deref() {
+        if let Some(existing) = state
+            .store
+            .find_control_request_by_idempotency(session_id, key)
+            .await?
+        {
+            if existing.kind != kind
+                || existing.text != text
+                || existing.origin_subject != subject
+                || existing.target_turn_id != target_turn_id
+            {
+                return Err(Error::InvalidRequest(
+                    "Idempotency key already belongs to a different control request".into(),
+                ));
+            }
+            return Ok(existing);
+        }
+    }
+    let request = state
+        .store
+        .create_control_request(&ControlRequest {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            session_id: session_id.clone(),
+            origin_subject: subject.to_string(),
+            kind: kind.to_string(),
+            text,
+            target_turn_id,
+            server_seq: 0,
+            state: "accepted".into(),
+            idempotency_key,
+            vendor_receipt: None,
+            error_message: None,
+            created_at_ms: crate::models::now_ms(),
+            consumed_at_ms: None,
+            failed_at_ms: None,
+            revision: 0,
+        })
+        .await?;
+    crate::api::controls::publish(state, &request).await;
+    Ok(request)
+}
+
+pub async fn control_requests(
+    State(state): State<AppState>,
+    Extension(subject): Extension<SubjectId>,
+    Path(session_id): Path<String>,
+) -> Result<Json<serde_json::Value>> {
+    let session_id = require_session(&state, &session_id).await?;
+    if !state
+        .store
+        .has_capability(&subject.0, session_id.environment.as_str(), "observe")
+        .await?
+    {
+        return Err(Error::SessionNotFound);
+    }
+    Ok(Json(
+        serde_json::json!({"requests": state.store.list_control_requests(&session_id).await?}),
+    ))
+}
 
 fn remote_link_state(agent: String, value: serde_json::Value) -> Result<LinkState> {
     let capabilities_value = value
@@ -529,6 +598,13 @@ pub async fn resolve(
         }
     }
 
+    let _guard = state
+        .env_bridge
+        .session_command_lock(&request.session_id)
+        .await
+        .lock_owned()
+        .await;
+
     // Claimed in one statement, so two clients answering together produce one
     // winner rather than two forwarded answers.
     let resolved = state
@@ -629,31 +705,19 @@ pub async fn interrupt(
         return Err(Error::Forbidden("control capability required".into()));
     }
 
-    let outcome = state
-        .env_bridge
-        .remote_session_command(
-            &session_id,
-            sylph_protocol::EnvironmentCommand::Interrupt {
-                session_id: session_id.clone(),
-                expected_turn_id: None,
-            },
-            sylph_protocol::IdempotencyPolicy::AtMostOnce,
-        )
-        .await
-        .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
-    match outcome {
-        sylph_protocol::CommandOutcome::Accepted { .. } => {
-            Ok(Json(serde_json::json!({"interrupted": true})))
-        }
-        sylph_protocol::CommandOutcome::Rejected { code, message } => Err(refusal_or(
-            anyhow::anyhow!("{code}: {message}"),
-            Error::Unsupported,
-        )),
-        sylph_protocol::CommandOutcome::Unknown { message } => Err(Error::LinkFailed(format!(
-            "remote interrupt outcome is unknown: {}",
-            message.unwrap_or_default()
-        ))),
-    }
+    let turn_id = state
+        .store
+        .running_turn_id(&session_id)
+        .await?
+        .ok_or_else(|| Error::InvalidRequest("No turn is running".into()))?;
+    let _ = super::turns::stop(
+        State(state),
+        Extension(subject),
+        Path(turn_id),
+        axum::http::HeaderMap::new(),
+    )
+    .await?;
+    Ok(Json(serde_json::json!({"interrupted": true})))
 }
 
 /// Add text to a turn already in flight.
@@ -676,11 +740,47 @@ pub async fn steer(
     {
         return Err(Error::Forbidden("control capability required".into()));
     }
+    if !state
+        .env_bridge
+        .environment_connected(&session_id.environment)
+        .await
+    {
+        return Err(Error::EnvironmentUnreachable(
+            session_id.environment.to_string(),
+        ));
+    }
 
     if body.text.trim().is_empty() {
         return Err(Error::InvalidRequest(
             "Steering text cannot be empty".into(),
         ));
+    }
+
+    let _guard = state
+        .env_bridge
+        .session_command_lock(&session_id)
+        .await
+        .lock_owned()
+        .await;
+    if let Some(key) = body.idempotency_key.as_deref() {
+        if let Some(existing) = state
+            .store
+            .find_control_request_by_idempotency(&session_id, key)
+            .await?
+        {
+            if existing.kind != "steer"
+                || existing.text != body.text
+                || existing.origin_subject != subject.0
+            {
+                return Err(Error::InvalidRequest(
+                    "Idempotency key belongs to a different request".into(),
+                ));
+            }
+            return Ok(Json(
+                serde_json::to_value(existing)
+                    .map_err(|error| Error::Internal(error.to_string()))?,
+            ));
+        }
     }
 
     // Checked here as well as by the adapter: the server knows which turn is
@@ -695,37 +795,37 @@ pub async fn steer(
         }
     }
 
-    let outcome = state
-        .env_bridge
-        .remote_session_command(
-            &session_id,
-            sylph_protocol::EnvironmentCommand::Steer {
-                session_id: session_id.clone(),
-                text: body.text,
-                expected_turn_id: body.turn_id,
-            },
-            sylph_protocol::IdempotencyPolicy::AtMostOnce,
-        )
-        .await
-        .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
-    match outcome {
-        sylph_protocol::CommandOutcome::Accepted { .. } => {
-            Ok(Json(serde_json::json!({"steered": true})))
-        }
-        sylph_protocol::CommandOutcome::Rejected { code, message } => {
-            Err(remote_refusal(&code, message))
-        }
-        sylph_protocol::CommandOutcome::Unknown { message } => Err(Error::LinkFailed(format!(
-            "remote steer outcome is unknown: {}",
-            message.unwrap_or_default()
-        ))),
-    }
+    let turn_id = running.ok_or_else(|| Error::InvalidRequest("No turn is running".into()))?;
+    let request = record_control(
+        &state,
+        &subject.0,
+        &session_id,
+        "steer",
+        body.text.clone(),
+        Some(turn_id.clone()),
+        body.idempotency_key,
+    )
+    .await?;
+    let request = super::controls::dispatch(
+        &state,
+        &request,
+        sylph_protocol::EnvironmentCommand::Steer {
+            session_id,
+            text: body.text,
+            expected_turn_id: Some(turn_id),
+        },
+    )
+    .await?;
+    Ok(Json(
+        serde_json::to_value(request).map_err(|error| Error::Internal(error.to_string()))?,
+    ))
 }
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SteerRequest {
     pub text: String,
+    pub idempotency_key: Option<String>,
     /// The turn the client believes is running. Optional, because a client with no
     /// turn in view is steering "whatever is running", which is a coherent ask.
     #[serde(default)]
@@ -772,36 +872,61 @@ pub async fn queue(
         return Err(Error::InvalidRequest("Queued text cannot be empty".into()));
     }
 
-    let outcome = state
+    let _guard = state
         .env_bridge
-        .remote_session_command(
-            &session_id,
-            sylph_protocol::EnvironmentCommand::Queue {
-                session_id: session_id.clone(),
-                text: body.text,
-            },
-            sylph_protocol::IdempotencyPolicy::AtMostOnce,
-        )
+        .session_command_lock(&session_id)
         .await
-        .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
-    match outcome {
-        sylph_protocol::CommandOutcome::Accepted { .. } => {
-            Ok(Json(serde_json::json!({"queued": true})))
+        .lock_owned()
+        .await;
+    let key = body
+        .idempotency_key
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    if let Some(existing) = state
+        .store
+        .find_control_request_by_idempotency(&session_id, &key)
+        .await?
+    {
+        if existing.kind != "queue" || existing.origin_subject != subject.0 {
+            return Err(Error::InvalidRequest(
+                "Idempotency key belongs to a different request".into(),
+            ));
         }
-        sylph_protocol::CommandOutcome::Rejected { code, message } => {
-            Err(remote_refusal(&code, message))
-        }
-        sylph_protocol::CommandOutcome::Unknown { message } => Err(Error::LinkFailed(format!(
-            "remote queue outcome is unknown: {}",
-            message.unwrap_or_default()
-        ))),
+        return Ok(Json(
+            serde_json::to_value(existing).map_err(|error| Error::Internal(error.to_string()))?,
+        ));
     }
+    let request = record_control(
+        &state,
+        &subject.0,
+        &session_id,
+        "queue",
+        body.text,
+        None,
+        Some(key),
+    )
+    .await?;
+    let Json(link) = capabilities(
+        State(state.clone()),
+        Extension(subject),
+        Path(session_id.encode()),
+    )
+    .await?;
+    if !link.supports.iter().any(|cap| cap == "queue") {
+        let reason = "This agent does not support queued follow-ups";
+        super::controls::transition(&state, &request, "rejected", None, Some(reason)).await?;
+        return Err(Error::Unsupported(reason.into()));
+    }
+    let request = super::controls::transition(&state, &request, "queued", None, None).await?;
+    Ok(Json(
+        serde_json::to_value(request).map_err(|error| Error::Internal(error.to_string()))?,
+    ))
 }
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueueRequest {
     pub text: String,
+    pub idempotency_key: Option<String>,
 }
 
 /// Set one typed config option on a live session.
@@ -880,37 +1005,6 @@ pub async fn set_config(
 pub struct SetConfigRequest {
     pub config_id: String,
     pub value: serde_json::Value,
-}
-
-/// Classify an adapter's refusal, falling back to `otherwise` for anything else.
-///
-/// # The two codes are not interchangeable, and one status erases the difference
-///
-/// `UNSUPPORTED_FIELD` means "no such option" and justifies **disabling** a control;
-/// `INVALID_VALUE` means "this value, right now" and must leave it usable, since the other
-/// five values may well be fine. Both adapters already drew that line and this module used
-/// to flatten every adapter error into [`Error::Unsupported`] — whose own doc comment says
-/// a client may disable the control over it — so one refused permission mode would have
-/// retired a picker most of whose values work.
-///
-/// # Recovered by `downcast_ref`, never by parsing the message
-///
-/// The text is the adapter's and may be reworded; the code is declared protocol. That
-/// distinction is why the error travels as a typed [`sylph_protocol::AdapterError`] through
-/// `anyhow` rather than as a `"{code}: {message}"` string — and with adapters linked in it
-/// is constructed as that type at the source, so the transitional `refusal()` that mapped
-/// a v3 wire string back into it is deleted rather than moved.
-///
-/// One helper rather than three copies of the match, because `interrupt`, `steer`, and
-/// `set_config` are all refusable and a rule written three times is one that will diverge.
-fn refusal_or(error: anyhow::Error, otherwise: fn(String) -> Error) -> Error {
-    match error.downcast_ref::<sylph_protocol::AdapterError>() {
-        Some(refusal) if refusal.code == sylph_protocol::RefusalCode::InvalidValue => {
-            Error::InvalidRequest(refusal.message.clone())
-        }
-        Some(refusal) => otherwise(refusal.message.clone()),
-        None => otherwise(format!("{error:#}")),
-    }
 }
 
 /// Session-scoped facts, as SSE.
@@ -1066,4 +1160,85 @@ async fn require_session(state: &AppState, encoded: &str) -> Result<SessionId> {
         .await?
         .ok_or(Error::SessionNotFound)?;
     Ok(session_id)
+}
+
+/// Preserve harness queues without claiming a turn-scoped delivery receipt.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeQueueRequest {
+    pub text: String,
+    pub idempotency_key: String,
+    pub priority: bool,
+}
+
+pub async fn native_queue(
+    State(state): State<AppState>,
+    Extension(subject): Extension<crate::middleware::auth::SubjectId>,
+    Path(id): Path<String>,
+    Json(body): Json<NativeQueueRequest>,
+) -> Result<Json<serde_json::Value>> {
+    let session_id = require_session(&state, &id).await?;
+    if !state
+        .store
+        .has_capability(&subject.0, session_id.environment.as_str(), "control")
+        .await?
+    {
+        return Err(Error::Forbidden("control capability required".into()));
+    }
+    if body.text.trim().is_empty() {
+        return Err(Error::InvalidRequest("Queued text cannot be empty".into()));
+    }
+    let _guard = state
+        .env_bridge
+        .session_command_lock(&session_id)
+        .await
+        .lock_owned()
+        .await;
+    let kind = if body.priority {
+        "native_steer"
+    } else {
+        "native_queue"
+    };
+    if let Some(existing) = state
+        .store
+        .find_control_request_by_idempotency(&session_id, &body.idempotency_key)
+        .await?
+    {
+        if existing.kind != kind
+            || existing.text != body.text
+            || existing.origin_subject != subject.0
+        {
+            return Err(Error::InvalidRequest(
+                "Idempotency key belongs to a different request".into(),
+            ));
+        }
+        return Ok(Json(
+            serde_json::to_value(existing).map_err(|error| Error::Internal(error.to_string()))?,
+        ));
+    }
+    let request = record_control(
+        &state,
+        &subject.0,
+        &session_id,
+        kind,
+        body.text.clone(),
+        None,
+        Some(body.idempotency_key),
+    )
+    .await?;
+    let command = if body.priority {
+        sylph_protocol::EnvironmentCommand::QueueSteering {
+            session_id,
+            text: body.text,
+        }
+    } else {
+        sylph_protocol::EnvironmentCommand::Queue {
+            session_id,
+            text: body.text,
+        }
+    };
+    let request = super::controls::dispatch(&state, &request, command).await?;
+    Ok(Json(
+        serde_json::to_value(request).map_err(|error| Error::Internal(error.to_string()))?,
+    ))
 }

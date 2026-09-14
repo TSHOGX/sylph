@@ -52,12 +52,14 @@ export interface AgentSession {
    * the two genuinely differ and the interesting case is where they disagree: a
    * session running in a terminal is observable and undrivable, so a surface that
    * read one boolean would either hide readable history or offer a composer that
-   * cannot send. Defaults to unavailable-for-an-unreachable-environment before the
-   * first handshake, which is the honest answer while nothing has been asked.
+   * cannot send. Absent until the server supplies a facet; an HTTP error says
+   * nothing about whether the environment itself is reachable.
    */
-  observe: Facet;
+  observe?: Facet;
   /** Can Sylph send this session a turn, and why not. */
-  control: Facet;
+  control?: Facet;
+  linkError: unknown;
+  retryLinkRead: () => void;
   /** Server-derived per-caller answer for whether control is admitted. */
   controlBlock?: ControlBlock;
   /**
@@ -78,9 +80,6 @@ export interface AgentSession {
   /** Set when the last answer lost a race, so the UI can say the dialog was stale. */
   staleAnswer: boolean;
   interrupt: () => void;
-  steer: (text: string, turnId?: string) => void;
-  /** Add text to run after the turn in flight. */
-  queue: (text: string) => void;
   /** Set one typed config option; the response replaces the cached surface. */
   setConfig: (configId: string, value: string | boolean) => void;
   settingConfig: boolean;
@@ -93,17 +92,6 @@ export interface AgentSession {
    */
   configError: unknown;
 }
-
-/**
- * What a facet reads as before any handshake has answered.
- *
- * `environment_unreachable` rather than a bare `available: false`, because an
- * unexplained false is the original defect this whole vocabulary exists to fix. It
- * is also the accurate reading: nothing has reached that machine yet. `connecting`
- * is what distinguishes "on its way" from "settled", and it outranks this reason at
- * every surface that renders one.
- */
-const UNREACHED: Facet = { available: false, reason: "environment_unreachable" };
 
 export function useAgentSession(sessionId: string | undefined): AgentSession {
   const queryClient = useQueryClient();
@@ -134,7 +122,7 @@ export function useAgentSession(sessionId: string | undefined): AgentSession {
   // strength of the control facet even while observe is fine.
   const linkQuery = useQuery({
     queryKey: ["session", sessionId, "capabilities"],
-    queryFn: () => api.sessions.capabilities(sessionId!),
+    queryFn: ({ signal }) => api.sessions.capabilities(sessionId!, signal),
     enabled,
     staleTime: (query) => {
       const control = query.state.data?.link.control;
@@ -167,7 +155,7 @@ export function useAgentSession(sessionId: string | undefined): AgentSession {
 
   const requestsQuery = useQuery({
     queryKey: ["session", sessionId, "requests"],
-    queryFn: () => api.sessions.requests(sessionId!),
+    queryFn: ({ signal }) => api.sessions.requests(sessionId!, signal),
     enabled,
     refetchInterval: REQUEST_POLL_MS,
   });
@@ -209,6 +197,11 @@ export function useAgentSession(sessionId: string | undefined): AgentSession {
                 queryKey: ["session", sessionId, "capabilities"],
               });
             }
+            if (frame.event === "control_changed" || frame.event === "control_request") {
+              void queryClient.invalidateQueries({
+                queryKey: ["session", sessionId, "controls"],
+              });
+            }
             // The agent started a turn nobody asked for — reporting backgrounded work
             // that finished after the turn which dispatched it. This is the only
             // notice a client gets: the turn's own events go to its turn-scoped
@@ -241,17 +234,6 @@ export function useAgentSession(sessionId: string | undefined): AgentSession {
 
   const interruptMutation = useMutation({
     mutationFn: () => api.sessions.interrupt(sessionId!),
-  });
-
-  const steerMutation = useMutation({
-    mutationFn: ({ text, turnId }: { text: string; turnId?: string }) =>
-      api.sessions.steer(sessionId!, text, turnId),
-  });
-
-  // No turn id, and that is the difference rather than an omission: a queued follow-up is
-  // *for* after the turn, so there is no precondition a boundary could invalidate.
-  const queueMutation = useMutation({
-    mutationFn: (text: string) => api.sessions.queue(sessionId!, text),
   });
 
   // The response *is* the new surface, so it is written into the cache rather than
@@ -306,11 +288,10 @@ export function useAgentSession(sessionId: string | undefined): AgentSession {
 
   return {
     link,
-    // Before the first handshake both facets read as unreached rather than
-    // available. Defaulting the other way would render a composer that can send to
-    // a session nothing has reached yet.
-    observe: link?.link.observe ?? UNREACHED,
-    control: link?.link.control ?? UNREACHED,
+    observe: link?.link.observe,
+    control: link?.link.control,
+    linkError: linkQuery.error,
+    retryLinkRead: () => void linkQuery.refetch(),
     controlBlock: link?.controlBlock,
     // `isFetching` rather than `isLoading`, so a retry reads as connecting too: a
     // refetch over cached failure data is not "loading" to React Query, but it is
@@ -328,8 +309,6 @@ export function useAgentSession(sessionId: string | undefined): AgentSession {
       resolveMutation.isError &&
       /already/i.test(String((resolveMutation.error as Error | null)?.message ?? "")),
     interrupt: () => interruptMutation.mutate(),
-    steer: (text: string, turnId?: string) => steerMutation.mutate({ text, turnId }),
-    queue: (text: string) => queueMutation.mutate(text),
     setConfig: (configId: string, value: string | boolean) =>
       configMutation.mutate({ configId, value }),
     settingConfig: configMutation.isPending,

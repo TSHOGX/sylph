@@ -527,6 +527,14 @@ puts a checkmark on both (`docs/session-protocol.md` § A config value must be u
 **Thinking levels depend on the selected model**, which is why config is a refreshed array
 rather than a session-global enumeration.
 
+**Pi does not offer turn-scoped Steer.** Its RPC `steer` handler calls
+`AgentSession.steer`, whose `_queueSteer` unconditionally inserts into the steering queue.
+Neither the command nor its receipt carries a turn identity or checks that a turn remains
+open. Observing `agent_start` locally cannot close the race with the vendor settling before
+it reads stdin. Sylph exposes this primitive as QueueSteering and follow-up as Queue, alongside its
+editable server-owned queue. Turn-scoped Steer is refused without writing to the vendor. Codex's `expectedTurnId` supplies the required atomic
+precondition; the envagent binds that vendor id to Sylph's unique turn generation.
+
 **A turn ends on `agent_settled`, not `agent_end`**, because `pi` can emit `agent_end` and
 then continue. Both events exist and both reach the wire; the distinction is about which
 one is terminal, not about which one is real.

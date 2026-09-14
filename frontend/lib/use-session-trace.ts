@@ -18,8 +18,8 @@ const FLUSH_INTERVAL_MS = 16;
 /**
  * Subscribe to the complete session trace, including late delegated events.
  *
- * This is intentionally separate from `useSSE`: a turn stream ends with the turn, while
- * a session trace stays alive across turns. The trace endpoint replays stable history and
+ * The session trace stays alive across turns, including delegated work that outlives
+ * the turn that opened it. The trace endpoint replays stable history and
  * a bounded live projection, so reconnecting never requires guessing which turn owns the
  * next frame.
  */

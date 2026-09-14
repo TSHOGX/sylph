@@ -24,7 +24,7 @@
  */
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useMemo, useState, useSyncExternalStore } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type Session } from "@/lib/api";
 import { formatRelative, sessionLabel, shortenHome } from "@/lib/format";
@@ -48,6 +48,7 @@ import { ContextMenu, MenuButton, type MenuItem } from "@/components/ui/menu";
 import { useWorkspaceUI } from "@/lib/workspace-ui";
 import { Button, IconButton } from "@/components/ui/button";
 import { EnvironmentChip, FidelityMarker } from "@/components/badges";
+import { ImportHistory } from "@/components/import-history";
 import {
   ArchiveIcon,
   ChevronRightIcon,
@@ -69,6 +70,28 @@ interface Group {
   lastUsedMs: number;
 }
 
+const WORKSPACE_IMPORT_STORAGE_KEY = "sylph:workspace-import";
+
+function storedWorkspaceImportRaw(): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.sessionStorage.getItem(WORKSPACE_IMPORT_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function parseStoredWorkspaceImport(raw: string | null): { environment: string; path: string; key?: string } | null {
+  try {
+    if (!raw) return null;
+    const saved = JSON.parse(raw) as { environment?: unknown; path?: unknown };
+    if (typeof saved.environment !== "string" || typeof saved.path !== "string") return null;
+    return { environment: saved.environment, path: saved.path };
+  } catch {
+    return null;
+  }
+}
+
 export function WorkspaceSidebar() {
   const { settings, update } = useSettings();
   const t = useT();
@@ -78,12 +101,26 @@ export function WorkspaceSidebar() {
   // (`use-session-id-param`).
   const activeId = useSessionIdParam();
   const [picking, setPicking] = useState(false);
+  const storedImportRaw = useSyncExternalStore(
+    () => () => undefined,
+    storedWorkspaceImportRaw,
+    () => null,
+  );
+  const storedImport = parseStoredWorkspaceImport(storedImportRaw);
+  const [importing, setImporting] = useState<{ environment: string; path: string; key?: string } | null>(null);
+  const [dismissedStoredImport, setDismissedStoredImport] = useState(false);
+  const visibleImport = importing ?? (dismissedStoredImport ? null : storedImport);
 
   const bindWorkspace = (path: string, environment?: string | null) => {
     update({
       pinnedWorkspaces: [...(settings.pinnedWorkspaces ?? []), { path, environment: environment ?? null }],
     });
     setPicking(false);
+    if (environment) {
+      setImporting({ environment, path, key: crypto.randomUUID() });
+      setDismissedStoredImport(false);
+      window.sessionStorage.setItem(WORKSPACE_IMPORT_STORAGE_KEY, JSON.stringify({ environment, path }));
+    }
   };
 
   // Shared with the start screen, which lists the same rows to resume rather than
@@ -329,6 +366,7 @@ export function WorkspaceSidebar() {
         onClose={() => setPicking(false)}
       />
     )}
+    {visibleImport && <ImportHistory environment={visibleImport.environment} workdir={visibleImport.path} autoStartKey={visibleImport.key} onClose={() => { setImporting(null); setDismissedStoredImport(true); window.sessionStorage.removeItem(WORKSPACE_IMPORT_STORAGE_KEY); }} />}
     </>
   );
 }
