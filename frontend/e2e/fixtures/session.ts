@@ -146,6 +146,6 @@ export async function createSession(
   expect(firstTurn.ok(), `first turn failed: ${firstTurn.status()} ${await firstTurn.text()}`).toBe(true);
   const { session } = (await firstTurn.json()) as { session: { id: string } };
   await page.goto(`/sessions/${session.id}`);
-  await expect(page.getByLabel("Message")).toBeVisible();
+  await expect(page.getByLabel("Message", { exact: true })).toBeVisible();
   return session.id;
 }

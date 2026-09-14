@@ -12,7 +12,7 @@ test("draft remains usable while opening files and changing config", async ({ pa
   expect(created.ok()).toBe(true);
   const { draftId } = await created.json();
   await page.goto(`/sessions/draft/${encodeURIComponent(draftId)}`);
-  await expect(page.getByLabel("Message")).toBeVisible();
+  await expect(page.getByLabel("Message", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Show artifacts sidebar" }).click();
   await expect(page.getByRole("heading", { name: "Files" })).toBeVisible();
   await expect(page.getByText("before-send.txt")).toHaveCount(0);
@@ -34,7 +34,7 @@ test("switching drafts does not discard the replacement", async ({ page }) => {
   });
   const { draftId } = await created.json();
   await page.goto(`/sessions/draft/${encodeURIComponent(draftId)}`);
-  await expect(page.getByLabel("Message")).toBeVisible();
+  await expect(page.getByLabel("Message", { exact: true })).toBeVisible();
   const menu = page.getByRole("button", { name: "Add" });
   await menu.click();
   await expect(page.getByRole("menu")).toBeVisible();
@@ -44,7 +44,7 @@ test("switching drafts does not discard the replacement", async ({ page }) => {
   expect(replacement.ok()).toBe(true);
   const replacementId = (await replacement.json()).draftId;
   await page.goto(`/sessions/draft/${encodeURIComponent(replacementId)}`);
-  await expect(page.getByLabel("Message")).toBeVisible();
+  await expect(page.getByLabel("Message", { exact: true })).toBeVisible();
   const metadata = await page.request.get(`/api/v1/sessions/draft/${encodeURIComponent(replacementId)}`);
   expect(metadata.ok()).toBe(true);
 });
@@ -59,7 +59,7 @@ test("navigating from one empty draft discards the draft left behind", async ({ 
   });
   const firstDraft = (await first.json()).draftId;
   await page.goto(`/sessions/draft/${encodeURIComponent(firstDraft)}`);
-  await expect(page.getByLabel("Message")).toBeVisible();
+  await expect(page.getByLabel("Message", { exact: true })).toBeVisible();
 
   // Use the in-app action rather than a full document navigation. This is the
   // user path where the old draft must be discarded by the route cleanup while
@@ -69,11 +69,11 @@ test("navigating from one empty draft discards the draft left behind", async ({ 
   await expect(page).toHaveURL(new RegExp(`/sessions/draft/(?!${firstDraft})`));
   const secondDraft = decodeURIComponent(page.url().split("/").pop()!);
   // Wait for the replacement's own mount, not for a Message box: both drafts render
-  // one, so `getByLabel("Message")` is satisfied by the page being navigated away
+  // one, so `getByLabel("Message", { exact: true })` is satisfied by the page being navigated away
   // from and the spec runs on while React has yet to commit the unmount. That is the
   // whole failure this spec had — it read the new id from a URL the router had
   // already changed, then asserted 13ms before the browser sent the discard.
-  await expect(page.getByLabel("Message")).toBeVisible();
+  await expect(page.getByLabel("Message", { exact: true })).toBeVisible();
 
   // Discard is fire-and-forget by design: an unmount cleanup cannot await, and
   // blocking navigation on a DELETE would make leaving a draft feel slow for a
@@ -103,13 +103,13 @@ test("starting another session while a draft is open leaves the new draft alive"
   });
   const firstSession = (await firstTurn.json()).session;
   await page.goto(`/sessions/${encodeURIComponent(firstSession.id)}`);
-  await expect(page.getByLabel("Message")).toBeVisible();
+  await expect(page.getByLabel("Message", { exact: true })).toBeVisible();
   const group = page.locator("button[aria-expanded]").filter({ hasText: "tmp" }).first();
   await group.click({ button: "right" });
   const menu = page.getByRole("menu");
   await menu.getByRole("menuitem", { name: "New session here", exact: true }).click();
   await expect(page).toHaveURL(/\/sessions\/draft\/(?:draft-|remote-draft-)/);
-  await expect(page.getByLabel("Message")).toBeVisible();
+  await expect(page.getByLabel("Message", { exact: true })).toBeVisible();
   const secondDraft = decodeURIComponent(page.url().split("/").pop()!);
   const metadata = await page.request.get(`/api/v1/sessions/draft/${encodeURIComponent(secondDraft)}`);
   expect(metadata.ok()).toBe(true);

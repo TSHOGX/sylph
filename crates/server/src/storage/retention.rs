@@ -278,7 +278,7 @@ pub fn resolve_authority(
 ///
 /// Blob sweeping is deliberately *not* here. Reachability is not a property of one
 /// session — the same file read in two sessions is one blob — so the sweep is a
-/// global scan over `cas_refs`, and calling it per session would run that scan once
+/// global candidate queue, and calling it per session would revisit that queue once
 /// per session for one pass's worth of work. [`sweep_blobs`] is the per-pass
 /// counterpart, and the split is what keeps a pass O(sessions) rather than
 /// O(sessions × blobs).

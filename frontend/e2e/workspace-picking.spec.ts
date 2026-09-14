@@ -158,7 +158,7 @@ test("the keyboard can open a folder and choose one without the mouse", async ({
   // Which left the keyboard no way to *choose*, so the modifier does it outright.
   // Creation navigates to the session, so the composer is the signal it worked.
   await filter.press("ControlOrMeta+Enter");
-  await expect(page.getByLabel("Message")).toBeVisible();
+  await expect(page.getByLabel("Message", { exact: true })).toBeVisible();
 });
 
 test("the folder browser's height is the surface's, not its current directory's", async ({

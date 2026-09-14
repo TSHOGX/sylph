@@ -18,7 +18,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::Semaphore;
+use tokio::sync::{Notify, Semaphore};
 use tracing::{debug, error, info, warn};
 
 use crate::db::JournalStore;
@@ -46,6 +46,7 @@ pub struct Consolidator {
     /// token path for the same disk is exactly what the tiering exists to avoid.
     /// Serializing it keeps the background work off the latency-sensitive path.
     gate: Arc<Semaphore>,
+    wake: Arc<Notify>,
 }
 
 impl Consolidator {
@@ -54,6 +55,7 @@ impl Consolidator {
             journal,
             history,
             gate: Arc::new(Semaphore::new(1)),
+            wake: Arc::new(Notify::new()),
         }
     }
 
@@ -63,14 +65,15 @@ impl Consolidator {
     /// turn is already complete and the client already has its events, so making
     /// the response wait on disk work would be pure latency.
     pub fn schedule(&self, turn_id: String) {
+        // The journal is already the durable work queue. Under an import burst,
+        // coalesce wakeups instead of spawning one suspended task per settled turn.
+        let Ok(permit) = self.gate.clone().try_acquire_owned() else {
+            self.wake.notify_one();
+            return;
+        };
         let consolidator = self.clone();
         tokio::spawn(async move {
-            let _permit = match consolidator.gate.acquire().await {
-                Ok(permit) => permit,
-                // The semaphore is never closed, so this cannot happen; if it
-                // somehow did, the startup sweep is the safety net.
-                Err(_) => return,
-            };
+            let _permit = permit;
 
             match history::consolidate_turn(&consolidator.journal, &consolidator.history, &turn_id)
                 .await
@@ -130,17 +133,20 @@ impl Consolidator {
     pub fn spawn_sweeper(&self) {
         let consolidator = self.clone();
         tokio::spawn(async move {
-            // Immediately, because a restart is exactly when the journal is most
-            // likely to hold settled turns nobody is watching.
-            consolidator.sweep().await;
-
             let mut ticker = tokio::time::interval(SWEEP_INTERVAL);
-            // The first tick fires instantly and the sweep above already covered
-            // it, so it is consumed rather than acted on.
             ticker.tick().await;
             loop {
-                ticker.tick().await;
-                consolidator.sweep().await;
+                let moved = consolidator.sweep().await;
+                if moved == SWEEP_BATCH as usize {
+                    // Drain a backlog in bounded passes without waiting five
+                    // minutes between prefixes. Each pass releases the gate.
+                    tokio::task::yield_now().await;
+                    continue;
+                }
+                tokio::select! {
+                    _ = ticker.tick() => {},
+                    _ = consolidator.wake.notified() => {},
+                }
             }
         });
     }

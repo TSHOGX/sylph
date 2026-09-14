@@ -145,22 +145,20 @@ async fn later_import_once_stops_syncing_the_same_snapshot() {
 }
 
 #[tokio::test]
-async fn synchronization_keeps_the_authorized_snapshot_and_shares_one_catalogue() {
+async fn synchronization_discovers_new_scope_members_and_shares_one_catalogue() {
     let backend = TestBackend::start().await;
     backend.agents.add_stored_session("also-authorized");
     let initial = import(&backend, "import_and_watch", "authorized-snapshot").await;
     assert_eq!(initial["imported"], 2);
     backend.agents.add_stored_session("discovered-later");
-    let enumerations = backend.agents.native_enumeration_count();
     let reads = backend.agents.native_read_count();
     assert_eq!(
         sylph_server::api::imports::sync_once(&backend.state)
             .await
             .unwrap(),
-        0
+        1
     );
-    assert_eq!(backend.agents.native_enumeration_count(), enumerations + 1);
-    assert_eq!(backend.agents.native_read_count(), reads);
+    assert!(backend.agents.native_read_count() > reads);
     let unrequested = SessionId::decode(&format!(
         "{}:mock:discovered-later",
         backend.environment_id().await,
@@ -172,7 +170,18 @@ async fn synchronization_keeps_the_authorized_snapshot_and_shares_one_catalogue(
         .get_session(&unrequested)
         .await
         .unwrap()
-        .is_none());
+        .is_some());
+    // Once adopted, discovery and refresh share one catalogue and no body re-read.
+    let reads = backend.agents.native_read_count();
+    let enumerations = backend.agents.native_enumeration_count();
+    assert_eq!(
+        sylph_server::api::imports::sync_once(&backend.state)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(backend.agents.native_read_count(), reads);
+    assert_eq!(backend.agents.native_enumeration_count(), enumerations + 1);
 }
 
 #[tokio::test]
@@ -210,4 +219,41 @@ async fn partial_native_reads_remain_failed_until_the_same_revision_can_be_read(
     )
     .await;
     assert_eq!(current["job"]["failed"], 0);
+}
+
+#[tokio::test]
+async fn an_empty_subscription_discovers_later_sessions_only_in_its_exact_workdir() {
+    let backend = TestBackend::start().await;
+    let other = format!("{}-neighbour", backend.workdir().display());
+    backend.agents.set_store_workdir(Some(other.clone()));
+    let initial = import(&backend, "import_and_watch", "empty-workspace").await;
+    assert_eq!(initial["total"], 0);
+    backend.agents.add_stored_session("later-member");
+    assert_eq!(
+        sylph_server::api::imports::sync_once(&backend.state)
+            .await
+            .unwrap(),
+        0
+    );
+    backend
+        .agents
+        .set_store_workdir(Some(backend.workdir().display().to_string()));
+    assert_eq!(
+        sylph_server::api::imports::sync_once(&backend.state)
+            .await
+            .unwrap(),
+        2
+    );
+    let id = SessionId::decode(&format!(
+        "{}:mock:later-member",
+        backend.environment_id().await
+    ))
+    .unwrap();
+    assert!(backend
+        .state
+        .store
+        .get_session(&id)
+        .await
+        .unwrap()
+        .is_some());
 }

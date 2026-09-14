@@ -166,7 +166,7 @@ test("Quick Start names an environment and uses its local sentinel", async ({ pa
   );
   await page.getByRole("button", { name: /Quick session/ }).click();
   await post;
-  await expect(page.getByLabel("Message")).toBeVisible();
+  await expect(page.getByLabel("Message", { exact: true })).toBeVisible();
 
   expect(requestBody?.environment, "Quick Start must select an environment").toMatch(/^[a-z2-7]+$/);
   expect(requestBody?.workdir).toBe("__sylph_quick_start__");

@@ -94,7 +94,7 @@
 //! live session renders, to serve a re-read. Keeping it hidden there instead would mean
 //! giving `blocks` a stability column and teaching every history read to filter it, which
 //! pushes ephemerality into the tier whose whole contract is that it holds the record a
-//! reader reads (`docs/storage.md` § Three tiers, because there are three workloads).
+//! reader reads (`docs/storage.md` § Workloads and database boundaries).
 //!
 //! # Every turn a pass opens is closed by the pass
 //!

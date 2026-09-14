@@ -1,7 +1,7 @@
 //! Durable, replayable history.
 //!
-//! `docs/storage.md` is the governing spec. Three tiers, because there are three
-//! workloads with opposite optimal shapes:
+//! `docs/storage.md` is the governing spec. Native retention, live events, and
+//! consolidated history use independent writers:
 //!
 //! * [`fold`](crate::storage::fold) — a block's deltas as offsets and timings, so lossless replay costs
 //!   ~8 bytes per delta rather than a row.
@@ -19,6 +19,7 @@ pub mod fold;
 pub mod history;
 pub mod retention;
 pub mod scheduler;
+pub(crate) mod sqlite;
 
 pub use consolidator::Consolidator;
 pub use fold::{Delta, Folded};

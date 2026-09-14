@@ -49,7 +49,7 @@ async function sweptClosed(page: import("@playwright/test").Page) {
 
 async function runDelegation(page: import("@playwright/test").Page) {
   await createSession(page);
-  await page.getByLabel("Message").fill("delegate this please");
+  await page.getByLabel("Message", { exact: true }).fill("delegate this please");
   await page.getByRole("button", { name: "Send", exact: true }).click();
   // The dispatch line precedes every trajectory, so waiting on it means the turn
   // is genuinely under way rather than the page merely being loaded.
@@ -241,7 +241,7 @@ test("delegation structure survives a reload", async ({ page }) => {
  */
 async function runPromotion(page: import("@playwright/test").Page) {
   const sessionId = await createSession(page);
-  await page.getByLabel("Message").fill("promote this workflow");
+  await page.getByLabel("Message", { exact: true }).fill("promote this workflow");
   await page.getByRole("button", { name: "Send", exact: true }).click();
 
   // Waits for the *settled* turn, not for the scenario's first line — and specifically for
@@ -488,7 +488,7 @@ test("work that finishes after its turn is reported in a turn of the agent's own
   page,
 }) => {
   await createSession(page);
-  await page.getByLabel("Message").fill("unprompted please");
+  await page.getByLabel("Message", { exact: true }).fill("unprompted please");
   await page.getByRole("button", { name: "Send", exact: true }).click();
 
   // The dispatching turn ends first, with the delegate still open.
@@ -511,7 +511,7 @@ test("a delegate that finishes late is reported as finishing, not as abandoned",
   page,
 }) => {
   await createSession(page);
-  await page.getByLabel("Message").fill("unprompted please");
+  await page.getByLabel("Message", { exact: true }).fill("unprompted please");
   await page.getByRole("button", { name: "Send", exact: true }).click();
   await expect(
     page.getByText("The background worker finished while you were away."),
@@ -573,7 +573,7 @@ test("a late outcome does not leave an abandoned host on the turn it arrives on"
   page,
 }) => {
   await createSession(page);
-  await page.getByLabel("Message").fill("unprompted please");
+  await page.getByLabel("Message", { exact: true }).fill("unprompted please");
   await page.getByRole("button", { name: "Send", exact: true }).click();
   await expect(
     page.getByText("The background worker finished while you were away."),

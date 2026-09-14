@@ -18,7 +18,7 @@ import { createSession } from "./fixtures/session";
 
 /** Raise a request by prompt substring, and wait for its panel. */
 async function ask(page: Page, prompt: string) {
-  await page.getByLabel("Message").fill(prompt);
+  await page.getByLabel("Message", { exact: true }).fill(prompt);
   await page.getByRole("button", { name: "Send", exact: true }).click();
   const panel = page.getByTestId("approval-dialog");
   await expect(panel).toBeVisible({ timeout: 15000 });
@@ -211,7 +211,7 @@ test("answering on one client retires the panel on another", async ({ browser })
     const laptopPage = await laptop.newPage();
     await laptopPage.request.get("/api/v1/auth/token");
     await laptopPage.goto(`/sessions/${sessionId}`);
-    await expect(laptopPage.getByLabel("Message")).toBeVisible();
+    await expect(laptopPage.getByLabel("Message", { exact: true })).toBeVisible();
 
     // Raised from the phone. Both clients are attached, so both must show it — the
     // arrival half, which already worked and is asserted so a failure below is

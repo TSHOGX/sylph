@@ -23,7 +23,7 @@ import { createSession } from "./fixtures/session";
 test("the slash menu still opens after a completed turn", async ({ page }) => {
   await createSession(page);
 
-  const composer = page.getByLabel("Message");
+  const composer = page.getByLabel("Message", { exact: true });
   await composer.fill("/");
   // The fixture reports four commands, so the listbox is the agent's own answer to
   // "what can I be asked to do" rather than anything this UI holds.
@@ -45,7 +45,7 @@ test("the slash menu still opens after a completed turn", async ({ page }) => {
 test("a control command opens a picker instead of sending a message", async ({ page }) => {
   await createSession(page);
 
-  const composer = page.getByLabel("Message");
+  const composer = page.getByLabel("Message", { exact: true });
   await composer.fill("/model");
   await page.getByRole("button", { name: "Send", exact: true }).click();
 

@@ -4,10 +4,10 @@
 of turns still in flight. It states the shape and the reasoning; the DDL itself lives in
 `crates/server/migrations/journal/`, applied by `sqlx::migrate!` at startup.
 
-One authoritative record is split across three stores for SQLite's sake rather than as a
-data-model choice (`docs/storage.md` § Three tiers): `journal.db` here, `history.db` for
-consolidated blocks and the full-text index, and `blobs/` beside them.
-**`docs/storage.md` owns the other two**, because their tables only make sense alongside
+One authoritative record is split across workload-specific stores for SQLite's sake rather than as a
+data-model choice (`docs/storage.md` § Workloads and database boundaries): `journal.db` here, `history.db` for
+consolidated blocks and the full-text index, `native.db` for native records, and `blobs/` beside them.
+**`docs/storage.md` owns the other stores**, because their tables only make sense alongside
 the consolidation and retention rules that write them.
 
 WAL mode, for concurrent readers against a live writer.
@@ -246,7 +246,11 @@ asserts only over the environment that issued it.
 `producer_seq` is allocated and spooled on the environment; `server_seq` is allocated by the
 server in the same transaction that inserts the canonical event. A payload hash makes reuse
 of a producer sequence with different bytes a hard error rather than a second
-interpretation of one event.
+interpretation of one event. `env_producer_cursors` holds the contiguous acknowledged
+prefix per environment and producer. The receipt insert trigger advances only across the
+newly contiguous suffix, in the same transaction; a duplicate or rollback cannot advance
+it, and a gap never becomes an acknowledgement. Reads seek this cursor rather than
+loading and sorting the producer's entire receipt history for every incoming frame.
 
 ## Search lives beside history.db
 
@@ -280,8 +284,9 @@ examined, not pages.**
 ## Schema evolution
 
 Numbered SQL files, one directory per database, applied by `sqlx::migrate!` at startup:
-`crates/server/migrations/journal/` for the journal and `crates/server/migrations/history/`
-for history. **Each currently holds exactly one file**, `001_initial_schema.sql`, and that
+`crates/server/migrations/journal/` for the journal,
+`crates/server/migrations/history/` for history, and `crates/server/migrations/native/`
+for native records. **Each currently holds exactly one file**, `001_initial_schema.sql`, and that
 is the intended steady state rather than a stage the project has not yet grown out of.
 
 **Schemas change in place.** The store is disposable: a build that cannot read one refuses

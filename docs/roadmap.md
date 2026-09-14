@@ -165,6 +165,17 @@ sidecar and source-close delivery wait for a fixed producer watermark. File root
 from the server's durable record. Transcript and file queries are cancelled on navigation,
 and failed capability reads no longer masquerade as an offline environment.
 
+Storage isolates native retention in `native.db`, uses independent read pools and one
+writer per database, and acquires write intent before read-modify-write transactions.
+History upserts preserve an integer address shared with FTS, and publication/pruning use
+bounded batches with coalesced background scheduling. Transactional usage counters replace payload scans in accounting and
+spool capacity checks. Producer acknowledgement reads a transactionally maintained
+contiguous cursor instead of rescanning all receipts. CAS sweeping examines bounded dangling references with publication
+excluded. Sync now discovers new identities within the latest authorized workspace/agent
+scope, including an initially empty workspace, and reuses catalogues for refresh.
+Concurrency tests hold competing write transactions open; VM-step regressions check that
+FTS replacement and spool enqueue cost do not grow with unrelated history or backlog.
+
 The M4 acceptance suite covers raw ordering and unsigned revisions, sidecar transitions,
 large summaries and bodies, native user-input provenance, all three adapter reprojections,
 bounded transfer framing, pagination, reconnect recovery, and mobile focus/refresh behavior.

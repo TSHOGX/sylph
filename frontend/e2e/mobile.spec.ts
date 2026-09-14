@@ -88,7 +88,7 @@ test("the composer fits the viewport, with a flag selected and with a long messa
 }) => {
   await createSession(page);
 
-  const composer = page.getByLabel("Message");
+  const composer = page.getByLabel("Message", { exact: true });
   await expect(composer).toBeVisible();
 
   // The reported bug, directly: nothing on the page may extend past the right edge.
@@ -173,8 +173,8 @@ test("the sessions drawer overlays the conversation and dismisses on navigation"
   await expect(current).toHaveCount(1);
   await current.click();
   await expect(drawer).toBeHidden();
-  await expect(page.getByLabel("Message")).toBeVisible();
-  await expect(page.getByLabel("Message")).toBeVisible();
+  await expect(page.getByLabel("Message", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Message", { exact: true })).toBeVisible();
 });
 
 test("files open as a bottom sheet, and a file opens full screen from it", async ({ page }) => {
@@ -206,7 +206,7 @@ test("the document does not scroll, so the shell cannot be dragged off screen", 
   page,
 }) => {
   await createSession(page);
-  const composer = page.getByLabel("Message");
+  const composer = page.getByLabel("Message", { exact: true });
   await composer.fill("Say something");
   await page.getByRole("button", { name: "Send", exact: true }).click();
   await expect(page.getByText("Hello from the E2E runner.")).toBeVisible();
@@ -369,7 +369,7 @@ test("a long catalogue is a filterable sheet that does not grab focus", async ({
 test("a request form fits the viewport and is answerable by tapping", async ({ page }) => {
   await createSession(page);
 
-  await page.getByLabel("Message").fill("question please");
+  await page.getByLabel("Message", { exact: true }).fill("question please");
   await page.getByRole("button", { name: "Send", exact: true }).tap();
 
   const panel = page.getByTestId("approval-dialog");
@@ -407,7 +407,7 @@ test("a request form fits the viewport and is answerable by tapping", async ({ p
 test("a delegation tree three levels deep still fits the viewport", async ({ page }) => {
   await createSession(page);
 
-  await page.getByLabel("Message").fill("delegate this please");
+  await page.getByLabel("Message", { exact: true }).fill("delegate this please");
   await page.getByRole("button", { name: "Send", exact: true }).click();
 
   // The failed branch expands itself to the tool that failed, so this is already

@@ -230,8 +230,8 @@ The individual transcript refresh always forces a re-read. At most one import jo
 per environment, with bounded concurrent items; each item reports completion as soon as
 its own pass finishes.
 
-`import_and_watch` retains the discovered identity snapshot as a synchronization
-subscription. The server checks subscribed environments every ten seconds after the
+`import_and_watch` retains the requested workdir and agent scope as a synchronization
+subscription, including sessions discovered after the initial import. The server checks subscribed environments every ten seconds after the
 previous pass finishes, sharing one native catalogue per environment and vendor. Only
 identities whose source revision changed are re-read; an absent revision requires a
 conservative re-read. The adapter supplies the revision from its native files, including
@@ -241,10 +241,12 @@ response leaves the item failed and its previous revision pending for retry.
 Successful revisions are durable, so restarting either process resumes synchronization
 without re-importing unchanged sessions or starting a follower for every imported row.
 
-The latest settled import snapshot covering an identity decides its mode, ordered by
-transaction insertion rather than a wall-clock timestamp or random identifier. A later
-`import_once` snapshot stops continued synchronization for its identities. Synchronization
-does not add identities discovered after the original snapshot, and every pass checks
+The latest settled import whose scope covers a native session decides its mode, ordered
+by transaction insertion rather than a wall-clock timestamp or random identifier. A later
+`import_once` or cancelled scope stops continued synchronization within that scope.
+New identities matching an active subscription are durably added before import, including
+when the initial catalogue was empty. Workdir matching is exact after normalization;
+neighbouring and nested directories are not implicitly authorized. Every pass checks
 the originating Subject's current environment authorization. Active import jobs take
 priority over background synchronization. Failures retain per-item reasons and retry
 without advancing the last successful source revision.

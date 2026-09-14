@@ -1,6 +1,10 @@
 //! Durable import scope, discovery snapshot, and per-session outcomes.
 
-use std::{collections::BTreeMap, convert::Infallible, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    convert::Infallible,
+    time::Duration,
+};
 
 use axum::{
     extract::{Extension, Path, Query, State},
@@ -121,7 +125,7 @@ async fn require_capability(
 async fn job(state: &AppState, id: &str) -> Result<ImportJob> {
     sqlx::query_as::<_, ImportJob>(&format!("{JOB_QUERY} WHERE j.id = ? GROUP BY j.id"))
         .bind(id)
-        .fetch_optional(state.store.raw_pool())
+        .fetch_optional(state.store.read_pool())
         .await
         .map_err(Error::Database)?
         .ok_or(Error::RequestNotFound)
@@ -185,7 +189,7 @@ pub async fn create(
         .bind(mode).bind(&req.idempotency_key).bind(&request_json).bind(now_ms()).bind(now_ms())
         .execute(state.store.raw_pool()).await.map_err(Error::Database)?.rows_affected() > 0;
     let (stored_id, stored_request): (String, String) = sqlx::query_as("SELECT id,request_json FROM import_jobs WHERE environment_id=? AND origin_subject=? AND idempotency_key=?")
-        .bind(&environment).bind(&subject.0).bind(&req.idempotency_key).fetch_one(state.store.raw_pool()).await.map_err(Error::Database)?;
+        .bind(&environment).bind(&subject.0).bind(&req.idempotency_key).fetch_one(state.store.read_pool()).await.map_err(Error::Database)?;
     if stored_request != request_json {
         return Err(Error::InvalidRequest(
             "idempotencyKey already names an import with different options".into(),
@@ -212,7 +216,7 @@ pub async fn list(
 ) -> Result<Json<serde_json::Value>> {
     require_capability(&state, &subject, &environment, "observe").await?;
     let jobs = sqlx::query_as::<_, ImportJob>(&format!("{JOB_QUERY} WHERE j.environment_id=? AND (? IS NULL OR j.workdir=?) GROUP BY j.id ORDER BY j.rowid DESC LIMIT 20"))
-        .bind(environment).bind(&query.workdir).bind(&query.workdir).fetch_all(state.store.raw_pool()).await.map_err(Error::Database)?;
+        .bind(environment).bind(&query.workdir).bind(&query.workdir).fetch_all(state.store.read_pool()).await.map_err(Error::Database)?;
     Ok(Json(serde_json::json!({"jobs": jobs})))
 }
 
@@ -241,7 +245,7 @@ pub async fn items(
     authorized_job(&state, &subject, &id, "observe").await?;
     let limit = query.limit.unwrap_or(50).clamp(1, 200);
     let mut rows = sqlx::query_as::<_, ImportItem>("SELECT ordinal,agent,native_id,title,workdir,status,reason,error_code,source_revision FROM import_items WHERE job_id=? AND ordinal>? ORDER BY ordinal LIMIT ?")
-        .bind(id).bind(query.after.unwrap_or(-1)).bind(limit + 1).fetch_all(state.store.raw_pool()).await.map_err(Error::Database)?;
+        .bind(id).bind(query.after.unwrap_or(-1)).bind(limit + 1).fetch_all(state.store.read_pool()).await.map_err(Error::Database)?;
     let has_more = rows.len() > limit as usize;
     rows.truncate(limit as usize);
     let next_cursor = if has_more {
@@ -276,7 +280,7 @@ pub async fn retry(
     let mut tx = state
         .store
         .raw_pool()
-        .begin()
+        .begin_with("BEGIN IMMEDIATE")
         .await
         .map_err(Error::Database)?;
     let changed = sqlx::query("UPDATE import_jobs SET status='queued', cancel_requested=0,error=NULL,updated_at_ms=? WHERE id=? AND status IN ('failed','cancelled','completed')")
@@ -356,18 +360,159 @@ async fn sync_candidates(store: &crate::db::JournalStore) -> Result<Vec<SyncItem
          i.ordinal,i.agent,i.native_id,i.title,i.workdir,i.status,i.reason,i.error_code,i.source_revision, \
          ROW_NUMBER() OVER(PARTITION BY j.environment_id,i.agent,i.native_id ORDER BY j.rowid DESC) AS priority \
          FROM import_jobs j JOIN import_items i ON i.job_id=j.id \
-         WHERE j.scan_complete=1 AND j.status IN ('completed','failed','cancelled')) \
+         WHERE j.scan_complete=1 AND j.status IN ('completed','failed','cancelled') \
+         AND NOT EXISTS(SELECT 1 FROM import_jobs newer WHERE newer.environment_id=j.environment_id \
+           AND newer.rowid > j.rowid AND newer.scan_complete=1 AND newer.status IN ('completed','failed','cancelled') \
+           AND (newer.workdir IS NULL OR newer.workdir=i.workdir) \
+           AND (newer.agents_json IS NULL OR EXISTS(SELECT 1 FROM json_each(newer.agents_json) WHERE value=i.agent)))) \
          SELECT * FROM latest WHERE priority=1 AND mode='import_and_watch' AND cancel_requested=0 \
-         AND status IN ('imported','refreshed','failed') \
-         AND NOT EXISTS(SELECT 1 FROM import_jobs active WHERE active.environment_id=latest.environment AND active.status IN ('queued','running'))",
+         AND status IN ('pending','imported','refreshed','failed') \
+         AND NOT EXISTS(SELECT 1 FROM import_jobs active WHERE active.environment_id=latest.environment AND active.status IN ('queued','running')) \
+         ORDER BY (status='pending') DESC, ordinal",
     )
-    .fetch_all(store.raw_pool())
+    .fetch_all(store.read_pool())
     .await
     .map_err(Error::Database)
 }
 
-/// Refresh changed members of the latest explicit import snapshot.
+#[derive(FromRow)]
+struct SyncScope {
+    id: String,
+    environment: String,
+    origin_subject: String,
+    workdir: Option<String>,
+    agents_json: Option<String>,
+    mode: String,
+    cancel_requested: bool,
+}
+
+type Catalogues = BTreeMap<(String, String), Result<Vec<NativeSummary>>>;
+
+/// Discovery follows the latest matching scope, including empty initial imports.
+/// Keep the catalogue for refresh so this does not double vendor filesystem scans.
+async fn discover_sync_members(state: &AppState) -> Result<Catalogues> {
+    let scopes = sqlx::query_as::<_, SyncScope>(
+        "WITH ranked AS (SELECT id, environment_id AS environment, origin_subject,
+           workdir, agents_json, mode, cancel_requested, rowid AS insertion_order,
+           ROW_NUMBER() OVER(PARTITION BY environment_id, workdir, agents_json ORDER BY rowid DESC) AS priority
+         FROM import_jobs WHERE scan_complete=1 AND status IN ('completed','failed','cancelled'))
+         SELECT * FROM ranked WHERE priority=1 AND NOT EXISTS (
+           SELECT 1 FROM import_jobs active WHERE active.environment_id=ranked.environment
+           AND active.status IN ('queued','running')) ORDER BY insertion_order DESC")
+        .fetch_all(state.store.read_pool()).await.map_err(Error::Database)?;
+    let mut permissions = BTreeMap::new();
+    let mut decoded = Vec::with_capacity(scopes.len());
+    let mut recorded = BTreeMap::new();
+    for scope in scopes {
+        let agents: Option<Vec<String>> = scope
+            .agents_json
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|e| Error::Internal(e.to_string()))?;
+        let key = (scope.environment.clone(), scope.origin_subject.clone());
+        if let std::collections::btree_map::Entry::Vacant(entry) = permissions.entry(key) {
+            let (environment, subject) = entry.key();
+            let allowed = state
+                .store
+                .has_capability(subject, environment, "control")
+                .await?;
+            entry.insert(allowed);
+        }
+        let members: Vec<(String, String)> =
+            sqlx::query_as("SELECT agent,native_id FROM import_items WHERE job_id=?")
+                .bind(&scope.id)
+                .fetch_all(state.store.read_pool())
+                .await
+                .map_err(Error::Database)?;
+        recorded.insert(
+            scope.id.clone(),
+            members.into_iter().collect::<BTreeSet<_>>(),
+        );
+        decoded.push((scope, agents));
+    }
+    let mut catalogues = BTreeMap::new();
+    for environment in state
+        .env_bridge
+        .list_environments()
+        .await
+        .map_err(|e| Error::Internal(e.to_string()))?
+    {
+        if !state
+            .env_bridge
+            .environment_connected(&environment.id)
+            .await
+        {
+            continue;
+        }
+        for agent in environment.agents.iter().filter(|a| a.available) {
+            let relevant: Vec<_> = decoded
+                .iter()
+                .filter(|(scope, agents)| {
+                    scope.environment == environment.id.as_str()
+                        && agents
+                            .as_ref()
+                            .is_none_or(|agents| agents.contains(&agent.name))
+                })
+                .collect();
+            if !relevant.iter().any(|(scope, _)| {
+                scope.mode == "import_and_watch"
+                    && !scope.cancel_requested
+                    && permissions[&(scope.environment.clone(), scope.origin_subject.clone())]
+            }) {
+                continue;
+            }
+            let key = (environment.id.to_string(), agent.name.clone());
+            let summaries = match enumerate_native(state, &environment.id, &agent.name, None).await
+            {
+                Ok(summaries) => summaries,
+                Err(error) => {
+                    // One unavailable vendor must not prevent the other vendors
+                    // or environments from discovering new sessions this pass.
+                    catalogues.insert(key, Err(error));
+                    continue;
+                }
+            };
+            for summary in &summaries {
+                let Some(workdir) = summary.workdir.as_deref().filter(|p| !p.trim().is_empty())
+                else {
+                    continue;
+                };
+                let Some((scope, _)) = relevant.iter().find(|(scope, _)| {
+                    scope.workdir.as_deref().is_none_or(|p| {
+                        sylph_protocol::normalize_workdir(p)
+                            == sylph_protocol::normalize_workdir(workdir)
+                    })
+                }) else {
+                    continue;
+                };
+                if scope.mode != "import_and_watch"
+                    || scope.cancel_requested
+                    || !permissions[&(scope.environment.clone(), scope.origin_subject.clone())]
+                {
+                    continue;
+                }
+                let key = (agent.name.clone(), summary.native_id.to_string());
+                if recorded[&scope.id].contains(&key) {
+                    continue;
+                }
+                // A single indexed statement per newly discovered identity, with no native
+                // body in the transaction. A crash leaves a pending item to retry.
+                sqlx::query("INSERT INTO import_items(job_id,ordinal,agent,native_id,title,workdir,status)
+                    SELECT ?1, COALESCE((SELECT MAX(ordinal)+1 FROM import_items WHERE job_id=?1),0), ?2, ?3, ?4, ?5, 'pending'
+                    WHERE NOT EXISTS(SELECT 1 FROM import_items WHERE job_id=?1 AND agent=?2 AND native_id=?3)")
+                    .bind(&scope.id).bind(&agent.name).bind(summary.native_id.as_str())
+                    .bind(&summary.title).bind(workdir).execute(state.store.raw_pool()).await.map_err(Error::Database)?;
+            }
+            catalogues.insert(key, Ok(summaries));
+        }
+    }
+    Ok(catalogues)
+}
+
+/// Discover and refresh members of active synchronization scopes.
 pub async fn sync_once(state: &AppState) -> Result<usize> {
+    let mut catalogues = discover_sync_members(state).await?;
     let candidates = sync_candidates(&state.store).await?;
     let mut groups = BTreeMap::<(String, String), Vec<SyncItem>>::new();
     let mut permissions = BTreeMap::new();
@@ -400,7 +545,11 @@ pub async fn sync_once(state: &AppState) -> Result<usize> {
         if !state.env_bridge.environment_connected(&environment).await {
             continue;
         }
-        let summaries = match enumerate_native(state, &environment, &agent, None).await {
+        let discovered = match catalogues.remove(&(environment.to_string(), agent.clone())) {
+            Some(result) => result,
+            None => enumerate_native(state, &environment, &agent, None).await,
+        };
+        let summaries = match discovered {
             Ok(summaries) => summaries,
             Err(error) => {
                 for item in items {
@@ -422,7 +571,7 @@ pub async fn sync_once(state: &AppState) -> Result<usize> {
             };
             if revision.is_some()
                 && revision == item.item.source_revision
-                && item.item.status != "failed"
+                && matches!(item.item.status.as_str(), "imported" | "refreshed")
             {
                 continue;
             }
@@ -438,12 +587,17 @@ pub async fn sync_once(state: &AppState) -> Result<usize> {
                             .expect("persisted agent identity"),
                         sylph_protocol::NativeId::new(&item.item.native_id),
                     );
-                    let result = reread_complete(
-                        state,
-                        &SubjectId(item.origin_subject.clone()),
-                        &session_id,
-                    )
-                    .await;
+                    let subject = SubjectId(item.origin_subject.clone());
+                    let result = if item.item.status == "pending"
+                        || state.store.get_session(&session_id).await?.is_none()
+                    {
+                        let current = job(state, &item.job_id).await?;
+                        import_item(state, &current, &subject, &item.item)
+                            .await
+                            .map(|_| ())
+                    } else {
+                        reread_complete(state, &subject, &session_id).await
+                    };
                     match result {
                         Ok(()) => {
                             finish_sync_item(state, &item, revision.as_deref(), Ok(())).await?;
@@ -460,6 +614,9 @@ pub async fn sync_once(state: &AppState) -> Result<usize> {
         while let Some(result) = pending.next().await {
             refreshed += result?;
         }
+    }
+    for catalogue in catalogues.into_values() {
+        catalogue?;
     }
     Ok(refreshed)
 }
@@ -504,7 +661,7 @@ async fn finish_sync_item(
     let mut tx = state
         .store
         .raw_pool()
-        .begin()
+        .begin_with("BEGIN IMMEDIATE")
         .await
         .map_err(Error::Database)?;
     sqlx::query("UPDATE import_items SET status=?,reason=?,error_code=?,source_revision=CASE WHEN ?='refreshed' THEN ? ELSE source_revision END WHERE job_id=? AND ordinal=?")
@@ -574,7 +731,7 @@ fn spawn(state: AppState, id: String) {
                 break;
             }
             next = sqlx::query_scalar("SELECT id FROM import_jobs WHERE environment_id=? AND status='queued' ORDER BY rowid LIMIT 1")
-                .bind(current.environment).fetch_optional(state.store.raw_pool()).await.ok().flatten();
+                .bind(current.environment).fetch_optional(state.store.read_pool()).await.ok().flatten();
         }
     });
 }
@@ -614,7 +771,7 @@ async fn run(state: &AppState, id: &str) -> Result<()> {
     let request_json: String =
         sqlx::query_scalar("SELECT request_json FROM import_jobs WHERE id=?")
             .bind(id)
-            .fetch_one(state.store.raw_pool())
+            .fetch_one(state.store.read_pool())
             .await
             .map_err(Error::Database)?;
     let request: CreateImportRequest =
@@ -632,7 +789,7 @@ async fn run(state: &AppState, id: &str) -> Result<()> {
         // per row while staying below the envagent's command capacity and preserving
         // durable item-level progress/cancellation.
         let items = sqlx::query_as::<_, ImportItem>("SELECT ordinal,agent,native_id,title,workdir,status,reason,error_code,source_revision FROM import_items WHERE job_id=? AND status='pending' ORDER BY ordinal LIMIT ?")
-            .bind(id).bind(HISTORY_CONCURRENCY as i64).fetch_all(state.store.raw_pool()).await.map_err(Error::Database)?;
+            .bind(id).bind(HISTORY_CONCURRENCY as i64).fetch_all(state.store.read_pool()).await.map_err(Error::Database)?;
         if items.is_empty() {
             break;
         }
@@ -694,7 +851,7 @@ async fn set_item(
     let mut tx = state
         .store
         .raw_pool()
-        .begin()
+        .begin_with("BEGIN IMMEDIATE")
         .await
         .map_err(Error::Database)?;
     sqlx::query(
@@ -760,7 +917,7 @@ async fn discover(
         let mut tx = state
             .store
             .raw_pool()
-            .begin()
+            .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(Error::Database)?;
         let mut ordinal: i64 = sqlx::query_scalar(
@@ -816,7 +973,7 @@ async fn import_item(
             .bind(&item.agent)
             .bind(&item.native_id)
             .bind(&current.id)
-            .fetch_optional(state.store.raw_pool())
+            .fetch_optional(state.store.read_pool())
             .await
             .map_err(Error::Database)?;
             if previous.is_some_and(|(status, previous)| {

@@ -27,6 +27,7 @@ roots and no privileged code path.
 ├── SOUL.md              The identity preamble. Yours to edit; seeded from the bundle.
 ├── data/                Everything durable. This is what to back up.
 │   ├── journal.db       The journal: sessions, turns, in-flight events.
+│   ├── native.db        Lossless native records and staged sidecars.
 │   ├── history.db       Consolidated history, and the FTS index over it.
 │   ├── blobs/           Content-addressed payloads, referenced by history.db.
 │   └── attachments/     Files staged for a turn, by session and turn id.
@@ -39,7 +40,7 @@ roots and no privileged code path.
 └── spool.db             Events not yet acked by the server. Bounded; ack-gated.
 ```
 
-`data/` is one subtree so backup is one path: `journal.db`, `history.db`, and `blobs/`
+`data/` is one subtree so backup is one path: `journal.db`, `native.db`, `history.db`, and `blobs/`
 are one store split for SQLite's sake, and `attachments/` is referenced by turns inside
 it. Copying `data/` copies a consistent whole.
 

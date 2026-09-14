@@ -256,7 +256,7 @@ impl RetentionScheduler {
         }
 
         // Once per pass, not once per session: reachability spans sessions, so this
-        // is a global scan over `cas_refs`.
+        // consumes the global candidate queue produced by block mutations.
         match retention::sweep_blobs(&self.history).await {
             Ok(removed) => report.blobs_swept = removed,
             Err(error) => warn!("Could not sweep unreferenced blobs: {:#}", error),

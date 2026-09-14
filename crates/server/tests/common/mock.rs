@@ -541,7 +541,7 @@ impl Adapter for MockAdapter {
     /// **Every field the vendor would not record is absent, not defaulted.** A synthesized
     /// title or timestamp is a lie a journal makes permanent, and this row is what a picker
     /// renders — so the only fields set are the ones a real store genuinely holds.
-    async fn enumerate(&self, _filter: &StoreFilter) -> Result<Vec<NativeSummary>> {
+    async fn enumerate(&self, filter: &StoreFilter) -> Result<Vec<NativeSummary>> {
         self.native_enumerations.fetch_add(1, Ordering::SeqCst);
         if self.behavior == Behavior::NoStore {
             return Ok(Vec::new());
@@ -569,6 +569,14 @@ impl Adapter for MockAdapter {
             let mut summary = summary.clone();
             summary.native_id = NativeId::new(native_id);
             summaries.push(summary);
+        }
+        if let Some(workdir) = &filter.workdir {
+            summaries.retain(|summary| {
+                summary.workdir.as_deref().is_some_and(|held| {
+                    sylph_protocol::normalize_workdir(held)
+                        == sylph_protocol::normalize_workdir(workdir)
+                })
+            });
         }
         Ok(summaries)
     }

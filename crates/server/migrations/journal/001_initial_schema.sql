@@ -170,7 +170,7 @@ CREATE INDEX turns_status_idx ON turns(status)
   WHERE status IN ('queued', 'starting', 'running', 'stopping', 'settling');
 
 -- The live event tail. Bounded: consolidation moves a settled turn's rows into
--- `history.db` and deletes them here (`docs/storage.md` § Three tiers).
+-- `history.db` and deletes them here (`docs/storage.md` § Workloads and database boundaries).
 CREATE TABLE events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   session_env    TEXT NOT NULL,
@@ -423,6 +423,31 @@ CREATE TABLE env_event_receipts (
 
 CREATE INDEX env_event_receipts_session_idx
   ON env_event_receipts(session_env, session_agent, session_native, server_seq);
+
+-- The contiguous producer prefix is updated with receipts, not reconstructed by
+-- scanning every receipt for every frame. Filling a gap walks only the newly
+-- contiguous suffix; ordinary ordered ingestion seeks one next sequence.
+CREATE TABLE env_producer_cursors (
+  environment_id TEXT NOT NULL,
+  producer_id TEXT NOT NULL,
+  accepted_through INTEGER NOT NULL CHECK(accepted_through >= 0),
+  PRIMARY KEY(environment_id, producer_id)
+) WITHOUT ROWID;
+
+CREATE TRIGGER receipts_advance_cursor AFTER INSERT ON env_event_receipts BEGIN
+  INSERT INTO env_producer_cursors(environment_id, producer_id, accepted_through)
+    VALUES(NEW.environment_id, NEW.producer_id, 0) ON CONFLICT DO NOTHING;
+  UPDATE env_producer_cursors SET accepted_through = (
+    WITH RECURSIVE contiguous(seq) AS (
+      SELECT env_producer_cursors.accepted_through
+      UNION ALL
+      SELECT seq + 1 FROM contiguous WHERE EXISTS (
+        SELECT 1 FROM env_event_receipts r WHERE r.environment_id = NEW.environment_id
+          AND r.producer_id = NEW.producer_id AND r.producer_seq = contiguous.seq + 1)
+    ) SELECT MAX(seq) FROM contiguous
+  ) WHERE environment_id = NEW.environment_id AND producer_id = NEW.producer_id
+      AND NEW.producer_seq = accepted_through + 1;
+END;
 
 -- Server-owned graph edges. Events remain stored once under their owning session; this
 -- is a read model for delegation and fork provenance, which is why `relation` is a

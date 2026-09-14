@@ -19,9 +19,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use base64::Engine;
-use sqlx::sqlite::{
-    SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions, SqliteSynchronous,
-};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqliteSynchronous};
 use sqlx::Row;
 use tracing::{debug, info, warn};
 
@@ -45,11 +43,9 @@ pub enum NativeBlobState {
 // One measurement definition serves both the live query and the recorded baseline.
 // Unavailable references describe source bytes, not retained body bytes.
 const SESSION_BYTES_SQL: &str = "SELECT
-    COALESCE((SELECT SUM(text_len + data_len) FROM blocks WHERE session_id = ?1), 0)
-    + COALESCE((SELECT SUM(length(payload_json)) FROM native_records WHERE session_id = ?1), 0)
-    + COALESCE((SELECT SUM(size) FROM native_blobs WHERE session_id = ?1 AND hash IS NOT NULL), 0)
-    + COALESCE((SELECT SUM(length(data)) FROM native_blob_chunks WHERE session_id = ?1), 0) AS bytes,
-    (SELECT COUNT(*) FROM blocks WHERE session_id = ?1) AS blocks";
+    COALESCE((SELECT bytes FROM session_usage WHERE session_id = ?1), 0)
+    + COALESCE((SELECT bytes FROM native.session_usage WHERE session_id = ?1), 0) AS bytes,
+    COALESCE((SELECT blocks FROM session_usage WHERE session_id = ?1), 0) AS blocks";
 
 /// One block as stored: a completed event plus how it streamed.
 #[derive(Debug, Clone)]
@@ -249,6 +245,10 @@ fn session_bytes_from_row(row: sqlx::sqlite::SqliteRow) -> SessionBytes {
 #[derive(Clone)]
 pub struct HistoryStore {
     pool: SqlitePool,
+    readers: SqlitePool,
+    native_writer: SqlitePool,
+    native_readers: SqlitePool,
+    publication: Arc<tokio::sync::RwLock<()>>,
     blobs: BlobStore,
     native_record_failures: Arc<AtomicU64>,
 }
@@ -256,58 +256,43 @@ pub struct HistoryStore {
 impl HistoryStore {
     /// Open (creating if needed) the history database beside a blob store.
     pub async fn open(db_path: &str, blobs: BlobStore) -> Result<Self> {
+        let native_path = std::path::Path::new(db_path).with_file_name("native.db");
         let options = SqliteConnectOptions::new()
             .filename(db_path)
             .create_if_missing(true)
             .journal_mode(SqliteJournalMode::Wal)
-            // FULL, unlike the journal's NORMAL: this is the record, and it is
-            // written once per turn rather than once per token, so the fsync is
-            // affordable exactly where the journal's would not be.
             .synchronous(SqliteSynchronous::Full)
-            .busy_timeout(std::time::Duration::from_secs(30));
-
-        let pool = SqlitePoolOptions::new()
-            .max_connections(3)
-            // **The `jieba` tokenizer is registered per connection, and a failure here is
-            // fatal rather than a fallback.**
-            //
-            // Registration is bound to one `sqlite3*`, so every connection the pool opens
-            // needs it — including the one migrations run on, which is why this is set
-            // before `connect_with` rather than after.
-            //
-            // Linked into the binary rather than loaded as a `.dylib`: there is no file to
-            // locate, no per-platform artifact to install, and no "extension missing"
-            // runtime state to degrade into. Degrading is what makes this worth stating —
-            // an index built with one tokenizer and queried with another silently returns
-            // nothing for CJK, so falling back to `unicode61` would answer *wrongly*
-            // rather than answering worse. `docs/storage.md` § Tokenization.
-            .after_connect(|conn, _meta| {
-                Box::pin(async move {
-                    let mut handle = conn.lock_handle().await?;
-                    // SAFETY: the handle is a live `sqlite3*` held for this call, and
-                    // registration lasts as long as that connection.
-                    let rc = unsafe { fts5jieba::register_on_connection(handle.as_raw_handle().as_ptr().cast()) };
-                    rc.map_err(|code| {
-                        sqlx::Error::Configuration(
-                            format!(
-                                "could not register the `jieba` FTS5 tokenizer                                  (SQLite code {code}); the full-text index cannot be                                  read or written without it"
-                            )
-                            .into(),
-                        )
-                    })
-                })
-            })
-            .connect_with(options)
+            .foreign_keys(true)
+            .busy_timeout(std::time::Duration::from_secs(5));
+        let native_options = options.clone().filename(&native_path);
+        let native_writer =
+            super::sqlite::pool(native_options.clone(), 1, false, false, None).await?;
+        sqlx::migrate!("./migrations/native")
+            .run(&native_writer)
             .await
-            .with_context(|| format!("Could not open the history store at {}", db_path))?;
-
+            .context("Native record migrations failed")?;
+        let native_readers = super::sqlite::pool(native_options, 3, true, false, None).await?;
+        let pool = super::sqlite::pool(options.clone(), 1, false, true, None).await?;
         sqlx::migrate!("./migrations/history")
             .run(&pool)
             .await
             .context("History migrations failed")?;
-
+        // Attach only to readers: BEGIN IMMEDIATE on an attached writer would
+        // reserve both files and silently undo workload isolation.
+        let readers = super::sqlite::pool(
+            options,
+            3,
+            true,
+            true,
+            Some(native_path.to_string_lossy().into_owned()),
+        )
+        .await?;
         Ok(Self {
             pool,
+            readers,
+            native_writer,
+            native_readers,
+            publication: Arc::new(tokio::sync::RwLock::new(())),
             blobs,
             native_record_failures: Arc::new(AtomicU64::new(0)),
         })
@@ -353,16 +338,16 @@ impl HistoryStore {
                 && chunk.final_chunk == (chunk.offset + bytes.len() as u64 == chunk.size),
             "native blob chunk has invalid bounds"
         );
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.native_writer.begin_with("BEGIN IMMEDIATE").await?;
         // An insert acquires SQLite's writer lock before checking the current end.
         // A read-then-insert transaction can lose that upgrade to another writer.
         sqlx::query(
             "INSERT INTO native_blob_chunks (session_id, source, version, name, size, offset, data)
              SELECT ?, ?, ?, ?, ?, ?, ?
-             WHERE ? = COALESCE((SELECT SUM(length(data)) FROM native_blob_chunks
-               WHERE session_id = ? AND source = ? AND version = ? AND name = ?), 0)
+             WHERE ? = COALESCE((SELECT offset + length(data) FROM native_blob_chunks
+               WHERE session_id = ? AND source = ? AND version = ? AND name = ? ORDER BY offset DESC LIMIT 1), 0)
              AND NOT EXISTS (SELECT 1 FROM native_blob_chunks
-               WHERE session_id = ? AND source = ? AND version = ? AND name = ? AND size <> ?)
+               WHERE session_id = ? AND source = ? AND version = ? AND name = ? AND offset = 0 AND size <> ?)
              ON CONFLICT(session_id, source, version, name, offset) DO NOTHING",
         )
         .bind(session_id)
@@ -411,11 +396,23 @@ impl HistoryStore {
     /// append-only for JSONL and content-versioned for rewritten manifests. Sidecar chunks
     /// are assembled into CAS before the record references them.
     pub async fn put_native_record(&self, session_id: &str, record: &NativeRecord) -> Result<()> {
-        // A file may be observed while SQLite is checkpointing or while the vendor's
-        // sidecar is being rotated. One bounded retry handles those transient failures
-        // without turning a bad record into an unbounded ingest loop.
+        // Only contention is retryable here: vendor paths have already been
+        // resolved by the envagent. Repeating a collision or corrupt CAS read
+        // doubles work and cannot turn it into a valid native record.
         let mut result = self.put_native_record_inner(session_id, record).await;
-        if result.is_err() {
+        if result.as_ref().err().is_some_and(|error| {
+            error
+                .chain()
+                .any(|cause| match cause.downcast_ref::<sqlx::Error>() {
+                    Some(sqlx::Error::PoolTimedOut) => true,
+                    Some(sqlx::Error::Database(error)) => error
+                        .code()
+                        .and_then(|code| code.parse::<u32>().ok())
+                        .is_some_and(|code| matches!(code & 0xff, 5 | 6)),
+                    _ => false,
+                })
+        }) {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
             result = self.put_native_record_inner(session_id, record).await;
         }
         if result.is_err() {
@@ -425,6 +422,7 @@ impl HistoryStore {
     }
 
     async fn put_native_record_inner(&self, session_id: &str, record: &NativeRecord) -> Result<()> {
+        let _publication = self.publication.read().await;
         let mut blobs = Vec::with_capacity(record.blobs.len());
         for blob in &record.blobs {
             anyhow::ensure!(
@@ -455,7 +453,7 @@ impl HistoryStore {
                         .bind(&record.source)
                         .bind(record.version as i64)
                         .bind(&blob.name)
-                        .fetch_all(&self.pool)
+                        .fetch_all(&self.native_readers)
                         .await?;
                         if chunks.is_empty() {
                             // A repeated record may have already consumed its chunks.
@@ -464,7 +462,7 @@ impl HistoryStore {
                                  WHERE session_id = ? AND source = ? AND version = ? AND name = ? AND size = ?",
                             )
                             .bind(session_id).bind(&record.source).bind(record.version as i64)
-                            .bind(&blob.name).bind(blob.size as i64).fetch_optional(&self.pool).await?.flatten();
+                            .bind(&blob.name).bind(blob.size as i64).fetch_optional(&self.native_readers).await?.flatten();
                             let hash = hash.context("native blob has no retained chunks")?;
                             self.blobs
                                 .get(&hash)
@@ -492,11 +490,11 @@ impl HistoryStore {
             blobs.push((blob, hash));
         }
 
-        let mut tx = self.pool.begin().await?;
         let payload = record
             .raw_json
             .clone()
             .unwrap_or_else(|| record.payload.to_string().into_bytes());
+        let mut tx = self.native_writer.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query(
             r#"INSERT INTO native_records
                (session_id, source, version, payload_json, created_at_ms, retained_seq, retention_class)
@@ -593,7 +591,7 @@ impl HistoryStore {
         .bind(session_id)
         .bind(source)
         .bind(version as i64)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&self.native_readers)
         .await?;
         let Some(row) = row else {
             return Ok(None);
@@ -619,7 +617,7 @@ impl HistoryStore {
         .bind(session_id)
         .bind(source)
         .bind(version as i64)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&self.native_readers)
         .await?;
         row.map(|row| row.try_get("payload_json"))
             .transpose()
@@ -633,7 +631,7 @@ impl HistoryStore {
              WHERE session_id = ? ORDER BY retained_seq",
         )
         .bind(session_id)
-        .fetch_all(&self.pool)
+        .fetch_all(&self.native_readers)
         .await?;
         rows.into_iter()
             .map(|row| {
@@ -668,7 +666,7 @@ impl HistoryStore {
         .bind(source)
         .bind(version as i64)
         .bind(name)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&self.native_readers)
         .await?;
         let Some(row) = row else {
             return Ok(NativeBlobState::Missing);
@@ -690,10 +688,34 @@ impl HistoryStore {
 
     /// Write blocks, then their blob references.
     ///
-    /// `INSERT OR REPLACE` because consolidation must be safe to re-run: a crash
+    /// Upsert keeps the integer address stable and makes consolidation safe to re-run: a crash
     /// after the insert and before the journal delete leaves rows here that the
     /// next attempt writes again.
     pub async fn put_blocks(&self, blocks: &[Block]) -> Result<()> {
+        // Bounds both SQL round trips and tokenizer input. A single oversized body
+        // remains indivisible; the journal is retained until every batch commits.
+        let mut start = 0;
+        while start < blocks.len() {
+            let mut end = start;
+            let mut bytes = 0;
+            while end < blocks.len() && end - start < 64 {
+                let block = &blocks[end];
+                let size =
+                    block.text.len() + block.data.as_ref().map_or(0, |v| v.to_string().len());
+                if end > start && bytes + size > 1024 * 1024 {
+                    break;
+                }
+                bytes += size;
+                end += 1;
+            }
+            self.put_block_batch(&blocks[start..end]).await?;
+            start = end;
+        }
+        Ok(())
+    }
+
+    async fn put_block_batch(&self, blocks: &[Block]) -> Result<()> {
+        let _publication = self.publication.read().await;
         if blocks.is_empty() {
             return Ok(());
         }
@@ -716,7 +738,7 @@ impl HistoryStore {
             payloads.push((text, data, data_len));
         }
 
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
 
         for (block, (text, data, data_len)) in blocks.iter().zip(&payloads) {
             // A late agent outcome may have reconciled this block while a
@@ -745,9 +767,9 @@ impl HistoryStore {
                 None => (None, None),
             };
 
-            sqlx::query(
+            let block_id: i64 = sqlx::query_scalar(
                 r#"
-                INSERT OR REPLACE INTO blocks (
+                INSERT INTO blocks (
                     session_id, seq, turn_id, kind, phase, stream_id, span, interior_state, name,
                     text_inline, text_hash, text_len, text_encoding, text_preview,
                     delta_offsets, delta_timings,
@@ -756,6 +778,36 @@ impl HistoryStore {
                     started_at_ms, started_recorded_at_ms, created_at_ms
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_id, seq) DO UPDATE SET
+                turn_id = excluded.turn_id,
+                kind = excluded.kind,
+                phase = excluded.phase,
+                stream_id = excluded.stream_id,
+                span = excluded.span,
+                interior_state = excluded.interior_state,
+                name = excluded.name,
+                text_inline = excluded.text_inline,
+                text_hash = excluded.text_hash,
+                text_len = excluded.text_len,
+                text_encoding = excluded.text_encoding,
+                text_preview = excluded.text_preview,
+                delta_offsets = excluded.delta_offsets,
+                delta_timings = excluded.delta_timings,
+                data_json = excluded.data_json,
+                data_hash = excluded.data_hash,
+                data_len = excluded.data_len,
+                data_encoding = excluded.data_encoding,
+                data_preview_json = excluded.data_preview_json,
+                body_truncated = excluded.body_truncated,
+                reconciled = excluded.reconciled,
+                is_error = excluded.is_error,
+                source = excluded.source,
+                arrival_at_ms = excluded.arrival_at_ms,
+                recorded_at_ms = excluded.recorded_at_ms,
+                started_at_ms = excluded.started_at_ms,
+                started_recorded_at_ms = excluded.started_recorded_at_ms,
+                created_at_ms = excluded.created_at_ms
+                RETURNING id
                 "#,
             )
             .bind(&block.session_id)
@@ -788,7 +840,7 @@ impl HistoryStore {
             .bind(block.started_at_ms)
             .bind(block.started_recorded_at_ms)
             .bind(block.created_at_ms)
-            .execute(&mut *tx)
+            .fetch_one(&mut *tx)
             .await?;
 
             // Recorded per (hash, block) rather than as a count, so a blob shared
@@ -816,7 +868,7 @@ impl HistoryStore {
             // decoded copy is inserted here, which costs a second copy of the text and
             // is the price of the tier split (`docs/storage.md`).
             //
-            // Deleted first, because `INSERT OR REPLACE` above makes re-consolidating a
+            // Deleted first, because the upsert above makes re-consolidating a
             // turn idempotent and this table has no primary key to replace on — a
             // second pass would otherwise index the same block twice and return it
             // twice from one query.
@@ -824,18 +876,20 @@ impl HistoryStore {
             // Empty text is skipped rather than indexed: a `tool_call` carries its
             // arguments in `data_json` and no text at all, and an empty row can never
             // match a query while still costing an index entry per block.
-            sqlx::query("DELETE FROM blocks_fts WHERE session_id = ? AND seq = ?")
+            sqlx::query("DELETE FROM blocks_fts WHERE rowid = ?")
+                .bind(block_id)
+                .execute(&mut *tx)
+                .await?;
+            if !block.text.trim().is_empty() {
+                sqlx::query(
+                    "INSERT INTO blocks_fts (rowid, text, session_id, seq) VALUES (?, ?, ?, ?)",
+                )
+                .bind(block_id)
+                .bind(&block.text)
                 .bind(&block.session_id)
                 .bind(block.seq)
                 .execute(&mut *tx)
                 .await?;
-            if !block.text.trim().is_empty() {
-                sqlx::query("INSERT INTO blocks_fts (text, session_id, seq) VALUES (?, ?, ?)")
-                    .bind(&block.text)
-                    .bind(&block.session_id)
-                    .bind(block.seq)
-                    .execute(&mut *tx)
-                    .await?;
             }
         }
 
@@ -849,7 +903,7 @@ impl HistoryStore {
             sqlx::query("SELECT * FROM blocks WHERE session_id = ? AND seq > ? ORDER BY seq")
                 .bind(session_id)
                 .bind(after_seq)
-                .fetch_all(&self.pool)
+                .fetch_all(&self.readers)
                 .await?;
 
         let mut blocks = Vec::with_capacity(rows.len());
@@ -866,7 +920,7 @@ impl HistoryStore {
         after_seq: i32,
     ) -> Result<Vec<BlockSummary>> {
         let rows = sqlx::query(&format!("SELECT {BLOCK_SUMMARY_COLUMNS} FROM blocks WHERE session_id = ? AND seq > ? ORDER BY seq"))
-            .bind(session_id).bind(after_seq).fetch_all(&self.pool).await?;
+            .bind(session_id).bind(after_seq).fetch_all(&self.readers).await?;
         rows.into_iter()
             .map(|row| self.row_to_summary(row))
             .collect()
@@ -878,7 +932,7 @@ impl HistoryStore {
             "SELECT {BLOCK_SUMMARY_COLUMNS} FROM blocks WHERE turn_id = ? ORDER BY seq"
         ))
         .bind(turn_id)
-        .fetch_all(&self.pool)
+        .fetch_all(&self.readers)
         .await?;
         rows.into_iter()
             .map(|row| self.row_to_summary(row))
@@ -890,7 +944,7 @@ impl HistoryStore {
         let row = sqlx::query("SELECT * FROM blocks WHERE session_id = ? AND seq = ?")
             .bind(session_id)
             .bind(seq)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&self.readers)
             .await?;
         match row {
             Some(row) => Ok(Some(self.row_to_block(row).await?)),
@@ -941,7 +995,7 @@ impl HistoryStore {
     pub async fn turn_blocks(&self, turn_id: &str) -> Result<Vec<Block>> {
         let rows = sqlx::query("SELECT * FROM blocks WHERE turn_id = ? ORDER BY seq")
             .bind(turn_id)
-            .fetch_all(&self.pool)
+            .fetch_all(&self.readers)
             .await?;
 
         let mut blocks = Vec::with_capacity(rows.len());
@@ -1055,23 +1109,34 @@ impl HistoryStore {
     /// every pruned blob permanently. The ref outliving its block is a dangling
     /// row the sweep reconciles, which is the safe direction.
     pub async fn prune_below(&self, session_id: &str, confirmed_seq: i32) -> Result<u64> {
-        let mut tx = self.pool.begin().await?;
-        let result = sqlx::query("DELETE FROM blocks WHERE session_id = ? AND seq <= ?")
+        let mut removed = 0;
+        loop {
+            let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+            let ids: Vec<i64> = sqlx::query_scalar(
+                "SELECT id FROM blocks WHERE session_id = ? AND seq <= ? ORDER BY seq LIMIT 64",
+            )
             .bind(session_id)
             .bind(confirmed_seq)
-            .execute(&mut *tx)
+            .fetch_all(&mut *tx)
             .await?;
-        // The index goes with the rows, in the same transaction. `blocks_fts` is
-        // standalone rather than external-content, so nothing removes its entries
-        // automatically — and a hit pointing at a pruned block is worse than no hit,
-        // because a client would follow it and find nothing.
-        sqlx::query("DELETE FROM blocks_fts WHERE session_id = ? AND seq <= ?")
-            .bind(session_id)
-            .bind(confirmed_seq)
-            .execute(&mut *tx)
-            .await?;
-        tx.commit().await?;
-        Ok(result.rows_affected())
+            if ids.is_empty() {
+                tx.commit().await?;
+                break;
+            }
+            for id in ids {
+                sqlx::query("DELETE FROM blocks_fts WHERE rowid = ?")
+                    .bind(id)
+                    .execute(&mut *tx)
+                    .await?;
+                removed += sqlx::query("DELETE FROM blocks WHERE id = ?")
+                    .bind(id)
+                    .execute(&mut *tx)
+                    .await?
+                    .rows_affected();
+            }
+            tx.commit().await?;
+        }
+        Ok(removed)
     }
 
     /// Full-text search across every session's consolidated history, grouped by session.
@@ -1145,7 +1210,7 @@ impl HistoryStore {
         .bind(fts5_phrase(query))
         .bind(limit as i64)
         .bind(offset as i64)
-        .fetch_all(&self.pool)
+        .fetch_all(&self.readers)
         .await?;
 
         let mut out = Vec::with_capacity(ranked.len());
@@ -1159,14 +1224,13 @@ impl HistoryStore {
                      ON blocks.session_id = blocks_fts.session_id
                     AND blocks.seq = blocks_fts.seq
                   WHERE blocks_fts MATCH ?
-                    AND blocks_fts.session_id = ?
-                    AND blocks_fts.seq = ?
+                    AND blocks_fts.rowid = (SELECT id FROM blocks WHERE session_id = ? AND seq = ?)
                   LIMIT 1",
             )
             .bind(fts5_phrase(query))
             .bind(&session_id)
             .bind(seq)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&self.readers)
             .await?;
 
             let (excerpt, turn_id) = row.unwrap_or_default();
@@ -1188,51 +1252,47 @@ impl HistoryStore {
     /// the same file read in two sessions is one blob, and it survives until both
     /// have let go.
     pub async fn sweep_unreferenced_blobs(&self) -> Result<u64> {
-        let candidates: Vec<String> = sqlx::query_scalar(
-            "SELECT hash FROM cas_refs
-             UNION
-             SELECT hash FROM native_blobs WHERE hash IS NOT NULL",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-
+        let candidates: Vec<String> =
+            sqlx::query_scalar("SELECT hash FROM cas_gc_candidates ORDER BY hash LIMIT 128")
+                .fetch_all(&self.readers)
+                .await?;
         let mut removed = 0;
         for hash in candidates {
-            let live_blocks: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM cas_refs
-                 WHERE hash = ?
-                   AND EXISTS (
-                     SELECT 1 FROM blocks
-                      WHERE blocks.session_id = cas_refs.session_id
-                        AND blocks.seq = cas_refs.seq
-                   )",
+            // Acquire capacity before excluding publishers. Waiting for a busy
+            // history pool while holding the publication gate would couple raw
+            // ingestion back to the workload we split it away from.
+            let mut reader = self.readers.acquire().await?;
+            let mut writer = self.pool.acquire().await?;
+            // Do not queue maintenance ahead of ingestion. A writer publishes CAS
+            // before its SQL reference; excluding that window prevents deleting a
+            // just-reused object. The gate spans both independent databases.
+            let Ok(_publication) = self.publication.try_write() else {
+                break;
+            };
+            let live: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM cas_refs r JOIN blocks b
+                   ON b.session_id = r.session_id AND b.seq = r.seq
+                   WHERE r.hash = ?1 AND (b.text_hash = ?1 OR b.data_hash = ?1))
+                 OR EXISTS(SELECT 1 FROM native.native_blobs WHERE hash = ?1)",
             )
             .bind(&hash)
-            .fetch_one(&self.pool)
+            .fetch_one(&mut *reader)
             .await?;
-            let live_native: i64 =
-                sqlx::query_scalar("SELECT COUNT(*) FROM native_blobs WHERE hash = ?")
-                    .bind(&hash)
-                    .fetch_one(&self.pool)
-                    .await?;
-
-            sqlx::query(
-                "DELETE FROM cas_refs WHERE hash = ? AND NOT EXISTS (
-                SELECT 1 FROM blocks
-                 WHERE blocks.session_id = cas_refs.session_id
-                   AND blocks.seq = cas_refs.seq
-              )",
-            )
-            .bind(&hash)
-            .execute(&self.pool)
-            .await?;
-
-            if live_blocks == 0 && live_native == 0 {
+            if !live {
+                // Keep dangling refs until removal succeeds: they are the durable
+                // retry queue, including when filesystem removal fails.
                 self.blobs.remove(&hash).await?;
                 removed += 1;
             }
+            sqlx::query("DELETE FROM cas_refs WHERE hash = ? AND NOT EXISTS (
+                SELECT 1 FROM blocks b WHERE b.session_id = cas_refs.session_id
+                AND b.seq = cas_refs.seq AND (b.text_hash = cas_refs.hash OR b.data_hash = cas_refs.hash))")
+                .bind(&hash).execute(&mut *writer).await?;
+            sqlx::query("DELETE FROM cas_gc_candidates WHERE hash = ?")
+                .bind(&hash)
+                .execute(&mut *writer)
+                .await?;
         }
-
         Ok(removed)
     }
 
@@ -1294,7 +1354,7 @@ impl HistoryStore {
             "SELECT withheld FROM watermarks WHERE session_id = ?",
         )
         .bind(session_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&self.readers)
         .await
         .map(Option::flatten)
         .map_err(Into::into)
@@ -1304,7 +1364,7 @@ impl HistoryStore {
         let row =
             sqlx::query("SELECT authority, confirmed_seq FROM watermarks WHERE session_id = ?")
                 .bind(session_id)
-                .fetch_optional(&self.pool)
+                .fetch_optional(&self.readers)
                 .await?;
         Ok(row.map(|row| {
             (
@@ -1327,7 +1387,7 @@ impl HistoryStore {
         )
         .bind(session_id)
         .bind(at_ms)
-        .fetch_one(&self.pool)
+        .fetch_one(&self.readers)
         .await
         .context("Could not resolve a watermark to a sequence number")
     }
@@ -1361,7 +1421,7 @@ impl HistoryStore {
         .bind(session_id)
         .bind(stream_id)
         .bind(except_turn_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&self.readers)
         .await?
         else {
             return Ok(false);
@@ -1407,7 +1467,7 @@ impl HistoryStore {
             "SELECT * FROM blocks
               WHERE kind = 'subagent' AND phase = 'started'",
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&self.readers)
         .await
         .context("Could not list trajectories left running in history")?;
 
@@ -1434,7 +1494,7 @@ impl HistoryStore {
     pub async fn block_count(&self, session_id: &str) -> Result<i64> {
         sqlx::query_scalar("SELECT COUNT(*) FROM blocks WHERE session_id = ?")
             .bind(session_id)
-            .fetch_one(&self.pool)
+            .fetch_one(&self.readers)
             .await
             .context("Could not count blocks")
     }
@@ -1471,7 +1531,7 @@ impl HistoryStore {
     pub async fn measure_session_bytes(&self, session_id: &str) -> Result<(i64, i64)> {
         let row = sqlx::query(SESSION_BYTES_SQL)
             .bind(session_id)
-            .fetch_one(&self.pool)
+            .fetch_one(&self.readers)
             .await
             .context("Could not measure a session's held bytes")?;
 
@@ -1503,15 +1563,15 @@ impl HistoryStore {
         &self,
         session_id: &str,
     ) -> Result<(SessionBytes, i64)> {
-        let mut tx = self.pool.begin().await?;
         let row = sqlx::query(SESSION_BYTES_SQL)
             .bind(session_id)
-            .fetch_one(&mut *tx)
+            .fetch_one(&self.readers)
             .await
             .context("Could not measure a session's held bytes")?;
         let bytes = row.get::<i64, _>("bytes");
         let blocks = row.get::<i64, _>("blocks");
         let now = now_ms();
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let before: Option<i64> =
             sqlx::query_scalar("SELECT bytes FROM session_bytes WHERE session_id = ?")
                 .bind(session_id)
@@ -1563,7 +1623,7 @@ impl HistoryStore {
                FROM session_bytes WHERE session_id = ?",
         )
         .bind(session_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&self.readers)
         .await
         .context("Could not read a session's byte accounting")?;
 
@@ -1582,7 +1642,7 @@ impl HistoryStore {
                FROM session_bytes ORDER BY bytes DESC, session_id LIMIT ?",
         )
         .bind(limit)
-        .fetch_all(&self.pool)
+        .fetch_all(&self.readers)
         .await
         .context("Could not list the largest sessions")?;
 
@@ -1599,7 +1659,7 @@ impl HistoryStore {
         let row = sqlx::query(
             "SELECT COALESCE(SUM(bytes), 0) AS bytes, COUNT(*) AS sessions FROM session_bytes",
         )
-        .fetch_one(&self.pool)
+        .fetch_one(&self.readers)
         .await
         .context("Could not total the held bytes")?;
 
@@ -1619,16 +1679,15 @@ impl HistoryStore {
     pub async fn sessions_awaiting_retention(&self, limit: i64) -> Result<Vec<String>> {
         sqlx::query_scalar::<_, String>(
             "SELECT b.session_id FROM (
-               SELECT session_id FROM blocks
-               UNION SELECT session_id FROM native_records
-               UNION SELECT session_id FROM native_blob_chunks
+               SELECT session_id FROM session_usage WHERE blocks > 0 OR bytes > 0
+               UNION SELECT session_id FROM native.session_usage WHERE bytes > 0
              ) b
              LEFT JOIN session_bytes sb ON sb.session_id = b.session_id
              ORDER BY sb.measured_at_ms IS NOT NULL, sb.measured_at_ms, b.session_id
              LIMIT ?",
         )
         .bind(limit)
-        .fetch_all(&self.pool)
+        .fetch_all(&self.readers)
         .await
         .context("Could not list sessions awaiting retention")
     }
@@ -1984,3 +2043,7 @@ pub async fn consolidate_turn(
     info!("Consolidated turn {} into {} blocks", turn_id, count);
     Ok(count)
 }
+
+#[cfg(test)]
+#[path = "history_tests.rs"]
+mod tests;

@@ -166,7 +166,7 @@ test("global search finds a session and opens it", async ({ page }) => {
   // hydration finishes. Waiting for a client-rendered control first avoids
   // pressing the key into a page that is still static markup — a real race on a
   // cold load, not a test artifact.
-  await expect(page.getByLabel("Message")).toBeVisible();
+  await expect(page.getByLabel("Message", { exact: true })).toBeVisible();
   await page.keyboard.press("ControlOrMeta+k");
 
   const dialog = page.getByRole("dialog");
@@ -232,7 +232,7 @@ test("an index hit renders its match excerpt, which is the only text carrying th
     }),
   );
 
-  await expect(page.getByLabel("Message")).toBeVisible();
+  await expect(page.getByLabel("Message", { exact: true })).toBeVisible();
   await page.keyboard.press("ControlOrMeta+k");
   const dialog = page.getByRole("dialog");
   // Two characters is the threshold below which the index is not queried at all: FTS5
@@ -281,7 +281,7 @@ test("Escape closes an overlay and returns focus to its opener", async ({ page }
 test("settings persist a preference and the timeline honours it", async ({ page }) => {
   await createSession(page);
 
-  await page.getByLabel("Message").fill("Say something");
+  await page.getByLabel("Message", { exact: true }).fill("Say something");
   await page.getByRole("button", { name: "Send", exact: true }).click();
   await expect(page.getByText("Hello from the E2E runner.")).toBeVisible();
 
@@ -325,7 +325,7 @@ test("expand-all and collapse-all drive every disclosure in the timeline", async
 }) => {
   await createSession(page);
 
-  await page.getByLabel("Message").fill("Think about this");
+  await page.getByLabel("Message", { exact: true }).fill("Think about this");
   await page.getByRole("button", { name: "Send", exact: true }).click();
   await expect(page.getByText("Hello from the E2E runner.")).toBeVisible();
 
@@ -333,7 +333,7 @@ test("expand-all and collapse-all drive every disclosure in the timeline", async
   // is deliberately held open *while* it streams, and the reply block now appears
   // during the turn rather than after it, so the reply alone no longer implies the
   // turn is over. The composer re-enabling is what actually marks that.
-  await expect(page.getByLabel("Message")).toBeEnabled();
+  await expect(page.getByLabel("Message", { exact: true })).toBeEnabled();
 
   const thinking = page.getByText("Considering the request.");
   await expect(thinking).toBeHidden();
@@ -342,7 +342,7 @@ test("expand-all and collapse-all drive every disclosure in the timeline", async
   // focus. Clicking the transcript first is what a user would do, and is also
   // what proves the typing-target guard works: pressing it in the composer below
   // must not expand anything.
-  await page.getByLabel("Message").focus();
+  await page.getByLabel("Message", { exact: true }).focus();
   await page.keyboard.press("Shift+E");
   await expect(thinking).toBeHidden();
 
@@ -396,13 +396,13 @@ test("Quick Sessions creates a session from its menu with no dialog", async ({ p
   await menu.getByRole("menuitem", { name: "New session here", exact: true }).click();
 
   // Straight to a usable conversation: no form, and never the create route.
-  await expect(page.getByLabel("Message")).toBeVisible();
+  await expect(page.getByLabel("Message", { exact: true })).toBeVisible();
   // Creation is two-phase: this route carries an opaque draft handle until the first
   // real message. It is intentionally absent from the sidebar and history while empty.
   await expect(page).toHaveURL(/\/sessions\/draft\/(?:draft-|remote-draft-)/);
   await expect(page.getByLabel("Working directory")).toHaveCount(0);
 
-  await page.getByLabel("Message").fill("persist this draft");
+  await page.getByLabel("Message", { exact: true }).fill("persist this draft");
   await page.getByRole("button", { name: "Send", exact: true }).click();
   // Only promotion creates the identity triple and the durable row.
   await expect(page).toHaveURL(/\/sessions\/(?!draft\/)[^/]+/);
@@ -461,11 +461,11 @@ test("a workspace group creates in its own directory, with one menu item and no 
     .getByRole("menuitem", { name: "New session here", exact: true })
     .click();
 
-  await expect(page.getByLabel("Message")).toBeVisible();
+  await expect(page.getByLabel("Message", { exact: true })).toBeVisible();
   // The directory was inherited from the group, not re-asked. The empty draft is
   // deliberately not a sidebar row; it becomes one only after a real message.
   await expect(rows).toHaveCount(1);
-  await page.getByLabel("Message").fill("persist this draft");
+  await page.getByLabel("Message", { exact: true }).fill("persist this draft");
   await page.getByRole("button", { name: "Send", exact: true }).click();
   await expect(rows).toHaveCount(2);
 
@@ -664,7 +664,7 @@ test("no configuration can push Send outside the composer", async ({ page }) => 
   // control whose intrinsic width came from content the user could not see, so this
   // asserts the invariant that replaced it — the send control stays inside the
   // composer's own box — rather than asserting a pixel width that would drift.
-  const form = page.locator("form").filter({ has: page.getByLabel("Message") });
+  const form = page.locator("form").filter({ has: page.getByLabel("Message", { exact: true }) });
   const send = page.getByRole("button", { name: "Send", exact: true });
 
   const formBox = await form.boundingBox();
@@ -696,7 +696,7 @@ test("the agent is switchable from the add menu until the first turn, then fixed
   await expect(menu.getByText(/Agent.*e2e|e2e/)).toBeVisible();
   await page.keyboard.press("Escape");
 
-  const composer = page.getByLabel("Message");
+  const composer = page.getByLabel("Message", { exact: true });
   await composer.fill("First turn");
   await page.getByRole("button", { name: "Send", exact: true }).click();
   await expect(page.getByText("Hello from the E2E runner.")).toBeVisible();

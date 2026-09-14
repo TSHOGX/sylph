@@ -102,7 +102,7 @@ impl ReadFixture {
 
     async fn ledger(&self) -> (i64, i64) {
         sqlx::query_as("SELECT COUNT(*),COALESCE(SUM(length(outcome_json)),0) FROM env_command_results WHERE environment_id=?")
-            .bind(self.environment.as_str()).fetch_one(self.bridge.store.raw_pool()).await.unwrap()
+            .bind(self.environment.as_str()).fetch_one(self.bridge.store.read_pool()).await.unwrap()
     }
 }
 

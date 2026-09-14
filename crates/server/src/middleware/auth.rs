@@ -223,7 +223,7 @@ pub async fn bootstrap_token(
     let registered: Option<i64> = match sqlx::query_scalar::<_, i64>(
         "SELECT 1 FROM subjects WHERE id <> 'bootstrap' LIMIT 1",
     )
-    .fetch_optional(state.store.raw_pool())
+    .fetch_optional(state.store.read_pool())
     .await
     {
         Ok(value) => value,

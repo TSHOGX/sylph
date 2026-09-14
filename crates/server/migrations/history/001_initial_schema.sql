@@ -18,10 +18,11 @@
 -- (`docs/database-schema.md` § Schema evolution), and for the same reason: an order
 -- of discovery is only worth preserving while some database is stranded partway
 -- along it. Editing it makes an already-migrated `history.db` refuse to open, which
--- is the intended loud failure — re-projection from `native_records` below is what
+-- is the intended loud failure — re-projection from the native store is what
 -- makes accepting it cheap.
 
 CREATE TABLE blocks (
+  id           INTEGER PRIMARY KEY,
   session_id   TEXT NOT NULL,
   -- The completed event's sequence number, which orders the whole session stream.
   seq          INTEGER NOT NULL,
@@ -81,11 +82,11 @@ CREATE TABLE blocks (
   recorded_at_ms INTEGER,
   created_at_ms INTEGER NOT NULL,
 
-  PRIMARY KEY (session_id, seq)
--- The primary key *is* the access path — every read is by session and seq — so the
--- rowid indirection buys nothing and costs a B-tree level.
-) WITHOUT ROWID;
+  UNIQUE (session_id, seq)
+);
 
+-- The integer key is also the FTS rowid. Keep it stable on upsert so maintaining
+-- search never scans the UNINDEXED session/sequence columns.
 CREATE INDEX blocks_by_turn ON blocks(turn_id, seq);
 
 -- Which blocks reference which blobs.
@@ -101,6 +102,21 @@ CREATE TABLE cas_refs (
 ) WITHOUT ROWID;
 
 CREATE INDEX cas_refs_by_block ON cas_refs(session_id, seq);
+
+-- A durable queue makes an idle GC pass independent of the total live catalogue.
+-- Queue before forgetting/replacing a block. The reference rows remain until GC
+-- has rechecked both databases and successfully removed any unreferenced object.
+CREATE TABLE cas_gc_candidates (hash TEXT PRIMARY KEY) WITHOUT ROWID;
+CREATE TRIGGER blocks_gc_delete AFTER DELETE ON blocks BEGIN
+  INSERT OR IGNORE INTO cas_gc_candidates SELECT OLD.text_hash WHERE OLD.text_hash IS NOT NULL;
+  INSERT OR IGNORE INTO cas_gc_candidates SELECT OLD.data_hash WHERE OLD.data_hash IS NOT NULL;
+END;
+CREATE TRIGGER blocks_gc_update AFTER UPDATE OF text_hash, data_hash ON blocks BEGIN
+  INSERT OR IGNORE INTO cas_gc_candidates SELECT OLD.text_hash
+    WHERE OLD.text_hash IS NOT NULL AND OLD.text_hash IS NOT NEW.text_hash;
+  INSERT OR IGNORE INTO cas_gc_candidates SELECT OLD.data_hash
+    WHERE OLD.data_hash IS NOT NULL AND OLD.data_hash IS NOT NEW.data_hash;
+END;
 
 -- How far a downstream authority has confirmed each session.
 --
@@ -146,8 +162,8 @@ CREATE TABLE watermarks (
 --
 -- # Why a table rather than a query
 --
--- The size is a `SUM` over `blocks`, so *current* size needs no storage. Growth
--- does: it is a difference between two observations, and without a recorded
+-- Current size is maintained by session_usage triggers. Growth is a difference
+-- between two observations, and without a recorded
 -- earlier one the only available answer is "large", which does not distinguish a
 -- session that reached its size months ago and stopped from one adding a hundred
 -- megabytes an hour. Those need opposite responses, and the second is the whole
@@ -181,52 +197,6 @@ CREATE TABLE session_bytes (
 -- thousands of sessions.
 CREATE INDEX session_bytes_by_size ON session_bytes(bytes DESC);
 
--- Complete vendor-native records used to re-project history after an adapter change.
--- Unlike folded blocks these are never pruned by event watermarks: the native source is
--- the only copy from which an ignored field can be recovered, so their retention class is
--- explicitly `raw`.
-CREATE TABLE native_records (
-  session_id     TEXT NOT NULL,
-  source         TEXT NOT NULL,
-  -- Revisions are opaque u64 bit patterns, stored by reversible integer cast.
-  version        INTEGER NOT NULL,
-  retained_seq   INTEGER NOT NULL,
-  payload_json   BLOB NOT NULL,
-  created_at_ms  INTEGER NOT NULL,
-  retention_class TEXT NOT NULL DEFAULT 'raw' CHECK (retention_class = 'raw'),
-  PRIMARY KEY (session_id, source, version),
-  UNIQUE (session_id, retained_seq)
-) WITHOUT ROWID;
-
-CREATE TABLE native_blobs (
-  session_id TEXT NOT NULL,
-  source     TEXT NOT NULL,
-  version    INTEGER NOT NULL,
-  name       TEXT NOT NULL,
-  hash       TEXT,
-  size       INTEGER NOT NULL,
-  error      TEXT,
-  PRIMARY KEY (session_id, source, version, name),
-  FOREIGN KEY (session_id, source, version)
-    REFERENCES native_records(session_id, source, version) ON DELETE CASCADE
-) WITHOUT ROWID;
-
--- Bounded sidecar chunks staged by the envagent before the complete native record
--- arrives. Chunks are retained durably and folded into CAS atomically with that record.
-CREATE TABLE native_blob_chunks (
-  session_id TEXT NOT NULL,
-  source TEXT NOT NULL,
-  version INTEGER NOT NULL,
-  name TEXT NOT NULL,
-  size INTEGER NOT NULL,
-  offset INTEGER NOT NULL,
-  data BLOB NOT NULL,
-  PRIMARY KEY (session_id, source, version, name, offset)
-) WITHOUT ROWID;
-
-CREATE INDEX native_records_by_session
-  ON native_records(session_id, retained_seq);
-
 -- Cross-session full-text search over the same rows the timeline renders, so coverage is
 -- a contract rather than a function of what some parser reached
 -- (`docs/database-schema.md` § Search lives beside `history.db`).
@@ -241,7 +211,7 @@ CREATE INDEX native_records_by_session
 -- it and is the price of the tier split (`docs/storage.md` § The index is standalone).
 --
 -- `session_id` and `seq` ride along `UNINDEXED` so a hit resolves to a block without
--- a join back through a rowid mapping that would have to be maintained separately.
+-- a join when rendering hits. Mutations always seek by blocks.id / FTS rowid.
 --
 -- **The tokenizer is `jieba`, because `unicode61` cannot search Chinese.** `unicode61`
 -- splits on non-alphanumerics, so an entire run of Han characters becomes one token and
@@ -262,3 +232,23 @@ CREATE VIRTUAL TABLE blocks_fts USING fts5(
   seq        UNINDEXED,
   tokenize = 'jieba'
 );
+
+-- Transactional counters make accounting proportional to sessions, not record bytes.
+CREATE TABLE session_usage (
+  session_id TEXT PRIMARY KEY,
+  bytes INTEGER NOT NULL CHECK (bytes >= 0),
+  blocks INTEGER NOT NULL CHECK (blocks >= 0)
+) WITHOUT ROWID;
+
+CREATE TRIGGER blocks_usage_insert AFTER INSERT ON blocks BEGIN
+  INSERT INTO session_usage(session_id, bytes, blocks) VALUES(NEW.session_id, NEW.text_len + NEW.data_len, 1)
+  ON CONFLICT(session_id) DO UPDATE SET bytes = bytes + excluded.bytes, blocks = blocks + excluded.blocks;
+END;
+CREATE TRIGGER blocks_usage_delete AFTER DELETE ON blocks BEGIN
+  UPDATE session_usage SET bytes = bytes - (OLD.text_len + OLD.data_len), blocks = blocks - 1 WHERE session_id = OLD.session_id;
+END;
+CREATE TRIGGER blocks_usage_update AFTER UPDATE ON blocks BEGIN
+  UPDATE session_usage SET bytes = bytes - (OLD.text_len + OLD.data_len), blocks = blocks - 1 WHERE session_id = OLD.session_id;
+  INSERT INTO session_usage(session_id, bytes, blocks) VALUES(NEW.session_id, NEW.text_len + NEW.data_len, 1)
+  ON CONFLICT(session_id) DO UPDATE SET bytes = bytes + excluded.bytes, blocks = blocks + excluded.blocks;
+END;

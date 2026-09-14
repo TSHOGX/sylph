@@ -8,7 +8,7 @@ impl JournalStore {
     pub async fn control_request(&self, id: &str) -> Result<Option<ControlRequest>> {
         sqlx::query_as("SELECT * FROM control_requests WHERE request_id = ?")
             .bind(id)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&self.readers)
             .await
             .map_err(Error::Database)
     }
@@ -30,7 +30,7 @@ impl JournalStore {
             AND NOT EXISTS (SELECT 1 FROM turns t WHERE t.session_env = c.session_env AND t.session_agent = c.session_agent AND t.session_native = c.session_native AND t.status IN ('queued','starting','running','stopping','settling'))
             AND NOT EXISTS (SELECT 1 FROM control_requests p WHERE p.session_env = c.session_env AND p.session_agent = c.session_agent AND p.session_native = c.session_native AND p.state = 'queued' AND p.server_seq < c.server_seq)
             ORDER BY c.created_at_ms LIMIT 32")
-            .fetch_all(&self.pool).await.map_err(Error::Database)
+            .fetch_all(&self.readers).await.map_err(Error::Database)
     }
 
     pub async fn set_control_target(&self, id: &str, turn_id: &str) -> Result<()> {

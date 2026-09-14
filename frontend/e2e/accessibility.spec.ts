@@ -36,7 +36,7 @@ test("a control command's picker traps focus and returns it on close", async ({ 
   // Opened from the slash menu rather than the Send button, so the opener is the
   // textarea itself — which is where a keyboard user was, and where focus has to
   // return. Driving it by keyboard is also the only way this asserts the real path.
-  const composer = page.getByLabel("Message");
+  const composer = page.getByLabel("Message", { exact: true });
   await composer.click();
   await composer.fill("/model");
   await expect(page.getByRole("listbox", { name: "Agent commands" })).toBeVisible();
@@ -192,7 +192,7 @@ test("the conversation canvas has no automated accessibility violations", async 
 
   // Audit with real content: tool calls, a diff, and a failed command are the
   // parts with the most custom markup and the most colour.
-  await page.getByLabel("Message").fill("exercise tools please");
+  await page.getByLabel("Message", { exact: true }).fill("exercise tools please");
   await page.getByRole("button", { name: "Send", exact: true }).click();
   await expect(page.getByText("Hello from the E2E runner.")).toBeVisible();
 
@@ -217,7 +217,7 @@ test("a nested delegation tree has no automated accessibility violations", async
 }) => {
   await createSession(page);
 
-  await page.getByLabel("Message").fill("delegate this please");
+  await page.getByLabel("Message", { exact: true }).fill("delegate this please");
   await page.getByRole("button", { name: "Send", exact: true }).click();
   await expect(page.getByRole("region", { name: "Verify delegation" })).toBeVisible({
     timeout: 15000,
@@ -262,7 +262,7 @@ test("the composer has no accessibility violations while a turn is running", asy
 }) => {
   await createSession(page);
 
-  await page.getByLabel("Message").fill("paced please");
+  await page.getByLabel("Message", { exact: true }).fill("paced please");
   await page.getByRole("button", { name: "Send", exact: true }).click();
 
   // Stop replaces Send only while the turn is live, so its presence *is* the
@@ -374,7 +374,7 @@ test("an overlay's filter takes focus without becoming the node focus returns to
 }) => {
   await createSession(page);
 
-  const composer = page.getByLabel("Message");
+  const composer = page.getByLabel("Message", { exact: true });
   await composer.click();
   await expect(composer).toBeFocused();
 
@@ -418,7 +418,7 @@ test("both a menu and a filterable list are valid ARIA while open", async ({ pag
   // And the dialog form of the same list, which a control command opens. It reaches
   // the filterable path through a different surface — an `Overlay` that owns its own
   // dismissal — so its roles are worth auditing separately from the popover's.
-  const composer = page.getByLabel("Message");
+  const composer = page.getByLabel("Message", { exact: true });
   await composer.click();
   await composer.fill("/model");
   await composer.press("Enter");

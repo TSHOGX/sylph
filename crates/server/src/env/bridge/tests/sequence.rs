@@ -84,7 +84,7 @@ async fn preserves_the_reserved_row_after_remote_ingest(fail_first: bool) {
     bridge.store.append_event(&row).await.unwrap();
 
     let rows: Vec<(i32, String)> = sqlx::query_as("SELECT seq, text FROM events ORDER BY seq")
-        .fetch_all(bridge.store.raw_pool())
+        .fetch_all(bridge.store.read_pool())
         .await
         .unwrap();
     assert_eq!(

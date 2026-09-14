@@ -4,7 +4,7 @@ How the record is kept so that it is lossless, replayable from any frontend, and
 only when a downstream authority has confirmed the data. The implementation is
 `crates/server/src/storage/`, and the tables are in `crates/server/migrations/history/`.
 
-**This file owns `history.db` and `blobs/`.** `docs/database-schema.md` owns `journal.db`.
+**This file owns `history.db`, `native.db`, and `blobs/`.** `docs/database-schema.md` owns `journal.db`.
 
 ## What "lossless" has to mean here
 
@@ -49,35 +49,49 @@ reconstructor slices. A delta boundary can land mid-codepoint when a model emits
 multi-byte character in pieces, so a replayer buffers an incomplete tail rather than
 assuming every boundary is a valid string edge.
 
-## Three tiers, because there are three workloads
+## Workloads and database boundaries
 
-| Workload | Rate | Row | Read pattern |
-| --- | --- | --- | --- |
-| Live turn append | thousands/turn | tiny | tail-follow by `seq` |
-| Timeline read | once per open | one per block | full scan by session |
-| Cross-session search | rare | — | FTS5 index beside `history.db` |
+| Workload | Store | Write scheduling |
+| --- | --- | --- |
+| Session control and live events | `journal.db` | One writer, independent readers |
+| Lossless native records and staged sidecars | `native.db` | One writer, independent readers |
+| Consolidated blocks and search | `history.db` | One writer, independent readers; bounded batches |
+| Large immutable bodies | `blobs/` | Publish before committing a reference |
 
-Conflating the first two is a property of SQLite rather than of any schema: **a
-long-running read transaction blocks WAL checkpointing.** A browser scrolling a large
-archived session holds a read open while a live turn appends; the WAL cannot checkpoint,
-so it grows, and every subsequent append pays a longer WAL to walk. Streaming latency then
-degrades with unrelated browsing, which presents as a network problem.
+The tiers describe record temperature; database files isolate write workloads. Native
+retention is on the live acknowledgement path and must not share SQLite's writer lock
+with tokenization, consolidation, or pruning. History keeps blocks and their standalone
+FTS index in one transaction so a committed block and its search entry cannot disagree.
+Per-session databases would multiply pools and require cross-file search fan-out without
+removing the need to bound individual writes, so the split follows workloads instead.
+
+Every database uses WAL. A single writer connection serializes writes before they reach
+SQLite; separate read-only connections keep a queued writer from consuming all read
+capacity. Read-then-write transactions acquire write intent with `BEGIN IMMEDIATE`,
+before taking a snapshot. A busy timeout handles brief external contention; it cannot
+repair an obsolete read snapshot and is not a substitute for bounded work.
+
+History publication and pruning release the writer between batches bounded by block
+count and, for publication, decoded payload bytes. One oversized block is indivisible.
+Preparing compressed bodies and publishing CAS objects happens before the SQL transaction.
+A partial publication leaves the journal intact; replaying the publication upserts by
+`(session_id, seq)` before the journal is deleted. Readers materialize query results before
+resolving bodies or pacing replay, so no SQL cursor is held across network or filesystem I/O.
 
 ```
 data_dir/
-  journal.db      hot   unconsolidated turns only; stays a few MB
-  history.db      warm  consolidated blocks; grows without bound, read-mostly
-  blobs/          cold  content-addressed blobs, sharded aa/bb/<hash>
+  journal.db      hot   sessions, control, unconsolidated events
+  native.db       raw   lexical vendor records and native sidecar references
+  history.db      warm  consolidated blocks and atomic search index
+  blobs/          cold  content-addressed bodies, sharded aa/bb/<hash>
 ```
 
-`journal.db` staying small is the point of the split, and consolidation is what guarantees
-it. Checkpoint cost is bounded because the file is bounded, so hot-path latency does not
-depend on how much history exists.
-
-Durability differs because the requirements differ: `journal.db` runs
-`synchronous = NORMAL`, since a crash loses at most the tail of a turn the client can see
-was interrupted, and `FULL` per delta batch would put an fsync in the token path.
-`history.db` runs `FULL`, because it is the record.
+`journal.db` runs `synchronous = NORMAL`; `native.db` and `history.db` run `FULL`.
+Raw bytes commit before a producer receipt, and history commits before the journal forgets.
+No cross-database write transaction or acknowledgement of an unfinished record is needed.
+Read-only history connections attach the native database for accounting and reachability;
+writer connections never attach it, so a history transaction cannot reserve its write lock.
+Accounting across the files is a local observation, not an atomic cross-file snapshot.
 
 Deltas are batched into one transaction per ~50 ms. This is the largest lever on the hot
 path — fsync count is the cost, and batching converts thousands of tiny transactions into
@@ -115,6 +129,10 @@ folding as they go:
 **Step 5's order is the correctness rule:** history is durable before the journal forgets.
 A crash between them leaves a turn present in both, which consolidation makes idempotent
 by keying on `(session_id, seq)`. A crash the other way loses the turn.
+
+The journal itself is the durable consolidation queue. Scheduling under load coalesces
+wakeups instead of accumulating a suspended task per turn. A full sweep batch schedules
+the next bounded pass immediately, so a backlog does not wait for the maintenance timer.
 
 Consolidation is also the recovery path: a turn found in `journal.db` at startup whose
 status is terminal was interrupted mid-consolidation, and is consolidated again.
@@ -172,8 +190,9 @@ an existing filename alone is not evidence that its object is intact.
 A block is one consolidated event: its `completed` sequence number, turn, kind, phase,
 `stream_id`, `span`, and name; its text either inline (possibly zstd) or as a CAS hash,
 with the uncompressed length always stored; its packed delta offsets and timings; and its
-JSON payload under the same inline-or-hash rule. `(session_id, seq)` is the primary key
-and `WITHOUT ROWID`, because the key *is* the access path.
+JSON payload under the same inline-or-hash rule. `(session_id, seq)` is unique and indexed. An internal integer primary key is also the
+FTS rowid, so index replacement and deletion seek directly instead of scanning unindexed
+FTS metadata. This storage address is not a session identity.
 
 `session_id` is the single-column encoded triple here rather than three columns, because a
 foreign key cannot cross the database split (`docs/database-schema.md` § Identity in the
@@ -234,7 +253,7 @@ never withdraws bytes already retained. Two different available bodies for the s
 reference remain a collision.
 
 Raw retention is an ingestion prerequisite rather than best-effort telemetry. A write is
-retried once for a transient SQLite or sidecar race; if it still fails, adopt returns an
+retried once for SQLite contention; a collision or corrupt body is not retryable; if it still fails, adopt returns an
 explicit error and a live link closes with `LINK_LOST`. Normalized events are never kept
 without their source record, and the failure counter is diagnostic only.
 
@@ -270,7 +289,8 @@ browser would then disagree about what happened, which is what the single record
 
 Cross-session search is one FTS5 table beside `history.db`, written by consolidation in
 the same transaction as the blocks it indexes, carrying the block text plus `session_id`
-and `seq` `UNINDEXED` so a hit resolves without a separate rowid mapping.
+and `seq` `UNINDEXED` for result metadata. Mutations address the FTS row by the block
+integer primary key; unindexed metadata is never a deletion predicate.
 
 Coverage is therefore statable as a contract: **everything the server holds is
 searchable**, including sessions parsed out of a vendor's native files, whether or not the
@@ -442,6 +462,10 @@ never having run. So:
   dependency. **An install with no environment paired is a supported configuration**, so it
   must not be reported as a fault forever.
 * **Blob sweeping is per pass, not per session**, since reachability spans sessions.
+  Block deletion and body replacement enqueue old hashes transactionally. The sweep
+  consumes this bounded queue, seeks native references by hash, and excludes concurrent
+  publication while rechecking and deleting each candidate. An empty queue does not scan
+  live references. Failed filesystem deletion leaves the candidate available for retry.
 
 `/api/v1/diagnostics` reports the last pass separately as examined, confirmed, withheld,
 terminal, unchanged, blocks pruned, blobs swept, and which environments were reachable. A
@@ -475,7 +499,10 @@ per-session share. The consequence to hold onto: **the sum over sessions exceeds
 on disk.** This measure answers "which session is growing"; `du` answers what the disk is
 doing.
 
-**Growth needs a stored earlier observation.** Current size is a `SUM` and needs no table.
+**Growth needs a stored earlier observation.** Each database maintains current logical
+bytes in a per-session counter updated by triggers in the same transaction as its rows.
+An unchanged duplicate changes no counter; replacement and pruning apply exact deltas.
+Accounting reads these small counters instead of rescanning every native payload.
 A difference does, and without one the only available answer is "large" — which does not
 distinguish a session that reached its size months ago from one adding a hundred megabytes
 an hour. Those call for opposite responses.

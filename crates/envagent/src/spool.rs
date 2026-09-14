@@ -75,6 +75,7 @@ pub struct Spool {
     path: PathBuf,
     max_bytes: u64,
     pool: SqlitePool,
+    readers: SqlitePool,
 }
 
 impl Spool {
@@ -91,39 +92,27 @@ impl Spool {
             .busy_timeout(std::time::Duration::from_secs(5));
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
-            .connect_with(options)
+            .connect_with(options.clone())
             .await?;
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS spool_events (
-              producer_id TEXT NOT NULL,
-              producer_seq INTEGER NOT NULL,
-              kind TEXT NOT NULL DEFAULT 'event',
-              session_id TEXT NOT NULL,
-              arrival_turn_id TEXT,
-              payload BLOB NOT NULL,
-              source_cursor TEXT,
-              recorded_at_ms INTEGER,
-              PRIMARY KEY (producer_id, producer_seq)
-            );
-            CREATE INDEX IF NOT EXISTS spool_events_order
-              ON spool_events (producer_id, producer_seq);
-            CREATE TABLE IF NOT EXISTS spool_acks (
-              producer_id TEXT PRIMARY KEY,
-              acked_through INTEGER NOT NULL DEFAULT -1
-            );
-            CREATE TABLE IF NOT EXISTS spool_sequences (
-              producer_id TEXT PRIMARY KEY,
-              next_seq INTEGER NOT NULL DEFAULT 1
-            );
-            "#,
-        )
-        .execute(&pool)
-        .await?;
+        sqlx::migrate!("./migrations/spool")
+            .run(&pool)
+            .await
+            .map_err(anyhow::Error::from)?;
+        let readers = SqlitePoolOptions::new()
+            .max_connections(2)
+            .after_connect(|conn, _| {
+                Box::pin(async move {
+                    sqlx::query("PRAGMA query_only = ON").execute(conn).await?;
+                    Ok(())
+                })
+            })
+            .connect_with(options.read_only(true))
+            .await?;
         Ok(Self {
             path: config.path,
             max_bytes: config.max_bytes,
             pool,
+            readers,
         })
     }
 
@@ -137,7 +126,7 @@ impl Spool {
 
     /// Allocate and persist the next producer sequence before an event is sent.
     pub async fn next_sequence(&self, producer_id: &str) -> Result<u64, SpoolError> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query(
             "INSERT INTO spool_sequences(producer_id, next_seq) VALUES (?, 1) \
              ON CONFLICT(producer_id) DO NOTHING",
@@ -160,7 +149,7 @@ impl Spool {
     /// Append an event, refusing overflow and accepting an exact duplicate.
     pub async fn append(&self, event: &SpoolEvent) -> Result<(), SpoolError> {
         let producer_seq = to_i64(event.producer_seq)?;
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         if let Some(existing) = sqlx::query(
             "SELECT kind, session_id, arrival_turn_id, payload, source_cursor, recorded_at_ms \
              FROM spool_events WHERE producer_id = ? AND producer_seq = ?",
@@ -187,10 +176,9 @@ impl Spool {
             });
         }
 
-        let used: i64 =
-            sqlx::query_scalar("SELECT COALESCE(SUM(length(payload)), 0) FROM spool_events")
-                .fetch_one(&mut *tx)
-                .await?;
+        let used: i64 = sqlx::query_scalar("SELECT bytes FROM spool_usage WHERE singleton = 1")
+            .fetch_one(&mut *tx)
+            .await?;
         let used = u64::try_from(used).unwrap_or(u64::MAX);
         let incoming = event.payload.len() as u64;
         if used.saturating_add(incoming) > self.max_bytes {
@@ -224,7 +212,7 @@ impl Spool {
     /// SQLite transaction. This is the normal runtime path: a crash cannot
     /// consume a sequence between two commits and create an unreplayable gap.
     pub async fn append_next(&self, mut event: SpoolEvent) -> Result<u64, SpoolError> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query(
             "INSERT INTO spool_sequences(producer_id, next_seq) VALUES (?, 1) \
              ON CONFLICT(producer_id) DO NOTHING",
@@ -243,10 +231,9 @@ impl Spool {
         event.producer_seq =
             u64::try_from(allocated).map_err(|_| SpoolError::SequenceOutOfRange(u64::MAX))?;
 
-        let used: i64 =
-            sqlx::query_scalar("SELECT COALESCE(SUM(length(payload)), 0) FROM spool_events")
-                .fetch_one(&mut *tx)
-                .await?;
+        let used: i64 = sqlx::query_scalar("SELECT bytes FROM spool_usage WHERE singleton = 1")
+            .fetch_one(&mut *tx)
+            .await?;
         let used = u64::try_from(used).unwrap_or(u64::MAX);
         let incoming = event.payload.len() as u64;
         if used.saturating_add(incoming) > self.max_bytes {
@@ -295,7 +282,7 @@ impl Spool {
         .bind(producer_id)
         .bind(first_seq)
         .bind(i64::try_from(limit).unwrap_or(i64::MAX))
-        .fetch_all(&self.pool)
+        .fetch_all(&self.readers)
         .await?;
         rows.into_iter()
             .map(|row| {
@@ -328,7 +315,7 @@ impl Spool {
     /// Delete exactly the contiguous prefix acknowledged by the server.
     pub async fn ack_through(&self, producer_id: &str, through: u64) -> Result<usize, SpoolError> {
         let through_i64 = to_i64(through)?;
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let current: i64 = sqlx::query_scalar(
             "SELECT COALESCE((SELECT acked_through FROM spool_acks WHERE producer_id = ?), 0)",
         )
@@ -379,7 +366,7 @@ impl Spool {
         let value: Option<i64> =
             sqlx::query_scalar("SELECT acked_through FROM spool_acks WHERE producer_id = ?")
                 .bind(producer_id)
-                .fetch_optional(&self.pool)
+                .fetch_optional(&self.readers)
                 .await?;
         Ok(value
             .and_then(|value| u64::try_from(value).ok())
@@ -391,23 +378,22 @@ impl Spool {
             "SELECT COALESCE(MAX(producer_seq), 0) FROM spool_events WHERE producer_id = ?",
         )
         .bind(producer_id)
-        .fetch_one(&self.pool)
+        .fetch_one(&self.readers)
         .await?;
         u64::try_from(through)
             .map_err(|_| sqlx::Error::Protocol("negative producer sequence".into()).into())
     }
 
     pub async fn size_bytes(&self) -> Result<u64, SpoolError> {
-        let value: i64 =
-            sqlx::query_scalar("SELECT COALESCE(SUM(length(payload)), 0) FROM spool_events")
-                .fetch_one(&self.pool)
-                .await?;
+        let value: i64 = sqlx::query_scalar("SELECT bytes FROM spool_usage WHERE singleton = 1")
+            .fetch_one(&self.readers)
+            .await?;
         Ok(u64::try_from(value).unwrap_or(u64::MAX))
     }
 
     pub async fn is_empty(&self) -> Result<bool, SpoolError> {
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM spool_events")
-            .fetch_one(&self.pool)
+        let count: i64 = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM spool_events)")
+            .fetch_one(&self.readers)
             .await?;
         Ok(count == 0)
     }
@@ -436,6 +422,7 @@ impl Spool {
             std::fs::create_dir_all(parent)?;
         }
         self.checkpoint().await?;
+        self.readers.close().await;
         self.pool.close().await;
         std::fs::rename(&self.path, &destination)?;
         for sidecar in [
@@ -596,5 +583,63 @@ mod tests {
         let pending = reopened.pending("p", 10).await.unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].payload, b"durable");
+    }
+    #[tokio::test]
+    async fn queue_accounting_stays_exact_across_duplicate_overflow_ack_and_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("spool.db");
+        let spool = Spool::open(SpoolConfig::new(&path, 6)).await.unwrap();
+        spool.append(&event(1, b"abc")).await.unwrap();
+        spool.append(&event(1, b"abc")).await.unwrap();
+        assert_eq!(spool.size_bytes().await.unwrap(), 3);
+        assert!(matches!(
+            spool.append(&event(2, b"toolong")).await,
+            Err(SpoolError::Overflow { .. })
+        ));
+        assert_eq!(spool.size_bytes().await.unwrap(), 3);
+        spool.append(&event(2, b"def")).await.unwrap();
+        spool.ack_through("p", 1).await.unwrap();
+        spool.pool.close().await;
+        let reopened = Spool::open(SpoolConfig::new(&path, 6)).await.unwrap();
+        assert_eq!(reopened.size_bytes().await.unwrap(), 3);
+        reopened.ack_through("p", 2).await.unwrap();
+        assert_eq!(reopened.size_bytes().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn appending_does_not_rescan_the_pending_backlog() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        async fn measured(spool: &Spool, seq: u64) -> usize {
+            let steps = Arc::new(AtomicUsize::new(0));
+            let count = steps.clone();
+            let mut conn = spool.pool.acquire().await.unwrap();
+            conn.lock_handle()
+                .await
+                .unwrap()
+                .set_progress_handler(1, move || {
+                    count.fetch_add(1, Ordering::Relaxed);
+                    true
+                });
+            drop(conn);
+            spool.append(&event(seq, b"payload")).await.unwrap();
+            let mut conn = spool.pool.acquire().await.unwrap();
+            conn.lock_handle().await.unwrap().remove_progress_handler();
+            steps.load(Ordering::Relaxed)
+        }
+        let spool = spool(1024 * 1024).await;
+        let small = measured(&spool, 1).await;
+        for seq in 2..1000 {
+            spool.append(&event(seq, b"payload")).await.unwrap();
+        }
+        let large = measured(&spool, 1000).await;
+        eprintln!("Spool append VM steps: empty={small}, backlog={large}");
+        assert!(
+            large < small * 2,
+            "queue depth must not amplify capacity checks: {small} -> {large}"
+        );
+        assert_eq!(spool.size_bytes().await.unwrap(), 7000);
     }
 }

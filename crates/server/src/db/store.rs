@@ -3,15 +3,14 @@ use crate::error::{Error, Result};
 use crate::events::data_from_column;
 use crate::models::now_ms;
 use crate::models::{ControlRequest, Event, PendingRequest, Session, Turn};
-use sqlx::sqlite::{
-    SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions, SqliteSynchronous,
-};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqliteSynchronous};
 use std::path::Path;
 use sylph_protocol::SessionId;
 
 #[derive(Clone)]
 pub struct JournalStore {
     pub(super) pool: SqlitePool,
+    pub(super) readers: SqlitePool,
 }
 
 /// Narrowing criteria for a session listing. `None` means "do not narrow on
@@ -103,7 +102,7 @@ impl JournalStore {
             "SELECT * FROM control_requests WHERE session_env = ? AND session_agent = ? AND session_native = ? AND idempotency_key = ?"
         )
         .bind(session_id.environment.as_str()).bind(session_id.agent.as_str()).bind(session_id.native_id.as_str()).bind(key)
-        .fetch_optional(&self.pool).await.map_err(Error::Database)
+        .fetch_optional(&self.readers).await.map_err(Error::Database)
     }
 
     pub async fn update_control_request(
@@ -135,7 +134,7 @@ impl JournalStore {
     ) -> Result<Vec<ControlRequest>> {
         sqlx::query_as::<_, ControlRequest>("SELECT * FROM control_requests WHERE session_env = ? AND session_agent = ? AND session_native = ? ORDER BY server_seq")
             .bind(session_id.environment.as_str()).bind(session_id.agent.as_str()).bind(session_id.native_id.as_str())
-            .fetch_all(&self.pool).await.map_err(Error::Database)
+            .fetch_all(&self.readers).await.map_err(Error::Database)
     }
     pub async fn upsert_subject(
         &self,
@@ -153,7 +152,7 @@ impl JournalStore {
     pub async fn subject_id_for_token_hash(&self, token_hash: &str) -> Result<Option<String>> {
         sqlx::query_scalar("SELECT id FROM subjects WHERE token_hash = ?")
             .bind(token_hash)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&self.readers)
             .await
             .map_err(Error::Database)
     }
@@ -170,7 +169,7 @@ impl JournalStore {
             // is governed by durable grants.
             let active: Option<i64> =
                 sqlx::query_scalar("SELECT 1 FROM subjects WHERE id <> 'bootstrap' LIMIT 1")
-                    .fetch_optional(&self.pool)
+                    .fetch_optional(&self.readers)
                     .await
                     .map_err(Error::Database)?;
             if active.is_some() {
@@ -179,7 +178,7 @@ impl JournalStore {
             return Ok(true);
         }
         let found: Option<i64> = sqlx::query_scalar("SELECT 1 FROM env_grants WHERE subject_id = ? AND environment_id = ? AND capability = ? AND (expires_at_ms IS NULL OR expires_at_ms > ?)")
-            .bind(subject_id).bind(environment_id).bind(capability).bind(now_ms()).fetch_optional(&self.pool).await.map_err(Error::Database)?;
+            .bind(subject_id).bind(environment_id).bind(capability).bind(now_ms()).fetch_optional(&self.readers).await.map_err(Error::Database)?;
         Ok(found.is_some())
     }
 
@@ -198,7 +197,7 @@ impl JournalStore {
                 "SELECT environment_id FROM env_installations
                  WHERE NOT EXISTS (SELECT 1 FROM subjects WHERE id <> 'bootstrap')",
             )
-            .fetch_all(&self.pool)
+            .fetch_all(&self.readers)
             .await
             .map_err(Error::Database);
         }
@@ -210,7 +209,7 @@ impl JournalStore {
         .bind(subject_id)
         .bind(capability)
         .bind(now_ms())
-        .fetch_all(&self.pool)
+        .fetch_all(&self.readers)
         .await
         .map_err(Error::Database)
     }
@@ -224,7 +223,7 @@ impl JournalStore {
         if subject_id == "bootstrap" {
             let active: Option<i64> =
                 sqlx::query_scalar("SELECT 1 FROM subjects WHERE id <> 'bootstrap' LIMIT 1")
-                    .fetch_optional(&self.pool)
+                    .fetch_optional(&self.readers)
                     .await
                     .map_err(Error::Database)?;
             if active.is_some() {
@@ -238,7 +237,7 @@ impl JournalStore {
         .bind(subject_id)
         .bind(environment_id)
         .bind(capability)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&self.readers)
         .await
         .map_err(Error::Database)?;
         Ok(match row {
@@ -252,14 +251,14 @@ impl JournalStore {
         if subject_id == "bootstrap" {
             let active: Option<i64> =
                 sqlx::query_scalar("SELECT 1 FROM subjects WHERE id <> 'bootstrap' LIMIT 1")
-                    .fetch_optional(&self.pool)
+                    .fetch_optional(&self.readers)
                     .await
                     .map_err(Error::Database)?;
             return Ok(active.is_none());
         }
         let value: Option<i64> = sqlx::query_scalar("SELECT is_admin FROM subjects WHERE id = ?")
             .bind(subject_id)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&self.readers)
             .await
             .map_err(Error::Database)?;
         Ok(value == Some(1))
@@ -268,7 +267,7 @@ impl JournalStore {
     pub async fn grant_authority(&self, environment_id: &str) -> Result<Option<String>> {
         sqlx::query_scalar("SELECT grant_authority FROM env_installations WHERE environment_id = ?")
             .bind(environment_id)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&self.readers)
             .await
             .map_err(Error::Database)
     }
@@ -306,7 +305,11 @@ impl JournalStore {
     }
 
     pub async fn revoke_subject_work(&self, subject_id: &str, environment_id: &str) -> Result<u64> {
-        let mut tx = self.pool.begin().await.map_err(Error::Database)?;
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(Error::Database)?;
         let closed_trajectories = sqlx::query(
             "UPDATE events SET phase = 'completed', is_error = 0, data_json = ?
              WHERE turn_id IN (SELECT id FROM turns WHERE origin_subject = ? AND session_env = ?
@@ -335,6 +338,11 @@ impl JournalStore {
         &self.pool
     }
 
+    /// Read-only capacity is independent of the writer queue.
+    pub(crate) fn read_pool(&self) -> &SqlitePool {
+        &self.readers
+    }
+
     pub async fn new(path: &str) -> Result<Self> {
         // Ensure parent directory exists
         if let Some(parent) = Path::new(path).parent() {
@@ -359,14 +367,7 @@ impl JournalStore {
             // than exposing a transient lock as an unavailable environment.
             .busy_timeout(std::time::Duration::from_secs(30));
 
-        let pool = SqlitePoolOptions::new()
-            // One writer connection makes read-then-write CAS transactions
-            // deterministic. WAL still lets the separate history database and
-            // external readers proceed, while multiple journal connections can
-            // otherwise hit SQLITE_BUSY_SNAPSHOT when a transaction upgrades.
-            .max_connections(1)
-            .connect_with(options)
-            .await?;
+        let pool = crate::storage::sqlite::pool(options.clone(), 1, false, false, None).await?;
 
         // Run migrations.
         //
@@ -389,7 +390,8 @@ impl JournalStore {
                 ))
             })?;
 
-        Ok(Self { pool })
+        let readers = crate::storage::sqlite::pool(options, 3, true, false, None).await?;
+        Ok(Self { pool, readers })
     }
 
     // Session operations
@@ -444,7 +446,11 @@ impl JournalStore {
         session: &Session,
         turn: &Turn,
     ) -> Result<(Session, Turn)> {
-        let mut tx = self.pool.begin().await.map_err(Error::Database)?;
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(Error::Database)?;
         let stored_session = sqlx::query_as::<_, Session>(
             r#"INSERT INTO sessions (
                 environment, agent, native_id, workdir, title,
@@ -500,7 +506,7 @@ impl JournalStore {
         .bind(id.environment.as_str())
         .bind(id.agent.as_str())
         .bind(id.native_id.as_str())
-        .fetch_optional(&self.pool)
+        .fetch_optional(&self.readers)
         .await
         .map_err(Error::Database)?;
         if let Some(session) = session.as_mut() {
@@ -542,7 +548,7 @@ impl JournalStore {
             sqlx::query_as("SELECT native_id FROM sessions WHERE environment = ? AND agent = ?")
                 .bind(environment.as_str())
                 .bind(agent)
-                .fetch_all(&self.pool)
+                .fetch_all(&self.readers)
                 .await
                 .map_err(Error::Database)?;
         Ok(rows.into_iter().map(|(native,)| native).collect())
@@ -608,7 +614,7 @@ impl JournalStore {
         .bind(filter.capability_subject.as_deref())
         .bind(filter.capability.as_deref())
         .bind(filter.capability_subject.as_ref().map(|_| now_ms()))
-        .fetch_all(&self.pool)
+        .fetch_all(&self.readers)
         .await
         .map_err(Error::Database)?;
         for session in &mut sessions {
@@ -641,7 +647,7 @@ impl JournalStore {
         .bind(session.id.environment.as_str())
         .bind(session.id.agent.as_str())
         .bind(session.id.native_id.as_str())
-        .fetch_optional(&self.pool)
+        .fetch_optional(&self.readers)
         .await
         .map_err(Error::Database)?
         else {
@@ -718,7 +724,11 @@ impl JournalStore {
     /// envagent, so the concurrent writers are HTTP handlers in this process *and*
     /// whatever else is addressing the same session, and only the store sees both.
     pub async fn create_turn_claiming_slot(&self, turn: &Turn) -> Result<Option<Turn>> {
-        let mut tx = self.pool.begin().await.map_err(Error::Database)?;
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(Error::Database)?;
         let active: Option<String> = sqlx::query_scalar(
             "SELECT id FROM turns WHERE session_env = ? AND session_agent = ? AND session_native = ? \
              AND status IN ('queued','starting','running','stopping','settling') LIMIT 1",
@@ -772,7 +782,7 @@ impl JournalStore {
     pub async fn get_turn(&self, id: &str) -> Result<Option<Turn>> {
         sqlx::query_as::<_, Turn>("SELECT * FROM turns WHERE id = ?")
             .bind(id)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&self.readers)
             .await
             .map_err(Error::Database)
     }
@@ -787,7 +797,7 @@ impl JournalStore {
         .bind(session_id.agent.as_str())
         .bind(session_id.native_id.as_str())
         .bind(limit)
-        .fetch_all(&self.pool)
+        .fetch_all(&self.readers)
         .await
         .map_err(Error::Database)
     }
@@ -819,7 +829,7 @@ impl JournalStore {
         .bind(boundary_ms)
         .bind(boundary_id)
         .bind(limit)
-        .fetch_all(&self.pool)
+        .fetch_all(&self.readers)
         .await
         .map_err(Error::Database)
     }
@@ -915,7 +925,10 @@ impl JournalStore {
             }
         };
 
-        query.fetch_all(&self.pool).await.map_err(Error::Database)
+        query
+            .fetch_all(&self.readers)
+            .await
+            .map_err(Error::Database)
     }
 
     pub async fn touch_session(&self, id: &SessionId) -> Result<()> {
@@ -1045,7 +1058,7 @@ impl JournalStore {
         .bind(session_id.agent.as_str())
         .bind(session_id.native_id.as_str())
         .bind(key)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&self.readers)
         .await
         .map_err(Error::Database)
     }
@@ -1077,7 +1090,7 @@ impl JournalStore {
     /// compare-and-set remains on the turn row; the session update is part of
     /// the same commit, so either both facts become visible or neither does.
     pub async fn claim_turn_running(&self, turn_id: &str, session_id: &SessionId) -> Result<bool> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let result = sqlx::query(
             r#"
             UPDATE turns
@@ -1344,7 +1357,7 @@ impl JournalStore {
     /// The trajectories such a turn left open are closed by
     /// [`Self::close_stale_trajectories`], which the caller runs next.
     pub async fn interrupt_stale_turns(&self) -> Result<u64> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
 
         let result = sqlx::query(
             r#"
@@ -1390,7 +1403,7 @@ impl JournalStore {
             "SELECT DISTINCT turn_id FROM events
               WHERE turn_id IS NOT NULL AND (kind = 'subagent' OR span IS NOT NULL)",
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&self.readers)
         .await
         .map_err(Error::Database)?;
 
@@ -1483,14 +1496,14 @@ impl JournalStore {
         .bind(session_id.map(|id| id.environment.as_str()))
         .bind(session_id.map(|id| id.agent.as_str()))
         .bind(session_id.map(|id| id.native_id.as_str()))
-        .fetch_all(&self.pool)
+        .fetch_all(&self.readers)
         .await
         .map_err(Error::Database)
     }
 
     pub async fn count_sessions_by_status(&self) -> Result<Vec<(String, i64)>> {
         sqlx::query_as::<_, (String, i64)>("SELECT status, COUNT(*) FROM sessions GROUP BY status")
-            .fetch_all(&self.pool)
+            .fetch_all(&self.readers)
             .await
             .map_err(Error::Database)
     }
@@ -1509,7 +1522,7 @@ impl JournalStore {
         .bind(session_id.environment.as_str())
         .bind(session_id.agent.as_str())
         .bind(session_id.native_id.as_str())
-        .fetch_optional(&self.pool)
+        .fetch_optional(&self.readers)
         .await?;
         Ok(seq.unwrap_or(-1))
     }
@@ -1577,7 +1590,7 @@ impl JournalStore {
             return Ok(());
         }
 
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         for event in events {
             sqlx::query(
                 r#"
@@ -1630,7 +1643,7 @@ impl JournalStore {
     pub async fn schema_version(&self) -> Result<i64> {
         let value: Option<i64> =
             sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations WHERE success")
-                .fetch_optional(&self.pool)
+                .fetch_optional(&self.readers)
                 .await?
                 .flatten();
         Ok(value.unwrap_or(0))
@@ -1815,7 +1828,7 @@ impl JournalStore {
         )
         .bind(turn_id)
         .bind(respect_background_flag)
-        .fetch_all(&self.pool)
+        .fetch_all(&self.readers)
         .await
         .map_err(Error::Database)?;
 
@@ -1830,7 +1843,7 @@ impl JournalStore {
         )
         .bind(turn_id)
         .bind(after_seq)
-        .fetch_all(&self.pool)
+        .fetch_all(&self.readers)
         .await
         .map_err(Error::Database)
     }
@@ -1857,7 +1870,7 @@ impl JournalStore {
         .bind(session_id.environment.as_str())
         .bind(session_id.agent.as_str())
         .bind(session_id.native_id.as_str())
-        .fetch_all(&self.pool)
+        .fetch_all(&self.readers)
         .await
         .map_err(Error::Database)
     }
@@ -1909,7 +1922,7 @@ impl JournalStore {
         .bind(session_id.environment.as_str())
         .bind(session_id.agent.as_str())
         .bind(session_id.native_id.as_str())
-        .fetch_all(&self.pool)
+        .fetch_all(&self.readers)
         .await
         .map_err(Error::Database)
     }
@@ -1917,7 +1930,7 @@ impl JournalStore {
     pub async fn get_request(&self, id: &str) -> Result<Option<PendingRequest>> {
         sqlx::query_as::<_, PendingRequest>("SELECT * FROM pending_requests WHERE id = ?")
             .bind(id)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&self.readers)
             .await
             .map_err(Error::Database)
     }
@@ -1988,7 +2001,7 @@ impl JournalStore {
         .bind(session_id.native_id.as_str())
         .bind(stream_id)
         .bind(except_turn_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&self.readers)
         .await
         .map_err(Error::Database)?
         else {
@@ -2072,7 +2085,7 @@ impl JournalStore {
         .bind(id.environment.as_str())
         .bind(id.agent.as_str())
         .bind(id.native_id.as_str())
-        .fetch_optional(&self.pool)
+        .fetch_optional(&self.readers)
         .await
         .ok()
         .flatten()
@@ -2094,7 +2107,7 @@ impl JournalStore {
         .bind(session_id.environment.as_str())
         .bind(session_id.agent.as_str())
         .bind(session_id.native_id.as_str())
-        .fetch_optional(&self.pool)
+        .fetch_optional(&self.readers)
         .await
         .map_err(Error::Database)
     }
@@ -2103,7 +2116,7 @@ impl JournalStore {
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM turns WHERE status IN ('queued','starting','running','stopping','settling')",
         )
-        .fetch_one(&self.pool)
+        .fetch_one(&self.readers)
         .await?;
         Ok(count as usize)
     }
@@ -2127,7 +2140,7 @@ impl JournalStore {
         .bind(session_id.agent.as_str())
         .bind(session_id.native_id.as_str())
         .bind(after_seq)
-        .fetch_all(&self.pool)
+        .fetch_all(&self.readers)
         .await
         .map_err(Error::Database)
     }
@@ -2153,7 +2166,7 @@ impl JournalStore {
     pub async fn turn_events_for_consolidation(&self, turn_id: &str) -> Result<Vec<Event>> {
         sqlx::query_as::<_, Event>("SELECT * FROM events WHERE turn_id = ? ORDER BY seq")
             .bind(turn_id)
-            .fetch_all(&self.pool)
+            .fetch_all(&self.readers)
             .await
             .map_err(Error::Database)
     }
@@ -2171,7 +2184,7 @@ impl JournalStore {
               LIMIT ?",
         )
         .bind(limit)
-        .fetch_all(&self.pool)
+        .fetch_all(&self.readers)
         .await
         .map_err(Error::Database)
     }
@@ -3221,5 +3234,34 @@ mod tests {
             vec!["d", "c", "b", "a"],
             "the second page repeats the first in the same order it was first served"
         );
+    }
+}
+
+#[cfg(test)]
+mod reader_capacity_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn session_reads_finish_while_a_journal_write_is_uncommitted() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = JournalStore::new(dir.path().join("journal.db").to_str().unwrap())
+            .await
+            .unwrap();
+        let held = store
+            .raw_pool()
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .unwrap();
+        let id = SessionId::decode("envtest:codex:missing").unwrap();
+        let value = tokio::time::timeout(std::time::Duration::from_secs(2), store.get_session(&id))
+            .await
+            .expect("a writer must not consume the reader capacity")
+            .unwrap();
+        assert!(value.is_none());
+        assert!(sqlx::query("DELETE FROM sessions")
+            .execute(store.read_pool())
+            .await
+            .is_err());
+        held.rollback().await.unwrap();
     }
 }

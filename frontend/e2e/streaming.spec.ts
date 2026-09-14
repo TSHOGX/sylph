@@ -21,7 +21,7 @@ test("the transcript paints thinking, tools, and prose while the turn is still r
 }) => {
   await createSession(page);
 
-  const composer = page.getByLabel("Message");
+  const composer = page.getByLabel("Message", { exact: true });
   await composer.fill("paced please");
   await page.getByRole("button", { name: "Send", exact: true }).click();
 
@@ -69,7 +69,7 @@ test("the transcript paints thinking, tools, and prose while the turn is still r
 test("the live turn reports Streaming once events arrive", async ({ page }) => {
   await createSession(page);
 
-  const composer = page.getByLabel("Message");
+  const composer = page.getByLabel("Message", { exact: true });
   await composer.fill("paced please");
   await page.getByRole("button", { name: "Send", exact: true }).click();
 

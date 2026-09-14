@@ -193,7 +193,9 @@ pub struct EnvBridge {
     command_waiters: CommandWaiters,
     read_waiters: ReadWaiters,
     next_waiter_id: Arc<AtomicU64>,
-    ingest_gate: Arc<Mutex<()>>,
+    // Producer ordering is per environment. Retaining a sidecar on one machine
+    // must not hold the ingestion gate for every other machine.
+    ingest_gates: Arc<Mutex<HashMap<EnvironmentId, Arc<Mutex<()>>>>>,
     remote_drafts: Arc<Mutex<HashMap<String, RemoteDraft>>>,
     remote_promotion_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     remote_promotion_results: Arc<Mutex<HashMap<String, RemotePromotionResult>>>,
@@ -257,7 +259,7 @@ impl EnvBridge {
             command_waiters: Arc::new(Mutex::new(HashMap::new())),
             read_waiters: Arc::new(std::sync::Mutex::new(HashMap::new())),
             next_waiter_id: Arc::new(AtomicU64::new(1)),
-            ingest_gate: Arc::new(Mutex::new(())),
+            ingest_gates: Arc::new(Mutex::new(HashMap::new())),
             remote_drafts: Arc::new(Mutex::new(HashMap::new())),
             remote_promotion_locks: Arc::new(Mutex::new(HashMap::new())),
             remote_promotion_results: Arc::new(Mutex::new(HashMap::new())),
@@ -2109,7 +2111,7 @@ impl EnvBridge {
             let session = sylph_protocol::SessionId::decode(&session)?;
             command_guards.push(self.session_command_lock(&session).await.lock_owned().await);
         }
-        let _gate = self.ingest_gate.lock().await;
+        let _gate = self.ingest_gate(&environment).await.lock_owned().await;
         // Remote events derive their canonical sequence from SQLite. Hold the
         // allocator gate through that transaction and cursor update so a
         // concurrent server-authored frame cannot reserve the same number.
@@ -2439,13 +2441,22 @@ impl EnvBridge {
         Ok(())
     }
 
+    async fn ingest_gate(&self, environment: &EnvironmentId) -> Arc<Mutex<()>> {
+        self.ingest_gates
+            .lock()
+            .await
+            .entry(environment.clone())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
     /// Run one sequenced non-event message through the same contiguous-prefix
     /// gate as event batches.  The receipt/hash check happens before the
     /// callback, so an exact replay cannot publish or mutate state twice.  The
     /// gate remains held while the callback and receipt insertion run; this is
     /// intentionally serialized because these messages often update state in a
     /// different table than the receipt table and SQLite cannot make that pair
-    /// one transaction for every sink (notably the warm history store).
+    /// one transaction for every sink (notably the native record store).
     #[allow(clippy::too_many_arguments)]
     async fn process_message<F, Fut>(
         &self,
@@ -2463,7 +2474,7 @@ impl EnvBridge {
     {
         self.validate_producer_frame(environment, epoch, epoch, producer_id)
             .await?;
-        let _gate = self.ingest_gate.lock().await;
+        let _gate = self.ingest_gate(environment).await.lock_owned().await;
         let accepted_before = self
             .store
             .env_accepted_through(environment, producer_id)
@@ -3951,7 +3962,7 @@ mod tests {
                 bridge.store.clone(),
                 bridge.hub.clone(),
                 bridge.seq.clone(),
-                consolidator,
+                consolidator.clone(),
                 writer,
             ))
             .await;
@@ -3978,15 +3989,12 @@ mod tests {
         let turns = bridge.store.list_turns(&session_id, 10).await.unwrap();
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0].status, "completed");
-        let events = bridge
-            .store
-            .turn_events_after(&turns[0].id, -1)
-            .await
-            .unwrap();
+        // The contract is durable attribution, not which tier won the race
+        // with this read. Explicitly finish consolidation before inspecting it.
+        consolidator.sweep().await;
+        let events = bridge.history.turn_blocks(&turns[0].id).await.unwrap();
         assert!(events.iter().any(|event| event.kind == "turn"));
-        assert!(events
-            .iter()
-            .all(|event| event.turn_id.as_deref() == Some(turns[0].id.as_str())));
+        assert!(events.iter().all(|event| event.turn_id == turns[0].id));
         bridge
             .ingest_batch(
                 EventBatch::new(environment, producer, welcome.connection_epoch, vec![item])

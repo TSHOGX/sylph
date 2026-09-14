@@ -75,7 +75,7 @@ impl JournalStore {
              WHERE connected = 1 AND (last_seen_at_ms IS NULL OR last_seen_at_ms < ?)",
         )
         .bind(cutoff_ms)
-        .fetch_all(self.raw_pool())
+        .fetch_all(self.read_pool())
         .await
         .map_err(Error::Database)?;
         let mut disconnected = Vec::new();
@@ -119,7 +119,7 @@ impl JournalStore {
             .bind(session.environment.as_str())
             .bind(session.agent.as_str())
             .bind(session.native_id.as_str())
-            .fetch_all(self.raw_pool())
+            .fetch_all(self.read_pool())
             .await
             .map_err(Error::Database)?
         } else {
@@ -127,7 +127,7 @@ impl JournalStore {
                 "SELECT parent_env, parent_agent, parent_native, child_env, child_agent, child_native, relation \
                  FROM session_edges",
             )
-            .fetch_all(self.raw_pool())
+            .fetch_all(self.read_pool())
             .await
             .map_err(Error::Database)?
         };
@@ -204,7 +204,11 @@ impl JournalStore {
                 "event session environment does not match the authenticated envagent".into(),
             ));
         }
-        let mut tx = self.raw_pool().begin().await.map_err(Error::Database)?;
+        let mut tx = self
+            .raw_pool()
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(Error::Database)?;
         let producer_seq_i64 = i64::try_from(producer_seq.get())
             .map_err(|_| Error::InvalidRequest("producer sequence is too large".into()))?;
         if let Some(existing) = sqlx::query(
@@ -356,7 +360,11 @@ impl JournalStore {
                 "event session environment does not match the authenticated envagent".into(),
             ));
         }
-        let mut tx = self.raw_pool().begin().await.map_err(Error::Database)?;
+        let mut tx = self
+            .raw_pool()
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(Error::Database)?;
         let producer_seq_i64 = i64::try_from(producer_seq.get())
             .map_err(|_| Error::InvalidRequest("producer sequence is too large".into()))?;
         if let Some(existing) = sqlx::query_scalar::<_, i64>(
@@ -494,7 +502,11 @@ impl JournalStore {
         requested_environment: &EnvironmentId,
         subject_id: &str,
     ) -> Result<Option<(EnvironmentId, String)>> {
-        let mut tx = self.raw_pool().begin().await.map_err(Error::Database)?;
+        let mut tx = self
+            .raw_pool()
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(Error::Database)?;
         let row = sqlx::query(
             "SELECT i.environment_id, i.installation_id, i.capability, i.expires_at_ms \
              FROM env_invites i \
@@ -588,7 +600,7 @@ impl JournalStore {
              FROM env_installations WHERE environment_id = ?",
         )
         .bind(id.as_str())
-        .fetch_optional(self.raw_pool())
+        .fetch_optional(self.read_pool())
         .await
         .map_err(Error::Database)?;
         row.map(|row| {
@@ -623,7 +635,7 @@ impl JournalStore {
                     connected, connection_epoch, last_seen_at_ms, reachable_via, agents_json, facts_json \
              FROM env_installations ORDER BY environment_id",
         )
-        .fetch_all(self.raw_pool())
+        .fetch_all(self.read_pool())
         .await
         .map_err(Error::Database)?;
         rows.into_iter()
@@ -754,7 +766,11 @@ impl JournalStore {
         };
         let outcome_json =
             serde_json::to_string(outcome).map_err(|error| Error::Internal(error.to_string()))?;
-        let mut tx = self.raw_pool().begin().await.map_err(Error::Database)?;
+        let mut tx = self
+            .raw_pool()
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(Error::Database)?;
         if let Some(existing) = sqlx::query(
             "SELECT idempotency, outcome_json FROM env_command_results \
              WHERE environment_id = ? AND request_id = ?",
@@ -822,7 +838,7 @@ impl JournalStore {
         )
         .bind(environment.as_str())
         .bind(request_id)
-        .fetch_optional(self.raw_pool())
+        .fetch_optional(self.read_pool())
         .await
         .map_err(Error::Database)?;
         raw.map(|raw| {
@@ -850,7 +866,7 @@ impl JournalStore {
         .bind(environment.as_str())
         .bind(producer.as_str())
         .bind(seq)
-        .fetch_optional(self.raw_pool())
+        .fetch_optional(self.read_pool())
         .await
         .map_err(Error::Database)?;
         Ok(value.and_then(|value| u64::try_from(value).ok()))
@@ -871,7 +887,7 @@ impl JournalStore {
         .bind(environment.as_str())
         .bind(producer.as_str())
         .bind(seq)
-        .fetch_optional(self.raw_pool())
+        .fetch_optional(self.read_pool())
         .await
         .map_err(Error::Database)?;
         row.map(|row| {
@@ -892,28 +908,19 @@ impl JournalStore {
         environment: &EnvironmentId,
         producer: &ProducerId,
     ) -> Result<u64> {
-        let values: Vec<i64> = sqlx::query_scalar(
-            "SELECT producer_seq FROM env_event_receipts \
-             WHERE environment_id = ? AND producer_id = ? ORDER BY producer_seq",
+        // This prefix is advanced by the receipt insert trigger in the same
+        // transaction as the frame. Reading all receipts here made every native
+        // import quadratic and kept the ingestion gate occupied while sorting.
+        let accepted: i64 = sqlx::query_scalar(
+            "SELECT COALESCE((SELECT accepted_through FROM env_producer_cursors
+             WHERE environment_id = ? AND producer_id = ?), 0)",
         )
         .bind(environment.as_str())
         .bind(producer.as_str())
-        .fetch_all(self.raw_pool())
+        .fetch_one(self.read_pool())
         .await
         .map_err(Error::Database)?;
-        let mut expected = 1_u64;
-        let mut values: Vec<u64> = values
-            .into_iter()
-            .filter_map(|value| u64::try_from(value).ok())
-            .collect();
-        values.sort_unstable();
-        for value in values {
-            if value != expected {
-                break;
-            }
-            expected = expected.saturating_add(1);
-        }
-        Ok(expected.saturating_sub(1))
+        u64::try_from(accepted).map_err(|_| Error::Internal("negative producer cursor".into()))
     }
 
     pub async fn insert_env_receipt(
@@ -994,5 +1001,127 @@ impl JournalStore {
         .await
         .map_err(Error::Database)?;
         Ok(result.rows_affected() == 1)
+    }
+}
+
+#[cfg(test)]
+mod receipt_tests {
+    use super::*;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    async fn store() -> (JournalStore, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = JournalStore::new(dir.path().join("journal.db").to_str().unwrap())
+            .await
+            .unwrap();
+        (store, dir)
+    }
+
+    #[tokio::test]
+    async fn producer_confirmation_stops_at_gaps_and_survives_rollback_and_reopen() {
+        let (store, dir) = store().await;
+        let env = EnvironmentId::parse("envtest").unwrap();
+        let producer = ProducerId::parse("producer-test").unwrap();
+        for (seq, accepted) in [(3, 0), (1, 1), (2, 3), (2, 3)] {
+            store
+                .insert_env_message_receipt(&env, &producer, ProducerSeq::new(seq), "hash")
+                .await
+                .unwrap();
+            assert_eq!(
+                store.env_accepted_through(&env, &producer).await.unwrap(),
+                accepted
+            );
+        }
+        let other = ProducerId::parse("other-producer").unwrap();
+        assert_eq!(store.env_accepted_through(&env, &other).await.unwrap(), 0);
+        let mut tx = store
+            .raw_pool()
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO env_event_receipts(environment_id,producer_id,producer_seq,session_env,session_agent,session_native,server_seq,payload_hash,accepted_at_ms)
+            VALUES('envtest','producer-test',4,'envtest','__message__','__message__',0,'hash',1)")
+            .execute(&mut *tx).await.unwrap();
+        tx.rollback().await.unwrap();
+        assert_eq!(
+            store.env_accepted_through(&env, &producer).await.unwrap(),
+            3
+        );
+        store.read_pool().close().await;
+        store.raw_pool().close().await;
+        let reopened = JournalStore::new(dir.path().join("journal.db").to_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened
+                .env_accepted_through(&env, &producer)
+                .await
+                .unwrap(),
+            3
+        );
+    }
+
+    async fn measured_cursor(
+        store: &JournalStore,
+        env: &EnvironmentId,
+        producer: &ProducerId,
+    ) -> usize {
+        let steps = Arc::new(AtomicUsize::new(0));
+        let mut connections = Vec::new();
+        // Install on every reader so pool scheduling cannot hide a catalogue scan.
+        for _ in 0..store.read_pool().options().get_max_connections() {
+            let mut conn = store.read_pool().acquire().await.unwrap();
+            let count = steps.clone();
+            conn.lock_handle()
+                .await
+                .unwrap()
+                .set_progress_handler(1, move || {
+                    count.fetch_add(1, Ordering::Relaxed);
+                    true
+                });
+            connections.push(conn);
+        }
+        drop(connections);
+        steps.store(0, Ordering::Relaxed);
+        store.env_accepted_through(env, producer).await.unwrap();
+        let measured = steps.load(Ordering::Relaxed);
+        let mut connections = Vec::new();
+        for _ in 0..store.read_pool().options().get_max_connections() {
+            let mut conn = store.read_pool().acquire().await.unwrap();
+            conn.lock_handle().await.unwrap().remove_progress_handler();
+            connections.push(conn);
+        }
+        measured
+    }
+
+    #[tokio::test]
+    async fn acknowledging_a_frame_does_not_rescan_the_producer_history() {
+        let (store, _dir) = store().await;
+        let env = EnvironmentId::parse("envtest").unwrap();
+        let producer = ProducerId::parse("producer-test").unwrap();
+        store
+            .insert_env_message_receipt(&env, &producer, ProducerSeq::new(1), "hash")
+            .await
+            .unwrap();
+        let small = measured_cursor(&store, &env, &producer).await;
+        for seq in 2..=1000 {
+            store
+                .insert_env_message_receipt(&env, &producer, ProducerSeq::new(seq), "hash")
+                .await
+                .unwrap();
+        }
+        let large = measured_cursor(&store, &env, &producer).await;
+        eprintln!("Receipt cursor VM steps: first={small}, with 1000 receipts={large}");
+        assert!(
+            large < small * 3,
+            "acknowledgement must not grow with producer history: {small} -> {large}"
+        );
+        assert_eq!(
+            store.env_accepted_through(&env, &producer).await.unwrap(),
+            1000
+        );
     }
 }

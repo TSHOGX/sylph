@@ -202,6 +202,13 @@ mechanism that brings in any native history, and a property of the reason rather
 this condition, since `spool_full`, `link_lost`, `agent_exited`, and `grant_revoked` all
 leave the vendor's store ahead of Sylph's.
 
+The spool maintains its capacity counter with insert/delete triggers in the same
+transaction as queue mutations. An append reads one counter, never a sum over the entire
+backlog: network backpressure must not make every subsequent enqueue more expensive.
+The collapsed schema in `crates/envagent/migrations/spool/` is checksum-validated at open,
+so schema churn requires discarding the development spool rather than silently mixing
+old rows with new counters. Producer sequence allocation and enqueue remain atomic.
+
 ### Moving the spool means checkpoint-then-rename
 
 The spool is WAL-mode SQLite, so relocating it is not a move of three files. A crash

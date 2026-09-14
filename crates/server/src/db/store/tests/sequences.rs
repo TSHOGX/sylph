@@ -40,7 +40,7 @@ async fn startup_repair_appends_after_events_that_left_the_journal() {
     let closed_seq: i32 = sqlx::query_scalar(
         "SELECT seq FROM events WHERE kind = 'subagent' AND phase = 'completed'",
     )
-    .fetch_one(store.raw_pool())
+    .fetch_one(store.read_pool())
     .await
     .unwrap();
     assert_eq!(closed_seq, later.seq + 1);

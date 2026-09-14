@@ -40,7 +40,7 @@ test("a new session accepts a turn and streams the reply", async ({ page }) => {
   await picker.getByRole("button", { name: "Start session here" }).click();
 
   // Creation navigates to the session, so the composer is the signal it worked.
-  const composer = page.getByLabel("Message");
+  const composer = page.getByLabel("Message", { exact: true });
   await expect(composer).toBeVisible();
 
   await composer.fill("Hello from Playwright");
@@ -84,13 +84,13 @@ test("a created session is offered for resumption on the start screen", async ({
 
   // The row links to the conversation, which is the only thing this list is for.
   await recents.first().getByRole("link").click();
-  await expect(page.getByLabel("Message")).toBeVisible();
+  await expect(page.getByLabel("Message", { exact: true })).toBeVisible();
 });
 
 test("reloading mid-conversation replays the journal", async ({ page }) => {
   await createSession(page);
 
-  const composer = page.getByLabel("Message");
+  const composer = page.getByLabel("Message", { exact: true });
   await composer.fill("Persist this");
   await page.getByRole("button", { name: "Send", exact: true }).click();
   await expect(page.getByText("Hello from the E2E runner.")).toBeVisible();

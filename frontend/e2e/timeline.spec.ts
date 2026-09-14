@@ -12,7 +12,7 @@ import { createSession } from "./fixtures/session";
 
 async function runPrompt(page: Page, prompt: string) {
   await createSession(page);
-  await page.getByLabel("Message").fill(prompt);
+  await page.getByLabel("Message", { exact: true }).fill(prompt);
   await page.getByRole("button", { name: "Send", exact: true }).click();
   await expect(page.getByText("Hello from the E2E runner.")).toBeVisible();
 }
@@ -28,7 +28,7 @@ async function runPrompt(page: Page, prompt: string) {
  */
 async function sendFanout(page: Page) {
   await createSession(page);
-  await page.getByLabel("Message").fill("fanout across agents please");
+  await page.getByLabel("Message", { exact: true }).fill("fanout across agents please");
   await page.getByRole("button", { name: "Send", exact: true }).click();
   await expect(page.getByText("Fanning out to six agents.")).toBeVisible({
     timeout: 15_000,
@@ -411,7 +411,7 @@ test("a delegation with no name still renders, and does not shadow a named one",
 
 test("a promoted host reports its outcome, not its own arguments", async ({ page }) => {
   await createSession(page);
-  await page.getByLabel("Message").fill("promote this please");
+  await page.getByLabel("Message", { exact: true }).fill("promote this please");
   await page.getByRole("button", { name: "Send", exact: true }).click();
   await expect(page.getByText("Running a workflow.")).toBeVisible({ timeout: 15_000 });
   // Waited to settle, so the tree is stable before it is read. Mid-stream this scenario

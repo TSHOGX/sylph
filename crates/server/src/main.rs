@@ -193,6 +193,9 @@ fn migrate(args: &[String]) -> anyhow::Result<()> {
         "journal.db",
         "journal.db-wal",
         "journal.db-shm",
+        "native.db",
+        "native.db-wal",
+        "native.db-shm",
         "history.db",
         "history.db-wal",
         "history.db-shm",
@@ -218,7 +221,7 @@ fn migrate(args: &[String]) -> anyhow::Result<()> {
 
     if copied.is_empty() {
         anyhow::bail!(
-            "Nothing to migrate: {} holds no journal, history, blobs, or attachments.",
+            "Nothing to migrate: {} holds no journal, native records, history, blobs, or attachments.",
             from.display()
         );
     }

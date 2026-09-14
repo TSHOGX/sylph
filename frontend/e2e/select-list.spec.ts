@@ -202,7 +202,7 @@ test("a control command onto a long catalogue opens the same filterable list", a
 }) => {
   await createSession(page);
 
-  const composer = page.getByLabel("Message");
+  const composer = page.getByLabel("Message", { exact: true });
   await composer.click();
   await composer.fill("/provider");
   await expect(page.getByRole("listbox", { name: "Agent commands" })).toBeVisible();
@@ -228,7 +228,7 @@ test("a control command onto a long catalogue opens the same filterable list", a
 test("Escape closes the dialog form, which the list must not swallow", async ({ page }) => {
   await createSession(page);
 
-  const composer = page.getByLabel("Message");
+  const composer = page.getByLabel("Message", { exact: true });
   await composer.click();
   await composer.fill("/provider");
   await composer.press("Enter");

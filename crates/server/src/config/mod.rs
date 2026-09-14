@@ -36,8 +36,8 @@ pub struct Config {
     /// when it is read — see [`crate::db`].
     pub journal_path: String,
     /// Consolidated history. Derived from the data directory rather than
-    /// configured: the two tiers are one store split for SQLite's sake, not two
-    /// things a user chooses between.
+    /// configured: workload databases share one authority and one root, rather
+    /// than being independent stores a user chooses between.
     pub history_path: String,
     /// Root of the content-addressed blob store.
     pub blobs_dir: PathBuf,
