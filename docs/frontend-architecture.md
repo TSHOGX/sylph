@@ -1115,6 +1115,15 @@ both processes rather than treating the envagent as optional.
 Both children inherit the suite's throwaway roots, and the wrapper terminates them together
 when Playwright stops the web server.
 
+#### Startup readiness
+
+The E2E launcher reports readiness only after its envagent is paired, connected, and
+advertising the fixture adapter. Playwright waits for that stdout marker; HTTP health
+alone describes the server and cannot establish that an environment is ready. The launcher
+checks its ports before starting so the harness cannot reuse another process's server.
+Tests holding intercepted requests release and await their handlers before teardown, so a
+late routing error cannot escape into a later test.
+
 #### Fixture state
 
 **`npm run e2e` wipes `.e2e-home/` before the run, and the npm script is the only place

@@ -26,22 +26,31 @@ import { createSession, gotoReady } from "./fixtures/session";
 test("the start screen is usable before the sessions listing settles", async ({ page }) => {
   // Hold the listing open. Everything asserted below must be on screen anyway:
   // this is the difference between a start screen and a loading screen.
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
   await page.route("**/api/v1/sessions?*", async (route) => {
-    await new Promise((resolve) => setTimeout(resolve, 4_000));
+    await held;
     await route.continue();
   });
 
-  await page.goto("/");
+  try {
+    await page.goto("/");
 
-  await expect(page.getByRole("heading", { level: 1, name: "Sylph" })).toBeVisible();
-  await expect(page.getByRole("button", { name: /New session/ })).toBeVisible();
-  await expect(page.getByRole("button", { name: /Quick session/ })).toBeVisible();
-  // The keys are static content, so they are readable while the listing is still
-  // in flight rather than after it.
-  await expect(page.getByRole("heading", { name: "Keys" })).toBeVisible();
+    await expect(page.getByRole("heading", { level: 1, name: "Sylph" })).toBeVisible();
+    await expect(page.getByRole("button", { name: /New session/ })).toBeVisible();
+    await expect(page.getByRole("button", { name: /Quick session/ })).toBeVisible();
+    // The keys are static content, so they are readable while the listing is still
+    // in flight rather than after it.
+    await expect(page.getByRole("heading", { name: "Keys" })).toBeVisible();
 
-  // And the pending listing must not be reported as an empty app.
-  await expect(page.getByRole("heading", { name: "Getting started" })).toBeHidden();
+    // And the pending listing must not be reported as an empty app.
+    await expect(page.getByRole("heading", { name: "Getting started" })).toBeHidden();
+  } finally {
+    // An unawaited timer used to continue a closed page's route during a later
+    // test. Release this test's window and drain its handlers before closing it.
+    release();
+    await page.unrouteAll({ behavior: "wait" });
+  }
 });
 
 test("an app with no sessions gets the first-run guide, not an empty list", async ({

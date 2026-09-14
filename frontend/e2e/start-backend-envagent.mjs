@@ -35,6 +35,7 @@
  */
 import { spawn } from "node:child_process";
 import http from "node:http";
+import net from "node:net";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -296,7 +297,19 @@ async function waitForConnectedEnvironment() {
   throw new Error("paired envagent did not report a connected e2e agent");
 }
 
+// Stdout readiness replaces Playwright's health-URL check, including its occupied-port
+// preflight. Preserve that protection before making any pairing request.
+async function requireFreePort(port) {
+  await new Promise((resolve, reject) => {
+    const probe = net.createServer();
+    probe.once("error", reject);
+    probe.listen(port, "127.0.0.1", () => probe.close((error) => error ? reject(error) : resolve()));
+  });
+}
+
 try {
+  await requireFreePort(backendPort);
+  await requireFreePort(envPort);
   await buildFixtureBinaries();
   launch(serverBin, [], {
     SYLPH_ENV_LISTEN: `127.0.0.1:${envPort}`,

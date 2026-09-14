@@ -102,7 +102,9 @@ export default defineConfig({
       // production process has no path to the fixture.
       command: "exec node frontend/e2e/start-backend-envagent.mjs",
       cwd: path.join(__dirname, ".."),
-      url: `http://127.0.0.1:${BACKEND_PORT}/api/v1/health`,
+      // Playwright races URL and stdout readiness when both are configured. Wait
+      // only for pairing: a healthy server can still have no connected envagent.
+      wait: { stdout: /\[e2e\] paired envagent is connected and reports the e2e adapter/ },
       reuseExistingServer: false,
       // A cold `cargo run` compiles the whole backend first.
       timeout: 180_000,
