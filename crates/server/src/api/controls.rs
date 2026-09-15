@@ -23,6 +23,7 @@ pub async fn publish(state: &AppState, request: &ControlRequest) {
         text: String::new(), data: Some(serde_json::json!({"requestId": request.request_id, "revision": request.revision})),
         is_error: false, stability: "stable".into(), source: "server".into(), arrival_at_ms: now,
         recorded_at_ms: None, created_at_ms: now, started_at_ms: None, body_ref: None,
+            tool_summary: None,
     }).await;
 }
 

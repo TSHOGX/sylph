@@ -1,37 +1,7 @@
 /**
- * Interpreting a `tool_call` event well enough to render it as work.
- *
- * The session protocol deliberately does not standardize tool payloads: `data`
- * is an open object, and each adapter fills it with whatever its own vendor
- * produced. So this module normalizes what the shipped adapters actually emit,
- * verified against their source:
- *
- * - **claude** (`crates/adapters/src/claude/translate.rs`): `data.input` is the parsed
- *   tool input object, or the raw string when the streamed partial JSON did not
- *   parse. `text` is that raw JSON.
- * - **pi** (`crates/adapters/src/pi.rs`): `data.input` is the tool-call arguments
- *   object, from `args` on `tool_execution_start` and from `toolCall.arguments`
- *   on a delta.
- * - **codex** (`crates/adapters/src/codex/`): the same `data.input` shape.
- *
- * The single shape is therefore `data.input` holding the tool's arguments, with
- * `text` as a stringified fallback. Nothing else is read off `data`: a spelling
- * no adapter produces is not tolerated here, per AGENTS.md § Compatibility.
- *
- * What *is* open is the argument vocabulary *inside* `input`. Tool names and
- * their argument keys come from whichever MCP servers, plugins, and user
- * adapters (`SYLPH_AGENTS_DIR`) are installed, which no list in this repo can
- * close. So key matching below is generous, and everything degrades to "unknown
- * tool with some arguments" rather than throwing — a timeline that crashes on an
- * unfamiliar tool is worse than one that renders it plainly.
- *
- * # No icon here
- *
- * `ToolShape` used to carry an `icon` string, and each rule below named a Unicode
- * glyph. That put presentation in a pure, unit-tested logic module and forced the
- * choice to be a *character* — which is decided by the reader's installed fonts,
- * not by this project. `kind` is the semantic answer, and `components/execution-timeline.tsx`
- * maps it to an icon. This module stays free of React and testable in `node`.
+ * Tool headers use the server's bounded semantic description, the same producer
+ * that owns aggregate command/read counts. Only expanded edit details are parsed
+ * here, from the complete vendor payload supplied by EventBody.
  */
 
 import type { StreamEvent } from "@/lib/api-types";
@@ -65,25 +35,6 @@ export interface ToolShape {
 }
 
 /**
- * Tool-name vocabulary across agents.
- *
- * Matching is on the lowercased name with non-alphanumerics stripped, so
- * `str_replace_editor`, `strReplaceEditor`, and `StrReplace` all land together.
- * Names are matched by substring after that, because agents prefix and suffix
- * freely (`mcp__fs__read_file`).
- */
-const KIND_RULES: Array<{ kind: ToolKind; patterns: string[] }> = [
-  // Order matters: `multiedit` must be tested before `edit`, and `writefile`
-  // before `file`, so the more specific rule wins.
-  { kind: "edit", patterns: ["multiedit", "strreplace", "applypatch", "edit", "patch"] },
-  { kind: "write", patterns: ["writefile", "createfile", "write", "create"] },
-  { kind: "read", patterns: ["readfile", "read", "cat", "view", "notebookread"] },
-  { kind: "shell", patterns: ["bash", "shell", "exec", "terminal", "command", "run"] },
-  { kind: "search", patterns: ["grep", "glob", "search", "find", "ripgrep", "ls", "list"] },
-  { kind: "task", patterns: ["task", "agent", "todo", "plan", "delegate"] },
-];
-
-/**
  * Argument keys that name a file, in the order agents prefer them.
  *
  * The camelCase entries (`filePath`, `notebookPath`, `targetFile`) are **not**
@@ -114,16 +65,12 @@ const PATTERN_KEYS = ["pattern", "query", "regex", "glob", "search"];
 export function describeTool(event: StreamEvent): ToolShape {
   const name = event.name?.trim() || "tool";
   const args = extractArgs(event);
-  const normalized = name.toLowerCase().replace(/[^a-z0-9]/g, "");
-
-  const rule = KIND_RULES.find((candidate) =>
-    candidate.patterns.some((pattern) => normalized.includes(pattern)),
-  );
-  const kind = rule?.kind ?? "other";
-
-  const path = firstString(args, PATH_KEYS);
-  const command = firstString(args, COMMAND_KEYS);
-  const pattern = firstString(args, PATTERN_KEYS);
+  const description = event.toolSummary;
+  const kind = description?.kind ?? "other";
+  // Expanded paths come from full arguments, since the header is a preview.
+  const path = firstString(args, PATH_KEYS) ?? description?.path;
+  const command = description?.command;
+  const pattern = description?.pattern;
   const hunks = extractHunks(args, path);
 
   return {
@@ -132,7 +79,7 @@ export function describeTool(event: StreamEvent): ToolShape {
     path,
     command,
     pattern,
-    summary: summarize({ kind, name, path, command, pattern, args, hunks }),
+    summary: description?.summary ?? name,
     hunks,
     args: omitKeys(args, [
       ...PATH_KEYS,
@@ -154,8 +101,8 @@ export function describeTool(event: StreamEvent): ToolShape {
 /**
  * Recover the argument object from an event.
  *
- * Three shapes are accepted because the shipped adapters produce three:
- * `data.input` as an object (both adapters' happy path), `data.input` as a string
+ * The shipped adapters supply nested input or Codex live command details:
+ * `data.input` as an object (Claude, Pi, and native Codex), `data.input` as a string
  * (`crates/adapters/src/claude/translate.rs`, when the streamed partial JSON did not
  * parse), and `text` as raw JSON (`claude`'s `text` always holds it, and is the
  * only source when `data` is absent — which is the case for the `started` and
@@ -175,10 +122,10 @@ function extractArgs(event: StreamEvent): Record<string, unknown> {
       // shell command, so naming it `command` renders correctly.
       return { command: input };
     }
-    // Nothing else on `data` is read. Every shipped adapter nests a tool's
-    // arguments under `input` (`crates/adapters/src/claude/translate.rs`,
-    // `crates/adapters/src/pi.rs`), so a top-level `data.command` read would be
-    // tolerance for a producer that does not exist.
+    // Codex live details keep command/cwd beside status and outcome metadata.
+    if (typeof (data as Record<string, unknown>).command === "string") {
+      return data as Record<string, unknown>;
+    }
   }
 
   if (event.text) {
@@ -262,78 +209,4 @@ function omitKeys(
     if (!keys.includes(key)) out[key] = value;
   }
   return out;
-}
-
-/** The collapsed header line: what this call did, in as few words as possible. */
-function summarize(shape: {
-  kind: ToolKind;
-  name: string;
-  path?: string;
-  command?: string;
-  pattern?: string;
-  args: Record<string, unknown>;
-  hunks: EditHunk[];
-}): string {
-  if (shape.command) return shape.command;
-  if (shape.pattern) {
-    return shape.path ? `${shape.pattern} in ${shape.path}` : shape.pattern;
-  }
-  if (shape.path) return shape.path;
-
-  // No recognized field: show the first scalar argument rather than nothing, so
-  // an unfamiliar tool still says something about what it was asked to do.
-  for (const [key, value] of Object.entries(shape.args)) {
-    if (typeof value === "string" && value.trim()) {
-      return `${key}: ${truncate(value, 120)}`;
-    }
-    if (typeof value === "number" || typeof value === "boolean") {
-      return `${key}: ${value}`;
-    }
-  }
-  return shape.name;
-}
-
-function truncate(value: string, max: number): string {
-  const flat = value.replace(/\s+/g, " ").trim();
-  return flat.length > max ? `${flat.slice(0, max)}…` : flat;
-}
-
-/** Basename, for headers that should not wrap on a deep path. */
-export function basename(path: string): string {
-  const leaf = path.replace(/\/+$/, "").split("/").filter(Boolean).pop();
-  return leaf ?? path;
-}
-
-/**
- * Whether a tool result reports failure, and the exit code if it named one.
- *
- * `isError` is the declared outcome of a `tool_result`
- * (`docs/session-protocol.md:663`), and both shipped adapters set it: from
- * `is_error` on the vendor block at `crates/adapters/src/claude/translate.rs`, and from
- * the tool-execution result at `crates/adapters/src/pi.rs`. No `status` string
- * is read off `data` — no producer writes one, so a branch on it was tolerance
- * for a producer that does not exist.
- *
- * `data.exitCode` is a different case, and is deliberately still read even though
- * the protocol does not declare it. `components/execution-timeline.tsx:942` renders
- * "failed (exit N)" from it, which is the most useful single fact about a failed
- * shell call, but today the only producer is the E2E fixture
- * (`crates/adapters/src/e2e.rs`, `tool`) — the adapters put `exitCode` on a
- * `status` event at process exit, which is a different event kind entirely. So
- * this read is ahead of its spec: it stays pending a `docs/session-protocol.md`
- * change declaring `data.exitCode` as an optional refinement of `isError`, and
- * if that change is rejected instead, this and the fixture's shape both go.
- * `exit_code` was never emitted by anything and is gone.
- */
-export function resultStatus(event: StreamEvent): { exitCode?: number; failed: boolean } {
-  const failed = event.isError === true;
-  const data = event.data;
-  if (!data || typeof data !== "object") return { failed };
-  const record = data as Record<string, unknown>;
-  const raw = record.exitCode;
-  const exitCode = typeof raw === "number" ? raw : undefined;
-  return {
-    exitCode,
-    failed: failed || (exitCode !== undefined && exitCode !== 0),
-  };
 }

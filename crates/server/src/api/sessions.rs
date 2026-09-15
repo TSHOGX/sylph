@@ -325,16 +325,25 @@ pub async fn export_turns(
         // in the browser before its completed event exists. Only sealed turns fold;
         // both sealed storage tiers still use the same projection and time anchors.
         let journalled = state.store.turn_events_for_consolidation(&turn.id).await?;
-        let events: Vec<StreamEvent> = if journalled.is_empty() {
-            state
-                .history
-                .turn_block_summaries(&turn.id)
-                .await
-                .map_err(|error| Error::Internal(format!("could not read transcript: {error:#}")))?
-                .iter()
-                .map(block_summary_to_event)
-                .collect()
-        } else if !turn.is_terminal() {
+        let hot_seqs = journalled
+            .iter()
+            .map(|event| event.seq)
+            .collect::<std::collections::HashSet<_>>();
+        // A terminal turn may receive a late tail while its earlier snapshot is
+        // already archived. Choosing either tier would hide the other half. Read
+        // journal first, then history, and prefer the exact hot versions during
+        // publication overlap; the same ordering protects on-demand node bodies.
+        let mut merged = state
+            .history
+            .turn_block_summaries(&turn.id)
+            .await
+            .map_err(|error| Error::Internal(format!("could not read transcript: {error:#}")))?
+            .iter()
+            .filter(|summary| !hot_seqs.contains(&summary.block.seq))
+            .map(block_summary_to_event)
+            .map(|event| (event.seq, event))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let hot: Vec<StreamEvent> = if !turn.is_terminal() {
             journalled
                 .iter()
                 .map(StreamEvent::from_row)
@@ -347,6 +356,8 @@ pub async fn export_turns(
                 .map(bound_event)
                 .collect()
         };
+        merged.extend(hot.into_iter().map(|event| (event.seq, event)));
+        let events = merged.into_values().collect();
         out.push(TurnWithEvents { turn, events });
     }
 
@@ -456,10 +467,9 @@ pub async fn search_nodes(
         .await?
         .ok_or(Error::SessionNotFound)?;
     let hits = state
-        .history
-        .search_session(&id.encode(), &query.q)
-        .await
-        .map_err(|e| Error::Internal(e.to_string()))?;
+        .store
+        .search_nodes(&state.history, &id, &query.q)
+        .await?;
     Ok(Json(
         serde_json::json!({"hits":hits.into_iter().map(|(seq,excerpt)|serde_json::json!({"seq":seq,"excerpt":excerpt})).collect::<Vec<_>>()}),
     ))
@@ -496,63 +506,9 @@ pub async fn node_body(
             serde_json::json!({"text":node.event.text,"data":node.event.data}),
         ));
     }
-    let hot_seqs = hot
-        .iter()
-        .map(|event| event.seq)
-        .collect::<std::collections::HashSet<_>>();
-    let archived = seqs
-        .into_iter()
-        .filter(|seq| !hot_seqs.contains(seq))
-        .collect::<Vec<_>>();
-    let blocks = state
-        .history
-        .node_body_blocks(&session.encode(), &node.event.kind, &archived)
-        .await
-        .map_err(|e| Error::Internal(format!("could not read node body: {e:#}")))?;
-    let mut parts = std::collections::BTreeMap::new();
-    for block in blocks {
-        let replace = block.phase.as_deref() == Some("completed") || block.kind == "subagent";
-        parts.insert(block.seq, (replace, block.text, block.data));
-    }
-    for event in hot {
-        let replace = event.phase.as_deref() != Some("delta") || event.kind == "subagent";
-        parts.insert(
-            event.seq,
-            (
-                replace,
-                event.text,
-                crate::events::data_from_column(&event.data_json),
-            ),
-        );
-    }
-    let mut text = String::new();
-    let mut data = None;
-    for (replace, part, value) in parts.into_values() {
-        if replace {
-            text = part;
-            data = value;
-        } else {
-            text.push_str(&part);
-            if value.is_some() {
-                data = value;
-            }
-        }
-    }
-    let expected = node.event.body_ref.as_ref().unwrap().text_bytes;
-    if text.len() as u64 != expected {
-        return Err(Error::Internal(
-            "node body is incomplete; a retained fragment is unavailable".into(),
-        ));
-    }
-    let data_bytes = data
-        .as_ref()
-        .map_or(0, |value| value.to_string().len() as u64);
-    if data_bytes != node.event.body_ref.as_ref().unwrap().data_bytes {
-        return Err(Error::Internal(
-            "node metadata is incomplete; a retained fragment is unavailable".into(),
-        ));
-    }
-    Ok(Json(serde_json::json!({"text":text,"data":data})))
+    Ok(Json(
+        crate::storage::node_body::resolve(&state.history, &session, &node, hot, seqs).await?,
+    ))
 }
 
 /// Render a bounded history summary without hydrating the complete body.
@@ -672,6 +628,7 @@ pub fn block_to_event(block: &crate::storage::Block) -> StreamEvent {
         // start/end when `recordedAtMs` exists, otherwise arrival start/end for a stream
         // record; block/message fidelity gates native arrival stamps before arithmetic.
         started_at_ms: Some(block.started_at_ms),
+        tool_summary: None,
         body_ref: if block.text.len() > crate::storage::history::BLOCK_PREVIEW_BYTES
             || block.data.as_ref().is_some_and(|data| {
                 data.to_string().len() > crate::storage::history::BLOCK_PREVIEW_BYTES

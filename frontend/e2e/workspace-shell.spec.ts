@@ -287,6 +287,9 @@ test("settings retain display density without overriding collapsed execution", a
   await dialog.getByRole("button",{name:"Comfortable",exact:true}).click();
   await page.keyboard.press("Escape");
   await page.reload();
+  // Navigation finishes before the session hydrates and installs shortcuts.
+  // This assertion measures persisted density, so dispatch only once interactive.
+  await expect(page.getByLabel("Message", { exact: true })).toBeVisible();
   await page.keyboard.press("ControlOrMeta+Comma");
   await expect(page.getByRole("dialog").getByRole("button",{name:"Comfortable",exact:true})).toHaveAttribute("aria-pressed","true");
 });

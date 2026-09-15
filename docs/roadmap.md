@@ -200,7 +200,7 @@ transaction lock windows, and fault-injected query scans. Measurements belong un
 
 The follow-up workload measurements exposed quadratic stream-metadata lookups during
 consolidation. The fold now indexes those facts once and runs on a blocking worker under
-the existing consolidation gate. No producer sharding or new scheduling policy was needed.
+the existing consolidation gate. That fold measurement did not justify producer sharding or a new scheduling policy.
 Authenticated file reads remain responsive while native retention, archive publication,
 search, pruning, CAS deletion, and continuous discovery overlap in the disposable harness.
 Raw lexical bytes, archived block counts, search removal, and new identity discovery are
@@ -220,10 +220,27 @@ The baseline, bounded-work, and browser measurements are in
 the corresponding restored behavior are recorded in
 `docs/measurements/performance/regression-evidence.json`.
 
+Archive eviction now uses snapshot row identities and versions, preserving same-turn
+arrivals and in-place corrections during publication. Whole-turn reads merge an archived
+prefix with its later journal tail. Root input ownership commits with
+event projection; sealed ordinary streams ignore late deltas while completion corrections
+and independent delegates remain accepted. Interactive search merges complete hot bodies
+with history FTS, deduplicating logical nodes and excluding superseded body revisions.
+Tool summaries have one server producer for both counters and headers, exercised through
+retained records reprojected by the real Claude, Codex and Pi adapters.
+
 Still open: producer sharding and byte-weighted scheduling have not been introduced;
 full body requests still read whole retained bodies rather than independently compressed
 ranges. Native checkpointing and separate current sync-state tables remain measurement-led
-follow-ups. Atomic retained re-projection publication remains the separate boundary above.
+follow-ups. Next measurements must cover same-producer delivery through the actual
+spool/socket/ACK path with concurrent large imports, small sessions, file commands and
+reconnect recovery. Existing mixed storage and separate browser fixtures do not establish
+delivery fairness. Idle branch polling, hidden-page suspension and revision notification
+coalescing remain open, as do giant-body expansion, deep delegation, long-lived caches
+and database growth. Explicit hot search materializes current bodies; measure its latency
+and memory before introducing an incremental index or persistent checkpoint. Pi append
+checks and the historical-task window queries still need independent synchronization
+measurements. Atomic retained re-projection publication remains the separate boundary above.
 
 ## Milestone 5 — multi-client control convergence
 

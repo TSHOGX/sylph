@@ -53,6 +53,10 @@ export default defineConfig({
   timeout: 30_000,
   expect: { timeout: 10_000 },
   use: {
+    // These specs observe and hold page routes. Playwright recommends blocking
+    // workers for interception: worker takeover can hide network observations
+    // even when the UI action succeeds. Offline behavior needs a separate context.
+    serviceWorkers: "block",
     baseURL: `http://127.0.0.1:${FRONTEND_PORT}`,
     trace: "retain-on-failure",
     screenshot: "only-on-failure",

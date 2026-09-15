@@ -324,6 +324,7 @@ impl EnvBridge {
             arrival_at_ms: now_ms(),
             recorded_at_ms: None,
             body_ref: None,
+            tool_summary: None,
             created_at_ms: now_ms(),
             started_at_ms: None,
         };
@@ -951,6 +952,7 @@ impl EnvBridge {
                                         arrival_at_ms: now_ms(),
                                         recorded_at_ms: None,
                                         body_ref: None,
+                                        tool_summary: None,
                                         created_at_ms: now_ms(),
                                         started_at_ms: None,
                                     },
@@ -1018,6 +1020,7 @@ impl EnvBridge {
                                         arrival_at_ms: now_ms(),
                                         recorded_at_ms: None,
                                         body_ref: None,
+                                        tool_summary: None,
                                         created_at_ms: now_ms(),
                                         started_at_ms: None,
                                     },
@@ -2066,6 +2069,7 @@ impl EnvBridge {
                                 arrival_at_ms: now_ms(),
                                 recorded_at_ms: None,
                                 body_ref: None,
+                                tool_summary: None,
                                 created_at_ms: now_ms(),
                                 started_at_ms: None,
                             },
@@ -2254,13 +2258,6 @@ impl EnvBridge {
                     // constraint.
                     if let Ok(next_seq) = i32::try_from(ingest.server_seq.get().saturating_add(1)) {
                         self.seq.observe_inner(&item.session_id, next_seq).await;
-                    }
-                    if row.kind == "user" && row.span.is_none() {
-                        if let Some(turn_id) = arrival_turn_id.as_deref() {
-                            self.store
-                                .set_turn_request_text(&item.session_id, turn_id, &row.text)
-                                .await?;
-                        }
                     }
                     let published = StreamEvent::from_row(&row);
                     if let Some(turn_id) = arrival_turn_id.as_deref() {

@@ -30,7 +30,7 @@ pub struct Node {
     pub revision: i64,
     pub body_revision: i64,
     #[serde(skip)]
-    body_start_seq: i32,
+    pub(super) body_start_seq: i32,
     pub event: StreamEvent,
     pub trajectory: Option<StreamEvent>,
     pub children: i64,
@@ -97,7 +97,11 @@ fn decode(row: sqlx::sqlite::SqliteRow) -> Result<Node> {
     })
 }
 
-async fn get(conn: &mut SqliteConnection, session: &str, id: &str) -> Result<Option<Node>> {
+pub(super) async fn get(
+    conn: &mut SqliteConnection,
+    session: &str,
+    id: &str,
+) -> Result<Option<Node>> {
     sqlx::query("SELECT * FROM timeline_nodes WHERE session_id = ? AND id = ?")
         .bind(session)
         .bind(id)
@@ -149,6 +153,11 @@ fn bounded(event: &Event, old: Option<&Node>) -> (StreamEvent, String) {
             );
         }
     }
+    if out.name.is_none() {
+        out.name = old.and_then(|n| n.event.name.clone());
+    }
+    out.tool_summary =
+        (event.kind == "tool_call").then(|| crate::events::tool_summary::describe(&out));
     let mut summary = activity(&out);
     if event.kind == "tool_call" && event.phase.as_deref() == Some("delta") {
         if let Some(old) = old.filter(|n| !n.activity.is_empty()) {
@@ -195,13 +204,14 @@ fn category(event: &StreamEvent) -> (i64, i64) {
     if event.kind != "tool_call" {
         return (0, 0);
     }
-    let name = event.name.as_deref().unwrap_or_default().to_lowercase();
-    let reads = i64::from(matches!(name.as_str(), "read" | "read_file" | "readfile"));
-    let commands = i64::from(matches!(
-        name.as_str(),
-        "bash" | "shell" | "exec_command" | "run_command" | "terminal"
-    ));
-    (reads, commands)
+    let kind = event
+        .tool_summary
+        .as_ref()
+        .map(|summary| summary.kind.as_str());
+    (
+        i64::from(kind == Some("read")),
+        i64::from(kind == Some("shell")),
+    )
 }
 
 fn activity(event: &StreamEvent) -> String {
@@ -212,31 +222,14 @@ fn activity(event: &StreamEvent) -> String {
     if event.kind == "thinking" {
         return "Thinking".into();
     }
-    if event.kind == "tool_call" {
-        let parsed = if event.data.as_ref().and_then(|d| d.get("input")).is_none() {
-            serde_json::from_str::<serde_json::Value>(&event.text).ok()
-        } else {
-            None
-        };
-        let input = event
-            .data
-            .as_ref()
-            .and_then(|d| d.get("input"))
-            .or(parsed.as_ref());
-        if let Some(input) = input {
-            if let Some(command) = input.get("command").and_then(|v| v.as_str()) {
-                return format!("Running {}", clip(command, 120));
-            }
-            for key in ["file_path", "filePath", "path"] {
-                if let Some(path) = input.get(key).and_then(|v| v.as_str()) {
-                    return format!(
-                        "{} {}",
-                        event.name.as_deref().unwrap_or("Working on"),
-                        clip(path, 120)
-                    );
-                }
-            }
+    if let Some(summary) = &event.tool_summary {
+        if let Some(command) = &summary.command {
+            return format!("Running {command}");
         }
+        if let Some(path) = &summary.path {
+            return format!("{} {path}", summary.name);
+        }
+        return summary.summary.clone();
     }
     event.name.clone().unwrap_or_else(|| clip(&event.text, 120))
 }
@@ -612,6 +605,18 @@ pub async fn project(conn: &mut SqliteConnection, event: &Event) -> Result<()> {
     }) {
         return Ok(());
     }
+    // A content completion seals its stream, including an unfinished stream
+    // sealed by its owner. Preserve the canonical late row, but do not let its
+    // delta revise the body or restart activity. Completed corrections and
+    // independent trajectory progress have different semantics and still apply.
+    if event.kind != "subagent"
+        && event.phase.as_deref() == Some("delta")
+        && old.as_ref().is_some_and(|node| {
+            node.own_unfinished || node.event.phase.as_deref() == Some("completed")
+        })
+    {
+        return Ok(());
+    }
     if event.kind == "tool_result" {
         if get(conn, &session, &logical).await?.is_none() {
             parent = execution_group(conn, &session, &parent, event, revision).await?;
@@ -864,6 +869,21 @@ pub struct Page {
     pub has_more: bool,
 }
 
+pub(super) async fn body_snapshot(
+    conn: &mut SqliteConnection,
+    session: &sylph_protocol::SessionId,
+    id: &str,
+) -> Result<(Node, Vec<Event>, Vec<i32>)> {
+    let node = get(conn, &session.encode(), id)
+        .await?
+        .ok_or(Error::SessionNotFound)?;
+    let seqs:Vec<i32>=sqlx::query_scalar("SELECT seq FROM timeline_event_nodes WHERE session_id=? AND node_id=? AND seq>=? AND seq<=? ORDER BY seq")
+            .bind(session.encode()).bind(id).bind(node.body_start_seq).bind(node.event.seq).fetch_all(&mut *conn).await?;
+    let events=sqlx::query_as::<_,Event>("SELECT e.* FROM timeline_event_nodes m JOIN events e ON e.seq=m.seq AND e.session_env=? AND e.session_agent=? AND e.session_native=? WHERE m.session_id=? AND m.node_id=? AND m.seq>=? AND m.seq<=? AND e.kind=? ORDER BY m.seq")
+            .bind(session.environment.as_str()).bind(session.agent.as_str()).bind(session.native_id.as_str()).bind(session.encode()).bind(id).bind(node.body_start_seq).bind(node.event.seq).bind(&node.event.kind).fetch_all(&mut *conn).await?;
+    Ok((node, events, seqs))
+}
+
 impl super::JournalStore {
     /// Take the logical address, hot fragments and historical addresses from one
     /// journal snapshot. A concurrent archive can duplicate these rows, never
@@ -874,15 +894,9 @@ impl super::JournalStore {
         id: &str,
     ) -> Result<(Node, Vec<Event>, Vec<i32>)> {
         let mut tx = self.readers.begin().await?;
-        let node = get(&mut tx, &session.encode(), id)
-            .await?
-            .ok_or(Error::SessionNotFound)?;
-        let seqs:Vec<i32>=sqlx::query_scalar("SELECT seq FROM timeline_event_nodes WHERE session_id=? AND node_id=? AND seq>=? AND seq<=? ORDER BY seq")
-            .bind(session.encode()).bind(id).bind(node.body_start_seq).bind(node.event.seq).fetch_all(&mut *tx).await?;
-        let events=sqlx::query_as::<_,Event>("SELECT e.* FROM timeline_event_nodes m JOIN events e ON e.seq=m.seq AND e.session_env=? AND e.session_agent=? AND e.session_native=? WHERE m.session_id=? AND m.node_id=? AND m.seq>=? AND m.seq<=? AND e.kind=? ORDER BY m.seq")
-            .bind(session.environment.as_str()).bind(session.agent.as_str()).bind(session.native_id.as_str()).bind(session.encode()).bind(id).bind(node.body_start_seq).bind(node.event.seq).bind(&node.event.kind).fetch_all(&mut *tx).await?;
+        let snapshot = body_snapshot(&mut tx, session, id).await?;
         tx.commit().await?;
-        Ok((node, events, seqs))
+        Ok(snapshot)
     }
 
     pub(crate) async fn native_sync_fault(

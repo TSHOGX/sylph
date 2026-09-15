@@ -45,3 +45,59 @@ async fn startup_repair_appends_after_events_that_left_the_journal() {
     .unwrap();
     assert_eq!(closed_seq, later.seq + 1);
 }
+
+#[tokio::test]
+async fn archive_cleanup_preserves_changed_versions_even_when_the_payload_changes_back() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = seeded(directory.path()).await;
+    let event = span_event(1, "subagent", "started", "background", None);
+    store.append_event(&event).await.unwrap();
+    let snapshot = store.consolidation_snapshot("turn-1").await.unwrap();
+    for phase in ["completed", "started"] {
+        sqlx::query("UPDATE events SET phase=? WHERE seq=1")
+            .bind(phase)
+            .execute(store.raw_pool())
+            .await
+            .unwrap();
+    }
+    assert_eq!(store.delete_turn_events(&snapshot).await.unwrap(), 0);
+    assert_eq!(
+        store
+            .turn_events_for_consolidation("turn-1")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let current = store.consolidation_snapshot("turn-1").await.unwrap();
+    assert_eq!(store.delete_turn_events(&current).await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn archive_cleanup_rolls_back_all_batches_when_a_later_delete_fails() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = seeded(directory.path()).await;
+    let events: Vec<_> = (0..257)
+        .map(|seq| span_event(seq, "assistant", "delta", "reply", None))
+        .collect();
+    store.append_events(&events).await.unwrap();
+    let snapshot = store.consolidation_snapshot("turn-1").await.unwrap();
+    sqlx::query("CREATE TRIGGER reject_archive_delete BEFORE DELETE ON events WHEN OLD.seq=256 BEGIN SELECT RAISE(FAIL,'injected cleanup failure'); END").execute(store.raw_pool()).await.unwrap();
+    assert!(store.delete_turn_events(&snapshot).await.is_err());
+    assert_eq!(
+        store
+            .turn_events_for_consolidation("turn-1")
+            .await
+            .unwrap()
+            .len(),
+        events.len()
+    );
+    sqlx::query("DROP TRIGGER reject_archive_delete")
+        .execute(store.raw_pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        store.delete_turn_events(&snapshot).await.unwrap(),
+        events.len() as u64
+    );
+}

@@ -143,6 +143,9 @@ sweep reports it `interrupted`, keeping the end time the claim stamped.
 One append-only stream per session, carrying `kind`, `phase`, `stream_id`, `span`,
 `interior_state`, text, a JSON payload, an error flag, `stability`, `source`, and three
 time axes. Indexed by session sequence, by turn, and by `span`.
+`archive_revision` advances on every in-place row update. Consolidation captures it with
+the row id and deletes only that published version; an appended event or a corrected
+trajectory cannot be evicted by an older archive snapshot.
 
 **`kind` carries no CHECK, deliberately.** A closed list is a promise to break on the next
 adapter that adds a kind, and the breakage is silent in the worst way: the insert fails
@@ -162,8 +165,8 @@ differ only in the shape of the resulting tree, and its index is what keeps focu
 single-subtree replay from scanning the session. `docs/session-protocol.md` § Delegated
 trajectories is authoritative.
 
-`ephemeral` events (`started`, `delta`) exist only in live projection; `stable` events are
-journalled. **`stability` has one derivation, the column** — `StreamEvent::is_stable()`
+`ephemeral` events (`started`, `delta`) and `stable` events are both journalled;
+consolidation folds their stream timing and complete text into history. **`stability` has one derivation, the column** — `StreamEvent::is_stable()`
 reads the field rather than recomputing it from `phase`. The two were equivalent until
 `subagent` became stable at *every* phase for structural reasons, after which the method
 disagreed with the field beside it and a trajectory's `started` was silently not

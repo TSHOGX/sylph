@@ -1145,13 +1145,13 @@ async fn an_expanded_stream_keeps_its_prefix_when_its_owner_turn_is_archived() {
     let old = backend
         .state
         .store
-        .turn_events_for_consolidation("large-0")
+        .consolidation_snapshot("large-0")
         .await
         .unwrap();
     backend
         .state
         .history
-        .put_blocks(&sylph_server::storage::history::consolidate(&old))
+        .put_blocks(&sylph_server::storage::history::consolidate(&old.events))
         .await
         .unwrap();
     let later:Turn=serde_json::from_value(json!({"id":"later","sessionId":id,"status":"running","origin":"agent","requestText":"","createdAtMs":4})).unwrap();
@@ -1170,12 +1170,7 @@ async fn an_expanded_stream_keeps_its_prefix_when_its_owner_turn_is_archived() {
         .unwrap();
     for evict in [false, true] {
         if evict {
-            backend
-                .state
-                .store
-                .delete_turn_events("large-0")
-                .await
-                .unwrap();
+            backend.state.store.delete_turn_events(&old).await.unwrap();
         }
         let response = backend
             .get_authed(&format!("/api/v1/sessions/{id}/nodes/{node}/body"))
@@ -1279,4 +1274,465 @@ async fn an_error_kind_is_visible_in_collapsed_summaries_without_a_redundant_err
         .await
         .unwrap();
     assert_eq!(page.nodes.iter().map(|node| node.failed).sum::<i64>(), 1);
+}
+
+#[tokio::test]
+async fn archive_publication_preserves_events_that_arrive_after_its_snapshot() {
+    use sqlx::Connection;
+    let backend = TestBackend::start().await;
+    let id = seed_with_text(&backend, 1, "archive snapshot body ".repeat(1000)).await;
+    let mut connection = sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new().filename(&backend.state.config.history_path),
+    )
+    .await
+    .unwrap();
+    let held = connection.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    let journal = backend.state.store.clone();
+    let history = backend.state.history.clone();
+    let archive = tokio::spawn(async move {
+        sylph_server::storage::history::consolidate_turn(&journal, &history, "large-1")
+            .await
+            .unwrap()
+    });
+    fn has_file(path: &std::path::Path) -> bool {
+        std::fs::read_dir(path).is_ok_and(|entries| {
+            entries
+                .flatten()
+                .any(|entry| entry.path().is_file() || has_file(&entry.path()))
+        })
+    }
+    // CAS publication precedes the held SQL writer. Keep that window open until
+    // the late event commits, so the test cannot pass by scheduling the race away.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !has_file(&backend.state.config.blobs_dir) {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let mut event = backend
+        .state
+        .store
+        .turn_events_for_consolidation("large-1")
+        .await
+        .unwrap()
+        .remove(0);
+    event.id = None;
+    event.seq = 1;
+    event.stream_id = Some("late".into());
+    event.text = "late retained body ".repeat(1000);
+    backend.state.store.append_event(&event).await.unwrap();
+    held.rollback().await.unwrap();
+    archive.await.unwrap();
+    assert_eq!(
+        backend
+            .state
+            .store
+            .turn_events_for_consolidation("large-1")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let transcript = common::json_body(
+        backend
+            .get_authed(&format!("/api/v1/sessions/{id}/turns"))
+            .await,
+    )
+    .await;
+    let events = transcript["turns"][0]["events"].as_array().unwrap();
+    assert_eq!(
+        events.len(),
+        2,
+        "a late same-turn tail must not hide its archived prefix"
+    );
+    assert!(events[0]["text"]
+        .as_str()
+        .unwrap()
+        .starts_with("archive snapshot body"));
+    assert!(events[1]["text"]
+        .as_str()
+        .unwrap()
+        .starts_with("late retained body"));
+    let node = backend
+        .state
+        .store
+        .node_window(&id, 1)
+        .await
+        .unwrap()
+        .target_id
+        .unwrap();
+    let response = backend
+        .get_authed(&format!("/api/v1/sessions/{id}/nodes/{node}/body"))
+        .await;
+    assert!(response.status().is_success());
+    assert_eq!(common::json_body(response).await["text"], event.text);
+    sylph_server::storage::history::consolidate_turn(
+        &backend.state.store,
+        &backend.state.history,
+        "large-1",
+    )
+    .await
+    .unwrap();
+    let response = backend
+        .get_authed(&format!("/api/v1/sessions/{id}/nodes/{node}/body"))
+        .await;
+    assert_eq!(common::json_body(response).await["text"], event.text);
+}
+
+#[tokio::test]
+async fn accepted_native_input_has_one_prompt_address_in_the_event_transaction() {
+    let backend = TestBackend::start().await;
+    let id = seed(&backend, 0).await;
+    backend
+        .state
+        .store
+        .set_turn_request_text(&SessionId::decode(&id).unwrap(), "large-0", "")
+        .await
+        .unwrap();
+    append(
+        &backend,
+        &id,
+        1,
+        "user",
+        "completed",
+        "native-input",
+        None,
+        false,
+    )
+    .await;
+    let turn = backend
+        .state
+        .store
+        .get_turn("large-0")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(turn.request_text, "user native-input");
+    let page = backend
+        .state
+        .store
+        .node_page(&id, "", None, false, 40)
+        .await
+        .unwrap();
+    assert_eq!(page.nodes.len(), 1);
+    assert_eq!(page.nodes[0].id, "p:large-0");
+    assert_eq!(
+        backend
+            .state
+            .store
+            .node_window(&id, 1)
+            .await
+            .unwrap()
+            .target_id
+            .as_deref(),
+        Some("p:large-0")
+    );
+}
+
+#[tokio::test]
+async fn a_completed_thinking_block_rejects_late_deltas_but_accepts_completion_corrections() {
+    let backend = TestBackend::start().await;
+    let id = seed(&backend, 0).await;
+    for (seq, phase) in [(0, "started"), (1, "completed"), (2, "delta")] {
+        append(
+            &backend, &id, seq, "thinking", phase, "thought", None, false,
+        )
+        .await;
+    }
+    let page = backend
+        .state
+        .store
+        .node_page(&id, "g:0", None, false, 40)
+        .await
+        .unwrap();
+    assert_eq!(page.nodes[0].running, 0);
+    assert_eq!(page.nodes[0].event.phase.as_deref(), Some("completed"));
+    assert_eq!(page.nodes[0].event.text, "thinking thought");
+    append(
+        &backend,
+        &id,
+        3,
+        "thinking",
+        "completed",
+        "thought",
+        None,
+        false,
+    )
+    .await;
+    let page = backend
+        .state
+        .store
+        .node_page(&id, "g:0", None, false, 40)
+        .await
+        .unwrap();
+    assert_eq!(page.nodes[0].event.seq, 3);
+    assert_eq!(page.nodes[0].running, 0);
+}
+
+#[tokio::test]
+async fn visible_reply_search_is_complete_before_during_and_after_archiving() {
+    let backend = TestBackend::start().await;
+    let id = seed_with_text(
+        &backend,
+        1,
+        format!("{} searchablequartz", "prefix ".repeat(1000)),
+    )
+    .await;
+    for stage in 0..3 {
+        if stage == 1 {
+            let events = backend
+                .state
+                .store
+                .turn_events_for_consolidation("large-1")
+                .await
+                .unwrap();
+            backend
+                .state
+                .history
+                .put_blocks(&sylph_server::storage::history::consolidate(&events))
+                .await
+                .unwrap();
+        } else if stage == 2 {
+            sylph_server::storage::history::consolidate_turn(
+                &backend.state.store,
+                &backend.state.history,
+                "large-1",
+            )
+            .await
+            .unwrap();
+        }
+        let response = backend
+            .get_authed(&format!(
+                "/api/v1/sessions/{id}/nodes/search?q=searchablequartz"
+            ))
+            .await;
+        let body = common::json_body(response).await;
+        assert_eq!(
+            body["hits"].as_array().unwrap().len(),
+            1,
+            "archive stage {stage}: {body}"
+        );
+        assert_eq!(body["hits"][0]["seq"], 0);
+    }
+}
+
+#[tokio::test]
+async fn codex_live_commands_contribute_concrete_activity_and_command_counts() {
+    let backend = TestBackend::start().await;
+    let id = seed(&backend, 1).await;
+    let mut event = backend
+        .state
+        .store
+        .turn_events_for_consolidation("large-1")
+        .await
+        .unwrap()
+        .remove(0);
+    event.id = None;
+    event.seq = 1;
+    event.kind = "tool_call".into();
+    event.phase = Some("started".into());
+    event.stream_id = Some("command".into());
+    event.name = Some("exec".into());
+    event.text = "cargo test --workspace".into();
+    event.data_json = json!({"command":"cargo test --workspace","cwd":"/workspace"}).to_string();
+    backend.state.store.append_event(&event).await.unwrap();
+    let page = backend
+        .state
+        .store
+        .node_page(&id, "", None, false, 40)
+        .await
+        .unwrap();
+    let group = page
+        .nodes
+        .iter()
+        .find(|n| n.event.kind == "execution")
+        .unwrap();
+    assert_eq!(group.commands, 1);
+    assert_eq!(group.activity, "Running cargo test --workspace");
+}
+
+#[tokio::test]
+async fn real_adapter_tool_events_share_header_and_counter_semantics() {
+    use futures::TryStreamExt;
+    use sylph_protocol::{Adapter, NativeRecord, SessionMessage};
+    let fixtures: Vec<(Box<dyn Adapter>, Value)> = vec![
+        (
+            Box::new(sylph_adapters::codex::CodexAdapter),
+            json!({"method":"item/started","params":{"threadId":"test","turnId":"turn","item":{"type":"commandExecution","id":"exec","command":"cargo test --workspace","cwd":"/workspace"}}}),
+        ),
+        (
+            Box::new(sylph_adapters::claude::ClaudeAdapter),
+            json!({"type":"assistant","message":{"id":"assistant","content":[{"type":"tool_use","id":"exec","name":"Bash","input":{"command":"cargo test --workspace"}}]}}),
+        ),
+        (
+            Box::new(sylph_adapters::pi::PiAdapter),
+            json!({"type":"tool_execution_start","toolCallId":"exec","toolName":"bash","args":{"command":"cargo test --workspace"}}),
+        ),
+    ];
+    for (adapter, payload) in fixtures {
+        let backend = TestBackend::start().await;
+        let id = seed(&backend, 0).await;
+        let messages: Vec<_> = adapter
+            .reproject(vec![NativeRecord {
+                source: "live/stdout/fixture.jsonl".into(),
+                version: 1,
+                raw_json: None,
+                payload,
+                blobs: vec![],
+            }])
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        let mut calls = 0;
+        for message in messages {
+            if let SessionMessage::Event(event) = message {
+                if event.kind != sylph_protocol::EventKind::ToolCall {
+                    continue;
+                }
+                calls += 1;
+                let mut event = sylph_server::events::StreamEvent::from_protocol(&event)
+                    .to_row(&SessionId::decode(&id).unwrap(), "large-0");
+                event.seq = calls;
+                backend.state.store.append_event(&event).await.unwrap();
+            }
+        }
+        assert!(calls > 0, "the real adapter emitted no tool calls");
+        let roots = backend
+            .state
+            .store
+            .node_page(&id, "", None, false, 40)
+            .await
+            .unwrap();
+        let group = roots
+            .nodes
+            .iter()
+            .find(|node| node.event.kind == "execution")
+            .unwrap();
+        assert_eq!(group.commands, 1);
+        assert_eq!(group.activity, "Running cargo test --workspace");
+        let children = backend
+            .state
+            .store
+            .node_page(&id, &group.id, None, false, 40)
+            .await
+            .unwrap();
+        let summary = children.nodes[0].event.tool_summary.as_ref().unwrap();
+        assert_eq!(summary.kind, "shell");
+        assert_eq!(summary.command.as_deref(), Some("cargo test --workspace"));
+        assert_eq!(summary.summary, "cargo test --workspace");
+    }
+}
+
+#[tokio::test]
+async fn search_matches_across_deltas_and_excludes_superseded_body_revisions() {
+    let backend = TestBackend::start().await;
+    let id = seed(&backend, 1).await;
+    let mut event = backend
+        .state
+        .store
+        .turn_events_for_consolidation("large-1")
+        .await
+        .unwrap()
+        .remove(0);
+    event.id = None;
+    event.kind = "assistant".into();
+    event.stream_id = Some("reply".into());
+    for (seq, phase, text) in [
+        (1, "started", ""),
+        (2, "delta", "crossdelta"),
+        (3, "delta", "quartz"),
+    ] {
+        event.seq = seq;
+        event.phase = Some(phase.into());
+        event.text = text.into();
+        backend.state.store.append_event(&event).await.unwrap();
+    }
+    let search = format!("/api/v1/sessions/{id}/nodes/search?q=crossdeltaquartz");
+    let body = common::json_body(backend.get_authed(&search).await).await;
+    assert_eq!(body["hits"].as_array().unwrap().len(), 1);
+    assert_eq!(body["hits"][0]["seq"], 3);
+    sylph_server::storage::history::consolidate_turn(
+        &backend.state.store,
+        &backend.state.history,
+        "large-1",
+    )
+    .await
+    .unwrap();
+    event.seq = 4;
+    event.phase = Some("completed".into());
+    event.text = "corrected answer".into();
+    backend.state.store.append_event(&event).await.unwrap();
+    for archive in [false, true] {
+        if archive {
+            sylph_server::storage::history::consolidate_turn(
+                &backend.state.store,
+                &backend.state.history,
+                "large-1",
+            )
+            .await
+            .unwrap();
+        }
+        let body = common::json_body(backend.get_authed(&search).await).await;
+        assert!(
+            body["hits"].as_array().unwrap().is_empty(),
+            "obsolete body matched: {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn search_includes_the_current_report_of_a_promoted_tool() {
+    let backend = TestBackend::start().await;
+    let id = seed(&backend, 0).await;
+    append(
+        &backend,
+        &id,
+        0,
+        "tool_call",
+        "completed",
+        "worker",
+        None,
+        false,
+    )
+    .await;
+    append(
+        &backend, &id, 1, "subagent", "started", "worker", None, false,
+    )
+    .await;
+    append(
+        &backend,
+        &id,
+        2,
+        "subagent",
+        "completed",
+        "worker",
+        None,
+        false,
+    )
+    .await;
+    for archive in [false, true] {
+        if archive {
+            sylph_server::storage::history::consolidate_turn(
+                &backend.state.store,
+                &backend.state.history,
+                "large-0",
+            )
+            .await
+            .unwrap();
+        }
+        let body = common::json_body(
+            backend
+                .get_authed(&format!("/api/v1/sessions/{id}/nodes/search?q=subagent"))
+                .await,
+        )
+        .await;
+        assert_eq!(
+            body["hits"].as_array().unwrap().len(),
+            1,
+            "promoted report disappeared, archive={archive}: {body}"
+        );
+    }
 }

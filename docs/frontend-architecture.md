@@ -943,7 +943,7 @@ invites a reader to conclude coverage shrank.
 | --- | --- |
 | `lib/diff.test.ts` | LCS alignment, line numbering against the original files, `-` before `+`, no phantom trailing line, prefix/suffix stripping speed, degradation above the size cap |
 | `lib/markdown-parse.test.ts`, `components/markdown-render.test.ts` | Block and inline parsing, code not re-scanned, `javascript:`/`data:` links refused, termination on pathological input, and the rendered output |
-| `lib/tool-shape.test.ts` | Each shipped agent's payload shape, name classification, hunk extraction, never throwing on malformed `data` |
+| `lib/tool-shape.test.ts` | Server-authored tool descriptions, complete hunk extraction, and malformed `data`; vendor classification and real adapter contracts live in `crates/server/src/events/tool_summary.rs` and `crates/server/tests/timeline_nodes.rs` |
 | `lib/fuzzy.test.ts` | Subsequence matching and *relative ranking* — boundary and adjacency bonuses, field weighting |
 | `lib/shortcuts.test.ts` | Canonical combo spelling, Cmd/Ctrl unification, recorder and dispatcher agreeing |
 | `lib/sse-parse.test.ts` | Frame decoding across chunk boundaries — the bug `EventSource` shipped untested |
@@ -1033,7 +1033,10 @@ advertising the fixture adapter. Playwright waits for that stdout marker; HTTP h
 alone describes the server and cannot establish that an environment is ready. The launcher
 checks its ports before starting so the harness cannot reuse another process's server.
 Tests holding intercepted requests release and await their handlers before teardown, so a
-late routing error cannot escape into a later test.
+late routing error cannot escape into a later test. This suite blocks service-worker
+registration, following Playwright's request-interception guidance, so page routes and
+response assertions observe the requests they own. It does not establish offline-worker
+behavior; that requires a separate context with workers enabled.
 
 #### Fixture state
 

@@ -31,6 +31,7 @@ pub use ingest::{IngestReport, NativeIngest};
 pub use store::JournalStore;
 pub use writer::JournalWriter;
 
+mod search;
 pub mod timeline;
 
 /// All projections derived while accepting a canonical event share its transaction.
@@ -38,6 +39,15 @@ pub(crate) async fn project_event(
     conn: &mut sqlx::SqliteConnection,
     event: &crate::models::Event,
 ) -> crate::error::Result<()> {
+    // The first root input owns the prompt. Additional inputs in the same turn
+    // keep their own event identity rather than replacing the original request.
+    // This must precede node projection and share the producer receipt transaction.
+    if event.kind == "user" && event.span.is_none() && !event.text.is_empty() {
+        sqlx::query("UPDATE turns SET request_text=? WHERE id=? AND session_env=? AND session_agent=? AND session_native=? AND request_text=''")
+            .bind(&event.text).bind(&event.turn_id)
+            .bind(event.session_id.environment.as_str()).bind(event.session_id.agent.as_str())
+            .bind(event.session_id.native_id.as_str()).execute(&mut *conn).await?;
+    }
     JournalStore::project_event_title(conn, event).await?;
     timeline::project(conn, event).await
 }

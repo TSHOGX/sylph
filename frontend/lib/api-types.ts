@@ -172,6 +172,14 @@ export interface StreamEvent {
   data?: unknown;
   /** Complete bodies are fetched separately when these fields are previews. */
   bodyRef?: { seq: number; textBytes: number; dataBytes: number };
+  toolSummary?: {
+    kind: "read" | "edit" | "write" | "shell" | "search" | "task" | "other";
+    name: string;
+    summary: string;
+    path?: string;
+    command?: string;
+    pattern?: string;
+  };
   isError?: boolean;
   stability: string;
   source: string;

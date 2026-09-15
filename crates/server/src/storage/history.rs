@@ -177,7 +177,7 @@ pub fn data_preview(data: Option<&serde_json::Value>) -> Option<serde_json::Valu
 /// AND, so `foo bar` finds "foo bar" and not a block mentioning both apart. That is the
 /// safe direction — it never errors and never silently inverts a term — and supporting
 /// operators means *parsing* the user's text rather than escaping it.
-fn fts5_phrase(query: &str) -> String {
+pub(crate) fn fts5_phrase(query: &str) -> String {
     format!("\"{}\"", query.replace('"', "\"\""))
 }
 
@@ -1183,11 +1183,26 @@ impl HistoryStore {
     /// store makes FTS5 work no cheaper.
     /// Search one retained session without hydrating matched bodies.
     pub async fn search_session(&self, session: &str, query: &str) -> Result<Vec<(i32, String)>> {
+        let mut tx = self.search_snapshot().await?;
+        Self::search_session_page(&mut tx, session, query, 20, 0).await
+    }
+
+    pub(crate) async fn search_snapshot(&self) -> Result<sqlx::Transaction<'_, sqlx::Sqlite>> {
+        Ok(self.readers.begin().await?)
+    }
+
+    pub(crate) async fn search_session_page(
+        conn: &mut sqlx::SqliteConnection,
+        session: &str,
+        query: &str,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<(i32, String)>> {
         if query.trim().chars().count() < 2 {
             return Ok(Vec::new());
         }
-        Ok(sqlx::query_as("SELECT seq,snippet(blocks_fts,0,'','','…',24) FROM blocks_fts WHERE blocks_fts MATCH ? AND session_id=? ORDER BY rank LIMIT 20")
-            .bind(fts5_phrase(query)).bind(session).fetch_all(&self.readers).await?)
+        Ok(sqlx::query_as("SELECT seq,snippet(blocks_fts,0,'','','…',24) FROM blocks_fts WHERE blocks_fts MATCH ? AND session_id=? ORDER BY rank,seq LIMIT ? OFFSET ?")
+            .bind(fts5_phrase(query)).bind(session).bind(limit).bind(offset).fetch_all(conn).await?)
     }
 
     pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
@@ -2053,23 +2068,24 @@ pub async fn consolidate_turn(
     history: &HistoryStore,
     turn_id: &str,
 ) -> Result<usize> {
-    let events = journal.turn_events_for_consolidation(turn_id).await?;
-    if events.is_empty() {
+    let snapshot = journal.consolidation_snapshot(turn_id).await?;
+    if snapshot.events.is_empty() {
         return Ok(0);
     }
 
     // The consolidator already bounds concurrent turns. CPU work on an async
     // worker can still delay unrelated file commands even without a SQL lock.
-    let blocks = tokio::task::spawn_blocking(move || consolidate(&events))
-        .await
-        .context("Consolidation worker failed")?;
+    let (blocks, snapshot) =
+        tokio::task::spawn_blocking(move || (consolidate(&snapshot.events), snapshot))
+            .await
+            .context("Consolidation worker failed")?;
     let count = blocks.len();
 
     history.put_blocks(&blocks).await?;
 
     // Only now. A crash before this leaves the turn in both stores, and the next
     // attempt overwrites identical rows.
-    journal.delete_turn_events(turn_id).await?;
+    journal.delete_turn_events(&snapshot).await?;
 
     info!("Consolidated turn {} into {} blocks", turn_id, count);
     Ok(count)

@@ -415,11 +415,11 @@ A tool call and its `tool_result` render as **one row**, paired by the `streamId
 they share (`docs/session-protocol.md`). A result whose adapter did not reuse the id
 still renders on its own, so no output is ever dropped.
 
-Tool payloads are interpreted by `lib/tool-shape.ts`. The protocol deliberately
-leaves `data` unspecified, so that module normalizes what the three adapters emit —
-`data.input` holding the arguments, with `text` as a stringified fallback — and
-degrades to "unknown tool with some arguments" rather than throwing, because the next
-agent will spell something differently.
+Tool headers and aggregate counters share the server's `toolSummary`, described in
+`docs/storage.md` § Execution node projection. `lib/tool-shape.ts` reads that description
+and extracts complete edit hunks and file targets only for expanded details. Vendor
+payloads remain intact, including live Codex's top-level command metadata. Unknown and
+partially streamed arguments remain renderable without inventing a classification.
 
 ## Keyboard model
 

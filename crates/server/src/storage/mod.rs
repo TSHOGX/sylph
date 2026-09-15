@@ -17,6 +17,7 @@ pub mod cas;
 pub mod consolidator;
 pub mod fold;
 pub mod history;
+pub(crate) mod node_body;
 pub mod retention;
 pub mod scheduler;
 pub(crate) mod sqlite;

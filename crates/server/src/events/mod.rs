@@ -73,8 +73,11 @@ pub fn data_from_column(data_json: &str) -> Option<serde_json::Value> {
     }
 }
 
+pub mod tool_summary;
+
 /// A normalized event as it appears on the wire, both from adapters
 /// (`sylph.agent.v3` event messages) and to browsers (SSE `data:` payloads).
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StreamEvent {
@@ -140,6 +143,9 @@ pub struct StreamEvent {
     /// Present when the event carries a bounded preview and the full body is fetched lazily.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_ref: Option<BodyRef>,
+    /// Server-authored tool semantics, shared by headers and aggregate counters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_summary: Option<tool_summary::ToolSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -314,6 +320,7 @@ impl StreamEvent {
             created_at_ms,
             started_at_ms,
             body_ref: None,
+            tool_summary: None,
         }
     }
 
@@ -347,6 +354,7 @@ impl StreamEvent {
             created_at_ms: row.created_at_ms,
             started_at_ms: None,
             body_ref: None,
+            tool_summary: None,
         }
     }
 }
@@ -664,6 +672,7 @@ mod tests {
             created_at_ms: 1_700_000_000_000,
             started_at_ms: None,
             body_ref: None,
+            tool_summary: None,
         }
     }
 

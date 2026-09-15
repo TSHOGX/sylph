@@ -1312,7 +1312,14 @@ fn count_files(root: &std::path::Path) -> usize {
 /// path exists to prevent.
 #[tokio::test]
 async fn a_transcript_reads_the_same_before_and_after_consolidation() {
+    use sqlx::Connection;
     let backend = TestBackend::start().await;
+    let mut connection = sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new().filename(&backend.state.config.history_path),
+    )
+    .await
+    .unwrap();
+    let held = connection.begin_with("BEGIN IMMEDIATE").await.unwrap();
     let session_id = backend.create_session("mock").await;
 
     let response = backend
@@ -1326,6 +1333,30 @@ async fn a_transcript_reads_the_same_before_and_after_consolidation() {
         .unwrap()
         .to_string();
     backend.await_turn(&turn_id).await;
+    // The terminal row precedes its empty status notification. Wait for this
+    // fixture's producer to finish, while publication is provably held, so the
+    // comparison measures tier movement rather than an extra event arriving.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while backend.state.hub.is_live(&turn_id).await {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(backend
+        .state
+        .history
+        .turn_blocks(&turn_id)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(!backend
+        .state
+        .store
+        .turn_events_for_consolidation(&turn_id)
+        .await
+        .unwrap()
+        .is_empty());
 
     let before = common::json_body(
         backend
@@ -1334,10 +1365,7 @@ async fn a_transcript_reads_the_same_before_and_after_consolidation() {
     )
     .await;
 
-    // Consolidation is scheduled the moment a turn settles, so by now it has
-    // usually already run. Await the observable outcome rather than the trigger:
-    // asserting on a sweep's return value would be asserting that the automatic
-    // path had *not* worked.
+    held.rollback().await.unwrap();
     backend.await_consolidation(&turn_id).await;
 
     let after = common::json_body(

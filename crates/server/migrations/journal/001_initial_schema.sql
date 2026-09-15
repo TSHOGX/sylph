@@ -173,6 +173,7 @@ CREATE INDEX turns_status_idx ON turns(status)
 -- `history.db` and deletes them here (`docs/storage.md` § Workloads and database boundaries).
 CREATE TABLE events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  archive_revision INTEGER NOT NULL DEFAULT 0,
   session_env    TEXT NOT NULL,
   session_agent  TEXT NOT NULL,
   session_native TEXT NOT NULL,
@@ -232,6 +233,13 @@ CREATE TABLE events (
   FOREIGN KEY (session_env, session_agent, session_native)
     REFERENCES sessions(environment, agent, native_id) ON DELETE CASCADE
 );
+
+-- A snapshot may race in-place trajectory reconciliation. Row identity alone is
+-- insufficient: cleanup may evict only the version that history has published.
+CREATE TRIGGER events_archive_revision AFTER UPDATE ON events
+WHEN NEW.archive_revision = OLD.archive_revision BEGIN
+  UPDATE events SET archive_revision=OLD.archive_revision+1 WHERE id=NEW.id;
+END;
 
 -- The cursor survives journal eviction and advances atomically for every writer,
 -- including batched appends, session promotion, and producer receipt transactions.

@@ -4,6 +4,7 @@ use crate::events::data_from_column;
 use crate::models::now_ms;
 use crate::models::{ControlRequest, Event, PendingRequest, Session, Turn};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqliteSynchronous};
+use sqlx::{FromRow, Row};
 use std::path::Path;
 use sylph_protocol::SessionId;
 
@@ -11,6 +12,13 @@ use sylph_protocol::SessionId;
 pub struct JournalStore {
     pub(super) pool: SqlitePool,
     pub(super) readers: SqlitePool,
+}
+
+/// Rows and exact journal versions captured by one archive read statement.
+/// Versions stay opaque so cleanup cannot accidentally widen to a turn or cursor.
+pub struct ConsolidationSnapshot {
+    pub events: Vec<Event>,
+    versions: Vec<(i64, i64)>,
 }
 
 /// Narrowing criteria for a session listing. `None` means "do not narrow on
@@ -2101,13 +2109,41 @@ impl JournalStore {
     /// Called only by consolidation, and only after the history insert has
     /// committed. `docs/storage.md` states the rule: history is durable before the
     /// journal forgets, never the reverse.
-    pub async fn delete_turn_events(&self, turn_id: &str) -> Result<u64> {
-        let result = sqlx::query("DELETE FROM events WHERE turn_id = ?")
+    pub async fn delete_turn_events(&self, snapshot: &ConsolidationSnapshot) -> Result<u64> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut deleted = 0;
+        // Bound each statement, but commit the eviction as one operation. A crash
+        // between independently committed batches would leave a suffix whose next
+        // fold could overwrite a complete archive's timing with partial timing.
+        // Appends and changed versions remain queued for the next archive pass.
+        for batch in snapshot.versions.chunks(256) {
+            let versions =
+                serde_json::to_string(batch).map_err(|error| Error::Internal(error.to_string()))?;
+            deleted += sqlx::query(
+                "DELETE FROM events WHERE (id,archive_revision) IN
+                (SELECT json_extract(value,'$[0]'),json_extract(value,'$[1]') FROM json_each(?))",
+            )
+            .bind(versions)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        }
+        tx.commit().await?;
+        Ok(deleted)
+    }
+
+    pub async fn consolidation_snapshot(&self, turn_id: &str) -> Result<ConsolidationSnapshot> {
+        let rows = sqlx::query("SELECT * FROM events WHERE turn_id=? ORDER BY seq")
             .bind(turn_id)
-            .execute(&self.pool)
-            .await
-            .map_err(Error::Database)?;
-        Ok(result.rows_affected())
+            .fetch_all(&self.readers)
+            .await?;
+        let mut events = Vec::with_capacity(rows.len());
+        let mut versions = Vec::with_capacity(rows.len());
+        for row in rows {
+            versions.push((row.try_get("id")?, row.try_get("archive_revision")?));
+            events.push(Event::from_row(&row)?);
+        }
+        Ok(ConsolidationSnapshot { events, versions })
     }
 
     /// Every journal row for a turn, deltas included.

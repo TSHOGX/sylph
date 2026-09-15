@@ -131,7 +131,12 @@ folding as they go:
    form only if it is smaller. Encoding is recorded per row rather than inferred from
    length, so incompressible text (base64, random ids) stays `raw` instead of growing by a
    frame header and costing a decode on every read.
-5. Insert the blocks into `history.db`, then delete the turn's journal rows.
+5. Insert the blocks into `history.db`, then delete only the journal row identities and
+   versions captured by that archive snapshot. Later appends and in-place corrections
+   remain journaled for the next pass. Cleanup commits as one journal transaction;
+   a failed delete cannot leave a partial stream for a retry to fold over the archive.
+   Whole-turn transcript reads merge the archived prefix and any journal tail, preferring
+   hot versions when publication temporarily leaves the same sequence in both tiers.
 
 **Step 5's order is the correctness rule:** history is durable before the journal forgets.
 A crash between them leaves a turn present in both, which consolidation makes idempotent
@@ -298,6 +303,15 @@ Cross-session search is one FTS5 table beside `history.db`, written by consolida
 the same transaction as the blocks it indexes, carrying the block text plus `session_id`
 and `seq` `UNINDEXED` for result metadata. Mutations address the FTS row by the block
 integer primary key; unindexed metadata is never a deletion predicate.
+
+Interactive session search also includes current journal bodies, assembled through the
+same body resolver as expansion. An explicit query builds a private jieba FTS index over
+nodes with hot fragments, so phrases can cross delta and archive boundaries without
+rewriting a whole-stream index for every token. It reads the journal snapshot before
+history, deduplicates by logical node, and excludes superseded body revisions before
+applying the result limit. Cold bodies use the persistent FTS index. Search does not poll
+or scan previews in the browser. Hot search work scales with current body bytes; it is
+not covered by the constant-work node-page measurements.
 
 Coverage is therefore statable as a contract: **everything the server holds is
 searchable**, including sessions parsed out of a vendor's native files, whether or not the
@@ -565,6 +579,9 @@ a newer patch. Current node revisions are indexed per parent, so polling an unch
 branch does not traverse its children.
 
 Prompt and pending-request projection updates are transactional with their owning rows.
+The first root user event fills an empty turn request before event projection, in the
+same transaction as its receipt. Its event address resolves to that prompt. Additional
+input with different text retains its own event node and cannot overwrite the request.
 Ordinary stream addresses include their turn; trajectory aliases are session-scoped and
 can promote a tool without replacing its arguments. A former parent keeps a coalesced
 removal revision, and event-to-node addresses survive archive eviction for search jumps.
@@ -586,7 +603,14 @@ unfinished when their turn seals; an independent delegated scope can continue ac
 that boundary. Explicit trajectory closure seals only ordinary streams in that scope,
 not nested independent scopes. Open-scope indexes bound this work to affected streams.
 A later result clears an unfinished invocation without counting missing completion as
-failure.
+failure. A completed ordinary content block, or one sealed unfinished by its scope,
+rejects subsequent deltas in the projection. The original events remain retained;
+completed corrections and independent delegated progress still apply.
+
+Tool events carry a bounded `toolSummary` derived by the server before preview clipping.
+Command/read counters and browser headers consume that same description. Vendor input
+shapes include nested arguments from Claude, Pi and native Codex, and top-level command
+metadata from live Codex. Expanded edit details read the complete vendor arguments.
 
 On-demand bodies follow the durable event-to-node index across both physical tiers.
 A journal snapshot captures the current body boundary and hot fragments; archived
