@@ -5,4 +5,5 @@
 
 pub mod evidence;
 pub mod exporter;
+pub mod generation;
 pub mod outbox;

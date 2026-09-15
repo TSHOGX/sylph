@@ -193,6 +193,18 @@ pub enum Fact {
         selection: SelectionRef,
         selected_at: SourcePosition,
     },
+    HistoryPosition {
+        entry: EntryRef,
+        position: SourcePosition,
+        coordinate: HistoryCoordinate,
+        value: u64,
+        mapping_rule: String,
+    },
+    /// The mapper considered every source record in this bounded coordinate range.
+    /// This proves that an empty history-member result is known empty, not missing.
+    HistoryMappingComplete {
+        extent: SourceExtent,
+    },
     Equivalence {
         left: AnyObjectRef,
         right: AnyObjectRef,
@@ -204,6 +216,160 @@ pub enum Fact {
     Diagnostic {
         diagnostic: TraceDiagnostic,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceFactKind {
+    Declaration,
+    AgentState,
+    DeliveryStage,
+    Execution,
+    ResourceState,
+    Relation,
+    HistorySelection,
+    HistoryPosition,
+    HistoryMappingComplete,
+    Equivalence,
+    Coverage,
+    Diagnostic,
+}
+
+impl TraceFactKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Declaration => "declaration",
+            Self::AgentState => "agent_state",
+            Self::DeliveryStage => "delivery_stage",
+            Self::Execution => "execution",
+            Self::ResourceState => "resource_state",
+            Self::Relation => "relation",
+            Self::HistorySelection => "history_selection",
+            Self::HistoryPosition => "history_position",
+            Self::HistoryMappingComplete => "history_mapping_complete",
+            Self::Equivalence => "equivalence",
+            Self::Coverage => "coverage",
+            Self::Diagnostic => "diagnostic",
+        }
+    }
+}
+
+impl Fact {
+    pub fn kind(&self) -> TraceFactKind {
+        match self {
+            Self::Declare { .. } => TraceFactKind::Declaration,
+            Self::AgentState { .. } => TraceFactKind::AgentState,
+            Self::DeliveryStage { .. } => TraceFactKind::DeliveryStage,
+            Self::Execution { .. } => TraceFactKind::Execution,
+            Self::ResourceState { .. } => TraceFactKind::ResourceState,
+            Self::Relation { .. } => TraceFactKind::Relation,
+            Self::SelectHistory { .. } => TraceFactKind::HistorySelection,
+            Self::HistoryPosition { .. } => TraceFactKind::HistoryPosition,
+            Self::HistoryMappingComplete { .. } => TraceFactKind::HistoryMappingComplete,
+            Self::Equivalence { .. } => TraceFactKind::Equivalence,
+            Self::Coverage { .. } => TraceFactKind::Coverage,
+            Self::Diagnostic { .. } => TraceFactKind::Diagnostic,
+        }
+    }
+
+    /// One producer of subject indexes for provenance, correction and bounded reads.
+    /// The relation's directly affected subject is first; related participants follow.
+    pub fn subject_refs(&self) -> Vec<AnyObjectRef> {
+        match self {
+            Self::Declare { object } => vec![object.object_ref()],
+            Self::AgentState { agent, .. } | Self::SelectHistory { agent, .. } => {
+                vec![AnyObjectRef::Agent(agent.clone())]
+            }
+            Self::DeliveryStage { delivery, .. } => vec![AnyObjectRef::Delivery(delivery.clone())],
+            Self::Execution { execution, .. } => vec![execution.object_ref()],
+            Self::ResourceState { resource, .. } => vec![AnyObjectRef::Resource(resource.clone())],
+            Self::Relation { relation } => relation.subject_refs(),
+            Self::HistoryPosition { entry, .. } => vec![AnyObjectRef::HistoryEntry(entry.clone())],
+            Self::HistoryMappingComplete { extent } => match &extent.original_owner {
+                Some(OwnerRef::Agent { agent }) => vec![AnyObjectRef::Agent(agent.clone())],
+                _ => vec![],
+            },
+            Self::Equivalence { left, right, .. } => vec![left.clone(), right.clone()],
+            Self::Coverage { coverage } => vec![coverage.subject.clone()],
+            Self::Diagnostic { diagnostic } => diagnostic.subject.iter().cloned().collect(),
+        }
+    }
+}
+
+impl Relation {
+    pub fn subject_refs(&self) -> Vec<AnyObjectRef> {
+        match self {
+            Self::Spawn {
+                parent,
+                child,
+                operation,
+            } => std::iter::once(AnyObjectRef::Agent(child.clone()))
+                .chain(std::iter::once(AnyObjectRef::Agent(parent.clone())))
+                .chain(operation.iter().cloned().map(AnyObjectRef::Operation))
+                .collect(),
+            Self::Interaction {
+                sender,
+                recipient,
+                delivery,
+                operation,
+            } => vec![
+                AnyObjectRef::Agent(sender.clone()),
+                AnyObjectRef::Agent(recipient.clone()),
+            ]
+            .into_iter()
+            .chain(delivery.iter().cloned().map(AnyObjectRef::Delivery))
+            .chain(operation.iter().cloned().map(AnyObjectRef::Operation))
+            .collect(),
+            Self::Trigger {
+                delivery,
+                activation,
+            } => vec![
+                AnyObjectRef::Activation(activation.clone()),
+                AnyObjectRef::Delivery(delivery.clone()),
+            ],
+            Self::Nesting { enclosing, nested } => vec![
+                AnyObjectRef::Operation(nested.clone()),
+                AnyObjectRef::Operation(enclosing.clone()),
+            ],
+            Self::UsesResource {
+                operation,
+                resource,
+            } => vec![
+                AnyObjectRef::Operation(operation.clone()),
+                AnyObjectRef::Resource(resource.clone()),
+            ],
+            Self::HistoryPredecessor { predecessor, entry }
+            | Self::ReadingOrder {
+                before: predecessor,
+                after: entry,
+            } => vec![
+                AnyObjectRef::HistoryEntry(entry.clone()),
+                AnyObjectRef::HistoryEntry(predecessor.clone()),
+            ],
+            Self::ContextLineage {
+                recipient,
+                checkpoint,
+                original_owner,
+            } => {
+                let mut refs = vec![
+                    AnyObjectRef::ContextCheckpoint(checkpoint.clone()),
+                    AnyObjectRef::Agent(recipient.clone()),
+                ];
+                if let OwnerRef::Agent { agent } = original_owner {
+                    refs.push(AnyObjectRef::Agent(agent.clone()));
+                }
+                refs
+            }
+            Self::Representation {
+                original,
+                transformed,
+                ..
+            } => vec![
+                AnyObjectRef::MessageRevision(transformed.clone()),
+                AnyObjectRef::MessageRevision(original.clone()),
+            ],
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -256,6 +422,23 @@ impl Claim {
             return Err(ClaimError::SelfCorrection);
         }
         match &self.fact {
+            Fact::HistoryMappingComplete { extent } => {
+                if extent.start_inclusive >= extent.end_exclusive
+                    || extent.mapping_rule.trim().is_empty()
+                {
+                    return Err(ClaimError::InvalidExtent);
+                }
+                extent
+                    .source
+                    .validate()
+                    .map_err(|_| ClaimError::InvalidExtent)?;
+                if let HistoryCoordinate::VendorOrdinal { domain_ref } = &extent.coordinate {
+                    domain_ref
+                        .validate()
+                        .map_err(|_| ClaimError::InvalidExtent)?;
+                }
+                Ok(())
+            }
             Fact::Equivalence { left, right, .. } if !left.same_kind(right) => {
                 Err(ClaimError::DifferentKinds)
             }
@@ -289,7 +472,13 @@ impl Claim {
                     ..
                 } = &measurement.mode
                 {
-                    if counter_domain.trim().is_empty() || reset_epoch.trim().is_empty() {
+                    if counter_domain
+                        .as_ref()
+                        .is_some_and(|value| value.trim().is_empty())
+                        || reset_epoch
+                            .as_ref()
+                            .is_some_and(|value| value.trim().is_empty())
+                    {
                         return Err(ClaimError::MissingCounterDomain);
                     }
                 }

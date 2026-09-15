@@ -49,6 +49,23 @@ impl AnyObjectRef {
     pub fn same_kind(&self, other: &Self) -> bool {
         std::mem::discriminant(self) == std::mem::discriminant(other)
     }
+
+    pub fn scope(&self) -> &AgentRef {
+        match self {
+            Self::Agent(v) => v,
+            Self::Activation(v) => v.scope(),
+            Self::Message(v) => v.scope(),
+            Self::MessageRevision(v) => v.scope(),
+            Self::Delivery(v) => v.scope(),
+            Self::Operation(v) => v.scope(),
+            Self::Result(v) => v.scope(),
+            Self::Resource(v) => v.scope(),
+            Self::HistoryEntry(v) => v.scope(),
+            Self::HistorySelection(v) => v.scope(),
+            Self::ContextCheckpoint(v) => v.scope(),
+            Self::Measurement(v) => v.scope(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -473,6 +490,16 @@ pub enum ExecutionRef {
     Resource(ResourceRef),
 }
 
+impl ExecutionRef {
+    pub fn object_ref(&self) -> AnyObjectRef {
+        match self {
+            Self::Activation(v) => AnyObjectRef::Activation(v.clone()),
+            Self::Operation(v) => AnyObjectRef::Operation(v.clone()),
+            Self::Resource(v) => AnyObjectRef::Resource(v.clone()),
+        }
+    }
+}
+
 /// Request, termination and vendor outcome are different evidence families.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
@@ -700,8 +727,8 @@ pub enum MeasurementMode {
         interval_ref: AnyObjectRef,
     },
     Cumulative {
-        counter_domain: String,
-        reset_epoch: String,
+        counter_domain: Option<String>,
+        reset_epoch: Option<String>,
         sample_position: SourcePosition,
     },
     Gauge,

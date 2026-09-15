@@ -31,4 +31,5 @@ pub use runtime::{
     ChannelEventSink, EnvAgent, EnvAgentConfig, EventSink, HostedSession, RecordingSink,
 };
 pub use spool::{Spool, SpoolConfig, SpoolError, SpoolEvent};
+pub use spool::capture::CaptureRegistry;
 pub use transport::{Backoff, ConnectionEpoch, ConnectionSupervisor, FrameError, FramedConnection};

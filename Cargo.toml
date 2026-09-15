@@ -12,6 +12,7 @@ resolver = "2"
 members = [
   "crates/server",
   "crates/protocol",
+  "crates/trace",
   "crates/adapters",
   "crates/fts5-jieba",
   "crates/envagent",

@@ -107,13 +107,39 @@ receipt identity. Repeated source bytes at distinct positions remain separate; d
 manifest layouts of the same occurrence compare their decoded bytes. These modules are
 the replacement foundation and are not yet the product runtime path.
 
-The remaining acceptance work includes runtime source reservations and atomic capture
-spooling; production vendor corpus/mappers and deterministic reduction; complete generation
-publication, temporal reads, search and CAS root/deletion orchestration; and the normalized
-frontend replacement. Explicit deletion currently commits the evidence visibility boundary;
-cross-store cancellation, control-input erasure and payload collection still need the
-complete runtime/job registry. Existing event/block code is removed during the cutover;
-there is no dual-write or compatibility reader planned.
+The envagent capture registry now reserves physical sources durably, verifies the complete
+committed prefix, preserves rewrites as new generations and stages incomplete lexical
+tails. Complete-record cursor advancement, producer identity, fixed authorization epoch
+and chunked capture enqueue share one FULL transaction. Re-adoption recaptures the same
+source positions under its new epoch; concurrent readers cannot advance past one another's
+committed prefix. The new queue awaits the runtime wire cutover.
+
+The pure `sylph-trace` library maps server controls and the initial Codex native/live
+surface, retaining decoded payload provenance and explicit archive-reference requests.
+Reduction separates own outcomes, unknown field refinement, reversible reference classes,
+message revisions, deliveries/resources and selected history. Direct and inherited
+selections use one validated predecessor graph; source extents require explicit complete
+mapping witnesses before an empty selection is known. Recorded fixtures verify exact
+input/answer bytes, source checkpoint replay, copied headers, vendor ordinals, child
+execution after parent completion and stream sealing. This is not full vendor conformance.
+
+The generation store now applies complete bounded projection batches and serves temporal
+summaries, membership pages, anchored lookups and claim provenance. Query candidates have
+explicit work budgets; invalid-version density produces an advancing continuation rather
+than an empty completed page. Payload anchors pin representation and body revision.
+Writer fencing, validation, sealing and revision floors are implemented, with measured
+SQLite work and fault-tested concurrency. The external catalogue/lease/publication worker
+is still required before these stores can serve the product API.
+
+Remaining work: inventory-scoped capture and initial control acceptance before native
+identity; capture wire/runtime replacement; full Codex history-base, delegation, runtime
+resource and accounting mappings; Claude/Pi mappers and complete vendor evidence pairs;
+production projection workers, catalogue publication and reusable leases; search, payload
+pins, deletion cancellation/erasure and physical GC; normalized frontend replacement and
+final conformance. Explicit deletion currently commits the evidence visibility boundary;
+cross-store cancellation and control-input erasure need the complete runtime/job registry.
+Existing event/block code is removed during the cutover; there is no dual-write or
+compatibility reader planned.
 
 ## Milestone 1 — the envagent is the only path — complete
 

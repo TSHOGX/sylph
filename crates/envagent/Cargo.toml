@@ -24,6 +24,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 hex = "0.4"
 base64 = { workspace = true }
+blake3 = "1.5"
 # The on-disk config format, for the same reason the server uses it: the file is
 # hand-edited and seeded commented, and JSON has no comments.
 toml = "1.1"

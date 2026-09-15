@@ -14,6 +14,8 @@ use sqlx::sqlite::{
 use sqlx::Row;
 use thiserror::Error;
 
+pub mod capture;
+
 #[derive(Debug, Clone)]
 pub struct SpoolConfig {
     pub path: PathBuf,
@@ -392,7 +394,7 @@ impl Spool {
     }
 
     pub async fn is_empty(&self) -> Result<bool, SpoolError> {
-        let count: i64 = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM spool_events)")
+        let count: i64 = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM spool_events) OR EXISTS(SELECT 1 FROM capture_queue) OR EXISTS(SELECT 1 FROM capture_epoch_progress WHERE length(tail)>0)")
             .fetch_one(&self.readers)
             .await?;
         Ok(count == 0)

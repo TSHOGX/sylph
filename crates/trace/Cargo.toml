@@ -1,0 +1,17 @@
+[package]
+name = "sylph-trace"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+
+[dependencies]
+sylph-protocol = { path = "../protocol" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+blake3 = "1.5"
+petgraph = "0.8"
+
+[lib]
+name = "sylph_trace"
+path = "src/lib.rs"

@@ -121,14 +121,14 @@ mod tests {
         storage::cas::BlobStore,
         trace::{
             evidence::AdmissionLimits,
-            outbox::{
-                AuthorizationReceipt, CommandAcceptance, CommandKind, CommandState, OutboxLimits,
-                RetryPolicy, SubmittedRevision,
-            },
+            outbox::{CommandState, OutboxLimits},
         },
     };
     use sylph_protocol::{
-        trace::{AgentRef, IngestionEpoch, Issuer},
+        trace::{
+            AgentRef, AuthorizationReceipt, CommandAcceptance, CommandKind, IngestionEpoch, Issuer,
+            OperationalFact, RetryPolicy, SubmittedRevision,
+        },
         SessionId,
     };
 
@@ -295,9 +295,8 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(retained, occurrence.payload);
-        let fact: crate::trace::outbox::OperationalFact =
-            serde_json::from_slice(&retained).unwrap();
-        let crate::trace::outbox::OperationalFact::Accepted { command } = fact else {
+        let fact: OperationalFact = serde_json::from_slice(&retained).unwrap();
+        let OperationalFact::Accepted { command } = fact else {
             panic!("accepted fact expected")
         };
         assert_eq!(command.input.bytes, input);

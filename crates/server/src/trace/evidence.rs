@@ -113,12 +113,7 @@ pub enum CapturePreflight {
 /// The manifest's fixed representation is shared by command acceptance and
 /// payload publication, so an outbox does not derive a second address scheme.
 pub fn manifest_bytes(manifest: &PayloadManifest) -> Result<Vec<u8>> {
-    manifest.validate().map_err(invalid)?;
-    Ok([
-        b"sylph-payload-manifest\0".as_slice(),
-        &serde_json::to_vec(manifest)?,
-    ]
-    .concat())
+    manifest.canonical_bytes().map_err(invalid)
 }
 
 pub fn manifest_ref(manifest: &PayloadManifest) -> Result<PayloadRef> {

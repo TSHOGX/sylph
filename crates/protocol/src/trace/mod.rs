@@ -5,10 +5,12 @@
 
 pub mod capture;
 pub mod claims;
+pub mod control;
 pub mod identity;
 pub mod objects;
 
 pub use capture::*;
 pub use claims::*;
+pub use control::*;
 pub use identity::*;
 pub use objects::*;

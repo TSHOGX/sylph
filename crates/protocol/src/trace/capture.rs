@@ -316,6 +316,15 @@ pub struct PayloadManifest {
 }
 
 impl PayloadManifest {
+    /// Canonical immutable manifest encoding used by capture, outbox and archive.
+    /// Logical reference kind remains separate from these physical CAS bytes.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, CaptureError> {
+        self.validate()?;
+        let json = serde_json::to_vec(self)
+            .map_err(|_| CaptureError::Manifest("manifest cannot be serialized"))?;
+        Ok([b"sylph-payload-manifest\0".as_slice(), &json].concat())
+    }
+
     pub fn validate(&self) -> Result<(), CaptureError> {
         nonempty(&self.media_type, "payload media type")?;
         let mut covered_end = 0;
