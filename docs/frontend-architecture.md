@@ -671,30 +671,11 @@ those segments back still encoded; re-encoding them produces a lookup for a lite
 
 #### Delegation is shown beside the transcript, not inside it
 
-A live turn nests a subagent's work inside the tool call that spawned it, because every
-event carries a `span`. **A record read from a vendor's native store carries none**, and
-the page is built around that rather than around the resemblance.
-
-This is a `fidelity` consequence, not a property of any one source: no vendor writes
-event-level delegation structure to its native files, and the field that *looks* like a
-parent pointer means something different per agent — for `claude` it is the conversation
-chain, so honouring it as a `span` would nest a whole transcript into one chain thousands
-deep. Its only sound use is pairing a `tool_result` to its `tool_call`.
-
-So the page renders two **session-level** surfaces and nothing that imitates a trajectory:
-`LineageBar` above the transcript, turning a parent id into "open parent session" and
-giving a fork its own wording; and a `Delegations` list at the top of the pane, each row
-linking to that session's own transcript.
-
-**That list sits above the transcript rather than at inferred points inside it.** Anchoring
-a delegation to the call that spawned it was measured and rejected: most child ids carry
-only a hash, so anchoring recovers a small fraction of them and misattributes on
-collisions. The panel states that the source records no link to the exact call, which is
-what makes a flat view honest.
-
-The list cannot be a disclosure inside a sidebar row, and that is an ARIA constraint
-rather than a layout preference: a history-overlay row is a `role="option"`, which may not
-contain a button — the same rule that stops a `role="menu"` holding a text field.
+Delegation links open the shared reader in the work panel. Session edges without an
+exact invocation anchor appear in its directory, never at an inferred transcript
+position. Session targets and trajectory targets retain their different identities
+and control capabilities. The directory reads a bounded server projection rather
+than loading the execution tree. See `docs/ui-layout.md` § Work panel.
 
 ## Performance Optimization
 
@@ -1251,3 +1232,13 @@ Reverse it when selector-scoped re-renders start showing up in the render-cost b
 - The event vocabulary an adapter emits: `docs/session-protocol.md`
 - Tables, indexes, ancestry: `docs/database-schema.md`
 - What is built and what is next: `docs/roadmap.md`
+
+## Conversation reading model
+
+The server supplies bounded reading units and a delegation directory alongside the
+execution nodes. Presentation roles are progress, answer, or unknown; unknown prose
+stays visible. Lifecycle metadata comes from its owner, not a recent-turn lookup.
+Shared entities and in-flight reads are independent from each reader's scope,
+disclosures, pagination and scroll anchors. Hidden views release subscriptions.
+The main reader and each expanded tool group virtualize their own bounded window;
+no turn is rendered as an unbounded nested DOM subtree.

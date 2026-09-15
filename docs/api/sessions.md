@@ -1058,3 +1058,18 @@ orders of magnitude slower, and slower still under concurrent write load. FTS5 w
 real work and nothing about owning the store makes it cheaper, so the cost model that
 governs every other read does not transfer here — **this endpoint is user-initiated, and a
 client gates it on a real query rather than binding it to keystrokes.**
+
+## Conversation and delegation reading
+
+`GET /api/v1/sessions/{id}/conversation` reads a bounded conversation outline or
+process window. It shares stable execution addresses, revisions and body references
+with execution nodes. Work summaries carry owner lifecycle and trusted time endpoints.
+Unclassified prose stays in the outline. Pagination bounds both entries and bytes;
+large inputs and answers use explicit body reads, never an unbounded summary array.
+
+`GET /api/v1/sessions/{id}/delegations` returns a searchable, paged directory of
+recorded delegated trajectories and child sessions, excluding fork edges. Entries
+identify their real target and parent, outcome, interior state and recorded timing.
+Counts describe the accessible catalogue, not the currently loaded window. Both
+endpoints enforce observe authorization; invisible child sessions are excluded from
+entries and counts. Neither endpoint hydrates original bodies or a complete tree.

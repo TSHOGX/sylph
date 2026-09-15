@@ -61,8 +61,8 @@ ingests from or a projection it serves.
 **Local-first is about dependencies, not geography.** A server on a remote host is
 still local-first, because the authority is its own store and not somebody else's API.
 
-**Agent workspace, not chat app.** Tool execution is primary content; assistant prose
-is connective tissue; thinking is debugging detail.
+**Readable work.** Inputs and answers orient the conversation; progressively disclosed
+execution preserves every detail without overwhelming the reading flow.
 
 **Fidelity must be visible.** A record says how much resolution its source had,
 because a waterfall drawn over message-granularity data presents equal-length bars as

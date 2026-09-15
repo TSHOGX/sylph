@@ -279,3 +279,20 @@ Only after real requirements: raw deletion and audit, capabilities finer than th
 [ADR-0006](adr/0006-environment-authority-and-capability-grants.md), sharing UI, directory
 scopes, delegable granting, and controller handoff. Each addition needs its own ADR and
 threat-model review.
+
+## Conversation and work panel delivery
+
+The governing interaction is `docs/ui-layout.md` § Work panel and
+`docs/ui-layout.md` § Conversation canvas: agent-first, not chat-first.
+Implementation proceeds through these gates; independent diff review and production
+deployment are outside this delivery.
+
+| Stage | Deliverable | State |
+| --- | --- | --- |
+| P0 | Governing interaction and bounded read contracts | In progress: baseline validation |
+| P1 | Reading roles, lifecycle summaries and delegation catalogue | Open |
+| P2 | Shared data and independent reading state | Open |
+| P3 | Conversation bubbles and three-level bounded work disclosure | Open |
+| P4 | Work-panel tabs, files, details and responsive sizing | Open |
+| P5 | Delegation directory and shared trajectory navigation | Open |
+| P6 | Full checks, visual, performance and accessibility validation | Open |
