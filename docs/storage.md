@@ -618,3 +618,25 @@ fragments whose terminal sequence is still hot are excluded. Started/completed
 replacement boundaries prevent an older revision from being appended to a new one.
 The assembled text and metadata lengths must match the projection, so a missing retained
 fragment fails visibly instead of returning a plausible suffix.
+
+## Conversation reading projection
+
+The reading map references execution nodes rather than copying their bodies.
+`conversation_entries` indexes direct-child addresses by scope, turn and presentation
+role. `conversation_work` maintains process counters by differences in the same
+transaction as node changes. `conversation_removals` records the former reading
+address when a role correction or parent change moves a node. Outline and process
+windows retain the node ordering key; disclosure does not reorder steering or
+unclassified prose. Turn updates revise root work summaries; trajectory updates
+revise their own work summaries independently from the arrival turn.
+
+Assistant roles are progress, answer and unknown. Codex supplies its message phase;
+Claude supplies its message stop reason or successful terminal result; Pi supplies
+its message outcome and final agent settlement. Same-address completed corrections
+carry evidence learned after a text block closed. Unknown prose remains visible.
+Native parsers retain the source's full payload and apply the same role rules where
+the source contains those facts. Read-time classification does not mutate raw data.
+
+The delegation catalogue queries indexed trajectory ownership and recorded delegation
+session edges, applying the caller's environment grants before recursion, counts and
+pagination. Forks are excluded. Names never serve as identity or correlation evidence.

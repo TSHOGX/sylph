@@ -97,7 +97,7 @@ fn decode(row: sqlx::sqlite::SqliteRow) -> Result<Node> {
     })
 }
 
-pub(super) async fn get(
+pub(crate) async fn get(
     conn: &mut SqliteConnection,
     session: &str,
     id: &str,

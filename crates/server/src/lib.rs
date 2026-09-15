@@ -409,6 +409,8 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/sessions/{id}/bodies/{seq}",
             get(api::sessions::body),
         )
+        .route("/api/v1/sessions/{id}/conversation", get(api::sessions::conversation))
+        .route("/api/v1/sessions/{id}/delegations", get(api::sessions::delegations))
         .route("/api/v1/sessions/{id}/nodes", get(api::sessions::nodes))
         .route(
             "/api/v1/sessions/{id}/nodes/search",

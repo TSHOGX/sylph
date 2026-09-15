@@ -330,3 +330,11 @@ The journal owns the reconstructable execution projection described in
 within a session, not session identifiers. Parent/order and parent/revision indexes
 bound child pagination and incremental reads. Node rows survive event consolidation;
 original journal and history records retain the bodies.
+
+## Conversation reading addresses
+
+The journal also owns `conversation_entries`, `conversation_work` and
+`conversation_removals`. These tables are rebuildable address and summary projections
+with no original event bodies. Their ownership and update rules are described in
+`docs/storage.md` § Conversation reading projection. Schema changes occur in the
+initial schema; no alternate reader or migration preserves an obsolete spelling.

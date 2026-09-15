@@ -205,6 +205,9 @@ struct OpenBlock {
 /// translator needs memory at all, and each field below says which of the two it is.
 #[derive(Debug, Default)]
 pub struct Correlation {
+    // Completed prose for the current vendor message only. Its stop reason arrives
+    // after content_block_stop; a same-address completion adds that evidence.
+    completed_prose: HashMap<Option<HostId>, Vec<Event>>,
     /// `tool_use_id` → the name to report on its `tool_result`.
     ///
     /// A result payload carries no tool name, so it has to come from the call. For a
@@ -487,7 +490,15 @@ impl Correlation {
         let parent = self.delegate_of(host);
 
         match nested.get("type").and_then(Value::as_str) {
-            Some("message_start") => self.message_start(nested, parent.as_ref(), at_ms, &mut out),
+            Some("message_start") => {
+                self.completed_prose.remove(&host.cloned());
+                self.message_start(nested, parent.as_ref(), at_ms, &mut out);
+            }
+            Some("message_delta") => {
+                if let Some(role) = prose_role(nested.get("delta").and_then(|d| d.get("stop_reason")).and_then(Value::as_str)) {
+                    self.finish_prose(host, role, at_ms, &mut out);
+                }
+            }
             Some("content_block_start") => {
                 self.content_block_start(nested, host, parent, at_ms, &mut out);
             }
@@ -732,8 +743,26 @@ impl Correlation {
         event.name = block.name;
         event.text = block.text;
         event.data = data;
+        if event.kind == EventKind::Assistant { self.completed_prose.entry(host.cloned()).or_default().push(event.clone()); }
         out.push(event);
     }
+
+    fn finish_prose(&mut self, host: Option<&HostId>, role: &str, at_ms: i64, out: &mut Emission) {
+        for mut event in self.completed_prose.remove(&host.cloned()).unwrap_or_default() {
+            event.data = Some(json!({"presentationRole":role}));
+            event.created_at_ms = at_ms;
+            out.push(event);
+        }
+    }
+
+    pub(super) fn forget_prose(&mut self, host: Option<&str>) {
+        self.completed_prose.remove(&host.map(HostId::new));
+    }
+}
+
+/// Only an explicit vendor stop reason identifies the purpose of a message.
+pub(super) fn prose_role(reason: Option<&str>) -> Option<&'static str> {
+    match reason { Some("tool_use") => Some("progress"), Some("end_turn" | "stop_sequence") => Some("answer"), _ => None }
 }
 
 /// What the agent called this delegation, or `None` when it has not said yet.
@@ -1258,6 +1287,9 @@ impl Correlation {
             out.push(event);
         }
         self.turn_open = false;
+        if payload.get("subtype").and_then(Value::as_str) == Some("success") {
+            self.finish_prose(None, "answer", at_ms, &mut out);
+        } else { self.completed_prose.remove(&None); }
         let mut event = Event::new(EventKind::Turn, Some(Phase::Completed), at_ms);
         event.text = text_field(payload, "result").unwrap_or_default();
         event.is_error = payload
@@ -2842,5 +2874,27 @@ mod tests {
         assert!(link.events.is_empty());
         assert!(link.facets.is_empty());
         assert_eq!(link.refreshes, 0);
+    }
+}
+
+#[cfg(test)]
+mod reading_tests {
+    use super::*;
+    #[test]
+    fn the_message_stop_reason_classifies_its_prose_at_the_same_address() {
+        for (reason,role) in [("tool_use","progress"),("end_turn","answer")] {
+            let mut correlation=Correlation::new();
+            let payloads=[json!({"type":"message_start","message":{"id":"reading-message"}}),
+                json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":"Recorded prose"}}),
+                json!({"type":"content_block_stop","index":0})];
+            for payload in payloads { correlation.stream_event(&payload,None,1); }
+            let ending=json!({"type":"message_delta","delta":{"stop_reason":reason}});
+            println!("vendor message ending: {ending}");
+            let out=correlation.stream_event(&ending,None,2);
+            let event=out.messages.iter().find_map(|m|match m{SessionMessage::Event(e)=>Some(e),_=>None}).unwrap();
+            assert_eq!(event.stream_id.as_deref(),Some("reading-message:0"));
+            assert_eq!(event.text,"Recorded prose");
+            assert_eq!(event.data.as_ref().unwrap()["presentationRole"],role);
+        }
     }
 }

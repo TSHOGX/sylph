@@ -1498,6 +1498,7 @@ pub mod translate {
     /// one carried.
     #[derive(Debug, Default)]
     pub struct Correlation {
+        completed_prose: Vec<Event>,
         /// `contentIndex` → the in-flight block.
         ///
         /// **Keyed by the vendor's index alone, and that is sound *here* only because pi
@@ -1601,6 +1602,14 @@ pub mod translate {
         /// [`sylph_protocol::Request`] whose answer routes back over the same stdin — both
         /// are correlation against *outbound* traffic this module never sees. Splitting them
         /// out is also what keeps the projection testable without a process.
+        fn finish_prose(&mut self, role: &str, at_ms: i64, out: &mut Emission) {
+            for mut event in self.completed_prose.drain(..) {
+                event.created_at_ms = at_ms;
+                event.data = Some(json!({"presentationRole":role}));
+                out.push(event);
+            }
+        }
+
         pub fn translate(&mut self, payload: &Value, at_ms: i64) -> Emission {
             let mut out = Emission::default();
             match payload.get("type").and_then(Value::as_str) {
@@ -1615,6 +1624,7 @@ pub mod translate {
                     // Any block still open here was never closed by the vendor, which for
                     // this event means the message ended without an `_end` — dropping it is
                     // right, because its text is already on the wire as deltas.
+                    self.completed_prose.clear();
                     self.message_seq += 1;
                     self.message_id = format!("pi-{}", self.message_seq);
                     self.blocks.clear();
@@ -1710,6 +1720,9 @@ pub mod translate {
                     self.turn_open = false;
                     self.blocks.clear();
                     out.settled = true;
+                    if self.outcome.as_ref().is_some_and(|o|o.stop_reason == "stop") {
+                        self.finish_prose("answer", at_ms, &mut out);
+                    } else { self.completed_prose.clear(); }
                     out.push(self.close_turn(at_ms));
                 }
                 Some("extension_error") => {
@@ -1727,6 +1740,7 @@ pub mod translate {
                     // else on the wire. `agent_settled` then closes the turn with it.
                     if let Some(outcome) = payload.get("message").and_then(Outcome::read) {
                         out.observed_model = observed_model(payload.get("message"));
+                        if outcome.stop_reason == "toolUse" { self.finish_prose("progress", at_ms, &mut out); }
                         self.outcome = Some(outcome);
                     }
                 }
@@ -1873,6 +1887,7 @@ pub mod translate {
                             event.data = Some(json!({"input": call.get("arguments")}));
                         }
                     }
+                    if event.kind == EventKind::Assistant { self.completed_prose.push(event.clone()); }
                     out.push(event);
                 }
                 _ => {}
@@ -2987,6 +3002,12 @@ pub mod native {
                         .and_then(Value::as_str)
                         .unwrap_or_default()
                         .to_string();
+                }
+            }
+            if kind == EventKind::Assistant {
+                if let Some(outcome) = super::translate::Outcome::read(message) {
+                    let role = match outcome.stop_reason.as_str() { "toolUse" => Some("progress"), "stop" => Some("answer"), _ => None };
+                    if let Some(role)=role { event.data=Some(json!({"presentationRole":role})); }
                 }
             }
             out.push(SessionMessage::Event(event));
@@ -6614,5 +6635,27 @@ done
             assert_eq!(plain, vec!["--mode".to_string()]);
             let _ = std::fs::remove_file(&path);
         }
+    }
+}
+
+#[cfg(test)]
+mod reading_tests {
+    use super::*;
+    #[test]
+    fn a_final_prose_role_waits_for_agent_settled() {
+        let mut correlation=Correlation::default();
+        for payload in [serde_json::json!({"type":"message_start","message":{"role":"assistant"}}),
+          serde_json::json!({"type":"message_update","assistantMessageEvent":{"type":"text_start","contentIndex":0}}),
+          serde_json::json!({"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":0,"content":"Recorded answer"}}),
+          serde_json::json!({"type":"message_end","message":{"role":"assistant","stopReason":"stop"}})] {
+            correlation.translate(&payload,1);
+        }
+        assert!(correlation.translate(&serde_json::json!({"type":"agent_end"}),2).events().is_empty());
+        let ending=serde_json::json!({"type":"agent_settled"});
+        println!("vendor settlement: {ending}");
+        let out=correlation.translate(&ending,3);
+        let event=out.events().into_iter().find(|e|e.kind==sylph_protocol::EventKind::Assistant).unwrap();
+        assert_eq!(event.text,"Recorded answer");
+        assert_eq!(event.data.as_ref().unwrap()["presentationRole"],"answer");
     }
 }

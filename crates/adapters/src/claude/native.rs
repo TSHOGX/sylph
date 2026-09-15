@@ -1161,6 +1161,15 @@ fn assistant_blocks(
         messages.extend(envelope(correlation, stop, at_ms));
     }
 
+    let role = super::translate::prose_role(record.get("message").and_then(|m|m.get("stop_reason")).and_then(Value::as_str));
+    for message in &mut messages {
+        if let SessionMessage::Event(event) = message {
+            if event.kind == EventKind::Assistant {
+                if let Some(role) = role { event.data = Some(json!({"presentationRole":role})); }
+            }
+        }
+    }
+    correlation.forget_prose(host.as_deref());
     messages
 }
 

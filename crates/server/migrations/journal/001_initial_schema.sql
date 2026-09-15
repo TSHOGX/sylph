@@ -670,3 +670,105 @@ CREATE INDEX timeline_body_addresses ON timeline_event_nodes(session_id,node_id,
 
 CREATE INDEX timeline_open_scopes ON timeline_nodes(session_id,scope_id,turn_id,id) WHERE own_running>0;
 CREATE INDEX timeline_open_turns ON timeline_nodes(turn_id,scope_id) WHERE own_running>0;
+
+-- A second address map over the same nodes, not a second transcript. The work
+-- aggregate changes by differences, so reading a collapsed turn never scans it.
+CREATE TABLE conversation_entries (
+ session_id TEXT NOT NULL, id TEXT NOT NULL, parent_id TEXT NOT NULL,
+ turn_id TEXT NOT NULL, ordinal INTEGER NOT NULL, order_tie INTEGER NOT NULL,
+ revision INTEGER NOT NULL, process INTEGER NOT NULL,
+ tools INTEGER NOT NULL, reads INTEGER NOT NULL, commands INTEGER NOT NULL,
+ thinking INTEGER NOT NULL, failed INTEGER NOT NULL, running INTEGER NOT NULL,
+ waiting INTEGER NOT NULL, unfinished INTEGER NOT NULL,
+ PRIMARY KEY(session_id,id)
+);
+CREATE INDEX conversation_outline ON conversation_entries(session_id,parent_id,process,ordinal,order_tie,id);
+CREATE INDEX conversation_process ON conversation_entries(session_id,parent_id,turn_id,process,ordinal,order_tie,id);
+CREATE INDEX conversation_revisions ON conversation_entries(session_id,parent_id,revision,id);
+CREATE TABLE conversation_work (
+ session_id TEXT NOT NULL, id TEXT NOT NULL, parent_id TEXT NOT NULL, turn_id TEXT NOT NULL,
+ ordinal INTEGER NOT NULL, order_tie INTEGER NOT NULL, revision INTEGER NOT NULL,
+ children INTEGER NOT NULL DEFAULT 0, tools INTEGER NOT NULL DEFAULT 0,
+ reads INTEGER NOT NULL DEFAULT 0, commands INTEGER NOT NULL DEFAULT 0,
+ thinking INTEGER NOT NULL DEFAULT 0, failed INTEGER NOT NULL DEFAULT 0,
+ running INTEGER NOT NULL DEFAULT 0, waiting INTEGER NOT NULL DEFAULT 0,
+ unfinished INTEGER NOT NULL DEFAULT 0,
+ PRIMARY KEY(session_id,id), UNIQUE(session_id,parent_id,turn_id)
+);
+CREATE INDEX conversation_work_order ON conversation_work(session_id,parent_id,ordinal,order_tie,id);
+CREATE INDEX conversation_work_changes ON conversation_work(session_id,parent_id,revision,id);
+CREATE TRIGGER conversation_project_insert AFTER INSERT ON timeline_nodes BEGIN
+ DELETE FROM conversation_entries WHERE session_id=NEW.session_id AND id=NEW.id;
+ INSERT INTO conversation_entries VALUES(NEW.session_id,NEW.id,NEW.parent_id,NEW.turn_id,
+ NEW.ordinal,NEW.order_tie,NEW.revision,
+ NEW.kind='execution' OR (NEW.kind='assistant' AND
+ COALESCE(json_extract(NEW.event_json,'$.data.phase'),json_extract(NEW.event_json,'$.data.presentationRole'),'') IN ('commentary','progress')),
+ NEW.tools,NEW.reads,NEW.commands,NEW.thinking,NEW.failed,NEW.running,NEW.waiting,NEW.unfinished);
+END;
+CREATE TRIGGER conversation_project_update AFTER UPDATE ON timeline_nodes BEGIN
+ DELETE FROM conversation_entries WHERE session_id=NEW.session_id AND id=NEW.id;
+ INSERT INTO conversation_entries VALUES(NEW.session_id,NEW.id,NEW.parent_id,NEW.turn_id,
+ NEW.ordinal,NEW.order_tie,NEW.revision,
+ NEW.kind='execution' OR (NEW.kind='assistant' AND
+ COALESCE(json_extract(NEW.event_json,'$.data.phase'),json_extract(NEW.event_json,'$.data.presentationRole'),'') IN ('commentary','progress')),
+ NEW.tools,NEW.reads,NEW.commands,NEW.thinking,NEW.failed,NEW.running,NEW.waiting,NEW.unfinished);
+END;
+CREATE TRIGGER conversation_entry_remove AFTER DELETE ON conversation_entries WHEN OLD.process BEGIN
+ UPDATE conversation_work SET children=children-1,tools=tools-OLD.tools,reads=reads-OLD.reads,
+ commands=commands-OLD.commands,thinking=thinking-OLD.thinking,failed=failed-OLD.failed,
+ running=running-OLD.running,waiting=waiting-OLD.waiting,unfinished=unfinished-OLD.unfinished
+ WHERE session_id=OLD.session_id AND parent_id=OLD.parent_id AND turn_id=OLD.turn_id;
+END;
+CREATE TRIGGER conversation_entry_add AFTER INSERT ON conversation_entries WHEN NEW.process BEGIN
+ INSERT INTO conversation_work(session_id,id,parent_id,turn_id,ordinal,order_tie,revision,
+ children,tools,reads,commands,thinking,failed,running,waiting,unfinished)
+ VALUES(NEW.session_id,'work:'||length(NEW.parent_id)||':'||NEW.parent_id||':'||NEW.turn_id,
+ NEW.parent_id,NEW.turn_id,NEW.ordinal,NEW.order_tie,NEW.revision,
+ 1,NEW.tools,NEW.reads,NEW.commands,NEW.thinking,NEW.failed,NEW.running,NEW.waiting,NEW.unfinished)
+ ON CONFLICT(session_id,parent_id,turn_id) DO UPDATE SET
+ ordinal=MIN(ordinal,excluded.ordinal),order_tie=MIN(order_tie,excluded.order_tie),
+ revision=excluded.revision,children=children+1,tools=tools+excluded.tools,
+ reads=reads+excluded.reads,commands=commands+excluded.commands,
+ thinking=thinking+excluded.thinking,failed=failed+excluded.failed,
+ running=running+excluded.running,waiting=waiting+excluded.waiting,unfinished=unfinished+excluded.unfinished;
+END;
+CREATE TRIGGER conversation_node_remove AFTER DELETE ON timeline_nodes BEGIN
+ DELETE FROM conversation_entries WHERE session_id=OLD.session_id AND id=OLD.id;
+END;
+CREATE TRIGGER conversation_turn_state AFTER UPDATE OF status,started_at_ms,completed_at_ms,close_reason ON turns BEGIN
+ UPDATE timeline_clock SET revision=revision+1 WHERE id=1;
+ UPDATE conversation_work SET revision=(SELECT revision FROM timeline_clock WHERE id=1)
+ WHERE session_id=NEW.session_env||':'||NEW.session_agent||':'||NEW.session_native AND turn_id=NEW.id;
+END;
+CREATE TRIGGER conversation_session_remove AFTER DELETE ON sessions BEGIN
+ DELETE FROM conversation_work WHERE session_id=OLD.environment||':'||OLD.agent||':'||OLD.native_id;
+ DELETE FROM conversation_entries WHERE session_id=OLD.environment||':'||OLD.agent||':'||OLD.native_id;
+END;
+
+CREATE INDEX timeline_delegation_catalogue ON timeline_nodes(session_id,ordinal,id) WHERE scope_id=id;
+
+-- Presentation corrections move an address between outline and process. Retain
+-- the old address as a removal, just as execution-parent corrections do.
+CREATE TABLE conversation_removals (
+ session_id TEXT NOT NULL,parent_id TEXT NOT NULL,id TEXT NOT NULL,revision INTEGER NOT NULL,node_json TEXT NOT NULL,
+ PRIMARY KEY(session_id,parent_id,id)
+);
+CREATE INDEX conversation_removal_changes ON conversation_removals(session_id,parent_id,revision,id);
+CREATE TRIGGER conversation_move AFTER UPDATE ON timeline_nodes
+WHEN OLD.parent_id<>NEW.parent_id OR
+ (OLD.kind='execution' OR (OLD.kind='assistant' AND COALESCE(json_extract(OLD.event_json,'$.data.phase'),json_extract(OLD.event_json,'$.data.presentationRole'),'') IN ('commentary','progress'))) <>
+ (NEW.kind='execution' OR (NEW.kind='assistant' AND COALESCE(json_extract(NEW.event_json,'$.data.phase'),json_extract(NEW.event_json,'$.data.presentationRole'),'') IN ('commentary','progress')))
+BEGIN
+ INSERT INTO conversation_removals VALUES(OLD.session_id,
+ CASE WHEN OLD.kind='execution' OR (OLD.kind='assistant' AND COALESCE(json_extract(OLD.event_json,'$.data.phase'),json_extract(OLD.event_json,'$.data.presentationRole'),'') IN ('commentary','progress')) THEN 'work:'||length(OLD.parent_id)||':'||OLD.parent_id||':'||OLD.turn_id ELSE OLD.parent_id END,
+ OLD.id,NEW.revision,json_object('id',OLD.id,'parentId',OLD.parent_id,'turnId',OLD.turn_id,'ordinal',OLD.ordinal,'orderTie',OLD.order_tie,'revision',NEW.revision,'removed',json('true')))
+ ON CONFLICT(session_id,parent_id,id) DO UPDATE SET revision=excluded.revision,node_json=excluded.node_json;
+ UPDATE conversation_work SET revision=NEW.revision WHERE session_id=OLD.session_id AND parent_id=OLD.parent_id AND turn_id=OLD.turn_id;
+END;
+CREATE TRIGGER conversation_removals_cleanup AFTER DELETE ON sessions BEGIN
+ DELETE FROM conversation_removals WHERE session_id=OLD.environment||':'||OLD.agent||':'||OLD.native_id;
+END;
+
+CREATE TRIGGER conversation_scope_state AFTER UPDATE ON timeline_nodes WHEN NEW.scope_id=NEW.id BEGIN
+ UPDATE conversation_work SET revision=NEW.revision WHERE session_id=NEW.session_id AND parent_id=NEW.id;
+END;

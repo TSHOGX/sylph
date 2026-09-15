@@ -1675,3 +1675,29 @@ async fn ingest_reread_pass(
         },
     })
 }
+
+/// The reading outline shares the observe gate with execution nodes.
+pub async fn conversation(
+    State(state): State<AppState>, Extension(subject): Extension<SubjectId>,
+    Path(id): Path<String>, Query(query): Query<NodesQuery>,
+) -> Result<Json<serde_json::Value>> {
+    let id=decode_id(&id)?;
+    state.store.get_session(&id).await?.ok_or(Error::SessionNotFound)?;
+    if !state.store.has_capability(&subject.0,id.environment.as_str(),"observe").await? {return Err(Error::SessionNotFound);}
+    Ok(Json(state.store.conversation_page(&id.encode(),&query.parent,query.cursor.as_deref(),query.changes,query.limit.unwrap_or(40)).await?))
+}
+
+#[derive(Deserialize)]
+pub struct DelegationsQuery { #[serde(default)] q:String, cursor:Option<String>, limit:Option<i64> }
+
+/// A complete catalogue is independent from the reader's loaded tree windows.
+pub async fn delegations(
+    State(state): State<AppState>, Extension(subject): Extension<SubjectId>,
+    Path(id): Path<String>, Query(query): Query<DelegationsQuery>,
+)->Result<Json<serde_json::Value>>{
+    let id=decode_id(&id)?;
+    state.store.get_session(&id).await?.ok_or(Error::SessionNotFound)?;
+    if !state.store.has_capability(&subject.0,id.environment.as_str(),"observe").await? {return Err(Error::SessionNotFound);}
+    if query.q.len()>1024 {return Err(Error::InvalidRequest("delegation search is too long".into()));}
+    Ok(Json(state.store.delegation_page(&id.encode(),&subject.0,&query.q,query.cursor.as_deref(),query.limit.unwrap_or(40)).await?))
+}
