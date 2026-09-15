@@ -70,6 +70,20 @@ describe("execution entities", () => {
     expect(store.nodes.get("n:50")).toBe(unchanged);
     expect([changed, unrelated, structure]).toEqual([1, 0, 0]);
   });
+  it("a corrected ordering key repositions only the changed row", () => {
+    const store = seeded(3);
+    const unchanged = store.nodes.get("n:1");
+    store.merge("", {
+      nodes: [{ ...node(2, 10), ordinal: 0, orderTie: 0 }],
+      snapshot: 10, hasMore: false, nextCursor: null,
+    }, true);
+    expect(store.snapshot().map((row) => row.id)).toEqual(["n:2", "n:0", "n:1"]);
+    expect(store.nodes.get("n:1")).toBe(unchanged);
+    store.merge("", {
+      nodes: [node(2, 3)], snapshot: 3, hasMore: false, nextCursor: null,
+    });
+    expect(store.snapshot().map((row) => row.id)).toEqual(["n:2", "n:0", "n:1"]);
+  });
   it("an older page cannot replace a correction received after its snapshot", () => {
     const store = seeded(2);
     const corrected = node(1, 20);
@@ -102,6 +116,19 @@ describe("execution entities", () => {
         true,
       );
     expect(store.nodes.size).toBe(1);
+  });
+  it("live cache eviction keeps discarded history reachable by pagination", () => {
+    const store = seeded(160);
+    store.merge("", {
+      nodes: [node(160)], snapshot: 161, hasMore: false, nextCursor: null,
+    }, true);
+    expect(store.nodes.size).toBe(160);
+    expect(store.branches.get("")!.cursor).toBe("1:2:n:1");
+    expect(store.snapshot()[0].id).toBe("n:1");
+    store.merge("", {
+      nodes: [node(0)], snapshot: 161, hasMore: false, nextCursor: null,
+    });
+    expect(store.snapshot()[0].id).toBe("n:0");
   });
   it("pagination advances a bounded window instead of discarding the older page", () => {
     const store = seeded(160);

@@ -368,7 +368,11 @@ No event fold or subtree summary calculation runs in the browser.
 Each open parent has a cancellable revision subscription. Polling changes reads only rows
 updated since that parent's cursor; responses and the number of subscriptions are bounded.
 Snapshot revisions prevent older pages from overwriting newer patches. Parent removals
-retire the old visible address even when the destination patch arrives first.
+retire the old visible address even when the destination patch arrives first. Ordering
+corrections reinsert the affected address using the complete server ordering key; ordinary
+body revisions preserve the visible list and unrelated entity references. Evicting the
+oldest loaded rows during live growth advances the history cursor to the retained edge,
+so the discarded rows remain reachable even if the initial window was complete.
 
 Large bodies use `components/event-body.tsx`, which fetches only on an explicit action,
 cancels abandoned requests, and shows failures without replacing the readable preview.

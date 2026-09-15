@@ -185,6 +185,9 @@ transactional ancestor summaries, stable addresses across archiving, and revisio
 with former-parent removals. Ordinary stream ids are turn-scoped; delegated trajectories
 retain ownership and promoted tool bodies. The browser keeps a bounded entity/window cache,
 virtualizes expanded rows, and loads execution details and bodies only when requested.
+Ordering corrections reposition the affected loaded row without sorting its siblings.
+Live cache eviction retains a history cursor at the loaded edge so discarded rows remain
+reachable by page-up. Both regressions were reproduced against the preceding implementation.
 Execution groups default to collapsed; outward replies split groups. Expand-all and the
 full-tree browser derivation are removed. Copy/export and full replay are explicit reads.
 

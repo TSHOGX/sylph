@@ -139,10 +139,23 @@ export class ExecutionStore {
         continue;
       if (previous && previous.revision > node.revision) node = previous;
       const existing = branch.ids.includes(node.id);
-      if (!existing) {
+      const reordered =
+        existing &&
+        previous &&
+        (previous.ordinal !== node.ordinal || previous.orderTie !== node.orderTie);
+      // Corrections can change order without changing identity. Reinsert that one
+      // address; sorting the window would also touch every unchanged row.
+      if (reordered) branch.ids.splice(branch.ids.indexOf(node.id), 1);
+      if (!existing || reordered) {
         const first = this.nodes.get(branch.ids[0]);
         // An update to unloaded older history is not permission to load that window.
-        if (changes && branch.cursor && first && node.ordinal < first.ordinal)
+        if (
+          !existing &&
+          changes &&
+          branch.cursor &&
+          first &&
+          node.ordinal < first.ordinal
+        )
           continue;
         this.nodes.set(node.id, node);
         let lo = 0,
@@ -171,6 +184,12 @@ export class ExecutionStore {
         branch.ids.length - MAX_CHILDREN,
       ))
         this.evict(id);
+      if (changes) {
+        // The previous server cursor may precede rows just evicted locally (or
+        // be absent for a formerly complete window). Resume at the kept edge.
+        const first = this.nodes.get(branch.ids[0])!;
+        branch.cursor = `${first.ordinal}:${first.orderTie}:${first.id}`;
+      }
       structural = true;
     }
     if (changes) branch.changes = page.nextCursor ?? `${page.snapshot + 1}:`;

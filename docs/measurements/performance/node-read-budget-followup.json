@@ -1,0 +1,49 @@
+{
+  "scenario": "Execution node read budgets after incremental ordering and eviction fixes",
+  "command": "cargo test -p sylph-server --test timeline_nodes -- --nocapture",
+  "measurements": [
+    {
+      "coldUs": 1601,
+      "events": 2000,
+      "fullTurnBytes": 2424011,
+      "fullTurnUs": 216942,
+      "journalBytes": 7790592,
+      "journalWalBytes": 4841032,
+      "medianUs": 971,
+      "nodeBytes": 984,
+      "nodePoolWaitUs": 37,
+      "nodeReadUs": 555,
+      "nodes": 2
+    },
+    {
+      "coldUs": 1668,
+      "events": 20000,
+      "fullTurnBytes": 24336013,
+      "fullTurnUs": 2061569,
+      "journalBytes": 104341504,
+      "journalWalBytes": 4993472,
+      "medianUs": 741,
+      "nodeBytes": 1004,
+      "nodePoolWaitUs": 31,
+      "nodeReadUs": 186,
+      "nodes": 2
+    }
+  ],
+  "queryVmSteps": [
+    [
+      "2336",
+      "2336"
+    ]
+  ],
+  "heldHistoryWriteLock": [
+    {
+      "fileUs": 2417,
+      "nodeUs": 1965
+    }
+  ],
+  "notes": [
+    "API microbenchmark, not end-to-end sync latency.",
+    "Run concurrently with the browser regression suite; compare VM steps and bounded bytes, not isolated wall-clock speed.",
+    "Frontend ordering and eviction regressions both failed before their respective fixes."
+  ]
+}

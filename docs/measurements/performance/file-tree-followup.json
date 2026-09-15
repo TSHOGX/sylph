@@ -1,0 +1,232 @@
+{
+  "label": "working-tree",
+  "createdAt": "2026-09-15T01:28:58.393Z",
+  "browser": "148.0.7778.96",
+  "directories": 100,
+  "backgroundExecution": {
+    "turnId": "c381d63b-c343-4ad2-9370-8bc2e939d85a",
+    "startedAtMs": 1789435736418,
+    "completedAtMs": 1789435737921
+  },
+  "firstFile": {
+    "paintedMs": 132.5,
+    "requestMs": 76.70000004768372,
+    "responseMs": 81.79999995231628,
+    "bytes": 798,
+    "server": {
+      "lookup": 0.192,
+      "bridge": 2.517,
+      "auth": 0.447
+    }
+  },
+  "samples": [
+    {
+      "relative": "latency-000",
+      "totalMs": 53.5,
+      "beforeRequestMs": 4.400000095367432,
+      "requestToFirstByteMs": 2.5,
+      "httpTransferMs": 0.19999992847442627,
+      "afterResponseMs": 46.39999997615814,
+      "bytes": 245,
+      "server": {
+        "lookup": 0.198,
+        "bridge": 0.776,
+        "auth": 0.307
+      }
+    },
+    {
+      "relative": "latency-001",
+      "totalMs": 50.299999952316284,
+      "beforeRequestMs": 4.5,
+      "requestToFirstByteMs": 3.299999952316284,
+      "httpTransferMs": 0.30000007152557373,
+      "afterResponseMs": 42.199999928474426,
+      "bytes": 245,
+      "server": {
+        "lookup": 0.381,
+        "bridge": 1.15,
+        "auth": 0.327
+      }
+    },
+    {
+      "relative": "latency-002",
+      "totalMs": 47.700000047683716,
+      "beforeRequestMs": 4.299999952316284,
+      "requestToFirstByteMs": 3.3000000715255737,
+      "httpTransferMs": 0.2999999523162842,
+      "afterResponseMs": 39.800000071525574,
+      "bytes": 245,
+      "server": {
+        "lookup": 0.279,
+        "bridge": 1.222,
+        "auth": 0.406
+      }
+    },
+    {
+      "relative": "latency-003",
+      "totalMs": 48.700000047683716,
+      "beforeRequestMs": 4.5,
+      "requestToFirstByteMs": 3.899999976158142,
+      "httpTransferMs": 0.20000004768371582,
+      "afterResponseMs": 40.10000002384186,
+      "bytes": 245,
+      "server": {
+        "lookup": 0.212,
+        "bridge": 0.855,
+        "auth": 0.417
+      }
+    },
+    {
+      "relative": "latency-004",
+      "totalMs": 71,
+      "beforeRequestMs": 4.199999928474426,
+      "requestToFirstByteMs": 3.200000047683716,
+      "httpTransferMs": 0.2999999523162842,
+      "afterResponseMs": 63.300000071525574,
+      "bytes": 245,
+      "server": {
+        "lookup": 0.2,
+        "bridge": 1.099,
+        "auth": 0.504
+      }
+    },
+    {
+      "relative": "latency-005",
+      "totalMs": 47.39999997615814,
+      "beforeRequestMs": 4.399999976158142,
+      "requestToFirstByteMs": 2.5,
+      "httpTransferMs": 0.2999999523162842,
+      "afterResponseMs": 40.200000047683716,
+      "bytes": 245,
+      "server": {
+        "lookup": 0.154,
+        "bridge": 0.913,
+        "auth": 0.321
+      }
+    },
+    {
+      "relative": "latency-006",
+      "totalMs": 50.10000002384186,
+      "beforeRequestMs": 4.399999976158142,
+      "requestToFirstByteMs": 3,
+      "httpTransferMs": 0.10000002384185791,
+      "afterResponseMs": 42.60000002384186,
+      "bytes": 245,
+      "server": {
+        "lookup": 0.242,
+        "bridge": 0.967,
+        "auth": 0.427
+      }
+    },
+    {
+      "relative": "latency-007",
+      "totalMs": 74,
+      "beforeRequestMs": 4.300000071525574,
+      "requestToFirstByteMs": 3.0999999046325684,
+      "httpTransferMs": 0.20000004768371582,
+      "afterResponseMs": 66.39999997615814,
+      "bytes": 245,
+      "server": {
+        "lookup": 0.178,
+        "bridge": 0.985,
+        "auth": 0.304
+      }
+    },
+    {
+      "relative": "latency-008",
+      "totalMs": 67.89999997615814,
+      "beforeRequestMs": 3.600000023841858,
+      "requestToFirstByteMs": 3.399999976158142,
+      "httpTransferMs": 0.20000004768371582,
+      "afterResponseMs": 60.699999928474426,
+      "bytes": 245,
+      "server": {
+        "lookup": 0.198,
+        "bridge": 0.951,
+        "auth": 0.392
+      }
+    },
+    {
+      "relative": "latency-009",
+      "totalMs": 47.39999997615814,
+      "beforeRequestMs": 3.6999999284744263,
+      "requestToFirstByteMs": 3.600000023841858,
+      "httpTransferMs": 0.30000007152557373,
+      "afterResponseMs": 39.799999952316284,
+      "bytes": 245,
+      "server": {
+        "lookup": 0.209,
+        "bridge": 0.983,
+        "auth": 0.377
+      }
+    },
+    {
+      "relative": "latency-010",
+      "totalMs": 17.100000023841858,
+      "beforeRequestMs": 3.5,
+      "requestToFirstByteMs": 2.9000000953674316,
+      "httpTransferMs": 0.19999992847442627,
+      "afterResponseMs": 10.5,
+      "bytes": 245,
+      "server": {
+        "lookup": 0.196,
+        "bridge": 0.964,
+        "auth": 0.352
+      }
+    },
+    {
+      "relative": "latency-011",
+      "totalMs": 49.90000009536743,
+      "beforeRequestMs": 4.200000047683716,
+      "requestToFirstByteMs": 3,
+      "httpTransferMs": 0.20000004768371582,
+      "afterResponseMs": 42.5,
+      "bytes": 245,
+      "server": {
+        "lookup": 0.199,
+        "bridge": 0.943,
+        "auth": 0.481
+      }
+    },
+    {
+      "relative": "latency-012",
+      "totalMs": 46.200000047683716,
+      "beforeRequestMs": 4.400000095367432,
+      "requestToFirstByteMs": 3.5999999046325684,
+      "httpTransferMs": 0.10000002384185791,
+      "afterResponseMs": 38.10000002384186,
+      "bytes": 245,
+      "server": {
+        "lookup": 0.246,
+        "bridge": 1.199,
+        "auth": 0.399
+      }
+    },
+    {
+      "relative": "latency-013",
+      "totalMs": 71.5,
+      "beforeRequestMs": 4.399999976158142,
+      "requestToFirstByteMs": 3.1999999284744263,
+      "httpTransferMs": 0.20000004768371582,
+      "afterResponseMs": 63.700000047683716,
+      "bytes": 245,
+      "server": {
+        "lookup": 0.231,
+        "bridge": 1.113,
+        "auth": 0.51
+      }
+    }
+  ],
+  "dom": {
+    "elements": 132,
+    "sections": 22
+  },
+  "heapBefore": 39223980,
+  "heapAfter": 24528496,
+  "measurementNotes": [
+    "Final frontend build with ordering and live-eviction fixes.",
+    "Fixture concurrent execution and search; does not establish latency under simultaneous real native imports, cleanup, and archive workloads.",
+    "Heap samples do not force garbage collection and are not a leak measurement.",
+    "Server-Timing bridge includes queueing, transport and response decoding; it is not pure network time."
+  ]
+}
