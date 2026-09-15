@@ -64,9 +64,10 @@ production reducer. [Conformance](unified-trace-conformance.md) names their limi
 
 **Next implementation, in dependency order:**
 
-1. Replace protocol core types and capture/payload identity. Implement durable evidence
-   admission and control outbox before exposing new projections; keep authorization,
-   containment, spool integrity and workload isolation as gates.
+1. Connect the typed capture, evidence admission and control outbox foundations below to
+   the durable envagent source registry and runtime. Replace the event wire, remove
+   envagent semantic projection, and retain complete lexical native/live observations;
+   keep authorization, containment, spool integrity and workload isolation as gates.
 2. Implement pure vendor mappers and shared deterministic reduction against the new
    corpus contract. Native/live complete-body pairs, transformed/queued input, missing
    child sources and explicit lineage/ordinal witnesses remain required capture work.
@@ -87,6 +88,32 @@ UI trees and the reference SQLite exercise cannot substitute for that evidence.
 The milestones below remain the record of the current implementation and other product
 work. Their block-era mechanisms are not requirements for the replacement. No store is
 erased and no production trace implementation is claimed complete by this design review.
+
+### Foundation implementation
+
+The protocol now declares typed agents, activations, messages and immutable revisions,
+deliveries, operations/results, independent resources, history selections, context,
+measurements and evidenced claims. Reference encoding preserves namespace and tuple
+boundaries; capture preserves independent producer receipts, source positions, fixed
+ingestion epochs, payload manifests, attachment availability and clock domains. Claim
+validation refuses cross-kind equivalence, unpriced monetary values and exact context
+inferred from a summary.
+
+The independent evidence and control stores implement FULL-durable admission, source
+occurrence reconciliation, permanent deletion receipts, immutable accepted inputs,
+at-most-once dispatch ambiguity and a bounded outbox exporter. Chunk manifests are fixed
+before control acceptance, so large accepted inputs reach evidence without changing their
+receipt identity. Repeated source bytes at distinct positions remain separate; differing
+manifest layouts of the same occurrence compare their decoded bytes. These modules are
+the replacement foundation and are not yet the product runtime path.
+
+The remaining acceptance work includes runtime source reservations and atomic capture
+spooling; production vendor corpus/mappers and deterministic reduction; complete generation
+publication, temporal reads, search and CAS root/deletion orchestration; and the normalized
+frontend replacement. Explicit deletion currently commits the evidence visibility boundary;
+cross-store cancellation, control-input erasure and payload collection still need the
+complete runtime/job registry. Existing event/block code is removed during the cutover;
+there is no dual-write or compatibility reader planned.
 
 ## Milestone 1 — the envagent is the only path — complete
 

@@ -43,6 +43,7 @@ pub mod identity;
 pub mod link;
 pub mod request;
 pub mod semantic;
+pub mod trace;
 
 // Re-exported flat, because a caller wants `sylph_protocol::Event` rather than
 // `sylph_protocol::event::Event` — the modules are an organizing device for readers of

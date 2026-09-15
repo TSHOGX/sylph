@@ -34,6 +34,7 @@ pub mod paths;
 /// watermark-driven retention.
 pub mod storage;
 pub mod supervisor;
+pub mod trace;
 
 use crate::config::Config;
 use crate::db::JournalStore;

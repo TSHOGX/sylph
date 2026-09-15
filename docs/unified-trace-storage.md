@@ -141,6 +141,14 @@ not how much of an already observed native record the server silently throws awa
 Oversized semantic decoding can stop with a resource-limit diagnostic while the original
 bytes remain retained. Partial uploads never appear as complete payloads.
 
+Payload references distinguish `bytes:<BLAKE3>` from `manifest:<BLAKE3>`. The digest
+addresses immutable physical CAS bytes; the reference kind determines whether those bytes
+are the payload itself or its manifest. Both references can share physical bytes without
+sharing interpretation. A prefix inside manifest bytes cannot establish this distinction:
+an arbitrary raw capture can contain exactly those bytes, including the prefix. Logical
+payload keys therefore include the kind, and neither insertion order nor content sniffing
+chooses how retained bytes are read.
+
 ## Admission and acknowledgments
 
 Admission has two deduplication axes: producer delivery and source occurrence. They are
