@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { createSession, gotoReady } from "./fixtures/session";
+import { runExecution, openExecutionGroups } from "./fixtures/execution";
 
 /**
  * Keyboard reachability, checked in a real browser.
@@ -215,7 +216,6 @@ test("the conversation canvas has no automated accessibility violations", async 
 test("a nested delegation tree has no automated accessibility violations", async ({
   page,
 }) => {
-  const {runExecution,openExecutionGroups}=await import("./fixtures/execution");
   const {sessionId,turnId}=await runExecution(page,"delegate this please");
   await openExecutionGroups(page,sessionId,turnId);
   const explore=page.getByRole("region",{name:"Explore delegation"});

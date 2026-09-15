@@ -349,6 +349,9 @@ export function Composer({
    * itself lives in `lib/slash.ts`, where it is unit-tested without a DOM.
    */
   function submit() {
+    // Submission can disable or hide Send. Keep keyboard focus in the editor,
+    // whose identity and purpose survive the incoming execution state.
+    textareaRef.current?.focus();
     // Mid-turn, text goes to whichever channel the agent actually has. Routing it as a
     // command would try to start a second turn, which the backend refuses one-per-session,
     // so the message would simply be lost with an error the user did not cause.
@@ -1039,32 +1042,10 @@ export function Composer({
               </Button>
             )}
 
-            {isLive && (steering || queueing || nativeQueueing) && (
-              <Button
-                type="submit"
-                variant="primary"
-                disabled={!canSend}
-                aria-label={t("action.send")}
-                className="shrink-0 max-md:h-9 max-md:w-9 max-md:rounded-full max-md:p-0"
-              >
-                <SendIcon size={16} />
-                <span className="max-md:hidden">{t("action.send")}</span>
-              </Button>
-            )}
-            {isLive ? (
-              <Button
-                variant="danger"
-                onClick={onStop}
-                disabled={stopping}
-                icon={<StopIcon size={14} />}
-                className="shrink-0"
-              >
-                {stopping ? t("action.stopping") : t("action.stop")}
-              </Button>
-            ) : (
-              // Icon-only on a phone: the label costs the width the chips need, and
-              // an upward arrow in a filled circle is the least ambiguous control in
-              // any messaging app. `aria-label` carries the name either way.
+            {/* Send and Stop have separate DOM identities. Reusing Send's button
+                for Stop interpolates its primary colors into danger colors with
+                insufficient contrast, and changes the focused control's action. */}
+            {(!isLive || steering || queueing || nativeQueueing) && (
               <Button
                 type="submit"
                 variant="primary"
@@ -1074,6 +1055,17 @@ export function Composer({
               >
                 <SendIcon size={16} />
                 <span className="max-md:hidden">{sending ? t("action.sendingEllipsis") : t("action.send")}</span>
+              </Button>
+            )}
+            {isLive && (
+              <Button
+                variant="danger"
+                onClick={onStop}
+                disabled={stopping}
+                icon={<StopIcon size={14} />}
+                className="shrink-0"
+              >
+                {stopping ? t("action.stopping") : t("action.stop")}
               </Button>
             )}
           </div>
