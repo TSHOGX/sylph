@@ -1,5 +1,11 @@
 # API — Sessions, turns, links, and requests
 
+The target trace API is [unified-trace-storage.md](../unified-trace-storage.md#read-protocol).
+It replaces turn-event, execution-node, conversation/delegation and search projection
+contracts in this file. Session/control, grants and request APIs remain in force where
+not explicitly superseded. Existing route examples describe the current implementation;
+no old trace response shape must be preserved in the replacement.
+
 The session lifecycle: creating one, dispatching turns, reading the event stream,
 answering what an agent is blocked on, and reading lineage. `docs/api/README.md` holds
 the conventions every endpoint here assumes.
@@ -238,53 +244,16 @@ follower, and it does not change the session's `fidelity`.
 
 ### `POST /api/v1/sessions/{id}/reproject`
 
-This endpoint currently returns `501 NOT_IMPLEMENTED`. Re-projection is refused until the
-server can validate a complete replacement projection before publishing it; appending a
-corrected projection beside stale events would corrupt the transcript and is therefore not
-an acceptable fallback.
+The current endpoint returns `501 NOT_IMPLEMENTED`. Its replacement creates a pure server
+projection job over retained evidence and reports job identity, chosen evidence cut,
+mapper generation, validation/publication state and structured failure. It is not a
+reread report or an envagent command and does not require the source environment online.
 
-When implemented, this will re-project native envelopes already retained by Sylph through the owning envagent. The
-vendor's source files are not read, so the operation remains available after rotation or
-deletion of the native store. The response uses the same `RereadReport` shape; `examined`
-counts retained projected events and `ingested` counts the replacement events. Publication
-replaces the prior projection only after the complete pass validates; it does not append
-corrected timestamps or identifiers beside stale events. A running turn refuses rebuilding.
-
-Every field is a count of events in this one pass:
-
-| Field | Meaning |
-| --- | --- |
-| `examined` | events the adapter emitted, before suppression |
-| `ingested` | events new to the journal, now added |
-| `alreadyHeld` | events a previous pass had already journaled |
-| `readErrors` | items the adapter could not read; the pass continues past each |
-
-**`ingested + alreadyHeld` may be less than `examined`, and a client must not compute
-one from the others.** A turn's opening bracket survives in neither storage tier, so a
-pass that finds no new content after one neither writes it nor claims it was already held
-— it is examined and nothing else
-(`docs/environments.md` § Re-reading a session Sylph already holds). The difference is
-bounded by the number of brackets that bracketed nothing, so it is normally zero.
-
-`ingested: 0` with a non-zero `examined` is the ordinary "nothing new since last time"
-answer and is a success. **A client must not treat it as a failure**, and must not infer
-"the store is gone" from it — that case is a `404`. A caller refetching
-`GET /sessions/{id}/turns` after a `200` sees whatever the pass added; the response is
-returned only once ingestion has finished, so there is nothing to race.
-
-**Errors:**
-- `400` — `INVALID_REQUEST`: the id is malformed, or that agent is not installed on the
-  environment holding the session
-- `404` — `SESSION_NOT_FOUND`: Sylph holds no session with that id
-- `404` — `NATIVE_SESSION_NOT_FOUND`: Sylph holds the session and the vendor's store no
-  longer does, because it was pruned or rotated away
-- `500` — `INTERNAL`: the store could not be read, or a record could not be retained
-  losslessly
-- `503` — `ENVIRONMENT_UNREACHABLE`: no envagent is connected for that environment
-
-The two `404`s are one status and two codes on purpose: "you named nothing" and "the
-vendor dropped what you named" have different fixes, and only the second means the
-transcript Sylph holds is now the only copy.
+[unified-trace-storage.md](../unified-trace-storage.md#generation-publication) defines atomic
+publication while new evidence continues arriving. A running agent is not by itself a
+reason to refuse rebuild. Unauthorized scope, unavailable evidence, invalid build or
+failed publication are distinct failures; vendor source disappearance is irrelevant
+when the complete required observations are already retained.
 
 ### `GET /api/v1/sessions/enumerate`
 
@@ -964,44 +933,10 @@ past which a page cap gives up and reports a directory with dozens of sessions a
 
 ## Execution nodes
 
-`GET /api/v1/sessions/{id}/nodes` is the interactive transcript read path.
-The session grant gate decodes the identity path segment before checking authorization;
-percent-encoded colons or slashes cannot bypass the same observe/control checks. With no
-parent it returns a recent root window; `parent` requests that node's direct
-children and one bounded `parentNode` context. `limit` is capped at 40 direct children and encoded responses at 128 KiB. `cursor`
-is the exclusive `ordinal:orderTie:id` boundary. The admission tie preserves
-input-only turn order when no event sequence separates successive prompts. `hasMore` and `nextCursor` describe the next
-older page; nodes within each page are in narrative order.
-
-The response includes `parent`, `nodes`, `snapshot`, `nextCursor`, `hasMore`, and
-nullable `targetId`. Each node has an opaque projection address, parent, owning turn,
-first ordering key, revision, bounded event preview, direct child count, and materialized
-summary counters. `trajectory` keeps a promoted tool's delegated report separate from
-its call. `structureError` reports repaired cyclic parentage. None of these addresses
-changes the session's identity triple.
-
-`changes=true` changes the cursor to an exclusive revision/address pair and returns
-changed children in revision order, including ancestor summaries and `removed` entries
-for former parents. A read transaction captures the snapshot with the page. Once a
-change page is exhausted, its cursor includes the complete snapshot revision. Clients
-merge by node address and revision, retain removal ordering across parent subscriptions,
-and never overwrite a newer entity with an older page.
-
-`around=seq` resolves a retained event's projection address and reads a bounded window
-ending at the target under its direct parent, in the same read transaction. It does not
-load the containing turn or walk descendant branches. `GET .../nodes/search?q=...`
-searches the retained full-text index for that session and returns bounded excerpts and
-sequence targets. Search is explicit, not polled, and can locate text outside a preview.
-
-`GET .../nodes/{node}/body` reads an explicitly requested body. Ordinary nodes reuse
-`GET .../bodies/{seq}`; a prompt reads its turn-owned input. Journal reads precede history
-reads so archive publication cannot create a transient hole. Missing or corrupt bodies
-fail visibly. Root and child pages never read bodies.
-
-`GET .../turn-state` supplies a bounded list of recent turn identifiers and statuses for
-control state without reading input or event bodies. `GET .../turns` remains an explicit
-export operation; `turn_id` restricts copying to one owned turn. It is not an interactive
-history fallback. Full replay remains separate from the execution projection.
+The replacement exposes typed AgentThread/Activation/Message/Delivery/Operation/Resource
+and history/context reads, not block-derived execution nodes.
+[unified-trace-storage.md](../unified-trace-storage.md#read-protocol) is authoritative for
+bounds, typed object addresses, snapshot payload access and scoped relations.
 
 ## Search
 
@@ -1061,15 +996,8 @@ client gates it on a real query rather than binding it to keystrokes.**
 
 ## Conversation and delegation reading
 
-`GET /api/v1/sessions/{id}/conversation` reads a bounded conversation outline or
-process window. It shares stable execution addresses, revisions and body references
-with execution nodes. Work summaries carry owner lifecycle and trusted time endpoints.
-Unclassified prose stays in the outline. Pagination bounds both entries and bytes;
-large inputs and answers use explicit body reads, never an unbounded summary array.
-
-`GET /api/v1/sessions/{id}/delegations` returns a searchable, paged directory of
-recorded delegated trajectories and child sessions, excluding fork edges. Entries
-identify their real target and parent, outcome, interior state and recorded timing.
-Counts describe the accessible catalogue, not the currently loaded window. Both
-endpoints enforce observe authorization; invisible child sessions are excluded from
-entries and counts. Neither endpoint hydrates original bodies or a complete tree.
+The replacement reader uses reusable view leases, selected-history membership, stable
+object references, scoped page cursors and coherent change batches. A directory counts
+actual agents rather than tool containers. See
+[unified-trace-storage.md](../unified-trace-storage.md#read-protocol) and
+[unified-trace-ui.md](../unified-trace-ui.md).

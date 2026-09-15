@@ -1,5 +1,11 @@
 # Agents
 
+This document owns process setup, controls and dated vendor measurements. Replacement
+trace interpretation is owned by the dedicated [Claude](unified-trace-claude.md),
+[Codex](unified-trace-codex.md), and [Pi](unified-trace-pi.md) mappings. Older block/span,
+input segmentation and synthetic native-event examples below describe the existing
+implementation only; they cannot override those target contracts.
+
 One module per vendor, holding everything Sylph knows about that CLI: how to launch
 it, how to read its native store, what it exposes to a second party, and where it
 lies.
@@ -9,13 +15,15 @@ lies.
 Supported: **`claude`**, **`codex`**, **`pi`**. Two requirements decided that list, and
 both govern any agent proposed later:
 
-- **A readable per-session native store.** An agent keeping every session in one database
-  with a live WAL has no per-session bytes to watch and no per-session fingerprint, and
-  reading such a store wholesale is unbounded work that starves every other agent's pass.
+- **A source with stable, scoped identities and bounded acquisition.** Per-session
+  JSONL is one suitable shape. A native database is also usable with consistent snapshots,
+  session-scoped queries and explicit capture positions; a per-session file fingerprint
+  is not an architectural requirement.
 - **Known mid-turn write behaviour.** Observation is offerable only where it is known
   *when* a vendor flushes; unknown is not the same as absent.
 
-`gemini` and `opencode` meet neither, which is what excludes them.
+Only these three vendors are in scope. Additional vendors require their own evidenced
+acquisition and semantic mapping, rather than exclusion by a storage-format assumption.
 
 An agent is available on an environment when its CLI is on that machine's `PATH` **at a
 version the adapter accepts**, discovered by the envagent and re-discovered when the
@@ -32,16 +40,11 @@ machine's inventory changes (`docs/environments.md` § Agent availability).
 | second-party control surface | decides whether the control facet exists at all |
 | which vendor keys carry what | the most-repeated defect class in this repo |
 
-Native revision identity is derived from the retained bytes and source position, never
-from a reader's process-local generation counter. A fresh reader of a rewritten file must
-retain the new revision, while identical repeated lines at different positions remain
-separate records. Snapshot payload, lexical bytes, and revision are derived from one read.
-Only newline-terminated JSONL records are complete; an unfinished tail remains pending.
-
-Native-only metadata is retained alongside live stdout. Acquiring that raw source does
-not publish a second normalized copy of events already supplied by the live transport.
-An interior is complete only when the producer has read its complete source; reaching
-the end of a parent's transcript does not prove a child's transcript was available.
+[unified-trace-storage.md](unified-trace-storage.md#source-identity-and-generations)
+owns capture/source identity, generations and complete-record cursors. Native and live
+observations both contribute semantic facts under explicit equivalence rules; missing
+joins remain visible. No mode discards richer native semantics merely because a live
+connection already exists.
 
 ## Capability matrix
 
@@ -502,6 +505,11 @@ entirely invented key with `status: "ok"`. It is a file writer, not a settings A
 
 ## `pi`
 
+The target timestamp interpretation is
+[unified-trace-pi.md](unified-trace-pi.md#context-payloads-and-measurements): offsetless
+historical timestamps remain ambiguous unless actual timezone/epoch evidence resolves
+them. The current parser's machine timezone is not such evidence.
+
 **No second-party control surface.** `RpcClientOptions` is
 `{cliPath, cwd, env, provider, model, args}` — no address field, no `createServer`, no
 socket. It is stdio-only, reachable only by whoever spawned it. So a terminal-born `pi`
@@ -552,7 +560,8 @@ in a turn — an absent file is not an absent session.
 The Pi watcher therefore keeps a byte cursor only at complete-line boundaries, verifies the
 consumed prefix before each changed-file pass, and treats an inode replacement or prefix change
 as a new file generation. Unchanged record ids are de-duplicated across a rewrite; a record whose
-payload changed under the same id is projected once from the new generation. A missing or
+payload changed under the same id requires the supported field-revision rule before
+changing its semantic projection. Changed owner or predecessor claims remain conflicts. A missing or
 partial header remains a pending source and is rediscovered on the next pass. This is a
 source-specific rule: Claude's append-only bundle cursor and Codex's rollout cursor must not
 inherit Pi's rewrite assumptions.
@@ -610,22 +619,11 @@ so those yield *absent* rather than a wrong number. A file is one era or the oth
 both, but the offsetless window sits in the **middle** of the offset-aware range, so
 "before/after this date" gets it backwards.
 
-**Read an offsetless stamp as local wall-clock time, not as UTC.** Compared against their
-sibling integers, whose units are known, the offsetless era was written in whatever zone the
-machine was in while the offset-bearing era agrees with UTC exactly. Reading them locally
-makes the result depend on where the parser runs, which is correct here: the stamps *are*
-local wall-clock time, so every fixed zone is wrong by construction, and the era is a closed
-historical window rather than one new records join.
-
-**A wrong zone yields a plausible timestamp**, so what settles a units or zone question is
-comparing a value against a sibling whose units are known — a census of *pairs* rather than
-of stamps, drawn from one era, since a cross-era pair disagrees by construction.
-
-**A fork pointer is a file path, not a session id.** The session header carries
-`parentSession`/`parent_session` naming another `.jsonl` on disk. Under an identity of
-`(environment, agent, native_id)` it cannot be stored as given: resolve it by reading the
-target file's header for its id, or record it as unresolvable. Both spellings apply here,
-per the per-field rule above.
+**Offsetless historical timestamps are ambiguous without source evidence.** A sibling
+epoch value can establish that message's time; the parser's current timezone cannot
+establish the timezone of an earlier environment. The replacement preserves the lexical
+stamp and explicit uncertainty under
+[unified-trace-pi.md](unified-trace-pi.md#context-payloads-and-measurements).
 
 ## Reading a vendor payload
 

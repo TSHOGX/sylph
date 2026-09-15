@@ -1,11 +1,19 @@
 # Frontend Architecture
 
+[unified-trace-ui.md](unified-trace-ui.md) owns the target trace reader, data access,
+interaction and accessibility contract. It follows the unified foundation and replaces
+block/span interpretation and the former conversation/work reading rules below.
+This document continues to own application framework, authentication transport, files,
+internationalization and test tooling. Unreplaced code structure is implementation
+context, not a reason to constrain the new trace model.
+
 How the frontend is *built*: state, streaming, data flow, performance, error handling,
 and testing. `docs/ui-layout.md` is the companion and owns what the interface *is* — the
 panes, the surfaces, the component inventory, and the design tokens.
 
-It is an **agent workspace, not a chat client**: tool execution is the primary content,
-prose is connective tissue, and navigation is keyboard-first.
+The trace reader lets authored conversation orient the work and exposes operations,
+resources, agents and context progressively. Its semantic hierarchy is specified in
+[unified-trace-ui.md](unified-trace-ui.md), independently of current components.
 
 Two things shape almost every decision below, so they are stated once here:
 
@@ -350,81 +358,51 @@ Reconnection is covered in § Error handling.
 
 ### Turn lifecycle
 
-The terminal `status` event and the durable turn row describe the same completed record.
-Live and historical turn sections expose `data-turn-id` and `data-turn-status` from that
-fact. Send and Stop describe available actions and never serve as lifecycle signals.
-Running history snapshots preserve producer phase, stability and block identity; only
-terminal turns use the archival fold. A sealed content block rejects late deltas.
-Execution nodes and their bounded conversation reading map form the interactive transcript projection; a turn replay stream
-must not merge its independently timed block replacements into the same renderer.
+Read independently evidenced Activation outcomes, source coverage and projection progress.
+Terminal execution does not end trace subscriptions or imply that every result arrived.
+See [unified-trace-ui.md](unified-trace-ui.md).
 
 ### Event rendering
 
-The interactive transcript consumes execution nodes from `GET /sessions/{id}/nodes`.
-`lib/execution-store.ts` keeps entities by stable id and ordered child windows per parent.
-Individual revisions notify only the affected row. Structural changes update the expanded
-visible list; `components/execution-timeline.tsx` virtualizes that list with TanStack Virtual.
-No event fold or subtree summary calculation runs in the browser.
-
-Each open parent has a cancellable revision subscription. Polling changes reads only rows
-updated since that parent's cursor; responses and the number of subscriptions are bounded.
-Snapshot revisions prevent older pages from overwriting newer patches. Parent removals
-retire the old visible address even when the destination patch arrives first. Ordering
-corrections reinsert the affected address using the complete server ordering key; ordinary
-body revisions preserve the visible list and unrelated entity references. Evicting the
-oldest loaded rows during live growth advances the history cursor to the retained edge,
-so the discarded rows remain reachable even if the initial window was complete.
-Window eviction releases cached descendants but preserves a summary still owned by a
-loaded parent. Removal patches release entities once no loaded window references them;
-a move already received by another parent retains that parent's entity and descendants.
-Paging far enough back to evict newer rows detaches that window from the live tail.
-Revisions still update its loaded entities, but new arrivals outside its ordering bounds
-cannot bridge the unloaded gap. An explicit latest-window action resumes following;
-search windows follow the same rule. Every bound compares the full server ordering key.
-An initial read failure retries the recent page before subscribing to changes. Cancelling
-and restarting a subscription releases the aborted request before opening its replacement.
-
-Large bodies use `components/event-body.tsx`, which fetches only on an explicit action,
-cancels abandoned requests, and shows failures without replacing the readable preview.
-Search requests the retained full-text index, then loads a bounded window at the matched
-node's direct parent. Focus returns to the root conversation with one action.
+The browser consumes normalized objects and bounded server projections; it does not parse
+vendor JSON, infer authorship, or promote tool hosts into agents. The replacement data
+contract is [unified-trace-storage.md](unified-trace-storage.md#read-protocol), and reader
+behavior is [unified-trace-ui.md](unified-trace-ui.md).
 
 ### Delegated trajectories
 
-The server materializes parentage, ownership and counters in the event transaction
-(`docs/storage.md` § Execution node projection). Ordinary stream ids are scoped to their
-turn; delegated ids keep their first session-scoped owner. A promoted tool retains its
-arguments and a separate trajectory report. Ancestor failures and waiting counts remain
-visible while descendants are unloaded.
+Root and child AgentThreads use one reader. Independent Operation/Resource lifecycles,
+real child identities and scoped delivery evidence replace the span/promotion renderer.
+See [unified-trace-ui.md](unified-trace-ui.md).
 
 #### Rendering `abandoned` distinctly from `failed`
 
-A server-authored trajectory closure reports an unknown outcome, not a vendor failure.
-The projection excludes it from failure counts and the row says “never finished”.
-A later real completion replaces that provisional state at the same address.
+The target reader distinguishes own outcome from lost observation and unresolved current
+state. It consumes those separate facts; a parent close cannot mark independent children
+abandoned. See [the lifecycle contract](unified-trace-foundation.md#independent-lifecycle-claims).
 
 #### A summary is the point of a collapsed card
 
-A declared trajectory exposes its bounded report beside its counters. Promoted tools
-keep the delegation report separately from their arguments and result. Reading or
-expanding one never substitutes a tool result for the delegate's own account.
+Summaries are bounded query projections over typed operations/resources. They never
+become archival content or the source of an object's identity/outcome.
+See [unified-trace-ui.md](unified-trace-ui.md).
 
 #### `trajectoryName` is the sole definition
 
-Names come from the projection's retained event or trajectory report. A missing name
-stays missing in storage; only the renderer supplies a category label.
+The replacement reads evidenced optional agent names and operation descriptions from
+normalized objects. Fallback labels are presentation only, and names never resolve identity.
+See [unified-trace-ui.md](unified-trace-ui.md).
 
 #### A promoted host renders its own call
 
-The tool retains its call body and owns its result as a direct child. Delegated work
-references that same node. Focusing loads its direct-child window and offers a way back.
+Promotion is removed. A host invocation remains an Operation, with independently proved
+nested work and child links. See [unified-trace-foundation.md](unified-trace-foundation.md#operation-contract).
 
 #### Comparing siblings needs one shared axis
 
-The interactive transcript does not fetch a full tree for a comparison strip. Timing
-endpoints remain available on loaded node summaries. Parallel elapsed intervals cannot
-be added, and an absent start is not a measured zero. Full replay and export remain
-explicit operations for analysis of the whole record.
+Comparable interval views require compatible clock domains, covered endpoints and explicit
+scope. A visual common axis cannot manufacture those facts.
+See [unified-trace-foundation.md](unified-trace-foundation.md#ordering-clocks-and-measurements).
 
 ## Data flow
 
@@ -523,19 +501,8 @@ Two rules bind the composer:
 
 ### Fidelity gates what may be drawn
 
-```tsx
-// `stream` means every delta and its arrival time was recorded. `blocks` and
-// `messages` mean the source recorded less, and no care recovers a timing that
-// was never written — so a waterfall here would present equal-length bars as
-// measurements. Show the marker; do not draw the chart.
-{session.fidelity !== "stream" && <FidelityMarker value={session.fidelity} />}
-```
-
-Note what this is *not* correlated with: who started the session. A session Sylph
-launched, read back from the vendor's store after its process died, is `messages` too.
-Gating on anything else — an origin, a link state, whether the row came from a listing —
-draws a duration that was never measured.
-
+Coarse fidelity is a record summary. Each duration/rendered interval additionally checks
+its own timing/coverage evidence. See [unified-trace-ui.md](unified-trace-ui.md).
 
 ### Search integration
 
@@ -671,11 +638,9 @@ those segments back still encoded; re-encoding them produces a lookup for a lite
 
 #### Delegation is shown beside the transcript, not inside it
 
-Delegation links open the shared reader in the work panel. Session edges without an
-exact invocation anchor appear in its directory, never at an inferred transcript
-position. Session targets and trajectory targets retain their different identities
-and control capabilities. The directory reads a bounded server projection rather
-than loading the execution tree. See `docs/ui-layout.md` § Work panel.
+The agent directory and focused/companion reader are projections over actual AgentThreads;
+interaction placement is specified in [unified-trace-ui.md](unified-trace-ui.md), not inferred
+from nested execution containers.
 
 ## Performance Optimization
 
@@ -1235,10 +1200,8 @@ Reverse it when selector-scoped re-renders start showing up in the render-cost b
 
 ## Conversation reading model
 
-The server supplies bounded reading units and a delegation directory alongside the
-execution nodes. Presentation roles are progress, answer, or unknown; unknown prose
-stays visible. Lifecycle metadata comes from its owner, not a recent-turn lookup.
-Shared entities and in-flight reads are independent from each reader's scope,
-disclosures, pagination and scroll anchors. Hidden views release subscriptions.
-The main reader and each expanded tool group virtualize their own bounded window;
-no turn is rendered as an unbounded nested DOM subtree.
+[unified-trace-ui.md](unified-trace-ui.md) defines the replacement shared reader.
+[unified-trace-storage.md](unified-trace-storage.md#snapshot-pages-and-live-changes)
+defines reusable view leases, scoped cursors, immutable body revisions and coherent
+change batches. Hidden readers release subscriptions; body and metadata budgets remain
+independent, and stable object anchors survive revision/generation replacement.

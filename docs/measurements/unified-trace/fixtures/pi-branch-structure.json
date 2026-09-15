@@ -1,0 +1,2432 @@
+{
+  "format": "sylph.sanitized-native-structure.v1",
+  "kind": "observed_extract",
+  "vendor": "pi",
+  "records": [
+    {
+      "source_id": "source_14",
+      "source_line": 1,
+      "type": "session",
+      "source_keys": [
+        "cwd",
+        "id",
+        "timestamp",
+        "type",
+        "version"
+      ],
+      "id": "pi_session_1",
+      "version": 3
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 2,
+      "type": "model_change",
+      "source_keys": [
+        "id",
+        "modelId",
+        "parentId",
+        "provider",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_1",
+      "parentId": null
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 3,
+      "type": "thinking_level_change",
+      "source_keys": [
+        "id",
+        "parentId",
+        "thinkingLevel",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_2",
+      "parentId": "pi_entry_1"
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 4,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_3",
+      "parentId": "pi_entry_2",
+      "message": {
+        "role": "user",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 5,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_4",
+      "parentId": "pi_entry_3",
+      "message": {
+        "role": "assistant",
+        "stopReason": "toolUse",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "thinking",
+            "source_keys": [
+              "thinking",
+              "thinkingSignature",
+              "type"
+            ]
+          },
+          {
+            "source_block_index": 1,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          },
+          {
+            "source_block_index": 2,
+            "type": "toolCall",
+            "source_keys": [
+              "arguments",
+              "id",
+              "name",
+              "type"
+            ],
+            "id": "pi_call_1",
+            "name": "bash"
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 6,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_5",
+      "parentId": "pi_entry_4",
+      "message": {
+        "role": "toolResult",
+        "isError": false,
+        "toolCallId": "pi_call_1",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 7,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_6",
+      "parentId": "pi_entry_5",
+      "message": {
+        "role": "assistant",
+        "stopReason": "toolUse",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "thinking",
+            "source_keys": [
+              "thinking",
+              "thinkingSignature",
+              "type"
+            ]
+          },
+          {
+            "source_block_index": 1,
+            "type": "toolCall",
+            "source_keys": [
+              "arguments",
+              "id",
+              "name",
+              "type"
+            ],
+            "id": "pi_call_2",
+            "name": "write"
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 8,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_7",
+      "parentId": "pi_entry_6",
+      "message": {
+        "role": "toolResult",
+        "isError": false,
+        "toolCallId": "pi_call_2",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 9,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_8",
+      "parentId": "pi_entry_7",
+      "message": {
+        "role": "assistant",
+        "stopReason": "toolUse",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "toolCall",
+            "source_keys": [
+              "arguments",
+              "id",
+              "name",
+              "type"
+            ],
+            "id": "pi_call_3",
+            "name": "write"
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 10,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_9",
+      "parentId": "pi_entry_8",
+      "message": {
+        "role": "toolResult",
+        "isError": false,
+        "toolCallId": "pi_call_3",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 11,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_10",
+      "parentId": "pi_entry_9",
+      "message": {
+        "role": "assistant",
+        "stopReason": "length",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "thinking",
+            "source_keys": [
+              "thinking",
+              "thinkingSignature",
+              "type"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 12,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_11",
+      "parentId": "pi_entry_10",
+      "message": {
+        "role": "user",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 13,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_12",
+      "parentId": "pi_entry_11",
+      "message": {
+        "role": "assistant",
+        "stopReason": "aborted",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "thinking",
+            "source_keys": [
+              "thinking",
+              "thinkingSignature",
+              "type"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 14,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_13",
+      "parentId": "pi_entry_10",
+      "message": {
+        "role": "user",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 15,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_14",
+      "parentId": "pi_entry_13",
+      "message": {
+        "role": "assistant",
+        "stopReason": "length",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "thinking",
+            "source_keys": [
+              "thinking",
+              "thinkingSignature",
+              "type"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 16,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_15",
+      "parentId": "pi_entry_14",
+      "message": {
+        "role": "user",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 17,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_16",
+      "parentId": "pi_entry_15",
+      "message": {
+        "role": "assistant",
+        "stopReason": "toolUse",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "thinking",
+            "source_keys": [
+              "thinking",
+              "thinkingSignature",
+              "type"
+            ]
+          },
+          {
+            "source_block_index": 1,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          },
+          {
+            "source_block_index": 2,
+            "type": "toolCall",
+            "source_keys": [
+              "arguments",
+              "id",
+              "name",
+              "type"
+            ],
+            "id": "pi_call_4",
+            "name": "write"
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 18,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_17",
+      "parentId": "pi_entry_16",
+      "message": {
+        "role": "toolResult",
+        "isError": false,
+        "toolCallId": "pi_call_4",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 19,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_18",
+      "parentId": "pi_entry_17",
+      "message": {
+        "role": "assistant",
+        "stopReason": "toolUse",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          },
+          {
+            "source_block_index": 1,
+            "type": "toolCall",
+            "source_keys": [
+              "arguments",
+              "id",
+              "name",
+              "type"
+            ],
+            "id": "pi_call_5",
+            "name": "write"
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 20,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_19",
+      "parentId": "pi_entry_18",
+      "message": {
+        "role": "toolResult",
+        "isError": false,
+        "toolCallId": "pi_call_5",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 21,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_20",
+      "parentId": "pi_entry_19",
+      "message": {
+        "role": "assistant",
+        "stopReason": "toolUse",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "toolCall",
+            "source_keys": [
+              "arguments",
+              "id",
+              "name",
+              "type"
+            ],
+            "id": "pi_call_6",
+            "name": "write"
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 22,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_21",
+      "parentId": "pi_entry_20",
+      "message": {
+        "role": "toolResult",
+        "isError": false,
+        "toolCallId": "pi_call_6",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 23,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_22",
+      "parentId": "pi_entry_21",
+      "message": {
+        "role": "assistant",
+        "stopReason": "toolUse",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "toolCall",
+            "source_keys": [
+              "arguments",
+              "id",
+              "name",
+              "type"
+            ],
+            "id": "pi_call_7",
+            "name": "write"
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 24,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_23",
+      "parentId": "pi_entry_22",
+      "message": {
+        "role": "toolResult",
+        "isError": false,
+        "toolCallId": "pi_call_7",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 25,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_24",
+      "parentId": "pi_entry_23",
+      "message": {
+        "role": "assistant",
+        "stopReason": "toolUse",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "toolCall",
+            "source_keys": [
+              "arguments",
+              "id",
+              "name",
+              "type"
+            ],
+            "id": "pi_call_8",
+            "name": "write"
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 26,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_25",
+      "parentId": "pi_entry_24",
+      "message": {
+        "role": "toolResult",
+        "isError": false,
+        "toolCallId": "pi_call_8",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 27,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_26",
+      "parentId": "pi_entry_25",
+      "message": {
+        "role": "assistant",
+        "stopReason": "toolUse",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "toolCall",
+            "source_keys": [
+              "arguments",
+              "id",
+              "name",
+              "type"
+            ],
+            "id": "pi_call_9",
+            "name": "write"
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 28,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_27",
+      "parentId": "pi_entry_26",
+      "message": {
+        "role": "toolResult",
+        "isError": false,
+        "toolCallId": "pi_call_9",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 29,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_28",
+      "parentId": "pi_entry_27",
+      "message": {
+        "role": "assistant",
+        "stopReason": "toolUse",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "toolCall",
+            "source_keys": [
+              "arguments",
+              "id",
+              "name",
+              "type"
+            ],
+            "id": "pi_call_10",
+            "name": "write"
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 30,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_29",
+      "parentId": "pi_entry_28",
+      "message": {
+        "role": "toolResult",
+        "isError": false,
+        "toolCallId": "pi_call_10",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 31,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_30",
+      "parentId": "pi_entry_29",
+      "message": {
+        "role": "assistant",
+        "stopReason": "toolUse",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "toolCall",
+            "source_keys": [
+              "arguments",
+              "id",
+              "name",
+              "type"
+            ],
+            "id": "pi_call_11",
+            "name": "write"
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 32,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_31",
+      "parentId": "pi_entry_30",
+      "message": {
+        "role": "toolResult",
+        "isError": false,
+        "toolCallId": "pi_call_11",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 33,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_32",
+      "parentId": "pi_entry_31",
+      "message": {
+        "role": "assistant",
+        "stopReason": "toolUse",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "toolCall",
+            "source_keys": [
+              "arguments",
+              "id",
+              "name",
+              "type"
+            ],
+            "id": "pi_call_12",
+            "name": "write"
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 34,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_33",
+      "parentId": "pi_entry_32",
+      "message": {
+        "role": "toolResult",
+        "isError": false,
+        "toolCallId": "pi_call_12",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 35,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_34",
+      "parentId": "pi_entry_33",
+      "message": {
+        "role": "assistant",
+        "stopReason": "toolUse",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          },
+          {
+            "source_block_index": 1,
+            "type": "toolCall",
+            "source_keys": [
+              "arguments",
+              "id",
+              "name",
+              "type"
+            ],
+            "id": "pi_call_13",
+            "name": "write"
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 36,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_35",
+      "parentId": "pi_entry_34",
+      "message": {
+        "role": "toolResult",
+        "isError": false,
+        "toolCallId": "pi_call_13",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 37,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_36",
+      "parentId": "pi_entry_35",
+      "message": {
+        "role": "assistant",
+        "stopReason": "toolUse",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "thinking",
+            "source_keys": [
+              "thinking",
+              "thinkingSignature",
+              "type"
+            ]
+          },
+          {
+            "source_block_index": 1,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          },
+          {
+            "source_block_index": 2,
+            "type": "toolCall",
+            "source_keys": [
+              "arguments",
+              "id",
+              "name",
+              "type"
+            ],
+            "id": "pi_call_14",
+            "name": "bash"
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 38,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_37",
+      "parentId": "pi_entry_36",
+      "message": {
+        "role": "toolResult",
+        "isError": false,
+        "toolCallId": "pi_call_14",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 39,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_38",
+      "parentId": "pi_entry_37",
+      "message": {
+        "role": "assistant",
+        "stopReason": "toolUse",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "thinking",
+            "source_keys": [
+              "thinking",
+              "thinkingSignature",
+              "type"
+            ]
+          },
+          {
+            "source_block_index": 1,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          },
+          {
+            "source_block_index": 2,
+            "type": "toolCall",
+            "source_keys": [
+              "arguments",
+              "id",
+              "name",
+              "type"
+            ],
+            "id": "pi_call_15",
+            "name": "bash"
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 40,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_39",
+      "parentId": "pi_entry_38",
+      "message": {
+        "role": "toolResult",
+        "isError": false,
+        "toolCallId": "pi_call_15",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 41,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_40",
+      "parentId": "pi_entry_39",
+      "message": {
+        "role": "assistant",
+        "stopReason": "stop",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "thinking",
+            "source_keys": [
+              "thinking",
+              "thinkingSignature",
+              "type"
+            ]
+          },
+          {
+            "source_block_index": 1,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 42,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_41",
+      "parentId": "pi_entry_40",
+      "message": {
+        "role": "user",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 43,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_42",
+      "parentId": "pi_entry_41",
+      "message": {
+        "role": "assistant",
+        "stopReason": "aborted",
+        "content_structure": []
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 44,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_43",
+      "parentId": "pi_entry_40",
+      "message": {
+        "role": "user",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 45,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_44",
+      "parentId": "pi_entry_43",
+      "message": {
+        "role": "assistant",
+        "stopReason": "toolUse",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "thinking",
+            "source_keys": [
+              "thinking",
+              "thinkingSignature",
+              "type"
+            ]
+          },
+          {
+            "source_block_index": 1,
+            "type": "toolCall",
+            "source_keys": [
+              "arguments",
+              "id",
+              "name",
+              "type"
+            ],
+            "id": "pi_call_16",
+            "name": "read"
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 46,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_45",
+      "parentId": "pi_entry_44",
+      "message": {
+        "role": "toolResult",
+        "isError": false,
+        "toolCallId": "pi_call_16",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 47,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_46",
+      "parentId": "pi_entry_45",
+      "message": {
+        "role": "assistant",
+        "stopReason": "toolUse",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "thinking",
+            "source_keys": [
+              "thinking",
+              "thinkingSignature",
+              "type"
+            ]
+          },
+          {
+            "source_block_index": 1,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          },
+          {
+            "source_block_index": 2,
+            "type": "toolCall",
+            "source_keys": [
+              "arguments",
+              "id",
+              "name",
+              "type"
+            ],
+            "id": "pi_call_17",
+            "name": "bash"
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 48,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_47",
+      "parentId": "pi_entry_46",
+      "message": {
+        "role": "toolResult",
+        "isError": false,
+        "toolCallId": "pi_call_17",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 49,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_48",
+      "parentId": "pi_entry_47",
+      "message": {
+        "role": "assistant",
+        "stopReason": "toolUse",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "thinking",
+            "source_keys": [
+              "thinking",
+              "thinkingSignature",
+              "type"
+            ]
+          },
+          {
+            "source_block_index": 1,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          },
+          {
+            "source_block_index": 2,
+            "type": "toolCall",
+            "source_keys": [
+              "arguments",
+              "id",
+              "name",
+              "type"
+            ],
+            "id": "pi_call_18",
+            "name": "bash"
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 50,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_49",
+      "parentId": "pi_entry_48",
+      "message": {
+        "role": "toolResult",
+        "isError": false,
+        "toolCallId": "pi_call_18",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 51,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_50",
+      "parentId": "pi_entry_49",
+      "message": {
+        "role": "assistant",
+        "stopReason": "toolUse",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "thinking",
+            "source_keys": [
+              "thinking",
+              "thinkingSignature",
+              "type"
+            ]
+          },
+          {
+            "source_block_index": 1,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          },
+          {
+            "source_block_index": 2,
+            "type": "toolCall",
+            "source_keys": [
+              "arguments",
+              "id",
+              "name",
+              "type"
+            ],
+            "id": "pi_call_19",
+            "name": "edit"
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 52,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_51",
+      "parentId": "pi_entry_50",
+      "message": {
+        "role": "toolResult",
+        "isError": false,
+        "toolCallId": "pi_call_19",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 53,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_52",
+      "parentId": "pi_entry_51",
+      "message": {
+        "role": "assistant",
+        "stopReason": "toolUse",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "thinking",
+            "source_keys": [
+              "thinking",
+              "thinkingSignature",
+              "type"
+            ]
+          },
+          {
+            "source_block_index": 1,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          },
+          {
+            "source_block_index": 2,
+            "type": "toolCall",
+            "source_keys": [
+              "arguments",
+              "id",
+              "name",
+              "type"
+            ],
+            "id": "pi_call_20",
+            "name": "write"
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 54,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_53",
+      "parentId": "pi_entry_52",
+      "message": {
+        "role": "toolResult",
+        "isError": false,
+        "toolCallId": "pi_call_20",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 55,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_54",
+      "parentId": "pi_entry_53",
+      "message": {
+        "role": "assistant",
+        "stopReason": "toolUse",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "thinking",
+            "source_keys": [
+              "thinking",
+              "thinkingSignature",
+              "type"
+            ]
+          },
+          {
+            "source_block_index": 1,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          },
+          {
+            "source_block_index": 2,
+            "type": "toolCall",
+            "source_keys": [
+              "arguments",
+              "id",
+              "name",
+              "type"
+            ],
+            "id": "pi_call_21",
+            "name": "write"
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 56,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_55",
+      "parentId": "pi_entry_54",
+      "message": {
+        "role": "toolResult",
+        "isError": false,
+        "toolCallId": "pi_call_21",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 57,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_56",
+      "parentId": "pi_entry_55",
+      "message": {
+        "role": "assistant",
+        "stopReason": "toolUse",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "thinking",
+            "source_keys": [
+              "thinking",
+              "thinkingSignature",
+              "type"
+            ]
+          },
+          {
+            "source_block_index": 1,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          },
+          {
+            "source_block_index": 2,
+            "type": "toolCall",
+            "source_keys": [
+              "arguments",
+              "id",
+              "name",
+              "type"
+            ],
+            "id": "pi_call_22",
+            "name": "write"
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 58,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_57",
+      "parentId": "pi_entry_56",
+      "message": {
+        "role": "toolResult",
+        "isError": false,
+        "toolCallId": "pi_call_22",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 59,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_58",
+      "parentId": "pi_entry_57",
+      "message": {
+        "role": "assistant",
+        "stopReason": "toolUse",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          },
+          {
+            "source_block_index": 1,
+            "type": "toolCall",
+            "source_keys": [
+              "arguments",
+              "id",
+              "name",
+              "type"
+            ],
+            "id": "pi_call_23",
+            "name": "bash"
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 60,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_59",
+      "parentId": "pi_entry_58",
+      "message": {
+        "role": "toolResult",
+        "isError": false,
+        "toolCallId": "pi_call_23",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 61,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_60",
+      "parentId": "pi_entry_59",
+      "message": {
+        "role": "assistant",
+        "stopReason": "toolUse",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "thinking",
+            "source_keys": [
+              "thinking",
+              "thinkingSignature",
+              "type"
+            ]
+          },
+          {
+            "source_block_index": 1,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          },
+          {
+            "source_block_index": 2,
+            "type": "toolCall",
+            "source_keys": [
+              "arguments",
+              "id",
+              "name",
+              "type"
+            ],
+            "id": "pi_call_24",
+            "name": "bash"
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 62,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_61",
+      "parentId": "pi_entry_60",
+      "message": {
+        "role": "toolResult",
+        "isError": false,
+        "toolCallId": "pi_call_24",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 63,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_62",
+      "parentId": "pi_entry_61",
+      "message": {
+        "role": "assistant",
+        "stopReason": "toolUse",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "toolCall",
+            "source_keys": [
+              "arguments",
+              "id",
+              "name",
+              "type"
+            ],
+            "id": "pi_call_25",
+            "name": "bash"
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 64,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_63",
+      "parentId": "pi_entry_62",
+      "message": {
+        "role": "toolResult",
+        "isError": false,
+        "toolCallId": "pi_call_25",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 65,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_64",
+      "parentId": "pi_entry_63",
+      "message": {
+        "role": "assistant",
+        "stopReason": "toolUse",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "toolCall",
+            "source_keys": [
+              "arguments",
+              "id",
+              "name",
+              "type"
+            ],
+            "id": "pi_call_26",
+            "name": "bash"
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 66,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_65",
+      "parentId": "pi_entry_64",
+      "message": {
+        "role": "toolResult",
+        "isError": false,
+        "toolCallId": "pi_call_26",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 67,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_66",
+      "parentId": "pi_entry_65",
+      "message": {
+        "role": "assistant",
+        "stopReason": "toolUse",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "thinking",
+            "source_keys": [
+              "thinking",
+              "thinkingSignature",
+              "type"
+            ]
+          },
+          {
+            "source_block_index": 1,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          },
+          {
+            "source_block_index": 2,
+            "type": "toolCall",
+            "source_keys": [
+              "arguments",
+              "id",
+              "name",
+              "type"
+            ],
+            "id": "pi_call_27",
+            "name": "bash"
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 68,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_67",
+      "parentId": "pi_entry_66",
+      "message": {
+        "role": "toolResult",
+        "isError": false,
+        "toolCallId": "pi_call_27",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 69,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_68",
+      "parentId": "pi_entry_67",
+      "message": {
+        "role": "assistant",
+        "stopReason": "toolUse",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "thinking",
+            "source_keys": [
+              "thinking",
+              "thinkingSignature",
+              "type"
+            ]
+          },
+          {
+            "source_block_index": 1,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          },
+          {
+            "source_block_index": 2,
+            "type": "toolCall",
+            "source_keys": [
+              "arguments",
+              "id",
+              "name",
+              "type"
+            ],
+            "id": "pi_call_28",
+            "name": "bash"
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 70,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_69",
+      "parentId": "pi_entry_68",
+      "message": {
+        "role": "toolResult",
+        "isError": false,
+        "toolCallId": "pi_call_28",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 71,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_70",
+      "parentId": "pi_entry_69",
+      "message": {
+        "role": "assistant",
+        "stopReason": "toolUse",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "thinking",
+            "source_keys": [
+              "thinking",
+              "thinkingSignature",
+              "type"
+            ]
+          },
+          {
+            "source_block_index": 1,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          },
+          {
+            "source_block_index": 2,
+            "type": "toolCall",
+            "source_keys": [
+              "arguments",
+              "id",
+              "name",
+              "type"
+            ],
+            "id": "pi_call_29",
+            "name": "bash"
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 72,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_71",
+      "parentId": "pi_entry_70",
+      "message": {
+        "role": "toolResult",
+        "isError": false,
+        "toolCallId": "pi_call_29",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "source_14",
+      "source_line": 73,
+      "type": "message",
+      "source_keys": [
+        "id",
+        "message",
+        "parentId",
+        "timestamp",
+        "type"
+      ],
+      "id": "pi_entry_72",
+      "parentId": "pi_entry_71",
+      "message": {
+        "role": "assistant",
+        "stopReason": "stop",
+        "content_structure": [
+          {
+            "source_block_index": 0,
+            "type": "text",
+            "source_keys": [
+              "text",
+              "type"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -5,7 +5,8 @@ session and owns all session policy; an **envagent** runs on each machine where 
 execute and dials back to the server; a **web frontend** is one transport onto the
 server.
 
-Start with [architecture.md](architecture.md). Everything else defers to it. Cross-cutting
+Start with [architecture.md](architecture.md) for identity and authority, then
+[unified-trace-foundation.md](unified-trace-foundation.md) for the trace model. Cross-cutting
 decisions are recorded in [ADR-0001](adr/0001-foundation-semantics.md) and the ADRs listed
 below; implementation work is ordered by [roadmap.md](roadmap.md).
 
@@ -28,9 +29,13 @@ below; implementation work is ordered by [roadmap.md](roadmap.md).
    identity, authority, AFK, and the security gate.
 2. **[environments.md](environments.md)** — the envagent wire protocol, spooling,
    pairing, and how SSH and sandbox environments come to exist.
-3. **[session-protocol.md](session-protocol.md)** — the adapter contract: one event
-   vocabulary, three modes, capability facets, requests, delegated trajectories.
-4. **[agents.md](agents.md)** — per-vendor knowledge for `claude`, `codex`, `pi`.
+3. **[unified-trace-foundation.md](unified-trace-foundation.md)** — trace objects,
+   ownership, delivery, history/context, measurements and evidence resolution.
+4. **[unified-trace-storage.md](unified-trace-storage.md)** — capture, durable receipts,
+   reduction, publication, snapshots and bounded query protocol.
+5. **[session-protocol.md](session-protocol.md)** and **[agents.md](agents.md)** —
+   process control, capability facets and vendor acquisition; trace mappings live in
+   the three dedicated adapter specs below.
 
 Then, by subject:
 
@@ -38,12 +43,19 @@ Then, by subject:
 | --- | --- |
 | What is built, what is next | [roadmap.md](roadmap.md) |
 | System design, session model, identity, authority | [architecture.md](architecture.md) |
+| Unified trace meanings, identities, delivery, runtime work and history/context | [unified-trace-foundation.md](unified-trace-foundation.md) |
+| Trace evidence storage, atomic publication and bounded read API | [unified-trace-storage.md](unified-trace-storage.md) |
+| Codex trace capture and semantic mapping | [unified-trace-codex.md](unified-trace-codex.md) |
+| Claude Code trace capture and semantic mapping | [unified-trace-claude.md](unified-trace-claude.md) |
+| Pi trace capture and semantic mapping | [unified-trace-pi.md](unified-trace-pi.md) |
+| Trace reader, navigation, interaction and accessibility | [unified-trace-ui.md](unified-trace-ui.md) |
+| Trace evidence corpus and falsifiable implementation acceptance | [unified-trace-conformance.md](unified-trace-conformance.md) |
 | Where a session's work runs, and the wire to it | [environments.md](environments.md) |
 | What an adapter may send, and when | [session-protocol.md](session-protocol.md) |
 | A vendor CLI's shapes, quirks, and control surface | [agents.md](agents.md) |
 | Endpoint contracts | [api/](api/README.md) |
 | Tables, indexes, ancestry | [database-schema.md](database-schema.md) |
-| How history is kept, replayed, pruned | [storage.md](storage.md) |
+| Storage routing and retained source-comment anchors | [storage.md](storage.md) |
 | How the frontend is built | [frontend-architecture.md](frontend-architecture.md) |
 | Panes, surfaces, components, tokens | [ui-layout.md](ui-layout.md) |
 | Where files live, what a setting does | [configuration.md](configuration.md) |

@@ -7,11 +7,14 @@ resource, searched rather than read end to end.
 | --- | --- |
 | Health, diagnostics, identity, environments, agents, workspaces | [environments.md](environments.md) |
 | Sessions, turns, the event stream, links, requests, lineage, search | [sessions.md](sessions.md) |
+| Unified trace objects, history, snapshots, payloads and search | [../unified-trace-storage.md](../unified-trace-storage.md#read-protocol) |
 | Files, attachments, machine-level browsing | [files.md](files.md) |
 | Error shape, authentication, capability filtering | [admin.md](admin.md) |
 
 `docs/api-v1.openapi.json` is the generated machine-readable snapshot and may lag; these
-files are the evolving contract.
+files are the evolving contract. The unified trace read protocol replaces the former
+turn/block/execution-node reads; their old routes are implementation context until the
+replacement lands, not a compatibility API promise.
 
 ## Conventions
 

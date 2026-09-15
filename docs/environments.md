@@ -1,5 +1,11 @@
 # Environments
 
+For trace transport, [unified-trace-storage.md](unified-trace-storage.md#capture-contract)
+replaces normalized event delivery with durable source capture and pure server mapping.
+The topology, pairing, grants, framing bounds and envagent-owned filesystem policies in
+this document remain authoritative. Existing message/trait spellings below are current
+implementation context where the target capture contract replaces them.
+
 Where a session's work runs, and the wire between there and the server.
 
 One authoritative record on the server; agents execute wherever an **envagent** is
@@ -184,30 +190,15 @@ closing a laptop lid, switching Wi-Fi, and a sandbox auto-pausing on idle.
 
 ### Overflow is a fact in the record
 
-Stopping the agent bounds the damage without describing it, so overflow records
-`close_reason = spool_full` on the turn (`docs/session-protocol.md` § Outcomes), and the
-trajectories the sweep closes carry `abandoned`: the vendor reported no failure, and
-`abandoned` already means "nobody reported an outcome" while staying non-final. A reader
-asking whether anything is missing gets the answer from the record rather than from a log
-on another machine.
+Overflow bounds and reports capture loss; it cannot manufacture a vendor outcome.
+The envagent applies spool backpressure and the actual controlled-process stop policy,
+retaining diagnostic capacity and a named source gap. It cannot claim to stop a native
+agent it only observes. Parent loss does not close independent children/resources.
 
-The reason comes from the closed `CloseReason` set rather than a string this section
-invents, because a dropped connection produces the same shape one layer over
-(`link_lost`).
-
-Stopping the agent is what the envagent must do: a reader loop that exits while the agent
-keeps producing converts a bounded gap into an unbounded one. The vendor's own store
-still holds what the spool refused, so recovery is `adopt` on that session — the same
-mechanism that brings in any native history, and a property of the reason rather than of
-this condition, since `spool_full`, `link_lost`, `agent_exited`, and `grant_revoked` all
-leave the vendor's store ahead of Sylph's.
-
-The spool maintains its capacity counter with insert/delete triggers in the same
-transaction as queue mutations. An append reads one counter, never a sum over the entire
-backlog: network backpressure must not make every subsequent enqueue more expensive.
-The collapsed schema in `crates/envagent/migrations/spool/` is checksum-validated at open,
-so schema churn requires discarding the development spool rather than silently mixing
-old rows with new counters. Producer sequence allocation and enqueue remain atomic.
+[unified-trace-storage.md](unified-trace-storage.md#admission-and-acknowledgments)
+owns overflow, receipt and recovery behavior. The spool's accounting and enqueue/sequence
+allocation remain transactional, so growing backlog does not turn each enqueue into a
+full-table scan.
 
 ### Moving the spool means checkpoint-then-rename
 
@@ -414,68 +405,20 @@ user never associated with Sylph.
 
 ### Re-reading a session Sylph already holds
 
-A session adopted from a terminal keeps growing in the vendor's store after the one pass
-that brought it in. **Re-read** is that pass again, on demand, for a session that already
-has a row: the adapter parses the native store from the beginning and the server ingests
-only what its journal does not already hold.
+Reread captures another verified pass through the native source inventory. It shares
+source reservations with active followers and uses immutable SourcePosition plus the
+current admission epoch to recognize already retained occurrences. Repeated identical
+messages at distinct positions survive; projected-content hashes never suppress them.
 
-The pass is a disk-backed, ordered message transfer. Commands return an opaque transfer
-handle and byte length; the server reads bounded chunks and drains records, user-input
-facts, and events in their original order. A single large record may span chunks. Uploads
-for retained re-projection use the same framing in the other direction. Transfer handles
-are scoped to their session, expire, and are released after use; incomplete transfers
-never publish a replacement projection. The transport frame limit is not a history-size
-limit.
+Capture, incomplete tails, rewrite generations, sidecars and chunk budgets follow
+[unified-trace-storage.md](unified-trace-storage.md#source-identity-and-generations).
+A pass reports examined occurrences/bytes, new versus already retained occurrences,
+source gaps and its admitted cut. Zero new content is distinct from a failed scan.
 
-It is one pass and nothing else. It does not start a follower, does not change what
-`adopt` does, and does not touch the session's `fidelity` — a record's resolution is a
-property of the source that wrote it, so re-reading the same store cannot raise or lower
-it. `watch` remains the way to follow a session continuously.
-
-**A re-read is bounded by what the journal already holds, not by what the vendor emits.**
-The adapter has no cursor to resume from: `Adapter::adopt` restarts at the beginning of
-the store, so the second pass re-emits every record of the first. Suppression is therefore
-the server's, and it happens at ingest.
-
-**Raw identity and projected-event identity answer different questions.** All three
-adapters emit native records, keyed by `(session, source, version)`. Projected events
-still use content identity when the source supplies no durable per-event identifier or
-the live source version is process-local. A re-read digests each incoming event over the
-fields that decide what a reader sees, and skips one whose digest a previous pass already
-journaled for that session. The digest is per session and covers both tiers, because a
-turn's events live in whichever tier consolidation last left them.
-
-**Two events may legitimately be identical**, and this is the cost the design accepts
-knowingly: a vendor that wrote the same text twice in one session has a second record that
-is indistinguishable from a replay of the first. Suppressing it loses one repeated line;
-admitting it duplicates the entire transcript on every click. The transcript is the record
-being protected, so the digest wins, and the count of what a pass suppressed is reported
-rather than silent.
-
-**A turn's opening bracket is the one event content identity cannot answer for, so the
-stream decides it.** A `turn`/`started` is ephemeral and carries no `stream_id`, so it
-reaches the journal and no further: the history fold has nothing to key a block on, and
-the fold then deletes the journal rows it read. Once a turn is consolidated its opener is
-in neither tier, and no digest can recognize it on a later pass.
-
-The two obvious answers fail in opposite directions. Re-ingesting it grows the journal by
-a dead row per click, invisibly, because every reader-facing query filters to stable rows.
-Suppressing it whenever no container is open swallows a genuinely appended turn's bracket
-too — which loses no content, since any event arriving with no container open opens one,
-so no turn count can observe it. What it loses is the *start*: the container opens at the
-next event's stamp, so the turn silently begins late and any duration read from it
-measures the wrong interval.
-
-So an opener is **held aside and resolved by what follows it**: written once a following
-event proves unheld, and dropped when everything after it is already held. A dropped
-opener is reported as examined, and as already held only where the pass can actually
-establish that — which is what keeps the endpoint's counts from summing to a number
-nobody measured (`docs/api/sessions.md` § `POST /api/v1/sessions/{id}/reread`).
-
-**A pass that finds nothing new is a success, and says so.** "Ingested nothing" and "could
-not read the store" are the same shape in a journal and opposite facts, so a re-read
-reports what it examined, what it added, and what it recognized as already held. A
-re-read whose store is gone is a failure with its own status, never a quiet no-op.
+Reread does not start a vendor execution or infer current selected history from mtime.
+Re-projection is a separate pure server job over admitted evidence, so it does not need
+a reachable envagent or a present native source. Atomic generation publication follows
+[unified-trace-storage.md](unified-trace-storage.md#generation-publication).
 
 ## Health is per environment
 

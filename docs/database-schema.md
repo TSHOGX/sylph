@@ -1,181 +1,58 @@
 # Database Schema
 
-**This file covers `journal.db`** — the hot tier, holding sessions, turns, and the events
-of turns still in flight. It states the shape and the reasoning; the DDL itself lives in
-`crates/server/migrations/journal/`, applied by `sqlx::migrate!` at startup.
-
-One authoritative record is split across workload-specific stores for SQLite's sake rather than as a
-data-model choice (`docs/storage.md` § Workloads and database boundaries): `journal.db` here, `history.db` for
-consolidated blocks and the full-text index, `native.db` for native records, and `blobs/` beside them.
-**`docs/storage.md` owns the other stores**, because their tables only make sense alongside
-the consolidation and retention rules that write them.
-
-WAL mode, for concurrent readers against a live writer.
+[unified-trace-storage.md](unified-trace-storage.md#logical-tables-and-constraints)
+owns the replacement table families, keys, transactions and indexes. Operational Session
+and authorization schema belongs to the control store; trace objects belong to versioned
+projections over immutable evidence. The initial schema changes in place, with no migration
+or legacy reader. Current DDL still describes the previous implementation; the gap lives
+in [roadmap.md](roadmap.md#unified-trace-foundation-review).
 
 ## Identity in the schema
 
-`(environment, agent, native_id)` is a session's identity and its primary key — three
-columns, so each is queryable, with a composite key so the triple is the row. There is no
-Sylph-minted id (`docs/architecture.md` § Identity), so a row exists only once an agent has
-assigned the session an id, which is why `POST /sessions` starts an agent rather than
-reserving a row.
+Public Session identity is the native triple. Trace AgentRefs additionally address real
+embedded child identities without minting a public Session. Object keys retain native
+namespace or deterministic source occurrence scope, and equivalence is proved rather
+than inferred. The complete key algebra is
+[unified-trace-foundation.md](unified-trace-foundation.md#identity-and-reference-resolution).
 
-A composite key rather than one encoded text column, because every listing filters on
-`environment` and most group by `workdir` within it. The encoded form
-(`<env>:<agent>:<native>`, no `/`) exists for a URL path segment and for ancestry
-references, not as the storage shape.
-
-**Every child table in the journal carries the triple, not a surrogate.** A surrogate key
-on `sessions` would have to be generated, which reintroduces the second id space identity
-deletes — and with it the comparison that is silently always false. Three columns that
-cannot disagree with the parent beat one that can.
-
-**That rule stops at the database boundary, and `history.db` therefore keeps a
-single-column encoded `session_id`.** A foreign key names a table in its own database, so
-a cross-database reference is accepted at `CREATE TABLE` and fails at runtime — verified
-2026-08-28: declaring `REFERENCES sessions(environment, agent, native_id)` from a table in
-an attached `history` database creates cleanly, and the first insert answers `no such
-table: history.sessions`. `PRAGMA foreign_key_check` reports nothing, so the declaration
-reads as enforced while enforcing nothing. Since the constraint cannot exist across the
-split, three columns there would be three chances to disagree with no parent to check them
-against. The encode boundary sits at the journal↔history calls, which a `SessionId` type
-makes explicit.
+Same-database constraints enforce resolved relationships. Cross-database references
+use typed manifests, not foreign keys SQLite cannot enforce. See
+[unified-trace-storage.md](unified-trace-storage.md#logical-tables-and-constraints).
 
 ## sessions
 
-Holds `workdir`, `title`, `inject_identity`, `fidelity`, `status` (`idle` | `running`),
-ancestry, and timestamps. Indexed by recency, and by `(environment, workdir)` for
-grouping.
+The control store holds native identity, working-directory provenance, title, identity
+injection and reachability/policy metadata. A session has no creator-based class and
+cannot change native identity. `inject_identity` stays immutable after creation.
+AgentThread execution, coverage and history selection are trace facts, not overloaded
+session row state. The store has no event-count-derived identity allocator.
 
-- `environment` is the opaque id minted at pairing, never a hostname.
-- `inject_identity` is settable at creation and **refused afterwards**: a transcript
-  records what produced it, so rewriting the flag would rewrite what the stored history
-  means.
-- `fidelity` is `stream` | `blocks` | `messages`, a property of the record rather than of
-  who started the session. A renderer reads it to decide whether it may draw a duration.
-- `next_event_seq` is the durable next event sequence for the session. An event-insert
-  trigger advances it monotonically in the same transaction as every journal append,
-  including a batch or a producer receipt. Consolidation and retention do not lower it.
-  Allocators and startup repair read this field instead of deriving a cursor from rows
-  that may already have moved to history. In-memory reservations may raise a producer's
-  allocation floor further; a failed write never authorizes reusing a reservation.
-
-**There is no session class and no incarnation table** (`docs/architecture.md` § One class
-of session). Nothing records who started a session, and nothing may replace a session's
-native id — that id is part of the primary key, so a mid-life reset would change the row's
-identity.
-
-Ancestry is an explicit edge table rather than a column, because delegation and fork are
-two relationships and one column would need the row it points at to disambiguate them. A
-delegation folds into its parent as a count; a **fork** replays its origin's entire prefix
-and continues past it, so the two share every early user turn and read as one conversation
-resumed. A listing must not show them under one label. Events stay under the session that
-owns them, so a trace reader joins the edge table rather than copying a child transcript
-into its parent. Self-edges are rejected by the protocol type.
-
-**Where a native record carries both a parent and a fork origin, the parent wins.** A
-delegate may name the origin it was branched from, so the two pointers coexist and only the
-parent describes how the session came to exist. An adapter resolving this the other way
-produces a `fork` edge for a real delegation, which reads as a plausible tree.
+[architecture.md](architecture.md) owns public identity and policy;
+[unified-trace-foundation.md](unified-trace-foundation.md) owns embedded agents and trace
+relationships. Spawn, fork, context lineage and current selected head are separate.
 
 ## turns
 
-A turn's status is one of `queued`, `starting`, `running`, `stopping`, `settling`,
-`completed`, `failed`, `cancelled`, `interrupted`, with these transitions:
-
-- `queued` → `starting` → `running` → `settling` → `completed` / `failed` / `cancelled`
-- `running` → `stopping` → `settling` → `cancelled`
-- any in-flight status, `settling` included → `interrupted` (on service restart)
-
-**There is no per-turn exit code**, because an adapter is long-lived and a turn is a
-message on its link. A turn's outcome arrives as an event and is recorded in `status` with
-`error_code` / `error_message`; nothing reads a process exit.
-
-`close_reason` answers a different question from `status`: the status says what the record
-became, the reason says what cut it short (`docs/session-protocol.md` § Outcomes). It is
-`NULL` exactly when a turn ran to its own end, and required whenever one stopped short — a
-turn that ends early with no reason is indistinguishable from one that finished. Its
-`CHECK` rejects status names, including `abandoned`, which keeps a reason from restating
-its own status and keeps `abandoned` at the level that has it: a trajectory outcome, never
-a `turns.status`.
-
-`idempotency_key` is nullable, so a turn the server originates carries none while the
-uniqueness constraint over `(session triple, idempotency_key)` still de-duplicates every
-client retry. `command_invocation_id` links a turn to an agent command rather than to typed
-text. A partial index covers exactly the in-flight statuses, which is the query restart
-reconciliation runs.
-
-`origin` distinguishes a turn a user dispatched from one **the agent started itself**. An
-agent turn is a real turn — it consolidates, orders by sequence, and appears in the
-transcript where it happened — and its `request_text` is empty, which would otherwise be
-indistinguishable from a user sending nothing. It is load-bearing in the supervisor too: an
-agent turn never had a waiter, so `settle_turn` uses `origin` to tell "no waiter, because
-there never was one" from "no waiter, because a deliberate stop already claimed it".
-Conflating those reported a user's stop as `LINK_LOST`.
+The former row combining queued request text and execution outcome is replaced by
+immutable command/message revisions, Delivery attempts and native Activation objects.
+Queued/starting/stopping control state does not fabricate an execution boundary.
+See [unified-trace-foundation.md](unified-trace-foundation.md#messages-deliveries-and-model-visibility)
+and [the operational outbox](unified-trace-storage.md#operational-facts-use-an-outbox).
 
 ### A terminal status means the record is finished
 
-**`settling` is what makes the four terminal statuses worth acting on.** A turn passes
-through it holding a known outcome and an unfinished record: the settle sweep still has to
-close whatever trajectories the turn left open, journal them, and flush the writer's
-buffered deltas. Only then does the status become terminal.
-
-So a client that reads `completed` may refetch history and find everything — no grace
-period, no waiting to see whether more arrives, no second signal to correlate. That is a
-guarantee about this column, and `settling` is the only reason it can be one.
-
-It replaced a single write placed *before* the sweep, which made `status` answer two
-questions at once — *what did this turn produce* and *is its record finished* — with no
-field that could separate them. Every reader in that window saw a terminal turn over a
-partial record and had no way to know it. Measured on the wire: a client ended its claim
-there, tore down the stream before the sweep's own events arrived, and refetched a journal
-the sweep had not written; a delegation the server had closed rendered as running forever.
-At natural speed the sweep usually won, so the failure presented as one test in three
-flaking on a *different* assertion each run.
-
-`crate::supervisor::TurnCloser::close` owns the ordering and
-`a_terminal_turn_always_has_its_trajectories_closed` pins it. The cost is that a crash
-between the two writes leaves a turn whose outcome is known and unrecorded; the restart
-sweep reports it `interrupted`, keeping the end time the claim stamped.
+This former guarantee is superseded. A terminal Activation describes the execution's own
+outcome. Late history, child results and sidecars may still arrive. Evidence admission,
+projection/search progress and observation coverage explicitly describe record completeness.
+See [unified-trace-foundation.md](unified-trace-foundation.md#independent-lifecycle-claims).
 
 ## events
 
-One append-only stream per session, carrying `kind`, `phase`, `stream_id`, `span`,
-`interior_state`, text, a JSON payload, an error flag, `stability`, `source`, and three
-time axes. Indexed by session sequence, by turn, and by `span`.
-`archive_revision` advances on every in-place row update. Consolidation captures it with
-the row id and deletes only that published version; an appended event or a corrected
-trajectory cannot be evicted by an older archive snapshot.
-
-**`kind` carries no CHECK, deliberately.** A closed list is a promise to break on the next
-adapter that adds a kind, and the breakage is silent in the worst way: the insert fails
-while the sequence number is already consumed and the event has already reached live
-clients, so a turn streams correctly and comes back empty on reload. Kinds are additive
-(`docs/session-protocol.md`), so validation belongs at the wire boundary where an unknown
-kind can be *reported* rather than at the storage layer where it can only be dropped.
-
-**`source` stays a closed set**, unlike `kind`, because it has exactly two producers —
-`agent` and `server` — and a third would be a design change rather than an adapter's
-choice.
-
-`span` is which delegated trajectory an event ran in; NULL means the root turn. Nullable
-rather than `''`, because absent and "the root" are the same fact. That one pointer
-expresses a subagent, a nested subagent, and a workflow's parallel phases, since those
-differ only in the shape of the resulting tree, and its index is what keeps focus mode and
-single-subtree replay from scanning the session. `docs/session-protocol.md` § Delegated
-trajectories is authoritative.
-
-`ephemeral` events (`started`, `delta`) and `stable` events are both journalled;
-consolidation folds their stream timing and complete text into history. **`stability` has one derivation, the column** — `StreamEvent::is_stable()`
-reads the field rather than recomputing it from `phase`. The two were equivalent until
-`subagent` became stable at *every* phase for structural reasons, after which the method
-disagreed with the field beside it and a trajectory's `started` was silently not
-journalled, flattening every delegated subtree on reload.
-
-Uniqueness of `seq` within a session is what makes SSE resume-by-sequence safe: a replayed
-frame cannot be journalled twice. `seq` is per session rather than per turn, so ordering is
-by sequence rather than by timestamp — two events written in the same millisecond still
-have one defined order.
+The kind/phase/span journal is replaced by immutable capture occurrences and typed
+semantic claims. Producer receipt, source position, archive admission and query change
+revision are separate axes. Sealed message content, operation return and child completion
+cannot share one phase column. Table constraints and typed missing/conflicting references
+are specified in [unified-trace-storage.md](unified-trace-storage.md#logical-tables-and-constraints).
 
 ## pending_requests
 
@@ -245,52 +122,24 @@ five properties: environment scope, capability, expiry, single consumption, and 
 provenance. Scope is stored rather than inferred from the redeeming connection, so a grant
 asserts only over the environment that issued it.
 
-**Event receipts** are the durable deduplication boundary for envagent delivery.
-`producer_seq` is allocated and spooled on the environment; `server_seq` is allocated by the
-server in the same transaction that inserts the canonical event. A payload hash makes reuse
-of a producer sequence with different bytes a hard error rather than a second
-interpretation of one event. `env_producer_cursors` holds the contiguous acknowledged
-prefix per environment and producer. The receipt insert trigger advances only across the
-newly contiguous suffix, in the same transaction; a duplicate or rollback cannot advance
-it, and a gap never becomes an acknowledgement. Reads seek this cursor rather than
-loading and sorting the producer's entire receipt history for every incoming frame.
+**Evidence receipts** deduplicate the complete producer/epoch/sequence identity and
+commit with evidence admission, before semantic mapping. Source occurrence and retention
+authorization epoch are independent keys. The replacement transaction and collision
+rules are [the evidence admission contract](unified-trace-storage.md#admission-and-acknowledgments).
 
 ## Search lives beside history.db
 
-Full-text search is one FTS5 table beside `history.db`, over the same rows the timeline
-renders. Native history is parsed by an adapter into the same events a live turn emits, so
-it is indexed by the same table.
-
-That is what makes coverage statable as a contract: **everything the server holds is
-searchable**, including sessions read out of an agent's native files, whether or not the
-environment that produced them is still reachable. `docs/storage.md` owns the table, why it
-cannot be an external-content index, and the `jieba` tokenizer that makes Chinese
-searchable.
-
-Two rules about reading any store that is not this one:
-
-**Never query another component's tables.** The vendors' native stores are read through the
-agent module that owns that vendor (`docs/agents.md`), never with SQL or ad-hoc file
-parsing elsewhere.
-
-**A path filter must be a path match, not a substring match.** Compiling one to
-`LIKE '%' || ? || '%'` answers `/w/app-old`, and everything beneath it, when asked for
-`/w/app`. Anything meaning "this one directory" compares for equality after normalizing
-trailing separators — `sylph_protocol::normalize_workdir` is that comparison, shared so the
-adapters and the server cannot disagree.
-
-The same shape starves a paged scan: a parent's pattern matches every path beneath it, and
-those sort by recency rather than by depth, so a directory's own first exact match can land
-a thousand rows in and an early page cap reports it empty. **Bound such a scan in rows
-examined, not pages.**
+Search moves to its own generation/checkpoint store so tokenization cannot delay evidence
+acknowledgments. It reports coverage and lag, applies current grants, and pins corresponding
+trace membership/body revisions. [unified-trace-storage.md](unified-trace-storage.md#search-consistency)
+owns this contract. Native stores are read only by their capture adapter; directory scopes
+remain canonical exact path/containment matches, never substring matches.
 
 ## Schema evolution
 
-Numbered SQL files, one directory per database, applied by `sqlx::migrate!` at startup:
-`crates/server/migrations/journal/` for the journal,
-`crates/server/migrations/history/` for history, and `crates/server/migrations/native/`
-for native records. **Each currently holds exactly one file**, `001_initial_schema.sql`, and that
-is the intended steady state rather than a stage the project has not yet grown out of.
+Each replacement database has a single initial schema applied at open. Runtime checks
+validate its schema/build rather than accumulating a migration chain. The exact target
+layout is in [unified-trace-storage.md](unified-trace-storage.md#authority-and-database-boundaries).
 
 **Schemas change in place.** The store is disposable: a build that cannot read one refuses
 to start and names it, and the answer is to discard `data/` and re-adopt from the vendors'
@@ -308,8 +157,8 @@ table already exists, so something is wrong" into a silent success over a schema
 be missing every column added since — which is the class of defect `AGENTS.md` § Where
 Design Rules Live opens with, a plausible result in place of an error.
 
-Attachments and commands need no table of their own: attachments are staged on disk under
-the data directory, and a command invocation is a column on `turns`.
+Attachments use immutable payload references; accepted command revisions and evidence
+export use the operational outbox. A turn row is not their shared container.
 
 **`/api/v1/health` reports `MAX(version)` from `_sqlx_migrations`, never a stored key**, and
 the test reads the highest filename prefix out of the journal's migration directory rather
@@ -325,16 +174,13 @@ tests rather than at compile time, which is why those tests matter.
 
 ## Execution nodes
 
-The journal owns the reconstructable execution projection described in
-`docs/storage.md` § Execution node projection. Node identifiers are projection addresses
-within a session, not session identifiers. Parent/order and parent/revision indexes
-bound child pagination and incremental reads. Node rows survive event consolidation;
-original journal and history records retain the bodies.
+Promoted block-derived execution nodes are replaced by independently typed agents,
+activations, operations and resources. Query projections index those objects without
+becoming their identities. See [unified-trace-storage.md](unified-trace-storage.md#logical-tables-and-constraints).
 
 ## Conversation reading addresses
 
-The journal also owns `conversation_entries`, `conversation_work` and
-`conversation_removals`. These tables are rebuildable address and summary projections
-with no original event bodies. Their ownership and update rules are described in
-`docs/storage.md` § Conversation reading projection. Schema changes occur in the
-initial schema; no alternate reader or migration preserves an obsolete spelling.
+Every issued semantic reference remains resolvable across verified identity reconciliation.
+Temporal summaries pin order, membership and immutable payload revisions under a reusable
+view lease. [unified-trace-storage.md](unified-trace-storage.md#snapshot-pages-and-live-changes)
+owns the address and cursor contract.

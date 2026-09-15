@@ -1,0 +1,139 @@
+{
+  "format": "sylph.native-structure-inventory.v1",
+  "captured_on": "2026-09-15",
+  "artifacts": [
+    {
+      "path": "claude-structure.json",
+      "sha256": "d00b7e2f91ea8453fe103fbd154ccd1a4661a95819522c79a0aa6055eaacf4c8",
+      "byte_length": 47385
+    },
+    {
+      "path": "pi-branch-structure.json",
+      "sha256": "9b5561c424d65affb380c72c6e11fda15e4500a484c0c45491fc77feef07495b",
+      "byte_length": 52118
+    }
+  ],
+  "sources": [
+    {
+      "source_id": "source_1",
+      "locator": "fixtures/native/claude/ordinary-turn-session-start.jsonl",
+      "sha256": "f057c439401398739a46f626ae3fb06b980d1de311a6fa233d8f57947a5cf23e",
+      "byte_length": 29412,
+      "line_count": 12
+    },
+    {
+      "source_id": "source_2",
+      "locator": "fixtures/native/claude/injected-boilerplate-slash-command.jsonl",
+      "sha256": "a9346f97a580208c4b1310ba37501a8d6f31adb1dbc0b88e867890aa8b6bce88",
+      "byte_length": 4723,
+      "line_count": 7
+    },
+    {
+      "source_id": "source_3",
+      "locator": "fixtures/native/claude/delegation-task-fanout-nested.jsonl",
+      "sha256": "109678ac6c42cd755626a1edbff241f0d9081ba356e846a9aa131f9fe8857dae",
+      "byte_length": 150861,
+      "line_count": 21
+    },
+    {
+      "source_id": "source_4",
+      "locator": "fixtures/native/claude/compaction-boundary.jsonl",
+      "sha256": "cc5be135b00af5d65cb1431bdc4829457372d1d870824e1335f9e722d642197d",
+      "byte_length": 30924,
+      "line_count": 7
+    },
+    {
+      "source_id": "source_5",
+      "locator": "fixtures/native/claude/fork-replay-messageuuid-mirrors-own-uuid.jsonl",
+      "sha256": "5034b48b0870a625271e74dd5594de8e7d27abe679fc0171c8e026af8ab74551",
+      "byte_length": 13155,
+      "line_count": 15
+    },
+    {
+      "source_id": "source_6",
+      "locator": "fixtures/native/claude/user-interrupt.jsonl",
+      "sha256": "0d71687501e427ca13c1f2c66b699e25d3b657996dca4ba22e3c2f0bf72acb89",
+      "byte_length": 89123,
+      "line_count": 2
+    },
+    {
+      "source_id": "source_7",
+      "locator": "fixtures/native/claude/tool-error-edit.jsonl",
+      "sha256": "c2413bf341f16a6b355185e03881b520952dae958288add304fccd03b9bfc9a8",
+      "byte_length": 2212,
+      "line_count": 2
+    },
+    {
+      "source_id": "source_8",
+      "locator": "fixtures/native/claude/delegation-task-fanout-nested.agent-a7ee4760914240f23.meta.json",
+      "sha256": "9967ce2712e803b50a2d5733495b490d2a89fb738bd7a93a4a6a355819cac26f",
+      "byte_length": 169,
+      "line_count": 1
+    },
+    {
+      "source_id": "source_9",
+      "locator": "fixtures/native/claude/delegation-task-fanout-nested.agent-a93b1a01d826a734b.meta.json",
+      "sha256": "736716147608a5328dc117833f9bd610899e3ed11c06dbd894cf74bfa0aa6de8",
+      "byte_length": 182,
+      "line_count": 1
+    },
+    {
+      "source_id": "source_10",
+      "locator": "fixtures/native/claude/delegation-task-fanout-nested.agent-a9aa098597842ed09.meta.json",
+      "sha256": "b572a600950c635cbb94db0194306c92a37c52de245331d2adfae82a245a40a3",
+      "byte_length": 175,
+      "line_count": 1
+    },
+    {
+      "source_id": "source_11",
+      "locator": "fixtures/native/claude/delegation-task-fanout-nested.agent-acf7507ea81426dd0.meta.json",
+      "sha256": "2f7f4eaf72a1a3445159b60108054e79addc3d5d9e4ae49984aaf07af74cca52",
+      "byte_length": 190,
+      "line_count": 1
+    },
+    {
+      "source_id": "source_12",
+      "locator": "fixtures/native/claude/delegation-task-fanout-nested.agent-af9bb3b1475445e7d.meta.json",
+      "sha256": "bab5289afbc59ba74a6bce359388e0579cc5c683f508874c9ebcb5c6a53811ef",
+      "byte_length": 164,
+      "line_count": 1
+    },
+    {
+      "source_id": "source_13",
+      "locator": "fixtures/native/claude/delegation-task-fanout-nested.agent-afcf7613795f5a25b.meta.json",
+      "sha256": "194cb9c8151fcaa9b98f7fcfb67e66ff7d22c6c98b82ebfbcbcdc34938486342",
+      "byte_length": 202,
+      "line_count": 1
+    },
+    {
+      "source_id": "source_14",
+      "locator": "~/.pi/agent/sessions/--Users-hsw-.agents--/2026-07-15T07-57-34-862Z_019f64c7-f90e-7d37-a8de-09282bb46a2d.jsonl",
+      "sha256": "6fd42bb72a277c892266fda0a59b3b5d53d743356ec1a4db5a56ad3fd0ddea88",
+      "byte_length": 199922,
+      "line_count": 73
+    }
+  ],
+  "extraction": {
+    "policy": "Parse source JSON lines in physical order. Keep listed semantic keys, key inventories, content-part kinds, block indices, lifecycle flags and topology references. Replace every retained identity with an injective namespace-local ordinal shared across the Claude sources. Pi uses separate identity namespaces. Omit all text, thinking, arguments, tool output, filenames within content, and user paths except source locators. Absent keys remain absent; null remains null.",
+    "limits": "Structural extracts are neither complete vendor payloads nor live recordings. They establish shape, namespace equality, relative source order and explicit relationships only. Source keys list what was omitted. Original bytes are identified by digest. Native Pi header version 3 does not identify the producing binary; no binary version is inferred. Claude record versions are retained where present.",
+    "expected_results": "Not embedded: consumers assert semantic promises independently from these observations."
+  },
+  "source_baselines": [
+    {
+      "vendor": "pi",
+      "repository": "https://github.com/earendil-works/pi",
+      "revision": "bbb61e34aaf231639fdaaad1adbd757947034eac",
+      "package_version": "0.85.1",
+      "role": "Source reference for current behavior, not the producer of the historical native file."
+    },
+    {
+      "vendor": "claude",
+      "package": "@anthropic-ai/claude-agent-sdk",
+      "package_version": "0.2.126",
+      "bundled_cli_version": "2.1.126",
+      "role": "Public type contract only; historical fixture record versions establish their own production version.",
+      "declaration_sha256": "1c79234a0b2a555b7f93ad21eba831519a4d4b2e7caa0a1342a73a9489d6c61a",
+      "declaration_url": "https://unpkg.com/@anthropic-ai/claude-agent-sdk@0.2.126/sdk.d.ts"
+    }
+  ]
+}

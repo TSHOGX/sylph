@@ -1,0 +1,41 @@
+{
+  "reference_model": {
+    "status": "passed",
+    "sqlite_version": "3.50.4",
+    "scope": "disposable reference model; not production or power-loss certification",
+    "checks": [
+      "source occurrences, redelivery, lexical bytes",
+      "control outbox crash boundaries without command redispatch",
+      "snapshot pagination and immutable bodies after late reorder",
+      "private generation, atomic pointer, old lease and admitted tail"
+    ]
+  },
+  "negative_controls": [
+    {
+      "fault": "content_dedup",
+      "exit_code": 1,
+      "diagnostic": "AssertionError: equal bytes at different positions remain different occurrences"
+    },
+    {
+      "fault": "export_redispatch",
+      "exit_code": 1,
+      "diagnostic": "AssertionError: outbox export never redispatches a command"
+    },
+    {
+      "fault": "mutable_page",
+      "exit_code": 1,
+      "diagnostic": "AssertionError: late move cannot omit or duplicate a snapshot page member"
+    },
+    {
+      "fault": "early_publish",
+      "exit_code": 1,
+      "diagnostic": "AssertionError: incomplete generation never becomes readable"
+    },
+    {
+      "fault": "skip_tail",
+      "exit_code": 1,
+      "diagnostic": "AssertionError: arrivals after the publication cut remain in the resumed projection"
+    }
+  ],
+  "production_conformance": false
+}

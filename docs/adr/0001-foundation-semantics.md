@@ -1,6 +1,6 @@
 # ADR 0001: Foundation semantics for reconnectable environments
 
-- Status: Accepted
+- Status: Accepted for command retry policy; trace decisions superseded by the unified trace foundation
 - Date: 2026-09-04
 - Scope: `crates/protocol`, and the server ingest and schema that consume it
 
@@ -19,44 +19,23 @@ re-introduced by a runtime that guesses.
 
 ### 1. Two sequence axes
 
-Every producer item carries `producer_id` and `producer_seq`, allocated and persisted by the
-envagent **before** send; the server deduplicates on `(environment, producer_id,
-producer_seq)`. `server_seq` is allocated transactionally by the server after durable
-ingest, and is the sole canonical order for the journal, SSE replay, history, and search.
-
-The envagent acknowledges only a contiguous accepted producer prefix, so a reconnect starts
-at the first unacknowledged item and a duplicate is an idempotent no-op rather than a second
-canonical event. A source cursor may accompany an item as provenance and never substitutes
-for the producer sequence. Timestamps are provenance too and never decide ordering.
+Producer receipt identity remains a separate durable axis, but server admission is not
+semantic reading order. Source positions, causal/history order and view revisions are
+separate under [the unified foundation](../unified-trace-foundation.md#ordering-clocks-and-measurements)
+and [evidence admission](../unified-trace-storage.md#admission-and-acknowledgments).
 
 ### 2. Ancestry is a typed server-owned edge
 
-`SessionEdge` has typed `parent`, `child`, and `relation`, where `relation` is `delegation`
-or `fork`. Self-edges are rejected at construction. Events are stored exactly once under
-their owning session, so a parent trace is a graph read model assembled with source-session
-provenance rather than a copied child transcript.
-
-An edge is never inferred from an id suffix and never silently reversed. A missing endpoint
-may remain an unresolved read-model state until the corresponding native source is adopted.
-
-There is no ancestry column. A string cannot carry relation type, provenance, and multiple
-edges at once, which is the conflation this decision removes. The relation travels typed
-from the adapter that read the vendor's key, as `NativeSummary::parent_relation` beside the
-parent pointer, because the *key* is what distinguishes a delegation from a fork and the
-resulting id cannot. Where that field is absent the vendor named a parent without saying
-how, and **no edge is written**: a guessed relation would fold a fork into a count or
-replay a prefix that was never shared, and neither is withdrawable from rows already
-journaled.
+Typed ancestry remains required. The complete model distinguishes spawn, interaction,
+history predecessor and context lineage, including embedded child references and branch
+selection. See [the unified foundation](../unified-trace-foundation.md#ownership-topology-interaction-and-context).
 
 ### 3. Adopted user input is a fact, not an event
 
-A native adapter may emit a `TurnInputFact` in the ordered session message stream, carrying
-the request text, an optional vendor-recorded time, and an optional source cursor. It is not
-an `Event`, has no `EventKind`, and is not rendered as a timeline block; the server
-associates it with the native turn container and persists `turns.request_text`.
-
-Live turns obtain input from the server request path, so `run`, `watch`, and `adopt` stay
-aligned without fabricating a `user` event the vendor never recorded.
+The bare `TurnInputFact`/turn-request-text decision is superseded by identified Message
+revisions and Delivery facts. Submitted human content is immutable and independent of
+vendor wrapping, queue acceptance and model inclusion. See
+[the unified foundation](../unified-trace-foundation.md#messages-deliveries-and-model-visibility).
 
 ### 4. Command retry policy and ambiguity are typed
 
@@ -69,6 +48,9 @@ have reached the vendor but before its result reached the server. The server mus
 convert it into success or failure, and the envagent must not retry it automatically.
 
 ## Alternatives rejected
+
+The following alternatives belong to the original decision. Input-as-turn-text and its
+rejection of identified Message facts are superseded by the unified foundation.
 
 - **One sequence allocated by the envagent.** Independent producers cannot merge it into a
   deterministic journal order, and a server restart could not distinguish a replay from a
@@ -85,6 +67,9 @@ convert it into success or failure, and the envagent must not retry it automatic
   with the command rather than being guessed by the runtime.
 
 ## Where this landed
+
+This section records the implementation of the original ADR, not the target trace
+contract. Replacement status lives in [the roadmap](../roadmap.md#unified-trace-foundation-review).
 
 All four decisions are types in `crates/protocol` (`semantic.rs`, `env.rs`), consumed by
 `crates/envagent/src/runtime.rs` and the server's ingest and edge store. Each is pinned by a

@@ -1,5 +1,10 @@
 # UI Layout and Design
 
+The target trace-reading surfaces, operation/agent inspection and responsive interactions
+are owned by [unified-trace-ui.md](unified-trace-ui.md). That contract supersedes the
+former conversation/work-panel sections here. Shared design tokens, viewport/accessibility
+rules, file surfaces and non-trace controls remain owned by this document.
+
 What the interface *is*: the panes, how they collapse, the surfaces a user touches,
 and the tokens everything is drawn with.
 
@@ -393,37 +398,10 @@ if evidence shows it matters.
 
 ## Conversation canvas: agent-first, not chat-first
 
-The conversation is read as input, work, and reply. User input is a right-aligned
-neutral bubble (85% of the reading column, at most 640px; 92% on phones). Assistant
-prose stays open on the canvas. The reading column is at most 768px wide; normal
-body text is 16px with 1.65 line height, tool summaries 14px, and code 13px.
-
-Completed work collapses behind a keyboard-operable disclosure. Its final answers
-and unclassified assistant messages remain visible exactly once. Active work opens
-by default, but a reader's explicit choice wins over subsequent updates. A terminal
-transition collapses only when the reader is following the tail and has neither
-selected text nor explicitly expanded the process. Queued, stopping, settling,
-failed, cancelled and interrupted retain their real meaning. Required input stays
-reachable outside a collapsed process. A missing duration says Work details; fidelity
-and clock-domain rules govern every displayed elapsed interval.
-
-Three disclosures reveal the process, a consecutive tool group, then a call's details.
-The tool group's content grows to min(420px, 50dvh), then scrolls internally; its
-header remains outside. Calls and their details share that scroller. Long output is
-previewed and opens in a temporary work-panel tab. Tool failures use neutral ink and
-explicit status/exit-code text, never red ancestry or automatic expansion. Progress
-prose uses subdued body ink; summaries use accessible muted ink. Unknown content is
-not hidden. File links and disclosure buttons are separate controls.
-
-A tool call and its `tool_result` render as **one row**, paired by the `streamId`
-they share (`docs/session-protocol.md`). A result whose adapter did not reuse the id
-still renders on its own, so no output is ever dropped.
-
-Tool headers and aggregate counters share the server's `toolSummary`, described in
-`docs/storage.md` § Execution node projection. `lib/tool-shape.ts` reads that description
-and extracts complete edit hunks and file targets only for expanded details. Vendor
-payloads remain intact, including live Codex's top-level command metadata. Unknown and
-partially streamed arguments remain renderable without inventing a classification.
+The replacement conversation canvas is defined by
+[unified-trace-ui.md](unified-trace-ui.md). Authored input/content orients one agent's
+reading; operations, real related agents, resources and context are progressively
+inspectable. No existing pane or execution-tree design constrains trace semantics.
 
 ## Keyboard model
 
@@ -671,10 +649,8 @@ moves by a small amount in either direction rather than always dropping.
 
 ### Timeline rows
 
-`components/execution-timeline.tsx` renders the bounded execution projection. The
-disclosure contract lives in § Execution group disclosure. `lib/tool-shape.ts` interprets
-the arguments of a loaded tool for its target, diff and detailed view. It never computes
-subtree state. All body requests remain explicit.
+Trace rows are bounded projections over normalized objects, with author/delivery and
+independent lifecycle evidence. See [unified-trace-ui.md](unified-trace-ui.md).
 
 ### Shared primitives
 
@@ -1129,34 +1105,13 @@ one face rather than falling back per glyph.
 
 ### Execution group disclosure
 
-Tool groups default to collapsed. Their expanded windows are virtualized and bounded;
-closing preserves disclosure state and reading anchors. Only a reader following the
-local tail follows new calls. The main conversation and each expanded tool group own
-independent scrolling. Search opens only the required levels and restores a stable
-node anchor. Collapse all closes details; there is no expand-all operation.
+Grouping/disclosure is view state over operations, not a persisted execution owner.
+The replacement rules, anchors and keyboard behavior live in
+[unified-trace-ui.md](unified-trace-ui.md).
 
 ## Work panel
 
-The right surface hosts Files, Subagents and explicitly opened tool-detail tabs.
-Files retain tree/preview navigation and file operations. Subagents has a searchable,
-paged directory and a shared conversation reader. Clicking a delegation opens its
-detail directly; All subagents restores directory search, selection and scroll.
-Nested inspection provides Back without moving the main conversation or its draft.
-The directory spans all turns and known delegated descendants, excluding forks.
-Active entries use stable creation order; finished entries use reverse completion
-order with identity breaking ties. Unknown status is explicit. Recorded parentage,
-not names or timestamps, determines identity and placement.
-
-A target identifies either an existing session or a trajectory within it. Both use
-the same reader; only independently controllable sessions offer session controls.
-Files opened from a target use that target's environment and working directory.
-Unavailable, pending and partial interiors show their recorded state.
-
-Files default to 384px (minimum 320px), trajectory views to 480px (minimum 420px).
-The main pane retains at least 480px; insufficient available width opens an overlay.
-The pane supports pointer and keyboard resizing, maximize/restore, and close. Closing
-never stops an agent. Tabs use manual keyboard activation and restore focus when
-closed. Mobile file inspection uses a sheet; trajectory reading uses a full surface.
-Layout preferences persist; mobile overlays do not. Lightweight reading state is
-retained for the ten most recently visited sessions without retaining hidden trees
-or subscriptions. Independent Review is outside this surface's initial delivery.
+The operation/agent/resource inspector and companion-reader behavior live in
+[unified-trace-ui.md](unified-trace-ui.md). Historical file evidence remains distinct
+from current filesystem inspection. Shared file viewer rules in this document continue
+to apply to those separately requested surfaces.

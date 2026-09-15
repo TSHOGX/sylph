@@ -1,0 +1,528 @@
+# Unified Trace Storage and Read Protocol
+
+Status: **Normative target design; not the current database implementation.**
+
+[unified-trace-foundation.md](unified-trace-foundation.md) owns the objects and semantics.
+This document makes their durable capture, publication, and query contracts concrete.
+Implementation gates live in [roadmap.md](roadmap.md#unified-trace-foundation-review);
+the falsification matrix lives in [unified-trace-conformance.md](unified-trace-conformance.md).
+
+## Authority and database boundaries
+
+SQLite remains the engine. This is a typed relational representation of a semantic
+graph, not an EAV database and not a requirement for a graph server. Write workloads
+are separated without dividing the authoritative evidence into hot and cold semantics.
+
+| Store | Durable responsibility | Writer |
+| --- | --- | --- |
+| `control.db` | Subjects/grants, native Session metadata, command identities/revisions/leases, command outcomes, immutable evidence outbox | Short operational transactions, `WAL`, `synchronous=FULL` |
+| `evidence.db` | Captured source inventory, complete observations, admissions, receipt prefixes, payload roots, publication catalogue | Bounded append/admission transactions, `WAL`, `synchronous=FULL` |
+| `trace-<generation>.db` | Versioned semantic claims and objects, resolved relationships, temporal query summaries, mapper checkpoint and change log | One bounded projection writer per active/building generation, `WAL`, `synchronous=FULL` |
+| `search-<generation>.db` | Rebuildable FTS5-jieba index, revisioned document metadata, index checkpoint | Separate bounded search writer; search lag is explicit |
+| `blobs/` | Immutable raw bytes, chunks, payload manifests and derived body chunks | Publish and verify before any durable reference |
+
+These filenames specify the replacement layout, not additional tiers beside the former
+journal/history/native model. New initial schemas replace the old ones in place. No
+production data is erased by a documentation change.
+
+Operational policy is authoritative in `control.db`; the admitted trace is authoritative
+in `evidence.db`. An outbox is a pending transfer of an operational fact, not a second
+independent interpretation. Query databases are disposable interpretations with named
+builds and evidence cuts. Loss of a query database requires rebuild; loss of unreplicated
+evidence cannot be fixed by assuming a vendor still has equivalent bytes.
+
+Each writer uses bounded transactions and independent read connections. Expensive JSON
+decoding, compression, tokenization, graph ordering and payload I/O happen outside the
+evidence/operational writer transaction. CPU work runs on bounded workers. No SQL cursor
+is held while waiting on a browser, vendor, filesystem read, or paced replay.
+
+Cross-file atomicity is never assumed. SQLite explicitly excludes WAL from its
+[atomic attached-database transaction guarantee](https://www.sqlite.org/lang_attach.html).
+`ATTACH` may support read-only diagnostics, but neither durable acknowledgments nor
+publication depends on one transaction committing several WAL files.
+
+## Capture contract
+
+CaptureAdapter is the vendor-facing runtime on the envagent. It owns authentication,
+process I/O, native filesystem reads, native database transactions, source inventory,
+and sidecar acquisition. SemanticMapper is a pure vendor module over retained captures,
+run by the server's archive worker. It cannot open the envagent's paths or send commands.
+Both responsibilities belong to the vendor adapter package; splitting them does not
+create another agent implementation.
+
+The capture envelope carries:
+
+```text
+Capture {
+  observation_ref, source_position, ingestion_authorization_epoch,
+  declared_subject_refs[], captured_at,
+  source_clock?, transport_kind, vendor_build?, schema_fingerprint?,
+  payload_ref, attachments[], capture_diagnostics[]
+}
+```
+
+The server issues the ingestion authorization epoch for the capture scope/inventory
+before acquisition. The envagent persists it with every spool occurrence; admission
+validates it rather than assigning the current epoch from arrival time. A pre-deletion
+capture that was never admitted cannot acquire a new epoch merely by arriving after
+re-adoption. Fixed epoch metadata does not change native SourcePosition or producer
+receipt identity.
+
+The full native line/frame and lexical encoding survive; extracted routing headers are
+indexes, not substitutes for bytes. JSON duplicate keys and escape spelling remain in
+the raw representation even when a semantic parser refuses them. Native SQLite capture
+uses an actual consistent vendor-supported read transaction/snapshot; reading a database
+file while ignoring its WAL is not a capture.
+
+The exact source version/build and acquisition surface are recorded whenever exposed.
+Unknown semantic kinds are retained with coverage diagnostics. An incompatible Sylph
+capture envelope is rejected before its producer prefix is acknowledged; there is no
+dual-spelling wire fallback. Vendor format evolution is each mapper's external contract.
+
+### Source identity and generations
+
+Source identity identifies a physical/logical source stream, not an agent. SourceRef
+is the foundation tuple of issuer environment/server and durable source-instance ID;
+independent envagent registries cannot collide. Source path is
+provenance. A durable envagent registry relates actual file/API identities and captured
+generation boundaries; recreating a follower cannot allocate a new source for every poll.
+The registry survives reconnect and reread. A lost registry requires explicit new-source
+inventory and evidenced lineage before semantic equivalence can be asserted.
+
+For JSONL, position includes the exact byte interval and source ordinal. A complete line
+commits only after its bytes are retained. A trailing incomplete record stays staged,
+does not advance the complete-record cursor, and is reported as pending. If the source
+ends with permanently malformed bytes, those bytes are retained as an undecodable
+occurrence with a diagnostic. Empty semantic output is not success.
+
+Source generations are immutable prefixes. Append extends a known prefix; truncation,
+replacement, in-place revision, or changed native content revision starts a new generation.
+A new mapper build or a newly installed vendor binary alone changes provenance or mapper
+generation; it cannot turn identical retained source occurrences into new ones.
+Reusing a source position after restart/reread requires verifying the committed prefix
+against retained chunk digests or an authoritative immutable source revision. Size,
+mtime, a filename, or a sampled tail alone cannot prove prefix equality. Full verification
+may be linear in source bytes and is budgeted background work, not a metadata request.
+When continuous tailing relies on a vendor's append-only contract, that basis is recorded;
+later contradictory prefix evidence creates a generation/conflict without rewriting the
+old capture. A generation number is capture bookkeeping, not the vendor's history head.
+
+Concurrent follower, reread, and inventory jobs share source reservations in the
+envagent. Capture SourcePosition stays immutable across admission epochs. On the server,
+`UNIQUE(admission_epoch, source_ref, generation, position)` plus verified digest
+gives a second idempotence boundary. A new producer epoch does not make an old native
+occurrence new. Overlapping range captures are resolved to the same complete-record
+positions before semantic mapping. Distinct positions with identical bodies stay distinct.
+
+A copied file becomes a separate observed source with optional proven prefix lineage.
+It is not automatically either an append to the original or a duplicate. Sources that
+cannot expose stable positions use durable capture occurrence keys and explicit mapping
+coverage; the server never suppresses messages by a content digest.
+
+### Sidecars, mutable locators, and large records
+
+A sidecar locator is not its bytes. Capture records locator, subject/source relation,
+observed version or capture occurrence, digest when available, and availability state.
+An unreadable sidecar can later gain a captured body. A mutable path returning different
+bytes produces a new observed version, not a collision hidden behind that path. Two
+different byte strings claimed under one immutable version are a conflict.
+
+CAS chunk addresses use BLAKE3 of the decoded exact bytes. Storage compression/encoding
+is explicit object metadata and never an identity input; decoded length and digest
+are verified on read. Payload manifest identity includes ordered chunk/range references
+and representation metadata. SHA-256 in research inventories is a source-verification
+choice, not a competing runtime address scheme.
+
+Chunk transfers commit their offset, digest and staged durability before chunk receipt.
+The final manifest commits only after all expected chunks and its digest verify. The
+referencing record can name an explicit missing/unavailable sidecar; it cannot claim
+complete coverage before completion. Record and payload byte limits bound transfer chunks,
+not how much of an already observed native record the server silently throws away.
+Oversized semantic decoding can stop with a resource-limit diagnostic while the original
+bytes remain retained. Partial uploads never appear as complete payloads.
+
+## Admission and acknowledgments
+
+Admission has two deduplication axes: producer delivery and source occurrence. They are
+both required. Receipt identity is unique on `(environment, producer, epoch, sequence)`;
+source occurrence identity follows the preceding section. Receipt deduplication stays
+global across deletion/re-adoption. A newly authorized admission epoch must carry a new
+ObservationRef and freshly captured bytes; replay of an old receipt can confirm only
+its old receipt status and cannot resurrect deleted content. The default epoch lasts
+until an explicit scoped deletion/re-adoption action changes it.
+
+For one bounded contiguous producer batch:
+
+1. Verify envelope version, current environment authority, source bounds, and referenced
+   payload digests. Publish immutable bytes durably before a SQL reference can commit.
+2. `BEGIN IMMEDIATE` on the evidence writer. Existing equal receipts are no-ops. Existing
+   receipts/positions with incompatible bytes produce an explicit collision response.
+3. Insert new observations or occurrence links, assign monotone `admission_seq`, and
+   advance only the contiguous accepted producer prefix in that same transaction.
+4. Commit with FULL durability. Only then acknowledge the prefix and announce evidence
+   progress. Semantic workers consume the durable admission log independently.
+
+Transport batching cannot skip a failed item and acknowledge later positions. A durable
+malformed vendor payload may be acknowledged as retained evidence with a decode gap;
+an envelope or storage failure may not. This distinction prevents endless retries of
+bytes already archived while keeping admission faults honest.
+
+Receipt dispositions distinguish retained evidence from an explicit deletion discard.
+A stale ingestion epoch covered by an authorized deletion tombstone receives a durable
+`discarded_by_deletion` disposition naming that tombstone, without re-retaining its
+body. That terminal disposition can advance the contiguous receipt prefix so one deleted
+scope does not strand unrelated spooled work. It is never reported as evidence admitted,
+newly captured, or projection-complete. Old outbox items use the same disposition before
+being marked transferred. Other admission failures remain Nacks and cannot skip a prefix.
+
+The envagent spool preserves its existing enqueue-before-send and terminal-receipt-before-delete
+discipline. Bounded queue exhaustion applies backpressure, then records the actual
+capture/execution consequences through reserved diagnostic capacity. Killing a controlled
+process can stop further local output; an observer cannot claim it stopped an external
+agent. Any missing interval remains a capture gap, not an invented tool failure.
+
+All live observations offered as durable trace content follow this path, including
+deltas. Group commit can amortize fsyncs, but there is no acknowledged 50 ms loss window
+and no durable-looking precommit event publication. Network rendering can batch committed
+changes without altering the source arrival timestamps retained in evidence.
+
+### Operational facts use an outbox
+
+Command acceptance commits the command ID, immutable submitted revision, authorization
+decision/lease, retry policy, and fixed outbox occurrence including the ingestion
+authorization epoch at acceptance, in one FULL `control.db` transaction. An outbox first exported after deletion cannot be retagged
+with a later re-adoption epoch. An exporter idempotently admits that occurrence to
+evidence, then marks it exported in control. A crash before marking exported simply retries the same occurrence.
+Export never dispatches the command again.
+
+Dispatch, native queue acceptance, rejection, unknown outcome, and actual consumption
+each produce separate operational/vendor facts. A lost response to an at-most-once
+command remains unknown and is not automatically resent. Exactly-once evidence export
+does not claim exactly-once effects at a vendor that lacks that guarantee.
+
+An evidence cut includes only exported/admitted operational facts. Responses expose
+pending outbox count and oldest pending age separately from projection lag. Waiting for
+"my sent message appears" can target its outbox observation/command ID, rather than a
+session-wide running bit. Accepted user bytes remain durable in control until export
+is confirmed; deleting the outbox row before then is prohibited.
+
+## Logical tables and constraints
+
+The implementation uses typed columns for keys and fields queried by core consumers.
+Large bodies live behind Payload references. The following table families are a schema
+contract; the exact Rust member spelling is defined once in the protocol implementation.
+
+| Family | Essential key/constraints and purpose |
+| --- | --- |
+| Sources and generations | `(source_ref, generation)`; immutable provenance, capture contract, prefix extents and verified lineage |
+| Observations and admissions | Globally unique ObservationRef; unique admission-epoch/SourcePosition; immutable raw payload reference; ordered admission index |
+| Producer receipts | Producer/epoch prefix, atomically committed with admissions; acknowledged rows never depend on semantic projection |
+| Evidence payload roots | Observation/manifest references; immutable object digest, encoded/decoded length and availability |
+| Semantic claims | ClaimRef, kind, subject, typed value, rule/build, evidence joins, supersession joins |
+| Identity equivalences | Typed endpoints and proof; reversible derived equivalence classes; no destructive owner rewrite |
+| Agents, activations, messages, deliveries | Foundation object keys and owning references; message revision and delivery attempt indexed separately |
+| Operations, result occurrences, resources | Invocation/result/resource keys; explicit requester, activation and lifetime references |
+| History entries, selections, context checkpoints | Predecessor adjacency, selected-head claims, immutable membership extents and original ownership |
+| Measurements | Scope/metric/mode/counter-domain keys; series position uniqueness; no unqualified total column |
+| Diagnostics and coverage | Subject/source/dimension/interval, state/reason, evidence; structured conflict alternatives |
+| Query summaries and memberships | Object reference, `valid_from`, `valid_to`, selection/order/membership, bounded preview, immutable body revision refs |
+| Projection checkpoints and changes | Applied admission cut, view revision, mapper build, atomic changed/removed/moved object set |
+
+Same-database relations use foreign keys where the referenced identity is resolved.
+Unresolved references have a typed resolution record; they do not require placeholder
+entities with fabricated fields. Cross-database joins validate through durable manifests
+and typed references, never unenforced foreign keys to another SQLite database.
+
+Core indexes lead with query scope, then ordering/cursor key and reference: agent history
+by selection/order; activations by agent; operations by owner/activation or resource;
+agent edges by source/relation and target/relation; deliveries by recipient and message;
+measurement samples by subject/metric/domain/position. Claims have subject/kind and
+evidence reverse indexes. Temporal tables additionally index current rows and the bounded
+validity predicates used by snapshot pages.
+
+No request discovers all siblings by decoding payloads, walks all ancestors to open one
+agent, counts entities by rescanning source JSON, or builds a full execution tree in the
+browser. Materialized membership/count indexes update in projection work. If an ancestry
+or ordering correction affects an unbounded region, the worker queues bounded pieces
+and publishes that change only after its affected state is complete; it must not expose
+half-updated counts or block the evidence writer.
+
+## Reduction and projection checkpoints
+
+The implementation separates value-only protocol types, envagent capture/control, pure
+mapping/reduction, and server storage orchestration. The protocol crate keeps its existing
+no-runtime dependency rule. Pure mapping/reduction is a library with no vendor-process,
+network, filesystem or clock dependencies; its API takes captured values, prior mapper
+state and a fixed archive context, and returns claims, new state and typed unresolved
+archive-reference requests. The worker supplies those references from the same evidence
+cut. Mapper state is checkpointed with its build and projection cut, never hidden in a
+process-local global current-message variable. Vendor mapping modules remain separate
+within this library so an adapter review has one semantic owner per vendor.
+
+Pure mappers consume capture surfaces with source context at a fixed archive cut. Output
+claims cite the relevant observations, including pairing/adjacency proofs. Shared
+reduction resolves identities, valid ownership, histories, lifecycles, coverage and
+query objects. Live and native mapping use the same rules. There is no current-turn
+fallback, global tool-name classifier, or digest suppression path.
+
+The generation manifest pins semantic schema, mapper builds per vendor, reducer build,
+capture inventory interpretation, and derived encoding versions. Version change rebuilds
+a new generation rather than interpreting old rows with a partly new reducer.
+
+Projection transactions apply a bounded complete unit of claims, resolved object updates,
+temporal query revisions, and change-log entries, then advance their checkpoint. If a
+single observation expands beyond that unit, claims can be staged, but its visible cut
+advances only after the complete observation is resolved or explicitly quarantined.
+Parser failure retains a diagnostic and coverage gap at the cut; it does not publish
+guessed values. Dependent unresolved claims are indexed for reevaluation on later evidence.
+
+Current projection may lag evidence admission. Serve both cuts, worker status, affected
+source gaps and diagnostics. Do not turn projection failure into an agent failure.
+Full replay is deterministic over the complete cut. Incremental scheduling can change
+when a revision appears, but cannot change its final semantic value for that cut.
+
+General topological corrections are not claimed to be constant work. The reducer uses
+indexed adjacency and deterministic order labels; a bounded affected region updates
+incrementally, while a larger relabel/reconciliation rebuild runs as unpublished work.
+This keeps admission and already-published pages available without pretending that
+arbitrary graph updates have an O(1) algorithm.
+
+## Generation publication
+
+Publication switches a complete semantic generation, not one session's events followed
+later by its directory and bodies. All agents and edges used in a graph read resolve
+inside the same generation. Partial rebuilds still publish a complete generation
+manifest that explicitly reuses unchanged immutable partitions; the initial implementation
+uses full generations to keep that proof simple.
+
+1. Record a job and capture evidence cut `C0` in the publication catalogue. Pin its
+   evidence/payload roots while building a private generation.
+2. Replay through `C0`, then catch up from the durable admission log. Validate object and
+   ownership constraints, history DAGs, payload references, receipt/source consistency,
+   and the declared coverage gaps. An unknown source is allowed only with its diagnostic;
+   unexplained missing required data blocks publication.
+3. Acquire the short projection-publication barrier, not the evidence or control writers.
+   Fence and drain the old projection writer, including in-flight commits, and snapshot
+   its last committed cut `Cold`. Select a new cut `Cpub >= Cold` from already admitted
+   evidence. Catch the private generation up to `Cpub`, drain/fence its writer exactly
+   there, and validate its tail. Both projection writers remain fenced through the
+   pointer transaction; no old commit can race the sampled `Cold`. Evidence admission continues.
+   If the tail cannot finish within the configured barrier budget, release, resume old
+   projection, and retry after further background catch-up; never wait indefinitely.
+4. Commit/checkpoint and verify the new database files and payload manifests, sync their
+   durable files/directories, and record a sealed ready manifest containing `Cpub`, mapper
+   builds and file identities. The seal certifies the initial publication checkpoint;
+   the generation database subsequently grows through transactional updates, so a
+   whole-file digest at publication is not a permanent checksum of the live database.
+   Recovery validates its current checkpoint, WAL and payload references. A WAL is part of a live database; copying or renaming just
+   its main file is not publication.
+5. In one FULL evidence-catalogue transaction, compare the expected active generation
+   and replace its pointer with the ready manifest. This transaction is the linearization
+   point. A retry cannot publish over a different concurrent job's active pointer.
+6. Route new reads to the new generation and resume its incremental worker at `Cpub+1`.
+   Accepted later evidence is still in the durable log. Existing old-generation snapshot
+   leases retain their files until expiration; send generation-change notices.
+
+Publication does not wait for the optional search index to catch up. Search is available
+only at its own declared cut with matching generation; until then it reports indexing.
+It cannot silently query the previous generation or label partial results complete.
+
+On restart the catalogue chooses the active generation; directory names and newest mtime
+do not. A ready-but-unpublished generation is resumable/discardable scratch work. A
+published but corrupt/missing file produces an explicit recovery state and rebuild from
+evidence; any intentional fallback to a retained generation advertises its older cut.
+No caller gets silently mixed objects from both generations.
+
+### Crash obligations
+
+| Crash point | Required recovery |
+| --- | --- |
+| Payload synced before admission | Unreferenced payload is GC candidate; producer retries same observation |
+| Admission committed before ack | Redelivery returns prior prefix; one evidence occurrence |
+| Control committed before export | Fixed outbox occurrence is exported; no command redispatch |
+| Evidence export before outbox marking | Duplicate export resolves to the original occurrence |
+| Evidence acknowledged before mapping | Resume mapping from checkpoint; no evidence loss |
+| New projection transaction incomplete | Roll back that transaction; old visible revision/cut remains |
+| New generation ready before pointer swap | Old generation stays authoritative for reads |
+| Pointer committed before process exits | Reopen exactly the referenced durable generation and resume its tail |
+| Arrival after publication cut | Replay from durable log; no discarded tail or regressed cut |
+| GC interrupted | Retry bounded candidate work; never delete a live referenced payload |
+
+## Read protocol
+
+The following replaces the event/block-derived reading API. It is an implementation
+contract, not a statement that these endpoints exist today. Agent/object references are
+opaque encoded typed references. Routes remain under the existing authenticated API
+origin and preserve environment-grant checks.
+
+| Read | Contract |
+| --- | --- |
+| `GET /api/v1/trace/agents/{agent_ref}` | Bounded agent identity, known histories, current selection, coverage, cuts, own state, relations summary and authorized action target |
+| `GET /api/v1/trace/agents/{agent_ref}/history` | Keyset page of directly readable entries under an explicit history selection; optional around-object anchor |
+| `GET /api/v1/trace/agents/{agent_ref}/relations` | Direct related agents/interactions, paged by relation and direction; exact scope-labelled counts |
+| `GET /api/v1/trace/agents/{agent_ref}/activations` | Bounded own activation summaries; unknown associations stay outside invented containers |
+| `GET /api/v1/trace/objects/{object_ref}` | One typed summary, provenance and unresolved/conflicting fields; no eager body/tree |
+| `GET /api/v1/trace/objects/{object_ref}/relations` | Bounded operations/results/resources/deliveries/evidence relations, with a typed filter |
+| `GET /api/v1/trace/payloads/{payload_ref}` | An authorized object/snapshot-scoped manifest or bounded byte/part range; immutable revision required |
+| `GET /api/v1/trace/changes` | SSE change invalidations from a bounded projection cursor, with reset/generation notices |
+| `GET /api/v1/trace/search` | Authorized generation/scoped search at a declared search checkpoint; paged snippets and object anchors |
+
+Action targets are typed routes, not a guessed Session ID. A Session control route is
+returned only when that native identity addresses the focused agent. Embedded control
+requires an evidenced vendor route carrying both host and child identity, supported
+actions, and current lease selection. An embedded agent without such a route is
+readable-only; its anchor Session must never become a fallback target. Authorization
+for each actual action is reevaluated at dispatch.
+
+Full evidence export and paced playback are explicit streaming jobs with separate byte,
+work and cancellation budgets; they are not hidden implementation paths for an ordinary
+history page. Playback follows captured admission/source timing and states any pacing
+clamp. It is not reconstructed by reading only current object values.
+
+### Snapshot pages and live changes
+
+An initial reader request obtains a bounded reusable ViewLease. Related header, history,
+operation, child and payload reads use `at_snapshot` to derive their query scope at the
+same generation/cut/revision. A fresh scope does not silently acquire newer state.
+Each pagination cursor separately binds its agent, selection, filters and ordering:
+
+```text
+ViewLease { generation, evidence_cut, view_revision, expires_at }
+QueryScope { agent_ref, history_selection, filters, representation }
+Cursor = opaque(view_lease, query_scope_hash, order_key, object_ref, direction)
+```
+
+The scope hash includes the complete QueryScope. A header or child detail can reuse the
+ViewLease, but a pagination cursor cannot be reused for another scope. Cursors from
+another agent/scope are invalid. Page responses carry both `next_cursor` and `has_more`,
+actual returned counts, configured item/byte limits, and the cuts/coverage represented.
+Server limits apply before bodies are read. Counts cannot mean "items loaded so far".
+
+Temporal query rows have half-open validity `[valid_from, valid_to)`. A transaction
+closes prior summary/order/membership rows and inserts their replacement at the same
+view revision. Body references name immutable payload revisions. All pages and body
+lookups under a snapshot use its revision and selection. This fixes the omission/duplicate
+window that keyset pagination alone leaves during late identity, order or branch updates.
+
+Snapshot leases bound retained versions and old generations. Requests do not hold a SQL
+transaction across HTTP. Expiration or version-floor eviction yields `410 snapshot_expired`
+with an optional stable object anchor for reacquisition; malformed/mismatched cursors
+yield `400 invalid_cursor`. A current-generation change does not rewrite an old snapshot.
+
+SSE cursor is `(generation, change_revision)`, distinct from admission and producer
+sequences. A committed change batch names changed, removed, moved and equivalence-resolved
+references and the resulting cut. Batch framing is atomic. The client applies a bounded
+batch or invalidates/reacquires the affected scope; it cannot overlay new values onto
+an old snapshot and still claim that page is consistent. A missing change prefix yields
+`reset_required`; no unbounded catch-up downloads a whole session by accident.
+
+At the live tail the client can advance to a new snapshot and preserve its logical
+anchor. While reading history, it may hold the old snapshot and show new-work availability.
+UI policy is specified in [unified-trace-ui.md](unified-trace-ui.md). Deep links preserve
+object reference and desired selection, not projection row IDs; equivalence resolution
+and changed membership have explicit responses. A withdrawn interpretation returns
+`interpretation_withdrawn` with retained evidence/valid anchor where authorized, not
+an indistinguishable missing-session response. Native object references are not reused
+for unrelated objects.
+
+### Query and payload bounds
+
+The server owns configurable maximum items, serialized summary bytes, relation fan-out,
+payload range bytes, concurrent reads, change backlog, snapshot lease lifetime, and
+snapshot retained-byte pressure. The served trace limits are the one source for client
+and tests; values must not be separately guessed in frontend code. UI acceptance targets
+do not override these hard limits.
+
+An individual summary is bounded independently, with truncated-preview metadata and
+lazy detail references. A huge native record therefore cannot force an oversized page.
+Payload endpoints require a `via_ref` authorization anchor and snapshot;
+possession of a global CAS hash is not authorization. The anchor is a readable containing HistoryEntry, Delivery or Operation,
+separate from original authorship. The requested payload, revision and representation
+must be reachable through that anchor at the snapshot revision and selected history.
+An R1 anchor cannot authorize its newer R2 payload. Retained inherited/copied bytes can
+be read through their authorized recipient entry without access to the origin
+environment. This grants neither origin-object metadata nor unobserved origin ranges.
+Shared bytes do not expose another environment's existence or provenance. Range reads
+report range, total length when known, encoding and
+coverage; a body revision mismatch is a conflict, never a silent switch to the newest text.
+
+Query validation includes SQL VM-step/scanned-row evidence at growing corpus sizes and
+growing superseded-version density, not only an output row limit. A temporal validity
+predicate plus a B-tree is not by itself proof of bounded work. If it scans too many
+invalid versions, use indexed/persistent membership or an explicit resumable work-budget
+result; budget exhaustion cannot return a false empty or complete page. Full export,
+source prefix verification, rebuild, and search
+over large data can legitimately do linear work; ordinary object/page reads cannot.
+
+### Search consistency
+
+Search documents refer to Message/Operation/Payload representation plus owner and
+history membership. One original message copied into child context does not become
+another child-authored search result. Query scope selects authored history, selected
+context, or retained branches explicitly. Tool output and nonhuman context can be
+searched without masquerading as human conversation.
+
+The search worker consumes committed projection changes and commits its document
+replacements and search checkpoint `(generation, view_revision, evidence_cut)` in one
+transaction. Search responses identify that checkpoint, indexing status, and covered
+scopes. The worker pins the corresponding trace revision/body membership before
+advancing its checkpoint; temporal GC cannot overtake an index or its result jobs.
+If pressure requires releasing that pin, invalidate the search generation/jobs first
+and report indexing until rebuilt. Snapshot leases for
+search retain revisioned membership/snippets at that checkpoint; detail links either
+resolve the same revision or explicitly open current state. Never combine current FTS
+text with an earlier membership snapshot and call it a consistent result.
+
+The initial implementation may pin one short-lived read snapshot inside a materialized
+bounded search-result job, releasing SQL before returning pages. It must bound matches
+examined, result bytes, job lifetime, and concurrent work. A changing FTS table is not
+a stable cursor. Unknown binary/opaque content is searchable only through evidenced
+metadata or an explicitly derived extractor with its own version and coverage.
+
+## Retention, deletion, and garbage collection
+
+Evidence and server-accepted input revisions are kept by default without automatic
+pruning. Live-only timing remains evidence even when native history has final text.
+There is no native watermark authorizing its deletion. Raw retention continues the
+principle of [ADR-0005](adr/0005-raw-retention.md).
+
+Compression, chunk packing, and archive compaction must prove exact reconstruction of
+source bytes, source positions, clocks, and receipt identity before evicting an old
+encoding. Projection caches, expired temporal versions, search jobs and obsolete
+generations can be reclaimed because evidence can rebuild them. Current generation,
+rebuild jobs, active snapshot leases and explicit export jobs pin required payload roots.
+
+Explicit authorized deletion is a different operation. It commits a scope tombstone
+before removing read access. A permanent deletion epoch/cut invalidates pre-deletion
+evidence visibility and snapshots, while a separate suppression state blocks automatic
+follower/reread re-ingestion for that scope. It cancels affected snapshots/exports and invalidates search; authorization and
+tombstones are checked on every request even for an older generation. New explicit
+re-adoption can clear future-ingestion suppression only as an intentional control action.
+It starts a new admission epoch and verified source inventory; old tombstones and cancelled
+snapshots remain invalid. Deduplication is scoped to that admission epoch, so an erased
+old occurrence/receipt cannot count as newly recaptured bytes. Previously issued native
+object references can resolve to new admitted evidence, never to deleted generations. This is not a
+new deletion UI requirement for the foundation milestone; it is the minimum storage
+boundary that prevents the archive from resurrecting deleted content.
+
+CAS garbage collection uses durable roots from evidence, pending uploads/outbox bodies,
+active/building/leased generations, search checkpoints/result jobs and export jobs.
+It marks candidates in bounded
+batches, excludes concurrent reference publication during final eligibility check and
+unlink, and retries after crashes. A shared payload survives until every live root
+releases it. Source deletion is not enough to prove a CAS object is unreachable.
+
+## Implementation sequence and falsification
+
+Implement schema/types and capture admission first, then pure vendor mappings and shared
+reduction, then snapshot reads/publication, then dependent adapters and UI integration.
+Existing auth, spool, containment, CAS integrity and workload-isolation code can be reused
+where its guarantees match. Existing event-phase promotion, content-digest suppression,
+input-as-turn-text, turn-close sweeps and hot/cold semantic folding are removed.
+
+The reference transaction exercise in
+[storage-spike.py](measurements/unified-trace/storage-spike.py) checks the proposed
+outbox/idempotence, temporal-page and publication cut mechanisms in disposable SQLite
+databases. It is design evidence, not a replacement for real Rust crash, filesystem,
+multi-process and performance tests. All production obligations are enumerated in
+[unified-trace-conformance.md](unified-trace-conformance.md).

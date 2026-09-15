@@ -1,15 +1,21 @@
 # Session Protocol
 
-The contract between the server and an agent. One event vocabulary, two ways of
-obtaining events, three ways an adapter is asked for them.
+**Authority split:** this document owns vendor process/control behavior, requests and
+capabilities. [unified-trace-foundation.md](unified-trace-foundation.md) replaces the
+former event/block/span semantics, and [unified-trace-storage.md](unified-trace-storage.md)
+defines capture and pure mapping. Superseded trace headings below remain source-comment
+navigation points; they do not authorize an alternate trace model.
 
-An adapter is a Rust trait linked into the envagent, not a subprocess: events are
-values, and the only place the vocabulary crosses a machine boundary is
-`sylph.env.v1` (`docs/environments.md`). So the vocabulary is versioned by that wire
-protocol, because that is the only place a version can disagree with anything.
+The process/control contract between the server and an agent. Capture can observe live
+I/O, native history, or both; one pure semantic mapping interprets that evidence.
 
-**Read this before writing an adapter.** Every rule below is a contract an adapter
-must satisfy, and most of them are rules whose violation is *silent* — a vendor
+Vendor runtime code is linked into the envagent and talks to the vendor process. The
+pure mapping module is callable by the server over retained observations. Capture
+envelopes cross `sylph.env.v1` (`docs/environments.md`); schema/build identity is explicit
+at that boundary and at semantic generation publication.
+
+**Read this and the dedicated vendor mapping before writing an adapter.** Control and
+capability rules below are contracts an adapter must satisfy, and most of them are rules whose violation is *silent* — a vendor
 reports success, the turn completes, and the record is wrong. They are stated as
 requirements rather than as advice for that reason.
 
@@ -37,49 +43,14 @@ after its turn (§ An agent may start a turn) nowhere to speak from.
 
 ## An adapter is a trait, with three modes
 
-```rust
-#[async_trait]
-pub trait Adapter: Send + Sync {
-    /// Which agent this speaks for, and what the local CLI reports about itself.
-    async fn probe(&self) -> Result<AgentInfo>;
+An adapter package contains envagent capture/control and a pure server semantic mapper.
+Run captures a controlled live process, adopt captures an available native inventory,
+and watch follows source changes. They all feed the same evidence contract and mapper;
+none fabricates live events from native messages to satisfy the former block API.
 
-    /// Hold a live session's stdio. The returned handle carries turns both ways.
-    async fn run(&self, spec: RunSpec) -> Result<Box<dyn Session>>;
-
-    /// Parse what the vendor's native store already holds, once.
-    async fn adopt(&self, id: &NativeId) -> Result<EventStream>;
-
-    /// Parse, then follow the native store as it grows.
-    async fn watch(&self, id: &NativeId) -> Result<EventStream>;
-
-    /// Which native sessions this machine's store holds.
-    async fn enumerate(&self, filter: &StoreFilter) -> Result<Vec<NativeSummary>>;
-
-    /// Read one native session's metadata without summarizing unrelated sessions.
-    async fn lookup(&self, id: &NativeId) -> Result<Option<NativeSummary>>;
-}
-```
-
-Native summaries carry an opaque `source_revision` when the adapter can detect changes
-to the source bundle. A missing revision requires rereading; a last-event timestamp is
-not a substitute. Codex revisions cover the session's descendant rollouts. Claude and Pi
-use a conservative store-wide file revision, so unrelated native changes may trigger an
-extra read. Lookup and enumeration run filesystem work outside the async executor.
-
-**All three modes emit the same events.** That is the point of the shape: the
-journal, the history fold, the timeline, replay, and search see one vocabulary and
-cannot tell which mode produced a given row. The only visible difference is
-`fidelity` on the record (`docs/architecture.md`), which says how much resolution the
-source had.
-
-| Mode | Source | Fidelity | Control facet |
-| --- | --- | --- | --- |
-| `run` | the process's own stdio | `stream` | full |
-| `watch` | native store, followed | `blocks` or `messages`, per vendor | whatever the vendor offers a second party |
-| `adopt` | native store, one pass | `blocks` or `messages`, per vendor | none while it runs; full once resumed by `run` |
-
-`enumerate` is what makes adopt and watch offerable in a UI: it answers "what is on
-this machine" without parsing every session.
+[unified-trace-storage.md](unified-trace-storage.md#capture-contract) owns the replacement
+interface. Existing Rust trait signatures are implementation context until that interface
+lands; there is no compatibility adapter wrapping the obsolete vocabulary.
 
 ### What the adapter owns, and what it must not
 
@@ -396,396 +367,71 @@ answer arrived" are different claims and only the second is the feature.
 
 ## Events
 
-Kinds are `thinking`, `assistant`, `tool_call`, `tool_result`, `usage`, `status`,
-with phases `started` / `delta` / `completed`. Beyond those:
-
-| Kind | Carries |
-| --- | --- |
-| `subagent` | declares a delegated trajectory; its `stream_id` is that trajectory's id |
-| `compact` | a compaction boundary, so the timeline shows where context was condensed |
-| `turn` | `started` / `completed` with usage, cost, duration, stop reason |
-| `capabilities` | facet-scoped updates (§ Capability facets) |
-| `notice` | agent-originated notification worth surfacing |
-
-`kind` is deliberately unconstrained at the storage layer: a new kind is additive, and
-a `CHECK` listing them is a promise to break on the next adapter that adds one.
-
-**Reserved, not implemented: `plan` and `diff`.** No adapter emits either and no
-timeline branch handles them. They are recorded as the intended shape for making plan
-mode reviewable and a file change render as a diff rather than a tool log — today a
-plan arrives as an `Approval` whose detail is prose, and a diff is reconstructed
-client-side from a tool payload. Do not write a client branch expecting them.
-
-**A type in a vendor's event union is not a promise anything emits it.** Grep the
-implementation for emit sites, not the types for declarations: a declared-only event
-ships an adapter branch that never fires, and such a branch is indistinguishable from
-one whose condition is merely rare. Note the symmetric trap — "I grepped and found
-nothing" is a claim about your grep as much as about the vendor, so prefer an unbundled
-source-mapped install to a minified bundle before concluding a type is dead
-(`docs/agents.md`).
+The normalized vocabulary is the typed fact families in
+[unified-trace-foundation.md](unified-trace-foundation.md#evidence-claims-and-deterministic-reduction).
+Capture occurrence, semantic claim, resolved object and query change have distinct
+identities. A kind/phase/stream/span envelope is not the replacement object model.
 
 ## Delegated trajectories
 
-A turn is not a sequence. An agent delegates, its delegates delegate, and a workflow
-fans out to a dozen agents and then synthesizes. **One field carries all of it:**
-
-```
-span    the trajectory this event happened in. Absent means the root turn.
-```
-
-The server's session-trace projection also carries `arrivalTurnId`: the turn on which
-the event was received. It is provenance, not ownership. A child trajectory may finish
-after its parent turn, so consumers must not use the arrival turn as the trajectory's
-container; the first declaration (or promoted host) remains the owner.
-
-A `subagent` event *is* the trajectory's own record: its `stream_id` is the trajectory
-id and its `span` names the trajectory it was delegated from. A `thinking` block
-inside that trajectory carries the same `span`. Depth is unbounded, siblings may run
-concurrently, and a workflow phase is a trajectory whose children are trajectories. No
-case in the protocol distinguishes any of these, which is what makes it a
-generalization rather than three features.
-
-**`span` is not `stream_id`.** `stream_id` identifies one block across its phases;
-`span` identifies the trajectory a block ran in. A `subagent` event is the one place
-they meet, because opening a trajectory is itself a block with a lifecycle.
+Delegation connects independently advancing AgentThreads through invocation, spawn,
+delivery and activation evidence. Operations and Resources remain independently typed.
+The governing rules are
+[unified-trace-foundation.md](unified-trace-foundation.md#ownership-topology-interaction-and-context).
 
 ### Time axes are independent
 
-`seq` is the only total source/order axis. Timestamps can tie, arrive out of order, or
-come from different machines, so replay and producer merging must never sort by time.
-`arrivalAtMs` records when Sylph received the fact on the server clock and is always
-present. `recordedAtMs` is the vendor's own timestamp, when the native source supplied
-one; it is absent for records such as workflow journal closes that carry no timestamp.
-
-**Two clocks, and no third field that merges them.** A single "effective timestamp" would
-have to pick one clock per record, so its meaning would depend on the record mode — and a
-reader subtracting two of them would get a number that looks like a duration and spans two
-machines.
-
-Durations are exact only when both endpoints are in one domain: arrival start/end for a
-live stream, or recorded start/end for native history. Missing recorded endpoints mean
-the duration is unknown, not zero.
-
-Consolidated events carry `startedArrivalAtMs` and, only when the source supplied it,
-`startedRecordedAtMs`. Each anchor belongs to the clock named in its field. A missing
-recorded opening is not filled from receipt time, even when a later phase has a recorded
-close. Live vendor notifications that carry a timestamp retain it as `recordedAtMs` too;
-an item's own timestamp takes precedence over the timestamp of the envelope writing it.
-
-**A pointer, never nesting.** A child's events cannot arrive *nested inside* the parent
-event: an envelope must be closed before it is sent, and a trajectory streams for
-minutes. It also contradicts the journal, where an event is a row — a nested payload
-makes one row hold a subtree, so a delta inside it cannot be addressed, folded, or
-pruned. A flat stream with a parent pointer is what distributed tracing settled on, and
-it is already how the vendors speak: `claude` tags a subagent's output with
-`parent_tool_use_id`.
+See [unified-trace-foundation.md](unified-trace-foundation.md#ordering-clocks-and-measurements).
+Source order, receipt order, causal order and history selection remain separate; endpoint
+wall elapsed time does not replace a vendor's reported monotonic duration.
 
 ### Promotion: a trajectory is defined by use, not by declaration
 
-**Any `stream_id` another event names as its `span` is a trajectory**, whatever kind
-of event opened it. A `tool_call` so named is *promoted*: it stays a tool call and also
-becomes the container its children already claim it is.
-
-This is a definition, not a fallback, because **delegation is only knowable
-retroactively**. An adapter learns that a tool call delegated when a child arrives
-carrying its id — by which time the `tool_call` event has been sent and cannot be
-recalled. Anything deciding at open time is a guess standing in for a fact that has not
-arrived yet.
-
-**So never classify a delegating tool by name.** A whitelist of tool names cannot be
-completed, only extended after each new one is reported: a vendor adds delegating tools
-over time, and an MCP server can add one at any moment. The failure is visible — a host
-that reads *running* forever with no interior, or children rooted beside their host
-rather than inside it — but only for tools nobody thought to list.
-
-Promotion needs no list at all: an agent nobody has written yet nests correctly by
-tagging its children, which is the same `span` it must already set for its output to be
-attributed.
-
-Declaration keeps a purpose promotion does not share — it can name a trajectory before
-any child exists, and state an outcome independent of its host's. Both produce the
-same tree.
-
-**A promoted trajectory's lifecycle is its `tool_result`, not its phase.** A
-`tool_call`'s `completed` phase means its *arguments* finished streaming. Reading the
-phase reports every delegation as finished the instant its input parsed.
+This former promotion rule is replaced. A tool hosting nested calls remains an Operation;
+actual native child identity establishes an AgentThread. Arguments, returns, independent
+resources and activations have separate lifecycles under
+[unified-trace-foundation.md](unified-trace-foundation.md#execution-results-and-resources).
 
 ### `name` is absent when unknown
 
-**`name` is optional on every phase, including `started`.** An adapter that does not
-yet know what a delegation is called must **omit the field** rather than send a
-placeholder.
-
-This is not a tidiness rule. **A guess written here becomes permanent.** The history
-fold keeps the best name any phase gave a block, so a later `delta` carrying the real
-brief normally wins — but when the brief never finishes, because the delegation fails
-early or the link dies mid-input, the placeholder *is* that trajectory's durable name and
-is afterwards indistinguishable from one an agent chose. Nothing can tell the two apart
-retroactively, so such rows are unknowable rather than data. **`Option`/`null` is the
-only value that stays honest in a journal.**
-
-Two consequences: a client renders its own fallback, and the server keeps the best name
-any phase gave a block (`MAX` ignoring NULLs, so a phase that carried one wins). That
-second part is what makes omitting at `started` safe.
-
-**When two layers both supply a default for one field, the layer that writes data stops
-first and the layer that renders changes second.** Reversed, one condition acquires two
-labels — the producer's string for some rows and the new fallback for the rest — which is
-worse than a single imprecise label and invisible until a card renders.
-
-**Consolidation keeps the closing event's fields, so a name given at open must be
-carried forward explicitly.** The fold keys a block on its `completed` event — right for
-text, wrong for identity, since a trajectory is named at `started` and renamed by the
-delta carrying its brief, while its close reports only an outcome. Drop it and every card
-reads its fallback once a turn consolidates, which looks exactly like a frontend bug two
-layers above where the name was lost. **Any per-block attribute that only an early phase
-carries needs the same treatment.**
+Names are optional evidenced metadata, never identity or proof of a child. Read-time
+fallback labels belong to the reader and cannot enter durable authored content.
+See [unified-trace-foundation.md](unified-trace-foundation.md#identity-and-reference-resolution).
 
 ### Keying rules that produce corruption when broken
 
-**Key vendor block state by `(trajectory, index)`, never by the vendor's index
-alone.** `claude` numbers content blocks per message, so two concurrent subagents both
-open index 0. An index-keyed map appends each one's deltas to the other's text — data
-corruption rather than a display fault, and invisible until two delegates run at once.
-
-**A trajectory id must be the delegate's, because one host may multiplex N of them.**
-`claude`'s `Workflow` fans out under a single `tool_use_id`, so keying by the host
-collapses a whole fan-out into one card whose name is whichever delegate reported last,
-with the others absent from the timeline. The per-delegate identity is `task_id`, with
-the host as its `span`. A fixture with one delegate per host cannot observe this: at N=1
-the collapse is indistinguishable from correct.
-
-**A vendor tag coarser than a trajectory is not refinable by guessing.** Where a vendor
-tags forwarded output with the *host* id it multiplexes, that tag cannot say which
-delegate produced a given event. Attribute such output to the **host**, which is true,
-rather than picking a delegate, which is corruption indistinguishable from correct
-output. Only N=1 is safe. Two obligations follow:
-
-- **A re-label must be latched.** The delegate table grows while the turn runs, so
-  answering freshly per event splits one delegate's output between container and
-  delegate at whatever instant a notification landed, and both halves render nested.
-- **Vendor block state stays keyed by the vendor's own tag**, not by the trajectory it
-  resolves to, because the tag is the only part identical across `start`, `delta`, and
-  `stop`.
+Typed native scopes and source occurrence identities replace unscoped block/span keys.
+Owner, actual record UUID and content-part index remain independently represented.
+[unified-trace-foundation.md](unified-trace-foundation.md#identity-and-reference-resolution)
+is authoritative; the dedicated vendor specs establish each actual namespace.
 
 ### Structure survives the ephemeral/stable split
 
-**A `subagent` event is stable at every phase.** Ordinarily `started` and `delta` are
-ephemeral and never reach the journal. That is right for content and wrong for
-structure: the `started` phase is where a trajectory's identity, name, and parent live,
-so dropping it leaves every child pointing at a parent that was never recorded, and a
-reload flattens the whole subtree into the parent's own work — the exact failure `span`
-exists to prevent, reintroduced by the storage tier rather than by the protocol.
-
-**One fact must have one derivation.** Stability is a field on the event; nothing may
-recompute it from the phase. Two derivations agree until either grows a case — and this
-one did, when `subagent` became stable at every phase for the structural reason above —
-after which the recomputing copy silently disagrees and the event is published as stable
-while never being journaled. **Read the field.**
-
-**An unknown `span` is not an error.** A client receiving an event naming a trajectory
-it has not seen renders it at the root rather than dropping it. The alternative loses
-work exactly where structure is least reliable: a link that died mid-delegation, or an
-adapter emitting out of order.
-
-**Two nodes naming each other silently delete both.** A cycle in `span` pointers is
-not merely a recursion hazard: attachment holds the first as an orphan waiting for the
-second, which then adopts it *and* is adopted by it, so neither is a root, neither is
-reachable, and the pair vanishes with nothing reporting it missing. No single-pass
-attachment detects this — repair by reachability afterwards, and carry a visited guard
-in any rollup, because unbounded recursion in a render path is a frozen tab.
+There is no semantic ephemeral/stable retention split in the replacement. Every admitted
+observation, including live deltas and lifecycle boundaries, is durably retained before
+acknowledgment. Query caching is independently disposable. See
+[unified-trace-storage.md](unified-trace-storage.md#admission-and-acknowledgments).
 
 ### Outcomes, and what a turn may close
 
-**A trajectory has its own outcome.** `completed` with an error flag closes it, so a
-failure three levels down is reportable at every level above without a client inferring
-failure from a missing result. An adapter that loses a trajectory leaves it open, and
-the server closes open trajectories when the turn terminates — an unexplained gap is
-worse than a recorded failure. Keep `abandoned` distinct from `failed`: the server
-closing a trajectory an adapter left open means nobody reported an outcome, and
-colouring that red reports an interrupted turn as a broken one.
-
-**A close reason is a closed vocabulary, `CloseReason`, and it is not the status.** The
-status says what the record became; the reason says what cut it short. They are
-independent, and conflating them is what the first version of this section did: the
-server's closer wrote `interrupted`, `abandoned`, `failed` into the reason field, which
-are the three outcomes re-spelled. A reason that restates its own status answers no
-question — and the two values other sections of these specs already depend on could not
-be expressed at all.
-
-| Value | Producer | What a reader learns |
-| --- | --- | --- |
-| `interrupted` | a person, through stop | the stop worked; the only value that is not a diagnostic |
-| `spool_full` | the envagent, on overflow | the buffer refused bytes the vendor kept (`docs/environments.md` § Overflow is a fact in the record) |
-| `grant_revoked` | the server, on revocation | authorization ended mid-flight ([ADR-0006](adr/0006-environment-authority-and-capability-grants.md) § Revocation reaches work already in flight) |
-| `link_lost` | the server, when an envagent's connection drops | nobody was draining the spool for the rest of the turn |
-| `agent_exited` | the supervisor, on an unexplained process exit | the vendor died without answering |
-| `adapter_silent` | the server's terminal sweep | the adapter opened a trajectory and never closed it |
-
-**Every value has a named producer, and no value is reserved speculatively.** A variant
-with no producer is one every renderer must handle and no test can reach, which is how a
-vocabulary acquires values that are always dead.
-
-The vocabulary is authoritative in `crates/protocol`, alongside `UnavailableReason`, for
-the same reason that one is: a reason spelled in one layer and matched in another is a
-comparison that silently never fires. `interrupted` is the one value a renderer must not
-colour as a fault.
-
-**A turn carries `close_reason`; a server-closed trajectory carries the same vocabulary in
-`data.reason` beside `data.closedBy`.** One vocabulary, two carriers, because a turn and a
-trajectory are cut short by the same six conditions — a second per-level vocabulary would
-diverge as soon as either grew a case.
-
-**Three of these conditions leave the turn's trajectories `abandoned` rather than
-`failed`**, because the vendor reported no failure: a full spool, a revoked grant, and a
-lost link.
-
-Note the level carefully, because the sections that introduced these two conditions both
-got it wrong and said "closes the turn `abandoned`". `abandoned` is a **trajectory**
-outcome; it is not in the `turns.status` vocabulary
-(`docs/database-schema.md` § turns), where the four terminal values are `completed`,
-`failed`, `cancelled`, and `interrupted`. So a spool that fills sets
-`turns.close_reason = spool_full` with a terminal `status`, and the trajectories the sweep
-closes carry `abandoned`. Writing `abandoned` at the turn level names a status that does
-not exist there — and a `CHECK` constraint rejecting it is the *good* outcome; the bad one
-is a renderer switching on a value it can never receive, which is a branch that never
-fires and nothing reports.
-
-Each stays non-final at the trajectory level, so work already dispatched that later
-produces a result is still recorded against the turn that owns it. A reason is required
-whenever a turn ends short: a turn that stops without saying why is indistinguishable from
-one that finished, which is the reading a renderer will otherwise give it.
-
-**Whether the vendor still holds bytes Sylph never received is a property of the reason,
-declared once.** `spool_full`, `grant_revoked`, `link_lost`, and `agent_exited` all mean
-the vendor's own store kept accumulating past the cut, so `adopt` on that session recovers
-it — the same mechanism that brings in any native history. `interrupted` and
-`adapter_silent` do not: the work ended, or the adapter had every byte and merely failed to
-emit a close, so re-projection yields exactly what is already recorded. Declaring this
-beside the vocabulary rather than inside a renderer is what keeps a second consumer from
-re-deriving it differently.
-
-`grant_revoked` is in that first group, which is deliberate. It is a fact about the
-*record*, not a prediction that the caller reading it may act on it — whether anyone may
-run `adopt` is the grant layer's question, and answering it in a field that describes
-durable history would put per-caller authorization into the record
-(`docs/architecture.md` § Identity).
-
-**A collapsed subtree must report what it hides.** Hiding a delegation's work by
-default is only defensible if a failure three levels down is still visible at the top;
-otherwise the user must open every branch to learn something broke, which is the work
-collapsing was supposed to save. A descendant failure escalates its ancestors' status,
-and a failed branch expands itself to the tool that failed.
-
-**Interior reachability is a typed trajectory fact, never a child-count inference.** A
-`subagent` phase may carry `interior_state`: `pending`, `partial`, `full`,
-`forwards_nothing`, or `unreadable`. The producer owns the transition: `pending` is a
-source expected but not yet readable; `partial` is a live readable prefix; `full` is a
-complete reachable source; `forwards_nothing` is a terminal vendor capability; and
-`unreadable` is an expected source that could not be read. A source that has ended must
-never leave `pending` in durable history. The frontend renders the reported fact; it may
-use actual children only to decide whether an expansion has content *now*, never to decide
-what absence means.
-
-**Progress is a snapshot, not delta text.** A vendor's progress notification re-sends its
-whole current summary rather than a suffix, so appending each one repeats the same
-sentence. Such a summary **replaces**, leaving `text` append-only as everywhere else.
-
-**A trajectory id is session-scoped, not turn-scoped.** Two rules follow, and without
-them a delegation that outlives its turn cannot be described at all.
-
-*A turn closes only what it holds.* The turn-settle sweep resolves a trajectory only
-when some event **on that turn** carries it as its `stream_id`. A bare `span` naming
-something this turn never emitted is a reference outward, usually to a trajectory an
-earlier turn opened; treating it as an opening fabricates a record — a host that
-completed cleanly on its dispatching turn acquires a second, contradicting `abandoned`
-close on a later turn for work it never ran there. Note that the obvious repair, "skip an
-id another turn declared", is **not available**: consolidation has moved the earlier
-turn's rows out by then, so the evidence of ownership is gone. Only the local rule is
-decidable.
-
-*A late outcome is recorded on the turn that owns the trajectory.* The event stays
-where it arrived — that is when it happened — and the server additionally corrects the
-owning turn's record. Only a provisional record may be corrected: a trajectory still
-open, or a close the *server* authored. An outcome the agent itself stated is never
-rewritten, because a later mention is a description, not a re-decision. This is what
-makes `abandoned` genuinely non-final rather than merely documented as such.
-
-*The turn does not read terminal until the sweep has finished.* A turn holding a known
-outcome over an unfinished record has its own status, `settling`, which is **in flight**.
-Every client question of the form "is this done" turns on the four terminal statuses, and
-this is what lets one answer be enough: read `completed`, refetch history, find everything.
-
-The alternative was tried and is worth naming, because it looks harmless. Writing the
-outcome first and sweeping afterwards makes `status` answer two questions at once — what the
-turn produced, and whether its record is complete — and no client can tell which one it is
-reading. One that acts on the first meaning gets the second: it stops listening before the
-sweep's own closes arrive, and its refetch reads a journal the sweep has not written yet, so
-a delegation the server closed renders as running forever. The sweep usually won that race,
-which is what made it present as flakiness. `docs/database-schema.md` § A terminal status
-means the record is finished holds the measurement.
+[unified-trace-foundation.md](unified-trace-foundation.md#independent-lifecycle-claims)
+owns outcome, close reason and observation state. A parent ending cannot sweep independent
+children/resources closed. A terminal execution is not a promise that no later archive
+evidence can arrive. Command cancellation acceptance is not proof of vendor cancellation.
 
 ### `is_backgrounded` inverts the sweep
 
-**An adapter that knows a delegation runs in the background must say so, and must
-re-attach the flag to every later phase.**
-
-The sweep closes trajectories an adapter left open so silence never has to explain a
-gap. That is right in general and wrong for work the agent says is backgrounded, which
-is *expected* to outlive its turn and report on a later agent-initiated turn: closing
-it writes a contradiction the real completion cannot undo, and both records then exist
-on different turns with the earlier card still saying the work never finished.
-
-Three details, each of which is easy to get wrong in a way nothing reports:
-
-- **Re-attach the flag to every phase.** A vendor may report it on the opening
-  notification and on none of the later ones, so the adapter must remember it and stamp
-  each subsequent phase. Set only at open, every backgrounded delegation is closed as
-  `abandoned` anyway.
-- **The server's exclusion must test any row sharing the trajectory**, not the row being
-  swept — a correlated subquery over the trajectory, not a predicate on one row. And when
-  the flag is read out of stored JSON, compare against SQLite's integer `1`: a comparison
-  written against `true` matches nothing, and every backgrounded delegation is swept
-  closed.
-- **Skipping a step that writes a wrong record can delete the right one.** A trajectory
-  with no close carries no text, so it folds into no block and its children reattach to
-  the root — the flattening `span` exists to prevent, one layer down. Whenever a fix is
-  "stop writing X", check what still writes the *record*.
-
-Keep the exclusion narrow — an ordinary delegation left open is the permanent spinner
-the sweep exists to prevent. And **startup recovery deliberately ignores the flag**,
-because a dead process cannot report: "abandoned after a restart" is a truthful
-terminal state and must stay distinguishable from "still running in the background".
+The replacement removes parent-close sweeps entirely. A vendor background flag is evidence
+about an operation/resource, not the exception that makes independently owned work survive.
+See [unified-trace-foundation.md](unified-trace-foundation.md#operation-contract).
 
 ## An agent may start a turn
 
-**An event arriving with no turn in flight must not be dropped.** An agent speaks
-between turns: a session with backgrounded work emits its delegate's completion *after*
-the dispatching turn's result, then opens an exchange of its own to report it, with
-stdout still open and the process still alive. Dropping those discards exactly the
-completion a user was promised, and no monitor, schedule, or background job can reach a
-client however the rest of the stack is built.
-
-So the server opens an **agent-initiated turn** (`origin: "agent"`) on the first
-out-of-turn event — the first of *any* kind. Waiting for the vendor's own `turn`/`started`
-bracket does not work, because that arrives *after* the payload it brackets: the wait
-keeps the announcement and drops the thing being announced.
-
-Three consequences worth holding onto:
-
-- Such a turn has **no waiter**, so settling it means recording terminal state
-  directly rather than waking one. Leaving it unsettled wedges the session, since a
-  live turn refuses new messages.
-- Its request text is empty, so a client that does not render `origin` shows an answer
-  to a message the user never wrote.
-- A delegate closed by the turn-settle sweep may later report its *real* outcome on
-  that turn, so `abandoned` is not final.
-
-**A waiter's absence means two different things**, and `origin` is what separates them.
-An agent turn never had a waiter; a user's turn whose waiter is gone already has an
-owner, because claiming the waiter first is how a user's stop wins over the link teardown
-it causes. Settle every waiter-less turn alike and a deliberate stop is reported as a
-lost link.
+An Activation may follow a human delivery, another agent, a goal continuation or a
+native/harness trigger. It is created from an observed execution boundary; input acceptance
+alone cannot create one. Missing association stays unknown. Control waiter state and
+trace ownership are independent under
+[unified-trace-foundation.md](unified-trace-foundation.md#messages-deliveries-and-model-visibility).
 
 ## Failure
 

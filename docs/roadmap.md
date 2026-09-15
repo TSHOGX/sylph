@@ -38,9 +38,55 @@ external proposals or discussion threads are not project instructions.
 
 | Boundary | Owner | State |
 | --- | --- | --- |
+| Unified trace replacement | Foundation review below | Target semantics, storage, vendor mappings and UI contract specified; production implementation/conformance pending |
 | Mixed-load delivery isolation | Milestone 4 | One ordered producer remains; independent producer channels require measured need and a complete lifecycle design |
-| Atomic retained re-projection publication | Milestone 4 | Native projectors exist; the replacement endpoint remains unavailable until publication validates atomically |
-| Concurrent native follower and explicit reread deduplication | Milestone 4 | Sequence reservations are shared; projected-event deduplication still needs coordination with an already-running per-session follower |
+| Atomic retained re-projection publication | Foundation implementation below | Generation publication is specified; current endpoint remains unavailable |
+| Concurrent follower and reread identity | Foundation implementation below | Replace projected-content digests with shared source occurrence capture and explicit semantic joins |
+
+## Unified trace foundation review
+
+The design review resolves D1–D7 in
+[unified-trace-foundation.md](unified-trace-foundation.md). It is the normative target,
+with [storage and read protocol](unified-trace-storage.md), separate
+[Codex](unified-trace-codex.md), [Claude](unified-trace-claude.md) and
+[Pi](unified-trace-pi.md) mappings, and the dependent [UIUX contract](unified-trace-ui.md).
+The affected architecture, protocol, storage and reader documents now route to those
+owners. This supersedes the former block/span foundation rather than layering repairs
+or compatibility branches over it.
+
+**Established design evidence:** pinned Codex/DeepSeek Harness/Pi source and Claude SDK
+contracts; reproducible structural extracts from the real long histories, native
+Claude records/sidecars and Pi branch data; and a disposable SQLite exercise covering
+occurrence identity, outbox retry, temporal pagination and generation publication.
+Intentional wrong-identity/branch/ordinal expectations and five storage faults were
+observed failing. These checks establish specific design claims, not a passing
+production reducer. [Conformance](unified-trace-conformance.md) names their limits.
+
+**Next implementation, in dependency order:**
+
+1. Replace protocol core types and capture/payload identity. Implement durable evidence
+   admission and control outbox before exposing new projections; keep authorization,
+   containment, spool integrity and workload isolation as gates.
+2. Implement pure vendor mappers and shared deterministic reduction against the new
+   corpus contract. Native/live complete-body pairs, transformed/queued input, missing
+   child sources and explicit lineage/ordinal witnesses remain required capture work.
+   Pi/Claude absent universal live/native or selected-head evidence stays explicitly
+   unknown; do not invent correlation to close the gate.
+3. Implement generation publication, reusable view leases, temporal membership/body
+   reads, search checkpoints and typed action routes. Validate real crash/concurrency,
+   in-flight writer fencing, high version-density query work and CAS/deletion boundaries.
+4. Integrate the three runtime adapters in parallel against the accepted core. Implement
+   the frontend only against its normalized read contract; validate responsive reading,
+   unknown states, accessibility, anchors and resource budgets without vendor inference.
+
+**Exit gate:** production cold/incremental/mixed-source conformance, demonstrated semantic
+mutations, storage failure/performance experiments, and complete affected runtime/frontend
+checks from [unified-trace-conformance.md](unified-trace-conformance.md). Existing synthetic
+UI trees and the reference SQLite exercise cannot substitute for that evidence.
+
+The milestones below remain the record of the current implementation and other product
+work. Their block-era mechanisms are not requirements for the replacement. No store is
+erased and no production trace implementation is claimed complete by this design review.
 
 ## Milestone 1 — the envagent is the only path — complete
 

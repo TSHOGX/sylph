@@ -5,8 +5,11 @@ session and owns all session policy. An **envagent** runs on each machine where 
 execute and dials back to the server. A **web frontend** is a transport onto the server,
 and so is anything else.
 
-This document owns the system's shape, the session model, identity, and the authority
-model. Every other document defers to it.
+This document owns the system's shape, public Session identity, environment topology and
+authority. [unified-trace-foundation.md](unified-trace-foundation.md) owns trace semantics;
+[unified-trace-storage.md](unified-trace-storage.md) owns their physical realization.
+Those target contracts replace the former turn/block trace model. Implementation gaps
+are tracked in [roadmap.md](roadmap.md#unified-trace-foundation-review).
 
 ## Topology
 
@@ -18,7 +21,7 @@ model. Every other document defers to it.
         ┌─────────▼──────────────────────────────┐
         │  sylph-server  (+ web, same origin)    │
         │  sessions · turns · links · policy     │
-        │  journal.db · history.db · blobs/      │
+        │  control · evidence · projections      │
         │  THE authoritative record              │
         └─────────▲──────────────────────────────┘
                   │  sylph.env.v1 — envagent dials IN
@@ -101,15 +104,14 @@ rewrite what the stored history means.
 
 ### What genuinely differs, and where it belongs
 
-**How events are obtained** is an adapter mode (`docs/session-protocol.md`): hold the
-process's stdio, or read the vendor's native store. One vocabulary comes out either way.
+Acquisition is an adapter surface: live capture, native capture, or both. Capture and
+vendor process control execute in the envagent. Pure vendor semantic mappers execute
+over the server's retained observations, including while an environment is offline.
 
-**How much resolution the record has** is `fidelity` on the record itself — `stream`,
-`blocks`, or `messages`. It is not correlated with who started the session: a session
-Sylph started, read back from the vendor's native store after the process died, is
-message fidelity too. A renderer reads the field to decide whether it may draw a
-duration, since a waterfall over message-fidelity data would present equal-length bars as
-measurements.
+Resolution belongs to the record. The coarse `fidelity` summary does not conceal mixed
+coverage or authorize a duration: source intervals, endpoints, clock domain and
+uncertainty govern each measurement. The full contract is
+[unified-trace-foundation.md](unified-trace-foundation.md#coverage-is-not-a-rank).
 
 ## Identity is `(environment, agent, native_id)`
 
@@ -139,13 +141,17 @@ Rules the triple needs to hold:
 - **The encoding does not use `/`.** Most of `pi`'s model ids contain a slash, and vendor
   ids generally may. The wire form is `<env>:<agent>:<native>` with `env` restricted to
   base32, and a URL path segment carries it percent-encoded.
-- **A durable session exists only after a real turn and a native id.** `POST /sessions`
+- **Interactive creation commits a Session only after actual work and a native id.** `POST /sessions`
   starts a prepared link rather than reserving a row. The handle is process-local and
   disposable: it may be used to read capabilities, change configuration, and browse the
   contained workdir, but it is never a session id and never appears in history. A first
   user message — including a prompt command or an attachment — promotes it atomically;
   abandoning it closes the link without leaving a record, and a failed spawn reports at
   the start screen rather than leaving a dead row behind.
+- An imported native thread can be identified before its interior arrives. An
+  evidenced embedded child has an AgentRef without a fabricated standalone Session.
+  [unified-trace-foundation.md](unified-trace-foundation.md#identity-and-reference-resolution)
+  defines that reference and its independently reported control route.
 - **The id is stable for the session's whole life**, which follows from nothing resetting
   a session.
 
@@ -175,56 +181,38 @@ simplicity is bought with it:
   candidate copies of one session.
 - `cwd` is unambiguous. Two machines both having `/home/user/app` is not a collision,
   because a path is only ever read alongside the environment that named it.
-- Upload cannot conflict. It either brings a session the server has not seen, or a longer
-  prefix of one it has.
+- Environment ownership prevents cross-environment session-copy reconciliation. Within
+  an environment, rewrites, reverted histories and source conflicts remain possible and
+  follow [the capture contract](unified-trace-storage.md#source-identity-and-generations).
 
 Moving work elsewhere is a **fork**: a new session with a recorded ancestor.
 
 ## One authority, one store, one vocabulary
 
-The server's own store under `~/.sylph` is the authoritative record. Everything else is a
-source it ingests from or a projection it serves.
+The server owns the archive. Retained vendor observations and accepted server facts
+are authoritative evidence; semantic claims, search and readers are rebuildable
+projections. The envagent spool transfers evidence until acknowledged and is not an
+independent archive authority.
 
-There is exactly one event vocabulary and one durable store. Native history is parsed **by
-an adapter** and emitted as the same events a live turn emits, landing in the same journal
-→ history pipeline, carrying a `fidelity` marker, and indexed by the same full-text table.
-A reader cannot tell which mode produced a row, and nothing translates between two id
-spaces because there is only one.
+One typed vocabulary describes AgentThread, Activation, Message, Delivery, Operation,
+Resource, history/context and measurements. Root and child agents share that model.
+A graph read never changes original ownership or copies execution into a parent.
 
-A second store with its own per-vendor normalizers, schema, and query path bounds what any
-capability built on top can honestly claim: full-text search over a *subset* of history
-covers whichever sessions some parser happened to reach, so a session whose environment
-has gone away is searchable nowhere. One store answers it by construction.
-
-The cost is that vendor-format knowledge lives in Sylph's own adapters, which is where it
-belongs anyway — the adapter already owns that vendor's launch line and control surface,
-so its native format is the same body of knowledge rather than a second one.
-
-`docs/storage.md` owns the tiers and the fold format. `docs/agents.md` owns each vendor's
-native format and quirks.
+[unified-trace-foundation.md](unified-trace-foundation.md) defines the vocabulary.
+[unified-trace-storage.md](unified-trace-storage.md#authority-and-database-boundaries)
+separates short operational transactions, durable evidence admission and derived query
+work. Database boundaries isolate writes; they do not create competing sources of truth.
 
 ### Data travels one way: in
 
-The server never pushes history outward and never writes session data outside `~/.sylph`.
-There is no bidirectional sync, no last-writer-wins, no vector clock, and no merge — each
-of those exists to answer "which of two conflicting writes wins", which the no-migration
-invariant means nobody asks.
+Vendor stores are sources to capture, not a backup that can authorize evidence deletion.
+The server never reads remote native paths; the envagent captures their bytes and
+provenance. Once retained, re-projection uses pure mappers without a reachable vendor.
+Missing source material is explicit coverage, not a fabricated empty transcript.
 
-Two inbound paths:
-
-- **A live session** arrives as a consequence of running. The envagent streams normalized
-  events to the server as they happen, so there is no moment at which the data is only in
-  one place (`docs/environments.md` § Spooling).
-- **An existing native session** is brought in by an explicit act: **watch** it (follow it
-  as it runs) or **adopt** it (bring in what is already recorded).
-
-Bringing in native sessions stays explicit rather than becoming an automatic sweep of
-every store on the disk. Offering it as a one-time choice when an envagent first pairs is
-the shape to build.
-
-What travels is what the adapter produced from the native bytes it read locally, which is
-why the adapter runs in the environment. Uploading rows the server had to trust would put
-the schema in every environment and require upgrading them in lockstep.
+Control requests travel outward through the envagent as before. Their immutable accepted
+revisions and delivery outcomes enter the same evidence record through the operational
+outbox. A queued request is not proof of execution or model inclusion.
 
 ## One link, two typed capability facets
 
@@ -322,51 +310,31 @@ failure. That is what the two facets exist to express.
 
 ## Turn execution
 
-A **turn** is a durable resource, not an HTTP request's lifetime:
+A submitted request is a durable control operation with an immutable Message revision
+and Delivery attempt. It is not itself an Activation. The server serializes control
+against native execution leases; accepted cancellation holds the slot until its actual
+vendor/supervisor outcome is known. An at-most-once ambiguous dispatch is never retried
+merely because the client or server restarted.
 
-1. `POST /sessions/{id}/turns` with an idempotency key → `202` and a turn id
-2. The server ensures a link, then sends the turn on it
-3. The client streams the session trace (SSE), reconnecting with `Last-Event-ID`
-4. The turn settles when the adapter reports an outcome — there is no process exit to
-   read, because the adapter is long-lived and a turn is a message on it
-5. A server restart marks in-flight turns `interrupted`
+Activations follow observed native boundaries, including harness/agent-originated work.
+An arbitrary event arriving after another activation ended cannot open a guessed one.
+Server restart changes observation/control state; it does not invent remote execution
+outcomes or close independent child resources.
 
-One turn per session at a time; a second is refused (`SESSION_ALREADY_RUNNING`) rather
-than queued, because the link holds one conversation.
-
-**An agent may start a turn.** *Measured on claude 2.x:* a session with backgrounded work
-emits the delegate's completion after its turn's `result`, then an entire exchange of its
-own to report it. So the server opens an agent-initiated turn (`origin: "agent"`) on the
-first out-of-turn event of any kind. Such a turn has no waiter and its request text is
-empty, so a client that ignores `origin` will render an answer to a message the user never
-wrote. This is a property of the turn; a session carries no such field.
-
-Two orderings are load-bearing, and both express one principle: **write the row that makes
-the next action legal first**, because a client will observe between two writes that settle
-one logical fact.
-
-- **`stop` marks the turn `stopping` before asking the vendor to interrupt.** The
-  execution slot remains occupied until the adapter closes its turn lease. A successful
-  interrupt request is not evidence that the vendor is already idle.
-- **A session returns to `idle` before its turn is marked terminal.** The other order
-  leaves a finished turn on a `running` session, which is the state that makes the composer
-  refuse the next message.
+The delivery/lifecycle contract is
+[unified-trace-foundation.md](unified-trace-foundation.md#messages-deliveries-and-model-visibility).
+Operational durability follows [the outbox protocol](unified-trace-storage.md#operational-facts-use-an-outbox).
 
 ### Session trace is the transport boundary for delegated work
 
-The session page consumes the execution node projection described in
-`docs/storage.md` § Execution node projection. The session trace remains an explicit
-replay transport with a monotonic session cursor and records from both storage tiers.
-Node ownership is independent of the turn on which a late event arrives.
+A capture connection may multiplex work from several agents. Ownership is explicit and
+independent of the parent connection or activation receiving the bytes. Every agent uses
+the same reader contract. An embedded child is addressable through its real scoped native
+identity; it is not a promoted tool host or a new Session class.
 
-The trace envelope carries both `trajectoryId` (in the `streamId`/`span` vocabulary) and
-`arrivalTurnId`. The first declaration establishes trajectory ownership; `arrivalTurnId` is
-arrival provenance only. Keeping those separate is what keeps a late child close from being
-routed to a synthetic `origin: agent` turn, and it lets the frontend project the event into
-the existing owner card without moving the event's historical sequence.
-
-The index is derived from the event envelope, which stays append-only. Materializing it as
-`trajectories` and `invocations` tables is a schema change rather than a second authority.
+The semantic boundary is [unified-trace-foundation.md](unified-trace-foundation.md#ownership-topology-interaction-and-context).
+A separate typed action route is required before controlling an embedded agent; its
+containing Session is never a fallback control target.
 
 ## Security model, and what multi-user requires
 
