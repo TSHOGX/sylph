@@ -2334,6 +2334,7 @@ dependencies = [
  "sylph-adapters",
  "sylph-envagent",
  "sylph-protocol",
+ "sylph-trace",
  "tempfile",
  "thiserror",
  "tokio",
@@ -2353,6 +2354,7 @@ dependencies = [
 name = "sylph-trace"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "blake3",
  "petgraph",
  "serde",

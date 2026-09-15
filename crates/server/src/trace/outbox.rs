@@ -12,12 +12,12 @@ use sqlx::{
     Row, SqlitePool,
 };
 #[cfg(test)]
-use sylph_protocol::trace::{AgentRef, CommandKind, SubmittedRevision};
+use sylph_protocol::trace::SubmittedRevision;
 use sylph_protocol::trace::{
-    AuthorizationReceipt, Capture, CommandAcceptance, DeliveryFact, IngestionEpoch, Issuer,
-    ObservationRef, OperationalFact, PayloadChunk, PayloadCompleteness, PayloadEncoding,
-    PayloadManifest, PayloadRef, RetryPolicy, SourceLocator, SourcePosition, SourceRef, TimeBasis,
-    TimeEvidence, TimeUnit, TransportKind,
+    AgentRef, AuthorizationReceipt, Capture, CommandAcceptance, CommandKind, CommandTarget,
+    DeliveryFact, IngestionEpoch, Issuer, ObservationRef, OperationalFact, PayloadChunk,
+    PayloadCompleteness, PayloadEncoding, PayloadManifest, PayloadRef, RetryPolicy, SourceLocator,
+    SourcePosition, SourceRef, TimeBasis, TimeEvidence, TimeUnit, TransportKind,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -93,6 +93,15 @@ pub struct AcceptedCommand {
     pub accepted_observation: ObservationRef,
     pub state: CommandState,
     pub dispatch_attempts: u64,
+    pub bound_agent: Option<AgentRef>,
+    pub identity_observation: Option<ObservationRef>,
+}
+
+impl AcceptedCommand {
+    /// Resolves identity only; authorization and control reachability remain separate.
+    pub fn agent(&self) -> Option<&AgentRef> {
+        self.acceptance.target.agent().or(self.bound_agent.as_ref())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -315,6 +324,8 @@ impl ControlStore {
             accepted_observation: occurrence.capture.observation_ref,
             state: CommandState::Accepted,
             dispatch_attempts: 0,
+            bound_agent: None,
+            identity_observation: None,
         })
     }
 
@@ -323,6 +334,13 @@ impl ControlStore {
             .target
             .validate()
             .map_err(|error| OutboxError::Invalid(error.to_string()))?;
+        if matches!(command.target, CommandTarget::Launch { .. })
+            && command.kind != CommandKind::Send
+        {
+            return Err(OutboxError::Invalid(
+                "only an initial send may target a launch inventory".into(),
+            ));
+        }
         IngestionEpoch::new(command.ingestion_authorization_epoch.as_str())
             .map_err(|error| OutboxError::Invalid(error.to_string()))?;
         if command.command_id.is_empty()
@@ -352,6 +370,13 @@ impl ControlStore {
             accepted_observation: self.observation(row.get::<i64, _>("accepted_seq") as u64),
             state: CommandState::from_db(row.get("state"))?,
             dispatch_attempts: row.get::<i64, _>("dispatch_attempts") as u64,
+            bound_agent: row
+                .get::<Option<&[u8]>, _>("bound_agent_json")
+                .map(serde_json::from_slice)
+                .transpose()?,
+            identity_observation: row
+                .get::<Option<i64>, _>("bound_seq")
+                .map(|sequence| self.observation(sequence as u64)),
         })
     }
 
@@ -363,6 +388,86 @@ impl ControlStore {
             .as_ref()
             .map(|row| self.command_row(row))
             .transpose()
+    }
+
+    /// Record the native identity learned from retained vendor occurrences. The
+    /// accepted target, submission and ingestion epoch remain immutable. Repeating
+    /// the same binding returns its first receipt without permitting another launch.
+    pub async fn bind_identity(
+        &self,
+        command_id: &str,
+        agent_ref: AgentRef,
+        source_evidence: Vec<ObservationRef>,
+        at_ms: i64,
+    ) -> Result<ObservationRef> {
+        agent_ref
+            .validate()
+            .map_err(|error| OutboxError::Invalid(error.to_string()))?;
+        if !matches!(agent_ref, AgentRef::Session(_)) || source_evidence.is_empty() {
+            return Err(OutboxError::Invalid(
+                "launch identity needs a native session and source evidence".into(),
+            ));
+        }
+        for evidence in &source_evidence {
+            evidence
+                .validate()
+                .map_err(|error| OutboxError::Invalid(error.to_string()))?;
+            if evidence.issuer != Issuer::Environment(agent_ref.environment().clone()) {
+                return Err(OutboxError::Invalid(
+                    "identity evidence belongs to another environment".into(),
+                ));
+            }
+        }
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let row = sqlx::query("SELECT * FROM trace_commands WHERE command_id=?")
+            .bind(command_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or(OutboxError::InvalidTransition)?;
+        let command = self.command_row(&row)?;
+        let CommandTarget::Launch { inventory } = &command.acceptance.target else {
+            return Err(OutboxError::Invalid(
+                "only a launch inventory can gain a native binding".into(),
+            ));
+        };
+        if inventory.environment != *agent_ref.environment()
+            || inventory.vendor != agent_ref.anchor_session().agent
+        {
+            return Err(OutboxError::Invalid(
+                "native identity does not belong to the launch environment and vendor".into(),
+            ));
+        }
+        if command.dispatch_attempts == 0 {
+            return Err(OutboxError::InvalidTransition);
+        }
+        if let Some(bound) = &command.bound_agent {
+            return if bound == &agent_ref {
+                command
+                    .identity_observation
+                    .ok_or(OutboxError::InvalidTransition)
+            } else {
+                Err(OutboxError::IdentityConflict)
+            };
+        }
+        let payload = serde_json::to_vec(&OperationalFact::IdentityBound {
+            command_id: command_id.into(),
+            agent_ref: agent_ref.clone(),
+            source_evidence,
+        })?;
+        let prepared = self.prepare_payload(&payload)?;
+        let occurrence = self
+            .allocate(&mut tx, &command.acceptance, payload, prepared, at_ms)
+            .await?;
+        self.insert_occurrence(&mut tx, "identity_bound", &occurrence, at_ms)
+            .await?;
+        sqlx::query("UPDATE trace_commands SET bound_agent_json=?,bound_seq=? WHERE command_id=?")
+            .bind(serde_json::to_vec(&agent_ref)?)
+            .bind(occurrence.capture.observation_ref.producer_seq as i64)
+            .bind(command_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(occurrence.capture.observation_ref)
     }
 
     /// The caller may invoke the vendor only after receiving this durable permit.
@@ -388,12 +493,18 @@ impl ControlStore {
         }
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let row =
-            sqlx::query("SELECT state, dispatch_attempts FROM trace_commands WHERE command_id = ?")
+            sqlx::query("SELECT state, dispatch_attempts, bound_agent_json FROM trace_commands WHERE command_id = ?")
                 .bind(command_id)
                 .fetch_optional(&mut *tx)
                 .await?
                 .ok_or(OutboxError::InvalidTransition)?;
         let state = CommandState::from_db(row.get("state"))?;
+        if row.get::<Option<&[u8]>, _>("bound_agent_json").is_some() {
+            // A native identity proves the launch already took effect. An unknown
+            // later input response must never authorize another launch, even when
+            // the adapter supports idempotent requests on an existing session.
+            return Err(OutboxError::InvalidTransition);
+        }
         let retry_allowed = matches!(
             command.acceptance.retry_policy,
             RetryPolicy::VendorIdempotent { .. }
@@ -614,7 +725,7 @@ impl ControlStore {
                 },
             },
             ingestion_authorization_epoch: command.ingestion_authorization_epoch.clone(),
-            declared_subject_refs: vec![command.target.clone()],
+            declared_subject_refs: command.target.declared_subjects(),
             captured_at: TimeEvidence {
                 domain: format!("server-control:{}", self.producer_id),
                 value: at_ms,

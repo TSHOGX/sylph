@@ -1,0 +1,43 @@
+{
+  "captured_on": "2026-09-16",
+  "purpose": "Controlled harmless marker prompts with all vendor tools and customizations disabled. Historical fixture tools were not executed.",
+  "sanitization": "Parse complete JSON records and serialize compact UTF-8 JSONL. Replace temporary working-directory prefixes with /workspace/capture and the local home prefix with /home/capture. All keys, identities, message bodies, missing/null values, arrays, counts, and lifecycle fields are retained. No source bytes are claimed identical after path substitution/JSON serialization.",
+  "captures": [
+    {
+      "vendor": "claude",
+      "cli_version": "2.1.272",
+      "path": "claude/live-basic.jsonl",
+      "source_sha256": "69e72dece64f25dc409f4da82c671f862a5ec00b7efd60e79b49f11925281704",
+      "retained_sha256": "b43cdde4ba9aa9f1a420bccc9235dd8489c219e335571efaf6c202a9ad79270d",
+      "records": 13,
+      "result": "success marker"
+    },
+    {
+      "vendor": "claude",
+      "cli_version": "2.1.272",
+      "path": "claude/native-basic.jsonl",
+      "source_sha256": "137108db3148b126140ed737818562f7e93f4bb94da3cf04f2c7ba4f5d2d66c4",
+      "retained_sha256": "4a4c2038815138e8663dae5164cf77677cfa2879f640b8eddc2815c1705e91e6",
+      "records": 13,
+      "result": "success marker"
+    },
+    {
+      "vendor": "pi",
+      "cli_version": "0.84.3",
+      "path": "pi/rpc-failure.jsonl",
+      "source_sha256": "9f7277ba7a5d53d602e744a7228a4cc97b2df1d77ecc5640fe879439c4c6a796",
+      "retained_sha256": "5762bced2a69414a1e4d6512107c8dbf583a6fcd74cd71b12708fc2b81747999",
+      "records": 19,
+      "result": "failed model response: retired configured model; genuine agent_settled observed"
+    },
+    {
+      "vendor": "pi",
+      "cli_version": "0.84.3",
+      "path": "pi/native-failure.jsonl",
+      "source_sha256": "b3fe6cc1a8baf87def01f10fde25052d5ef2af5d91a879b4a799daf804f88a93",
+      "retained_sha256": "bdcc01cd679cafafb9df835214ae855a7f7f0c7952004d3e40e2f9f9a015f2c0",
+      "records": 5,
+      "result": "failed model response: retired configured model; genuine agent_settled observed"
+    }
+  ]
+}

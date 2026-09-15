@@ -147,11 +147,20 @@ impl BlobStore {
     /// shared by a pruned block and a retained one must survive, and only the
     /// index knows that.
     pub async fn remove(&self, hash: &str) -> Result<()> {
-        match tokio::fs::remove_file(self.path_for(hash)?).await {
-            Ok(()) => Ok(()),
+        let path = self.path_for(hash)?;
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => sync_parent_directories(&path).await,
             // Already gone is the desired end state, not a failure.
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(error).context("Could not remove a blob"),
+        }
+    }
+
+    pub(crate) async fn size(&self, hash: &str) -> Result<Option<u64>> {
+        match tokio::fs::metadata(self.path_for(hash)?).await {
+            Ok(metadata) => Ok(Some(metadata.len())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error).context("Could not measure a blob"),
         }
     }
 

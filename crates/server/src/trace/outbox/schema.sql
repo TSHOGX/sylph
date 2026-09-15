@@ -19,9 +19,15 @@ CREATE TABLE IF NOT EXISTS trace_commands (
     state TEXT NOT NULL CHECK (state IN
         ('accepted', 'dispatching', 'receiver_accepted', 'unknown', 'rejected', 'consumed', 'cancelled', 'conflicting')),
     dispatch_attempts INTEGER NOT NULL DEFAULT 0 CHECK (dispatch_attempts >= 0),
+    bound_agent_json BLOB,
+    bound_seq INTEGER,
     created_at_ms INTEGER NOT NULL,
-    UNIQUE (origin_subject, target_ref, idempotency_key)
+    UNIQUE (origin_subject, target_ref, idempotency_key),
+    CHECK ((bound_agent_json IS NULL) = (bound_seq IS NULL))
 );
+CREATE TRIGGER IF NOT EXISTS trace_bound_identity_immutable
+BEFORE UPDATE OF bound_agent_json, bound_seq ON trace_commands WHEN OLD.bound_agent_json IS NOT NULL
+BEGIN SELECT RAISE(ABORT, 'native launch identity is immutable'); END;
 CREATE INDEX IF NOT EXISTS trace_commands_dispatch ON trace_commands(state, created_at_ms, command_id);
 
 CREATE TABLE IF NOT EXISTS control_outbox (

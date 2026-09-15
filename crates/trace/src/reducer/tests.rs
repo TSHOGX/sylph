@@ -783,6 +783,8 @@ fn conflicting_revision_bodies_never_become_a_known_final_message() {
                     representation: Representation::Conversation,
                     form: RevisionForm::Final { covers: None },
                     parts: vec![ContentPart {
+                        media_type: Some("text/plain".into()),
+                        encoding: PayloadEncoding::Utf8,
                         part_ref: MessagePartRef::native(
                             agent("root"),
                             "part",

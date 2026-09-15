@@ -1,9 +1,12 @@
 //! Transfer fixed operational occurrences into evidence without dispatching commands.
 
 use super::{
-    evidence::{EvidenceError, EvidenceStore, ReceiptDisposition},
+    evidence::{EvidenceError, ReceiptDisposition},
     outbox::{ControlStore, ExportDisposition, OutboxError, OutboxOccurrence},
+    upload::{BeginCapture, CaptureUploads, PayloadDeclaration, UploadError},
 };
+#[cfg(test)]
+use sylph_protocol::trace::{CommandTarget, IngestionScope};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ExportError {
@@ -11,6 +14,8 @@ pub enum ExportError {
     Evidence(#[from] EvidenceError),
     #[error(transparent)]
     Outbox(#[from] OutboxError),
+    #[error(transparent)]
+    Upload(#[from] UploadError),
     #[error("staged operational bytes do not match the fixed outbox capture")]
     PayloadMismatch,
     #[error("control payload limits exceed evidence admission limits")]
@@ -27,13 +32,13 @@ pub struct ExportProgress {
 #[derive(Clone)]
 pub struct OutboxExporter {
     control: ControlStore,
-    evidence: EvidenceStore,
+    uploads: CaptureUploads,
 }
 
 impl OutboxExporter {
-    pub fn new(control: ControlStore, evidence: EvidenceStore) -> Result<Self, ExportError> {
+    pub fn new(control: ControlStore, uploads: CaptureUploads) -> Result<Self, ExportError> {
         let control_limits = control.limits();
-        let evidence_limits = evidence.limits();
+        let evidence_limits = uploads.evidence().limits();
         if control_limits.payload_chunk_bytes > evidence_limits.max_chunk_bytes
             || control_limits.max_payload_chunks > evidence_limits.max_manifest_chunks
             || control_limits.max_capture_envelope_bytes > evidence_limits.max_batch_envelope_bytes
@@ -41,7 +46,30 @@ impl OutboxExporter {
         {
             return Err(ExportError::IncompatibleLimits);
         }
-        Ok(Self { control, evidence })
+        // Acceptance bounds must imply upload declaration bounds. Otherwise a
+        // durable accepted command could be permanently unexportable without any
+        // configuration changing between acceptance and transfer.
+        let chunks = control_limits
+            .max_fact_bytes
+            .div_ceil(control_limits.payload_chunk_bytes)
+            .min(control_limits.max_payload_chunks);
+        let declarations = if control_limits.max_fact_bytes > control_limits.payload_chunk_bytes {
+            chunks.checked_add(1)
+        } else {
+            Some(1)
+        }
+        .ok_or(ExportError::IncompatibleLimits)?;
+        let worst = worst_declaration_bytes(
+            control_limits.max_fact_bytes,
+            control_limits.payload_chunk_bytes,
+            chunks,
+        )?;
+        if declarations > uploads.limits().max_declarations
+            || worst > uploads.limits().max_metadata_bytes
+        {
+            return Err(ExportError::IncompatibleLimits);
+        }
+        Ok(Self { control, uploads })
     }
 
     /// A bounded pass advances only after a terminal durable evidence receipt.
@@ -65,43 +93,84 @@ impl OutboxExporter {
     }
 
     async fn admit(&self, occurrence: &OutboxOccurrence) -> Result<ExportDisposition, ExportError> {
-        // The metadata check is advisory. Admission rechecks the epoch/receipt in
-        // its writer transaction, including deletion racing this payload staging.
-        if self.evidence.needs_payloads(&occurrence.capture).await? {
-            let payload_ref = if let Some(manifest) = &occurrence.manifest {
-                for chunk in &manifest.chunks {
-                    let start = usize::try_from(chunk.payload_offset)
-                        .map_err(|_| ExportError::PayloadMismatch)?;
-                    let length =
-                        usize::try_from(chunk.length).map_err(|_| ExportError::PayloadMismatch)?;
-                    let end = start
-                        .checked_add(length)
-                        .ok_or(ExportError::PayloadMismatch)?;
-                    let bytes = occurrence
-                        .payload
-                        .get(start..end)
-                        .ok_or(ExportError::PayloadMismatch)?;
-                    if chunk.chunk_offset != 0
-                        || self.evidence.stage_payload(bytes).await? != chunk.digest
-                    {
-                        return Err(ExportError::PayloadMismatch);
-                    }
-                }
-                self.evidence.stage_manifest(manifest).await?
-            } else {
-                self.evidence.stage_payload(&occurrence.payload).await?
-            };
-            if payload_ref != occurrence.capture.payload_ref {
-                return Err(ExportError::PayloadMismatch);
+        let mut declarations = std::collections::BTreeMap::new();
+        if let Some(manifest) = &occurrence.manifest {
+            declarations.insert(
+                occurrence.capture.payload_ref.clone(),
+                PayloadDeclaration::Manifest {
+                    reference: occurrence.capture.payload_ref.clone(),
+                    manifest: manifest.clone(),
+                },
+            );
+            for chunk in &manifest.chunks {
+                declarations.insert(
+                    chunk.digest.clone(),
+                    PayloadDeclaration::Bytes {
+                        reference: chunk.digest.clone(),
+                        length: chunk.length,
+                    },
+                );
             }
+        } else {
+            declarations.insert(
+                occurrence.capture.payload_ref.clone(),
+                PayloadDeclaration::Bytes {
+                    reference: occurrence.capture.payload_ref.clone(),
+                    length: occurrence.payload.len() as u64,
+                },
+            );
         }
-        let batch = self
-            .evidence
-            .admit_batch(
+        let batch = match self
+            .uploads
+            .begin(
                 &occurrence.capture.observation_ref.issuer,
-                std::slice::from_ref(&occurrence.capture),
+                occurrence.capture.clone(),
+                declarations.into_values().collect(),
             )
-            .await?;
+            .await?
+        {
+            BeginCapture::Complete(batch) => batch,
+            BeginCapture::Pending(ticket) => {
+                if let Some(manifest) = &occurrence.manifest {
+                    for chunk in &manifest.chunks {
+                        let start = usize::try_from(chunk.payload_offset)
+                            .map_err(|_| ExportError::PayloadMismatch)?;
+                        let length = usize::try_from(chunk.length)
+                            .map_err(|_| ExportError::PayloadMismatch)?;
+                        let end = start
+                            .checked_add(length)
+                            .ok_or(ExportError::PayloadMismatch)?;
+                        let bytes = occurrence
+                            .payload
+                            .get(start..end)
+                            .ok_or(ExportError::PayloadMismatch)?;
+                        if chunk.chunk_offset != 0 {
+                            return Err(ExportError::PayloadMismatch);
+                        }
+                        self.uploads
+                            .put_chunk(
+                                &occurrence.capture.observation_ref.issuer,
+                                &ticket,
+                                &chunk.digest,
+                                bytes,
+                            )
+                            .await?;
+                    }
+                } else {
+                    self.uploads
+                        .put_chunk(
+                            &occurrence.capture.observation_ref.issuer,
+                            &ticket,
+                            &occurrence.capture.payload_ref,
+                            &occurrence.payload,
+                        )
+                        .await?;
+                }
+                self.uploads
+                    .finish(&occurrence.capture.observation_ref.issuer, &ticket)
+                    .await?
+            }
+        };
         let receipt = batch.receipts.first().ok_or(ExportError::PayloadMismatch)?;
         Ok(match &receipt.disposition {
             ReceiptDisposition::Retained { admission_seq } => ExportDisposition::Retained {
@@ -114,14 +183,64 @@ impl OutboxExporter {
     }
 }
 
+fn worst_declaration_bytes(
+    max_bytes: usize,
+    chunk_bytes: usize,
+    max_chunks: usize,
+) -> Result<usize, ExportError> {
+    use sylph_protocol::trace::{
+        PayloadChunk, PayloadCompleteness, PayloadEncoding, PayloadManifest, PayloadRef,
+    };
+    let digest = PayloadRef::bytes("f".repeat(64)).map_err(|_| ExportError::IncompatibleLimits)?;
+    if max_bytes <= chunk_bytes {
+        return Ok(serde_json::to_vec(&vec![PayloadDeclaration::Bytes {
+            reference: digest,
+            length: max_bytes as u64,
+        }])
+        .map_err(|_| ExportError::IncompatibleLimits)?
+        .len());
+    }
+    let parts = (0..max_chunks)
+        .map(|i| PayloadChunk {
+            digest: digest.clone(),
+            chunk_offset: 0,
+            length: chunk_bytes as u64,
+            payload_offset: i.saturating_mul(chunk_bytes) as u64,
+        })
+        .collect();
+    let manifest = PayloadManifest {
+        chunks: parts,
+        media_type: "application/json".into(),
+        encoding: PayloadEncoding::Utf8,
+        decoded_length: Some(max_chunks.saturating_mul(chunk_bytes) as u64),
+        completeness: PayloadCompleteness::Complete,
+    };
+    let mut declarations = vec![PayloadDeclaration::Manifest {
+        reference: PayloadRef::manifest("f".repeat(64))
+            .map_err(|_| ExportError::IncompatibleLimits)?,
+        manifest,
+    }];
+    declarations.extend((0..max_chunks).map(|_| PayloadDeclaration::Bytes {
+        reference: digest.clone(),
+        length: chunk_bytes as u64,
+    }));
+    Ok(serde_json::to_vec(&declarations)
+        .map_err(|_| ExportError::IncompatibleLimits)?
+        .len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
         storage::cas::BlobStore,
         trace::{
-            evidence::AdmissionLimits,
+            evidence::{
+                catalogue::{CatalogueLimits, EvidenceCatalogue},
+                AdmissionLimits, EvidenceStore,
+            },
             outbox::{CommandState, OutboxLimits},
+            upload::UploadLimits,
         },
     };
     use sylph_protocol::{
@@ -152,7 +271,10 @@ mod tests {
             .await
             .unwrap();
             let epoch = evidence
-                .authorize_scope(&agent, std::slice::from_ref(&agent))
+                .authorize_scope(
+                    &IngestionScope::Agent(agent.clone()),
+                    std::slice::from_ref(&agent),
+                )
                 .await
                 .unwrap();
             let control = ControlStore::open(
@@ -175,7 +297,9 @@ mod tests {
             self.control
                 .accept(CommandAcceptance {
                     command_id: "command-1".into(),
-                    target: self.agent.clone(),
+                    target: CommandTarget::Agent {
+                        agent: self.agent.clone(),
+                    },
                     kind: CommandKind::Send,
                     input: SubmittedRevision {
                         revision: "input-1".into(),
@@ -198,7 +322,13 @@ mod tests {
         }
 
         fn exporter(&self) -> OutboxExporter {
-            OutboxExporter::new(self.control.clone(), self.evidence.clone()).unwrap()
+            let catalogue =
+                EvidenceCatalogue::new(self.evidence.clone(), CatalogueLimits::default()).unwrap();
+            OutboxExporter::new(
+                self.control.clone(),
+                CaptureUploads::new(catalogue, UploadLimits::default()).unwrap(),
+            )
+            .unwrap()
         }
     }
 
@@ -240,10 +370,17 @@ mod tests {
         let fixture = Fixture::new().await;
         fixture.accept(b"deleted input".to_vec()).await;
         let occurrence = fixture.control.pending().await.unwrap().remove(0);
-        fixture.evidence.delete_scope(&fixture.agent).await.unwrap();
+        fixture
+            .evidence
+            .delete_scope(&IngestionScope::Agent(fixture.agent.clone()))
+            .await
+            .unwrap();
         let fresh_epoch = fixture
             .evidence
-            .readopt_scope(&fixture.agent, std::slice::from_ref(&fixture.agent))
+            .readopt_scope(
+                &IngestionScope::Agent(fixture.agent.clone()),
+                std::slice::from_ref(&fixture.agent),
+            )
             .await
             .unwrap();
         assert_ne!(
@@ -316,8 +453,42 @@ mod tests {
         .await
         .unwrap();
         assert!(matches!(
-            OutboxExporter::new(fixture.control.clone(), evidence),
+            OutboxExporter::new(
+                fixture.control.clone(),
+                CaptureUploads::new(
+                    EvidenceCatalogue::new(evidence, CatalogueLimits::default()).unwrap(),
+                    UploadLimits::default()
+                )
+                .unwrap()
+            ),
             Err(ExportError::IncompatibleLimits)
         ));
+    }
+
+    #[tokio::test]
+    async fn accepted_fact_limits_must_fit_upload_declaration_count_and_metadata_bytes() {
+        let fixture = Fixture::new().await;
+        for limits in [
+            UploadLimits {
+                max_declarations: 1,
+                ..Default::default()
+            },
+            UploadLimits {
+                max_metadata_bytes: 1,
+                ..Default::default()
+            },
+        ] {
+            let uploads = CaptureUploads::new(
+                EvidenceCatalogue::new(fixture.evidence.clone(), CatalogueLimits::default())
+                    .unwrap(),
+                limits,
+            )
+            .unwrap();
+            assert!(matches!(
+                OutboxExporter::new(fixture.control.clone(), uploads),
+                Err(ExportError::IncompatibleLimits)
+            ));
+        }
+        assert!(fixture.exporter().run_once().await.is_ok());
     }
 }

@@ -38,7 +38,7 @@ external proposals or discussion threads are not project instructions.
 
 | Boundary | Owner | State |
 | --- | --- | --- |
-| Unified trace replacement | Foundation review below | Target semantics, storage, vendor mappings and UI contract specified; production implementation/conformance pending |
+| Unified trace replacement | Foundation review below | Capture, mapping/reduction and publication foundations implemented; runtime/read API cutover and complete conformance in progress |
 | Mixed-load delivery isolation | Milestone 4 | One ordered producer remains; independent producer channels require measured need and a complete lifecycle design |
 | Atomic retained re-projection publication | Foundation implementation below | Generation publication is specified; current endpoint remains unavailable |
 | Concurrent follower and reread identity | Foundation implementation below | Replace projected-content digests with shared source occurrence capture and explicit semantic joins |
@@ -128,18 +128,38 @@ summaries, membership pages, anchored lookups and claim provenance. Query candid
 explicit work budgets; invalid-version density produces an advancing continuation rather
 than an empty completed page. Payload anchors pin representation and body revision.
 Writer fencing, validation, sealing and revision floors are implemented, with measured
-SQLite work and fault-tested concurrency. The external catalogue/lease/publication worker
-is still required before these stores can serve the product API.
+SQLite work and fault-tested concurrency.
 
-Remaining work: inventory-scoped capture and initial control acceptance before native
-identity; capture wire/runtime replacement; full Codex history-base, delegation, runtime
-resource and accounting mappings; Claude/Pi mappers and complete vendor evidence pairs;
-production projection workers, catalogue publication and reusable leases; search, payload
-pins, deletion cancellation/erasure and physical GC; normalized frontend replacement and
-final conformance. Explicit deletion currently commits the evidence visibility boundary;
-cross-store cancellation and control-input erasure need the complete runtime/job registry.
-Existing event/block code is removed during the cutover; there is no dual-write or
-compatibility reader planned.
+Inventory-scoped capture and immutable Launch controls now precede native identity. An
+evidenced binding supplies the actual Agent without retagging accepted input or allowing
+a second launch. Monotone epoch cutoffs preserve deletion through delayed identity binding
+and re-adoption. The evidence catalogue owns publication jobs, immutable seals, pointer
+CAS, reusable subject-bound leases and scoped payload pins. Publication validates a
+bounded committed tail behind durable fences and resumes safely after timeout or process
+death. Fresh capture admission requires owned byte-transfer receipts or an exact same-scope
+reread; a known CAS hash alone cannot import another scope's bytes. Upload and physical
+collection work share durable roots and guards, including shared byte/manifest digests.
+
+The production projection worker applies validated bounded observation units, persists
+source checkpoints and deferred dependencies with the generation cut, and resolves late
+identity without needing an unrelated later event. JSON preflight and mapping run on
+bounded CPU workers; decoding gaps suspend semantic continuation explicitly while raw
+capture stays retained. Immutable derived payloads preserve selector, rule, evidence,
+MIME and encoding. Source-owner definitions require retained vendor identity proof;
+capture routing hints never establish ownership. Claude and Pi mappers now cover their
+recorded native/live slices, branching, media, task/outer-run outcomes, preserved context
+membership and reported usage. Controlled real captures establish a Claude success pair
+and Pi failed settlement; successful Pi live capture remains unavailable from the tested
+provider, and no live/native certificate is invented.
+
+Remaining work: capture wire/runtime replacement and removal of block-era execution;
+full Codex history-base, delegation, runtime resource and accounting mappings; remaining
+vendor source certificates and workflow/schedule coverage; normalized typed read/action
+routes with projection-derived summaries and selected nested-object payload anchors;
+search checkpoints, control-input erasure and runtime job cancellation; frontend
+replacement, accessibility/scale verification and final production conformance. The new
+stores and workers are not yet the product API/runtime path. Existing event/block code is
+removed during that cutover; there is no dual-write or compatibility reader planned.
 
 ## Milestone 1 — the envagent is the only path — complete
 

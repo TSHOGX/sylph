@@ -170,6 +170,12 @@ pub struct Reducer {
 }
 
 impl Reducer {
+    pub fn len(&self) -> usize {
+        self.claims.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.claims.is_empty()
+    }
     /// Validate a whole bounded unit before mutating state. The worker advances its
     /// evidence cut only in the transaction that persists this state and its projection.
     pub fn apply(

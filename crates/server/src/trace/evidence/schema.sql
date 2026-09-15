@@ -2,15 +2,21 @@
 -- below stay in this FULL-durable evidence database.
 CREATE TABLE ingestion_scopes (
   scope_ref TEXT PRIMARY KEY,
+  scope_json TEXT NOT NULL,
   issuer_ref TEXT NOT NULL,
+  vendor TEXT NOT NULL,
   current_epoch TEXT NOT NULL,
   suppressed INTEGER NOT NULL CHECK (suppressed IN (0, 1))
 ) WITHOUT ROWID;
 
+CREATE TABLE ingestion_clock (singleton INTEGER PRIMARY KEY CHECK(singleton=1), epoch_order INTEGER NOT NULL);
+INSERT INTO ingestion_clock VALUES(1,0);
+
 CREATE TABLE ingestion_epochs (
   epoch TEXT PRIMARY KEY,
   scope_ref TEXT NOT NULL REFERENCES ingestion_scopes(scope_ref),
-  opened_at_ms INTEGER NOT NULL
+  opened_at_ms INTEGER NOT NULL,
+  epoch_order INTEGER NOT NULL UNIQUE
 ) WITHOUT ROWID;
 
 CREATE TABLE inventory_subjects (
@@ -43,6 +49,8 @@ CREATE TABLE source_generations (
 -- precedes every receipt; unrooted staged objects remain identifiable for GC.
 CREATE TABLE payloads (
   payload_ref TEXT PRIMARY KEY,
+  physical_digest TEXT NOT NULL,
+  availability TEXT NOT NULL CHECK(availability IN ('available','collected')),
   kind TEXT NOT NULL CHECK (kind IN ('bytes', 'manifest')),
   stored_length INTEGER NOT NULL CHECK (stored_length >= 0),
   decoded_length INTEGER CHECK (decoded_length >= 0),
@@ -53,6 +61,7 @@ CREATE TABLE payloads (
   CHECK ((kind = 'manifest') = (manifest_json IS NOT NULL)),
   CHECK (complete = 0 OR (decoded_length IS NOT NULL AND decoded_digest IS NOT NULL))
 ) WITHOUT ROWID;
+CREATE INDEX payloads_by_physical_digest ON payloads(physical_digest,payload_ref);
 
 CREATE TABLE payload_chunks (
   manifest_ref TEXT NOT NULL REFERENCES payloads(payload_ref),
@@ -119,3 +128,35 @@ CREATE TABLE producer_receipts (
   CHECK ((disposition = 'retained') = (admission_seq IS NOT NULL)),
   CHECK ((disposition = 'discarded_by_deletion') = (tombstone_id IS NOT NULL))
 ) WITHOUT ROWID;
+
+-- Agent deletion fences inventory epochs even when their native owner is learned later.
+CREATE TABLE ingestion_scope_bindings (
+  scope_ref TEXT NOT NULL REFERENCES ingestion_scopes(scope_ref),
+  epoch TEXT NOT NULL REFERENCES ingestion_epochs(epoch),
+  agent_ref TEXT NOT NULL,
+  observation_ref TEXT NOT NULL REFERENCES observations(observation_ref),
+  PRIMARY KEY(scope_ref,epoch,agent_ref)
+) WITHOUT ROWID;
+CREATE INDEX ingestion_bindings_by_agent ON ingestion_scope_bindings(agent_ref,scope_ref,epoch);
+CREATE INDEX ingestion_bindings_by_epoch ON ingestion_scope_bindings(epoch,agent_ref);
+CREATE TABLE agent_deletions (
+  agent_ref TEXT NOT NULL,
+  deleted_through_order INTEGER NOT NULL,
+  tombstone_id TEXT NOT NULL REFERENCES deletion_tombstones(tombstone_id),
+  deleted_at_ms INTEGER NOT NULL,
+  PRIMARY KEY(agent_ref,deleted_through_order)
+) WITHOUT ROWID;
+CREATE TABLE ingestion_binding_deletions (
+  epoch TEXT PRIMARY KEY REFERENCES ingestion_epochs(epoch),
+  tombstone_id TEXT NOT NULL REFERENCES deletion_tombstones(tombstone_id)
+) WITHOUT ROWID;
+CREATE VIEW ingestion_epoch_tombstones AS
+SELECT e.epoch,
+ COALESCE(
+   (SELECT d.tombstone_id FROM deletion_tombstones d WHERE d.epoch=e.epoch),
+   (SELECT d.tombstone_id FROM ingestion_binding_deletions d WHERE d.epoch=e.epoch),
+   (SELECT d.tombstone_id FROM ingestion_scope_bindings b JOIN agent_deletions d
+      ON d.agent_ref=b.agent_ref AND d.deleted_through_order>=e.epoch_order
+    WHERE b.epoch=e.epoch ORDER BY d.deleted_through_order,d.tombstone_id LIMIT 1)
+ ) AS tombstone_id
+FROM ingestion_epochs e;

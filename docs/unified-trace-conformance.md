@@ -40,6 +40,11 @@ The retained material is:
   [Codex app-server captures](measurements/codex/README.md): additional malformed-input,
   outcome, transport, control, and native payload evidence, each subject to its own
   documented capture limits.
+- [Controlled live/native captures](../fixtures/unified-trace/manifest.json): Claude
+  2.1.272 successful marker input/output and Pi 0.84.3 failed outer-loop settlement,
+  with source/retained digests and explicit path substitution/JSON reserialization.
+  These preserve semantic bodies and identity relationships; they do not claim the
+  sanitized bytes reproduce original lexical encoding or establish unobserved Pi joins.
 
 Sanitization preserves equality relationships, key scope, missing-versus-empty values,
 ordering and branch structure. Replacing two distinct IDs with one placeholder would

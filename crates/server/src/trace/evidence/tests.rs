@@ -1,4 +1,5 @@
 use super::*;
+use sylph_protocol::trace::IngestionScope;
 use sylph_protocol::{
     trace::{
         capture::{
@@ -183,7 +184,10 @@ impl Fixture {
         .unwrap();
         let agent = AgentRef::Session(SessionId::decode("env7fk2:codex:root").unwrap());
         let epoch = store
-            .authorize_scope(&agent, std::slice::from_ref(&agent))
+            .authorize_scope(
+                &IngestionScope::Agent(agent.clone()),
+                std::slice::from_ref(&agent),
+            )
             .await
             .unwrap();
         Self {
@@ -612,7 +616,11 @@ async fn deleted_spool_items_release_the_prefix_without_resurrecting_evidence() 
         .admit_batch(&first.observation_ref.issuer, std::slice::from_ref(&first))
         .await
         .unwrap();
-    let tombstone = fixture.store.delete_scope(&fixture.agent).await.unwrap();
+    let tombstone = fixture
+        .store
+        .delete_scope(&IngestionScope::Agent(fixture.agent.clone()))
+        .await
+        .unwrap();
     assert!(fixture
         .store
         .capture_payload(&first.observation_ref, 100)
@@ -646,7 +654,10 @@ async fn deleted_spool_items_release_the_prefix_without_resurrecting_evidence() 
     assert!(!page.has_more);
     let fresh_epoch = fixture
         .store
-        .readopt_scope(&fixture.agent, std::slice::from_ref(&fixture.agent))
+        .readopt_scope(
+            &IngestionScope::Agent(fixture.agent.clone()),
+            std::slice::from_ref(&fixture.agent),
+        )
         .await
         .unwrap();
     assert_ne!(fresh_epoch, fixture.epoch);
@@ -701,7 +712,10 @@ async fn inventory_epoch_and_authenticated_environment_are_checked_before_receip
     let foreign = AgentRef::Session(SessionId::decode("env7fk3:codex:other").unwrap());
     let foreign_epoch = fixture
         .store
-        .authorize_scope(&foreign, std::slice::from_ref(&foreign))
+        .authorize_scope(
+            &IngestionScope::Agent(foreign.clone()),
+            std::slice::from_ref(&foreign),
+        )
         .await
         .unwrap();
     capture.ingestion_authorization_epoch = foreign_epoch;
@@ -751,7 +765,11 @@ async fn bounded_admission_pages_report_more_work_across_deleted_rows() {
         .admit_batch(&captures[0].observation_ref.issuer, &captures)
         .await
         .unwrap();
-    fixture.store.delete_scope(&fixture.agent).await.unwrap();
+    fixture
+        .store
+        .delete_scope(&IngestionScope::Agent(fixture.agent.clone()))
+        .await
+        .unwrap();
     let page = fixture.store.admissions_after(0, 2).await.unwrap();
     assert!(page.captures.is_empty());
     assert!(page.has_more);
@@ -1037,4 +1055,126 @@ async fn sigkill_during_admission_recovers_exact_bytes_and_only_the_committed_pr
             1
         );
     }
+}
+
+#[tokio::test]
+async fn pre_identity_inventory_retains_frames_without_minting_a_session() {
+    use sylph_protocol::trace::InventoryRef;
+    let fixture = Fixture::new().await;
+    let inventory = IngestionScope::Inventory(InventoryRef {
+        environment: fixture.agent.environment().clone(),
+        vendor: fixture.agent.anchor_session().agent.clone(),
+        instance: "launch-before-id".into(),
+    });
+    let epoch = fixture
+        .store
+        .authorize_scope(&inventory, &[])
+        .await
+        .unwrap();
+    let mut captured = fixture.capture(1, 1, b"{\"startup\":true}\n").await;
+    captured.ingestion_authorization_epoch = epoch.clone();
+    captured.declared_subject_refs.clear();
+    let admitted = fixture
+        .store
+        .admit_batch(
+            &captured.observation_ref.issuer,
+            std::slice::from_ref(&captured),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        admitted.receipts[0].disposition,
+        ReceiptDisposition::Retained { .. }
+    ));
+    assert_eq!(
+        fixture
+            .store
+            .capture_payload(&captured.observation_ref, 1024)
+            .await
+            .unwrap(),
+        Some(b"{\"startup\":true}\n".to_vec())
+    );
+    assert!(fixture
+        .store
+        .admissions_after(0, 10)
+        .await
+        .unwrap()
+        .captures[0]
+        .capture
+        .declared_subject_refs
+        .is_empty());
+    let extended = fixture
+        .store
+        .authorize_scope(&inventory, std::slice::from_ref(&fixture.agent))
+        .await
+        .unwrap();
+    assert_eq!(extended, epoch);
+    let foreign = AgentRef::Session(SessionId::decode("env7fk2:pi:native-other").unwrap());
+    assert!(matches!(
+        fixture
+            .store
+            .authorize_scope(&inventory, std::slice::from_ref(&foreign))
+            .await,
+        Err(EvidenceError::Authority)
+    ));
+}
+
+#[tokio::test]
+async fn deletion_of_a_pre_identity_inventory_rejects_its_old_capture_epoch_after_readoption() {
+    use sylph_protocol::trace::InventoryRef;
+    let fixture = Fixture::new().await;
+    let inventory = IngestionScope::Inventory(InventoryRef {
+        environment: fixture.agent.environment().clone(),
+        vendor: fixture.agent.anchor_session().agent.clone(),
+        instance: "launch-discarded".into(),
+    });
+    let epoch = fixture
+        .store
+        .authorize_scope(&inventory, &[])
+        .await
+        .unwrap();
+    let mut captured = fixture.capture(1, 1, b"old startup\n").await;
+    captured.ingestion_authorization_epoch = epoch.clone();
+    captured.declared_subject_refs.clear();
+    let tombstone = fixture.store.delete_scope(&inventory).await.unwrap();
+    let fresh = fixture.store.readopt_scope(&inventory, &[]).await.unwrap();
+    assert_ne!(fresh, epoch);
+    let result = fixture
+        .store
+        .admit_batch(
+            &captured.observation_ref.issuer,
+            std::slice::from_ref(&captured),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result.receipts[0].disposition,
+        ReceiptDisposition::DiscardedByDeletion {
+            tombstone_id: tombstone
+        }
+    );
+    assert_eq!(
+        fixture
+            .store
+            .capture_payload(&captured.observation_ref, 1024)
+            .await
+            .unwrap(),
+        None
+    );
+    let mut recaptured = captured.clone();
+    recaptured.observation_ref.producer_seq = 2;
+    recaptured.ingestion_authorization_epoch = fresh;
+    let result = fixture
+        .store
+        .admit_batch(
+            &recaptured.observation_ref.issuer,
+            std::slice::from_ref(&recaptured),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        result.receipts[0].disposition,
+        ReceiptDisposition::Retained { .. }
+    ));
+    assert_eq!(recaptured.source_position, captured.source_position);
 }

@@ -20,6 +20,16 @@ CREATE TABLE projection_revisions (
 );
 INSERT INTO projection_revisions VALUES (0, 0);
 
+-- Each validated, atomic projection unit certifies the contiguous tail after a
+-- background full validation. Publication checks only a bounded tail of proofs.
+CREATE TABLE projection_commit_proofs (
+  view_revision INTEGER PRIMARY KEY REFERENCES projection_revisions(view_revision),
+  previous_revision INTEGER NOT NULL,
+  previous_cut INTEGER NOT NULL,
+  evidence_cut INTEGER NOT NULL,
+  unit_digest TEXT NOT NULL
+);
+
 CREATE TABLE semantic_claims (
   claim_ref TEXT PRIMARY KEY,
   fact_kind TEXT NOT NULL,
@@ -123,6 +133,17 @@ CREATE TABLE mapper_states (
   state_json TEXT NOT NULL,
   at_revision INTEGER NOT NULL REFERENCES projection_revisions(view_revision)
 ) WITHOUT ROWID;
+CREATE TABLE processed_occurrences (
+  occurrence_id INTEGER PRIMARY KEY CHECK(occurrence_id > 0),
+  at_revision INTEGER NOT NULL REFERENCES projection_revisions(view_revision)
+);
+CREATE TABLE payload_derivations (
+  derivation_key TEXT PRIMARY KEY,
+  payload_ref TEXT NOT NULL,
+  derivation_json TEXT NOT NULL,
+  first_revision INTEGER NOT NULL REFERENCES projection_revisions(view_revision)
+) WITHOUT ROWID;
+CREATE INDEX derivations_by_payload ON payload_derivations(payload_ref,first_revision,derivation_key);
 CREATE TABLE change_batches (
   view_revision INTEGER PRIMARY KEY REFERENCES projection_revisions(view_revision),
   evidence_cut INTEGER NOT NULL,

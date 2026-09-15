@@ -6,7 +6,7 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 
-use super::{AgentRef, IngestionEpoch};
+use super::{AgentRef, CommandTarget, IngestionEpoch, ObservationRef};
 
 /// A retry is permitted only where the adapter established native idempotency.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -55,7 +55,7 @@ pub struct SubmittedRevision {
 #[serde(rename_all = "camelCase")]
 pub struct CommandAcceptance {
     pub command_id: String,
-    pub target: AgentRef,
+    pub target: CommandTarget,
     pub kind: CommandKind,
     pub input: SubmittedRevision,
     pub authorization: AuthorizationReceipt,
@@ -105,6 +105,11 @@ pub enum OperationalFact {
     Delivery {
         command_id: String,
         fact: DeliveryFact,
+    },
+    IdentityBound {
+        command_id: String,
+        agent_ref: AgentRef,
+        source_evidence: Vec<ObservationRef>,
     },
 }
 

@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::{
-    capture::{PayloadRef, TimeEvidence},
+    capture::{PayloadEncoding, PayloadRef, TimeEvidence},
     identity::*,
 };
 
@@ -157,6 +157,8 @@ pub struct ContentPart {
     pub part_ref: MessagePartRef,
     pub kind: ContentKind,
     pub payload: PayloadRef,
+    pub media_type: Option<String>,
+    pub encoding: PayloadEncoding,
 }
 
 /// The three representations carry different visibility claims even for equal bytes.
@@ -782,6 +784,35 @@ pub enum TraceObject {
 }
 
 impl TraceObject {
+    pub fn payload_refs(&self) -> Vec<&PayloadRef> {
+        match self {
+            Self::MessageRevision(value) => value.parts.iter().map(|part| &part.payload).collect(),
+            Self::Operation(value) => value.input_revision.iter().collect(),
+            Self::Result(value) => value.payload.iter().collect(),
+            Self::HistoryEntry(value) => value
+                .content
+                .iter()
+                .filter_map(|content| match content {
+                    HistoryContent::Opaque(payload) => Some(payload),
+                    _ => None,
+                })
+                .collect(),
+            Self::ContextCheckpoint(value) => {
+                let mut refs = match &value.content {
+                    ContextContent::Ordered { settings, .. } => settings.iter().collect(),
+                    ContextContent::OpaqueReplacement { payload }
+                    | ContextContent::Summary { payload } => vec![payload],
+                    _ => vec![],
+                };
+                if let InclusionCoverage::ByteRanges { payload, .. } = &value.coverage {
+                    refs.push(payload);
+                }
+                refs
+            }
+            _ => vec![],
+        }
+    }
+
     pub fn object_ref(&self) -> AnyObjectRef {
         match self {
             Self::Agent(v) => AnyObjectRef::Agent(v.agent_ref.clone()),

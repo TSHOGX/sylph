@@ -13,7 +13,9 @@ fn authorization() -> AuthorizationReceipt {
 fn acceptance(id: &str) -> CommandAcceptance {
     CommandAcceptance {
         command_id: id.into(),
-        target: AgentRef::Session(SessionId::decode("env:codex:Root:Case").unwrap()),
+        target: CommandTarget::Agent {
+            agent: AgentRef::Session(SessionId::decode("env:codex:Root:Case").unwrap()),
+        },
         kind: CommandKind::Send,
         input: SubmittedRevision {
             revision: "input-v1".into(),
@@ -661,7 +663,10 @@ async fn evidence_commit_before_export_mark_replays_without_new_admission_or_dis
     let control = store(&path).await;
     let mut command = acceptance("command-a");
     command.ingestion_authorization_epoch = evidence
-        .authorize_scope(&command.target, std::slice::from_ref(&command.target))
+        .authorize_scope(
+            &command.target.ingestion_scope(),
+            &command.target.declared_subjects(),
+        )
         .await
         .unwrap();
     control.accept(command).await.unwrap();
@@ -740,20 +745,34 @@ async fn deletion_discards_never_exported_old_epoch_while_unrelated_command_adva
     let control = store(&temp.path().join("control.db")).await;
     let mut old = acceptance("command-a");
     old.ingestion_authorization_epoch = evidence
-        .authorize_scope(&old.target, std::slice::from_ref(&old.target))
+        .authorize_scope(
+            &old.target.ingestion_scope(),
+            &old.target.declared_subjects(),
+        )
         .await
         .unwrap();
     control.accept(old.clone()).await.unwrap();
-    evidence.delete_scope(&old.target).await.unwrap();
+    evidence
+        .delete_scope(&old.target.ingestion_scope())
+        .await
+        .unwrap();
     let readopted = evidence
-        .readopt_scope(&old.target, std::slice::from_ref(&old.target))
+        .readopt_scope(
+            &old.target.ingestion_scope(),
+            &old.target.declared_subjects(),
+        )
         .await
         .unwrap();
     assert_ne!(readopted, old.ingestion_authorization_epoch);
     let mut next = acceptance("command-b");
-    next.target = AgentRef::Session(SessionId::decode("env:codex:OtherSession").unwrap());
+    next.target = CommandTarget::Agent {
+        agent: AgentRef::Session(SessionId::decode("env:codex:OtherSession").unwrap()),
+    };
     next.ingestion_authorization_epoch = evidence
-        .authorize_scope(&next.target, std::slice::from_ref(&next.target))
+        .authorize_scope(
+            &next.target.ingestion_scope(),
+            &next.target.declared_subjects(),
+        )
         .await
         .unwrap();
     control.accept(next).await.unwrap();
@@ -819,7 +838,10 @@ async fn large_accepted_input_keeps_fixed_manifest_across_restart_and_chunk_conf
     command.input.bytes = vec![b'x'; control.limits().payload_chunk_bytes + 10_000];
     command.input.bytes[..5].copy_from_slice(b"\xff\0A\r\n");
     command.ingestion_authorization_epoch = evidence
-        .authorize_scope(&command.target, std::slice::from_ref(&command.target))
+        .authorize_scope(
+            &command.target.ingestion_scope(),
+            &command.target.declared_subjects(),
+        )
         .await
         .unwrap();
     control.accept(command.clone()).await.unwrap();
@@ -979,5 +1001,223 @@ async fn lowered_export_budget_reports_retained_work_instead_of_an_empty_batch()
     assert_eq!(
         control.command("command-a").await.unwrap().unwrap().state,
         CommandState::Accepted
+    );
+}
+
+fn launch_acceptance(id: &str) -> CommandAcceptance {
+    let mut command = acceptance(id);
+    command.target = CommandTarget::Launch {
+        inventory: sylph_protocol::trace::InventoryRef {
+            environment: sylph_protocol::EnvironmentId::parse("env").unwrap(),
+            vendor: sylph_protocol::AgentName::parse("codex").unwrap(),
+            instance: "launch-inventory".into(),
+        },
+    };
+    command
+}
+fn identity_evidence() -> Vec<ObservationRef> {
+    vec![ObservationRef {
+        issuer: Issuer::Environment(sylph_protocol::EnvironmentId::parse("env").unwrap()),
+        producer_id: "vendor-capture".into(),
+        producer_epoch: "process-one".into(),
+        producer_seq: 1,
+    }]
+}
+
+#[tokio::test]
+async fn native_binding_preserves_launch_target_input_epoch_and_dispatch_history() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("control.db");
+    let control = store(&path).await;
+    let command = launch_acceptance("launch-one");
+    let accepted = control.accept(command.clone()).await.unwrap();
+    assert_eq!(accepted.agent(), None);
+    assert!(control.pending().await.unwrap()[0]
+        .capture
+        .declared_subject_refs
+        .is_empty());
+    control
+        .claim_dispatch("launch-one", authorization(), 30)
+        .await
+        .unwrap();
+    let agent = AgentRef::Session(SessionId::decode("env:codex:vendor-native").unwrap());
+    let binding = control
+        .bind_identity("launch-one", agent.clone(), identity_evidence(), 40)
+        .await
+        .unwrap();
+    assert_eq!(
+        control
+            .bind_identity("launch-one", agent.clone(), identity_evidence(), 50)
+            .await
+            .unwrap(),
+        binding
+    );
+    let current = control.command("launch-one").await.unwrap().unwrap();
+    assert_eq!(current.acceptance, command);
+    assert_eq!(current.agent(), Some(&agent));
+    assert_eq!(current.dispatch_attempts, 1);
+    assert_eq!(current.state, CommandState::Dispatching);
+    let queued = control.pending().await.unwrap();
+    assert_eq!(queued.len(), 3);
+    let fact: OperationalFact = serde_json::from_slice(&queued[2].payload).unwrap();
+    assert!(
+        matches!(fact,OperationalFact::IdentityBound{agent_ref,source_evidence,..} if agent_ref==agent&&source_evidence==identity_evidence())
+    );
+    assert_eq!(
+        queued[2].capture.ingestion_authorization_epoch,
+        command.ingestion_authorization_epoch
+    );
+    assert!(control
+        .claim_dispatch("launch-one", authorization(), 60)
+        .await
+        .is_err());
+    control.close().await;
+    let reopened = store(&path).await;
+    assert_eq!(
+        reopened.command("launch-one").await.unwrap().unwrap(),
+        current
+    );
+}
+
+#[tokio::test]
+async fn binding_refuses_foreign_vendor_phantom_children_and_unlaunched_commands() {
+    let temp = tempfile::tempdir().unwrap();
+    let control = store(&temp.path().join("control.db")).await;
+    control
+        .accept(launch_acceptance("launch-one"))
+        .await
+        .unwrap();
+    let agent = AgentRef::Session(SessionId::decode("env:codex:vendor-native").unwrap());
+    assert!(control
+        .bind_identity("launch-one", agent.clone(), identity_evidence(), 30)
+        .await
+        .is_err());
+    control
+        .claim_dispatch("launch-one", authorization(), 30)
+        .await
+        .unwrap();
+    let pi = AgentRef::Session(SessionId::decode("env:pi:vendor-native").unwrap());
+    assert!(control
+        .bind_identity("launch-one", pi, identity_evidence(), 40)
+        .await
+        .is_err());
+    let child = AgentRef::Embedded {
+        anchor_session: agent.anchor_session().clone(),
+        namespace: "codex.child".into(),
+        native_child_id: "child".into(),
+    };
+    assert!(control
+        .bind_identity("launch-one", child, identity_evidence(), 40)
+        .await
+        .is_err());
+    assert!(control
+        .bind_identity("launch-one", agent.clone(), vec![], 40)
+        .await
+        .is_err());
+    control
+        .bind_identity("launch-one", agent.clone(), identity_evidence(), 40)
+        .await
+        .unwrap();
+    let other = AgentRef::Session(SessionId::decode("env:codex:another-native").unwrap());
+    assert!(matches!(
+        control
+            .bind_identity("launch-one", other, identity_evidence(), 50)
+            .await,
+        Err(OutboxError::IdentityConflict)
+    ));
+    assert_eq!(
+        control
+            .command("launch-one")
+            .await
+            .unwrap()
+            .unwrap()
+            .agent(),
+        Some(&agent)
+    );
+}
+
+#[tokio::test]
+async fn failed_binding_transaction_retains_an_unbound_command_and_no_identity_fact() {
+    let temp = tempfile::tempdir().unwrap();
+    let control = store(&temp.path().join("control.db")).await;
+    control
+        .accept(launch_acceptance("launch-one"))
+        .await
+        .unwrap();
+    control
+        .claim_dispatch("launch-one", authorization(), 30)
+        .await
+        .unwrap();
+    sqlx::raw_sql("CREATE TRIGGER refuse_binding BEFORE UPDATE OF bound_agent_json ON trace_commands BEGIN SELECT RAISE(ABORT,'binding failure'); END;").execute(&control.pool).await.unwrap();
+    let agent = AgentRef::Session(SessionId::decode("env:codex:vendor-native").unwrap());
+    assert!(control
+        .bind_identity("launch-one", agent.clone(), identity_evidence(), 40)
+        .await
+        .is_err());
+    assert_eq!(
+        control
+            .command("launch-one")
+            .await
+            .unwrap()
+            .unwrap()
+            .agent(),
+        None
+    );
+    assert_eq!(control.pending().await.unwrap().len(), 2);
+    sqlx::query("DROP TRIGGER refuse_binding")
+        .execute(&control.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        control
+            .bind_identity("launch-one", agent, identity_evidence(), 50)
+            .await
+            .unwrap()
+            .producer_seq,
+        3
+    );
+}
+
+#[tokio::test]
+async fn resolved_launch_identity_never_reauthorizes_a_fresh_dispatch() {
+    let temp = tempfile::tempdir().unwrap();
+    let control = store(&temp.path().join("control.db")).await;
+    let mut command = launch_acceptance("launch-one");
+    command.retry_policy = RetryPolicy::VendorIdempotent {
+        key: "native-retry".into(),
+    };
+    control.accept(command).await.unwrap();
+    control
+        .claim_dispatch("launch-one", authorization(), 30)
+        .await
+        .unwrap();
+    let agent = AgentRef::Session(SessionId::decode("env:codex:vendor-native").unwrap());
+    control
+        .bind_identity("launch-one", agent, identity_evidence(), 40)
+        .await
+        .unwrap();
+    control
+        .record_delivery(
+            "launch-one",
+            "response-lost",
+            DeliveryFact::OutcomeUnknown {
+                reason: "transport lost".into(),
+            },
+            50,
+        )
+        .await
+        .unwrap();
+    assert!(control
+        .claim_dispatch("launch-one", authorization(), 60)
+        .await
+        .is_err());
+    assert_eq!(
+        control
+            .command("launch-one")
+            .await
+            .unwrap()
+            .unwrap()
+            .dispatch_attempts,
+        1
     );
 }

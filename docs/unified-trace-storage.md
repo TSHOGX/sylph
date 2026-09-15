@@ -68,6 +68,13 @@ capture that was never admitted cannot acquire a new epoch merely by arriving af
 re-adoption. Fixed epoch metadata does not change native SourcePosition or producer
 receipt identity.
 
+An ingestion scope is either an evidenced AgentRef or a server-issued InventoryRef
+containing environment, vendor and inventory instance. An inventory can precede native
+session identity and admit captures with no declared agent yet. It authorizes acquisition;
+it is neither an AgentThread nor a reserved Session row. Binding a native identity later
+adds evidence and known inventory membership without replacing earlier capture bytes,
+source positions or authorization epochs.
+
 The full native line/frame and lexical encoding survive; extracted routing headers are
 indexes, not substitutes for bytes. JSON duplicate keys and escape spelling remain in
 the raw representation even when a semantic parser refuses them. Native SQLite capture
@@ -183,6 +190,13 @@ scope does not strand unrelated spooled work. It is never reported as evidence a
 newly captured, or projection-complete. Old outbox items use the same disposition before
 being marked transferred. Other admission failures remain Nacks and cannot skip a prefix.
 
+A newly admitted capture owns durable upload receipts for its declared payload chunks,
+fixed to its ObservationRef and ingestion epoch. A global CAS digest alone cannot import
+another scope's bytes or count an erased occurrence as recaptured. An exact reread may
+reuse payloads already rooted by that same SourcePosition in the current epoch; all new
+payload references require provided and verified bytes. Upload roots precede physical
+publication, and complete upload ownership is checked in the receipt transaction.
+
 The envagent spool preserves its existing enqueue-before-send and terminal-receipt-before-delete
 discipline. Bounded queue exhaustion applies backpressure, then records the actual
 capture/execution consequences through reserved diagnostic capacity. Killing a controlled
@@ -207,6 +221,14 @@ Dispatch, native queue acceptance, rejection, unknown outcome, and actual consum
 each produce separate operational/vendor facts. A lost response to an at-most-once
 command remains unknown and is not automatically resent. Exactly-once evidence export
 does not claim exactly-once effects at a vendor that lacks that guarantee.
+
+The first input can target a Launch inventory before the vendor supplies its native ID.
+Its accepted target and exact input remain immutable. An IdentityBound fact names the
+command, actual native AgentRef and the observations proving that identity; it must match
+the inventory's environment and vendor. Until that proof arrives, mapping reports an
+unresolved archive reference instead of inventing an agent or losing the initial bytes.
+Later input targets the actual AgentRef. A restart can leave a launch's effect unknown;
+evidence export and identity binding never authorize another launch attempt.
 
 An evidence cut includes only exported/admitted operational facts. Responses expose
 pending outbox count and oldest pending age separately from projection lag. Waiting for
@@ -512,6 +534,20 @@ old occurrence/receipt cannot count as newly recaptured bytes. Previously issued
 object references can resolve to new admitted evidence, never to deleted generations. This is not a
 new deletion UI requirement for the foundation milestone; it is the minimum storage
 boundary that prevents the archive from resurrecting deleted content.
+
+Ingestion epochs also carry a monotone catalogue ordinal. Deleting an Agent records a
+permanent cutoff over that ordinal, covering its associated launch inventories. A binding
+learned after deletion still resolves an older inventory epoch to the deletion tombstone;
+learning identity later cannot authorize the bytes again. Re-adoption creates an epoch
+after the cutoff. This boundary is a durable order, not wall time or the set of bindings
+that happened to be known during deletion. Visibility checks apply it immediately while
+bounded background cleanup retires affected pins and jobs.
+
+Suppression remains effective until explicit re-adoption. An inventory bound while its
+Agent is suppressed receives a permanent deletion association. Re-adoption closes that
+suppressed interval through the last previously issued epoch ordinal before creating the
+fresh authorized epoch. Thus an inventory acquired during suppression cannot evade the
+boundary by revealing its Agent identity only after re-adoption.
 
 CAS garbage collection uses durable roots from evidence, pending uploads/outbox bodies,
 active/building/leased generations, search checkpoints/result jobs and export jobs.

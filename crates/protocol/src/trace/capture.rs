@@ -259,6 +259,19 @@ pub enum PayloadEncoding {
     Base64,
 }
 
+/// Immutable provenance for a decoded field or other declared payload transformation.
+/// This survives projection restart; a retained raw observation is still the authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PayloadDerivation {
+    pub payload: PayloadRef,
+    pub evidence: Vec<ObservationRef>,
+    pub selector: String,
+    pub rule: String,
+    pub media_type: String,
+    pub encoding: PayloadEncoding,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PayloadRange {
@@ -551,6 +564,35 @@ pub enum TransportKind {
     Sidecar,
     Control,
     Supervisor,
+    SourceInventory,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum SourceOwnerBasis {
+    NativeIdentity {
+        observation: ObservationRef,
+    },
+    CompanionTranscript {
+        source: super::SourceRef,
+        generation: u64,
+    },
+}
+
+/// Acquisition records a source relationship as retained evidence; routing hints in
+/// a Capture do not supply this ownership proof to semantic mappers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceDefinition {
+    pub source: super::SourceRef,
+    pub generation: u64,
+    pub locator: String,
+    pub owner: AgentRef,
+    pub basis: SourceOwnerBasis,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

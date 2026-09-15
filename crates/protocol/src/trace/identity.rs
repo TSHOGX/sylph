@@ -539,7 +539,7 @@ impl<K: ObjectKind> FromStr for ObjectRef<K> {
 // Length prefixes prevent kind/payload boundaries from depending on a delimiter that
 // an opaque vendor identifier might contain. JSON preserves native tuple member
 // boundaries inside the payload; canonical round-trip rejects alternate URL spellings.
-fn encode_reference<T: Serialize>(kind: &str, value: &T) -> String {
+pub(super) fn encode_reference<T: Serialize>(kind: &str, value: &T) -> String {
     let payload =
         serde_json::to_vec(value).expect("trace identities contain only serializable fields");
     let mut bytes = Vec::with_capacity(16 + kind.len() + payload.len());
@@ -556,7 +556,7 @@ fn encode_reference<T: Serialize>(kind: &str, value: &T) -> String {
     encoded
 }
 
-fn decode_reference<T: DeserializeOwned + Serialize>(
+pub(super) fn decode_reference<T: DeserializeOwned + Serialize>(
     kind: &str,
     encoded: &str,
 ) -> Result<T, TraceIdentityError> {

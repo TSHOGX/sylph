@@ -48,7 +48,7 @@ fn accepted(kind: CommandKind) -> OperationalFact {
     OperationalFact::Accepted {
         command: Box::new(CommandAcceptance {
             command_id: "command-a".into(),
-            target: agent(),
+            target: CommandTarget::Agent { agent: agent() },
             kind,
             input: SubmittedRevision {
                 revision: "original-v1".into(),
@@ -326,4 +326,31 @@ fn reread_receipts_keep_the_original_evidence_and_claim_addresses() {
         archive: &ArchiveContext::default(),
     });
     assert_eq!(actual, expected);
+}
+
+#[test]
+fn identity_binding_requires_a_proof_that_names_the_actual_agent() {
+    let capture = capture(2);
+    let observation = ObservationRef {
+        issuer: Issuer::Environment(agent().environment().clone()),
+        producer_id: "native".into(),
+        producer_epoch: "first".into(),
+        producer_seq: 1,
+    };
+    let fact = OperationalFact::IdentityBound {
+        command_id: "launch".into(),
+        agent_ref: agent(),
+        source_evidence: vec![observation.clone()],
+    };
+    let mut archive = ArchiveContext {
+        observations: [observation.clone()].into(),
+        ..ArchiveContext::default()
+    };
+    let unproved = run(&fact, &capture, &archive);
+    assert!(unproved.bound_agents.is_empty());
+    assert!(unproved.correlations.is_empty());
+    archive
+        .object_evidence
+        .insert(AnyObjectRef::Agent(agent()), vec![observation]);
+    assert_eq!(run(&fact, &capture, &archive).bound_agents, vec![agent()]);
 }

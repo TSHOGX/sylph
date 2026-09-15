@@ -8,9 +8,11 @@ pub mod claims;
 pub mod control;
 pub mod identity;
 pub mod objects;
+pub mod scope;
 
 pub use capture::*;
 pub use claims::*;
 pub use control::*;
 pub use identity::*;
 pub use objects::*;
+pub use scope::*;

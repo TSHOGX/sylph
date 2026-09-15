@@ -135,6 +135,7 @@ pub enum RelationFilter {
     Resource,
     HistoryPredecessor,
     ContextLineage,
+    ContextMembership,
     Representation,
     Evidence,
     Result,
@@ -160,7 +161,7 @@ pub enum MembershipFilter {
 pub enum Collection {
     History {
         agent: AgentRef,
-        selection: SelectionRef,
+        selection: Option<SelectionRef>,
     },
     Activations {
         agent: AgentRef,
@@ -190,8 +191,23 @@ pub struct QueryScope {
 impl QueryScope {
     pub fn history(agent: AgentRef, selection: SelectionRef) -> Self {
         Self {
-            collection: Collection::History { agent, selection },
+            collection: Collection::History {
+                agent,
+                selection: Some(selection),
+            },
             history_mode: HistoryMode::Selected,
+            representation: None,
+            filter: MembershipFilter::All,
+        }
+    }
+
+    pub fn archive(agent: AgentRef) -> Self {
+        Self {
+            collection: Collection::History {
+                agent,
+                selection: None,
+            },
+            history_mode: HistoryMode::RetainedArchive,
             representation: None,
             filter: MembershipFilter::All,
         }
@@ -205,9 +221,11 @@ impl QueryScope {
 
     fn columns(&self) -> Result<(&'static str, String, Option<String>)> {
         Ok(match &self.collection {
-            Collection::History { agent, selection } => {
-                ("history", agent.encode(), Some(selection.encode()))
-            }
+            Collection::History { agent, selection } => (
+                "history",
+                agent.encode(),
+                selection.as_ref().map(SelectionRef::encode),
+            ),
             Collection::Activations { agent } => ("activations", agent.encode(), None),
             Collection::AgentRelations { agent, .. } => ("agent_relations", agent.encode(), None),
             Collection::ObjectRelations { object, .. } => {
@@ -344,6 +362,8 @@ pub struct ProjectionBatch {
     pub memberships: Vec<MembershipChange>,
     pub payload_anchors: Vec<PayloadAnchorChange>,
     pub mapper_states: BTreeMap<String, serde_json::Value>,
+    pub processed_occurrences: Vec<u64>,
+    pub payload_derivations: Vec<sylph_protocol::trace::PayloadDerivation>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -440,6 +460,12 @@ pub struct ClaimPage {
     pub returned_bytes: usize,
     pub limits: QueryLimits,
     pub work: ReadWork,
+}
+
+pub struct RetainedClaimsPage {
+    pub claims: Vec<Claim>,
+    pub next: Option<ClaimRef>,
+    pub has_more: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -686,6 +712,16 @@ impl GenerationStore {
         for change in &batch.payload_anchors {
             save_anchor(&mut tx, change, revision).await?;
         }
+        for derivation in &batch.payload_derivations {
+            let json = serde_json::to_string(derivation)?;
+            let key = blake3::hash(json.as_bytes()).to_hex().to_string();
+            sqlx::query("INSERT INTO payload_derivations(derivation_key,payload_ref,derivation_json,first_revision) VALUES(?,?,?,?) ON CONFLICT DO NOTHING")
+                .bind(key).bind(derivation.payload.as_str()).bind(json).bind(signed(revision)?).execute(&mut *tx).await?;
+        }
+        for occurrence in &batch.processed_occurrences {
+            sqlx::query("INSERT INTO processed_occurrences(occurrence_id, at_revision) VALUES (?, ?) ON CONFLICT DO NOTHING")
+                .bind(signed(*occurrence)?).bind(signed(revision)?).execute(&mut *tx).await?;
+        }
         for (mapper, value) in &batch.mapper_states {
             sqlx::query("INSERT INTO mapper_states VALUES (?, ?, ?) ON CONFLICT(mapper_key) DO UPDATE SET state_json = excluded.state_json, at_revision = excluded.at_revision")
                 .bind(mapper).bind(serde_json::to_string(value)?).bind(signed(revision)?).execute(&mut *tx).await?;
@@ -707,6 +743,14 @@ impl GenerationStore {
             .bind(signed(batch.through_cut)?)
             .bind(&json)
             .bind(json.len() as i64)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("INSERT INTO projection_commit_proofs VALUES(?,?,?,?,?)")
+            .bind(signed(revision)?)
+            .bind(signed(prior.snapshot.view_revision)?)
+            .bind(signed(expected_cut)?)
+            .bind(signed(batch.through_cut)?)
+            .bind(blake3::hash(&serde_json::to_vec(batch)?).to_hex().as_str())
             .execute(&mut *tx)
             .await?;
         sqlx::query(
@@ -844,6 +888,79 @@ impl GenerationStore {
             .await?;
         sync_generation_paths(self.path.clone()).await?;
         Ok(identity)
+    }
+
+    /// Verify the bounded tail of fully validated atomic units after background
+    /// validation. Full database checks never run while the old writer is fenced.
+    pub async fn validate_tail(
+        &self,
+        baseline: &GenerationValidation,
+        fence: &FenceLease,
+        max_revisions: usize,
+    ) -> Result<GenerationValidation> {
+        if max_revisions == 0
+            || baseline.checkpoint.generation != self.manifest.generation
+            || fence.checkpoint.generation != self.manifest.generation
+            || baseline.checkpoint.view_revision > fence.checkpoint.view_revision
+        {
+            return Err(GenerationError::Invalid(
+                "tail validation scope is invalid".into(),
+            ));
+        }
+        let mut tx = self.readers.begin().await?;
+        let row = sqlx::query("SELECT * FROM projection_state WHERE singleton=1")
+            .fetch_one(&mut *tx)
+            .await?;
+        let current = decode_checkpoint(&self.manifest.generation, &row)?;
+        if current.writer_mode != WriterMode::Fenced
+            || current.fence_token != fence.token
+            || current.snapshot != fence.checkpoint
+        {
+            return Err(GenerationError::Fenced);
+        }
+        let identity: String = sqlx::query_scalar(
+            "SELECT database_identity FROM generation_manifest WHERE singleton=1",
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        if identity != baseline.database_identity {
+            return Err(GenerationError::ManifestMismatch);
+        }
+        let rows=sqlx::query("SELECT view_revision,previous_revision,previous_cut,evidence_cut,unit_digest FROM projection_commit_proofs WHERE view_revision>? AND view_revision<=? ORDER BY view_revision LIMIT ?")
+            .bind(signed(baseline.checkpoint.view_revision)?).bind(signed(fence.checkpoint.view_revision)?).bind((max_revisions+1) as i64).fetch_all(&mut *tx).await?;
+        if rows.len() > max_revisions {
+            return Err(GenerationError::Limit("publication tail revisions"));
+        }
+        let mut revision = baseline.checkpoint.view_revision;
+        let mut cut = baseline.checkpoint.evidence_cut;
+        for row in rows {
+            let next = unsigned(row.try_get("view_revision")?)?;
+            let next_cut = unsigned(row.try_get("evidence_cut")?)?;
+            let digest: String = row.try_get("unit_digest")?;
+            if next != revision + 1
+                || unsigned(row.try_get("previous_revision")?)? != revision
+                || unsigned(row.try_get("previous_cut")?)? != cut
+                || next_cut <= cut
+                || digest.len() != 64
+                || !digest.bytes().all(|b| b.is_ascii_hexdigit())
+            {
+                return Err(GenerationError::Invalid(
+                    "publication tail has a missing or invalid projection proof".into(),
+                ));
+            }
+            revision = next;
+            cut = next_cut;
+        }
+        if revision != fence.checkpoint.view_revision || cut != fence.checkpoint.evidence_cut {
+            return Err(GenerationError::Invalid(
+                "publication tail proofs do not reach the fenced checkpoint".into(),
+            ));
+        }
+        tx.commit().await?;
+        Ok(GenerationValidation {
+            checkpoint: fence.checkpoint.clone(),
+            database_identity: identity,
+        })
     }
 
     pub async fn summary(
@@ -1214,6 +1331,88 @@ impl GenerationStore {
             .collect()
     }
 
+    pub async fn mapper_state(&self, key: &str) -> Result<Option<serde_json::Value>> {
+        let row: Option<String> =
+            sqlx::query_scalar("SELECT state_json FROM mapper_states WHERE mapper_key = ?")
+                .bind(key)
+                .fetch_optional(&self.readers)
+                .await?;
+        row.map(|value| serde_json::from_str(&value).map_err(GenerationError::from))
+            .transpose()
+    }
+
+    pub async fn has_processed_occurrence(&self, occurrence: u64) -> Result<bool> {
+        Ok(sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM processed_occurrences WHERE occurrence_id = ?)",
+        )
+        .bind(signed(occurrence)?)
+        .fetch_one(&self.readers)
+        .await?)
+    }
+
+    pub async fn payload_derivations(
+        &self,
+        snapshot: &Snapshot,
+        payload: &PayloadRef,
+        limit: usize,
+    ) -> Result<Vec<sylph_protocol::trace::PayloadDerivation>> {
+        if limit == 0 || limit > self.limits.max_items {
+            return Err(GenerationError::Limit("payload derivations"));
+        }
+        let rows:Vec<String>=sqlx::query_scalar("SELECT derivation_json FROM payload_derivations WHERE payload_ref=? AND first_revision<=? ORDER BY first_revision,derivation_key LIMIT ?")
+            .bind(payload.as_str()).bind(signed(snapshot.view_revision)?).bind(limit as i64).fetch_all(&self.readers).await?;
+        rows.into_iter()
+            .map(|json| serde_json::from_str(&json).map_err(GenerationError::from))
+            .collect()
+    }
+
+    /// Rebuild an in-memory reducer from a fixed generation cut in bounded pages.
+    /// Metadata chooses the byte budget before any immutable claim body is loaded.
+    pub async fn retained_claims(
+        &self,
+        snapshot: &Snapshot,
+        after: Option<&ClaimRef>,
+        limit: usize,
+        max_bytes: usize,
+    ) -> Result<RetainedClaimsPage> {
+        if limit == 0
+            || limit > self.limits.max_candidates
+            || max_bytes == 0
+            || max_bytes > self.limits.max_batch_bytes
+        {
+            return Err(GenerationError::Limit("retained claim page"));
+        }
+        let cursor = after.map(ClaimRef::encode).unwrap_or_default();
+        let rows=sqlx::query("SELECT claim_ref,claim_bytes FROM semantic_claims WHERE claim_ref > ? AND first_revision <= ? ORDER BY claim_ref LIMIT ?")
+            .bind(cursor).bind(signed(snapshot.view_revision)?).bind((limit+1) as i64).fetch_all(&self.readers).await?;
+        let mut page = RetainedClaimsPage {
+            claims: vec![],
+            next: None,
+            has_more: rows.len() > limit,
+        };
+        let mut bytes = 0usize;
+        for row in rows.into_iter().take(limit) {
+            let size = usize::try_from(unsigned(row.try_get("claim_bytes")?)?)
+                .map_err(|_| GenerationError::Limit("claim length"))?;
+            if bytes
+                .checked_add(size)
+                .is_none_or(|total| total > max_bytes)
+            {
+                if page.claims.is_empty() {
+                    return Err(GenerationError::Limit("individual retained claim"));
+                }
+                page.has_more = true;
+                break;
+            }
+            let reference = ClaimRef::decode(&row.try_get::<String, _>("claim_ref")?)
+                .map_err(|error| GenerationError::Invalid(error.to_string()))?;
+            page.claims.push(self.claim(snapshot, &reference).await?);
+            page.next = Some(reference);
+            bytes += size;
+        }
+        Ok(page)
+    }
+
     /// Called only after the catalogue has expired every lease/search/export pin
     /// below this floor. Logical eviction commits before bounded physical GC.
     pub async fn advance_revision_floor(&self, floor: u64) -> Result<()> {
@@ -1280,7 +1479,7 @@ impl GenerationStore {
         Ok((conn, ops))
     }
 
-    fn validate_batch(&self, batch: &ProjectionBatch) -> Result<()> {
+    pub(crate) fn validate_batch(&self, batch: &ProjectionBatch) -> Result<()> {
         let count = batch.claims.len()
             + batch.objects.len()
             + batch.memberships.len()

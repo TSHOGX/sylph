@@ -1,13 +1,106 @@
 //! Interpretation of durable server command facts, independent of vendor dispatch.
 
+use super::derived_payload_with_media;
 use sylph_protocol::trace::*;
 
 use super::{
-    claim, correlation_key, derived_payload, ArchiveRequest, MapInput, MapOutput,
-    MappingDiagnostic, SemanticMapper,
+    claim, command_identity_key, correlation_key, derived_payload, ArchiveRequest, MapInput,
+    MapOutput, MappingDiagnostic, SemanticMapper,
 };
 
 pub struct ServerMapper;
+
+fn source_issue(input: &MapInput<'_>, output: &mut MapOutput, code: DiagnosticCode, message: &str) {
+    if code == DiagnosticCode::MissingOwner {
+        output.diagnostics.push(MappingDiagnostic {
+            evidence: vec![input.canonical_observation.clone()],
+            code,
+            message: message.into(),
+        });
+        return;
+    }
+    if let Some(scope) = input.capture.declared_subject_refs.first() {
+        output.claims.push(claim(
+            input,
+            scope,
+            "server/source-diagnostic",
+            "sylph-control-1",
+            diagnostic(scope, code, message),
+        ));
+    } else {
+        output.diagnostics.push(MappingDiagnostic {
+            evidence: vec![input.canonical_observation.clone()],
+            code,
+            message: message.into(),
+        });
+    }
+}
+
+fn control_scope(
+    input: &MapInput<'_>,
+    fact: &OperationalFact,
+    output: &mut MapOutput,
+) -> Option<AgentRef> {
+    if let OperationalFact::IdentityBound { agent_ref, .. } = fact {
+        return Some(agent_ref.clone());
+    }
+    let command_id = match fact {
+        OperationalFact::Accepted { command } => &command.command_id,
+        OperationalFact::Dispatched { command_id, .. }
+        | OperationalFact::Delivery { command_id, .. } => command_id,
+        OperationalFact::IdentityBound { .. } => unreachable!(),
+    };
+    if let OperationalFact::Accepted { command } = fact {
+        if let CommandTarget::Launch { inventory } = &command.target {
+            let key = command_identity_key(&input.capture.observation_ref.issuer, command_id);
+            if let Some(AnyObjectRef::Agent(agent)) = input.archive.correlations.get(&key) {
+                if agent.environment() != &inventory.environment
+                    || agent.anchor_session().agent != inventory.vendor
+                {
+                    source_issue(
+                        input,
+                        output,
+                        DiagnosticCode::ConflictingOwner,
+                        "Launch identity differs from its authorized inventory",
+                    );
+                    return None;
+                }
+                return Some(agent.clone());
+            }
+            output.requests.push(ArchiveRequest::CommandIdentity {
+                issuer: input.capture.observation_ref.issuer.clone(),
+                command_id: command_id.clone(),
+            });
+            source_issue(
+                input,
+                output,
+                DiagnosticCode::MissingOwner,
+                "Accepted launch input awaits evidenced native identity",
+            );
+            return None;
+        }
+    }
+    if let Some(scope) = input.capture.declared_subject_refs.first() {
+        return Some(scope.clone());
+    }
+    let key = command_identity_key(&input.capture.observation_ref.issuer, command_id);
+    if let Some(AnyObjectRef::Agent(agent)) = input.archive.correlations.get(&key) {
+        return Some(agent.clone());
+    }
+    if !matches!(fact, OperationalFact::Accepted { .. }) {
+        output.requests.push(ArchiveRequest::CommandIdentity {
+            issuer: input.capture.observation_ref.issuer.clone(),
+            command_id: command_id.clone(),
+        });
+    }
+    source_issue(
+        input,
+        output,
+        DiagnosticCode::MissingOwner,
+        "A server control occurrence has no evidenced target",
+    );
+    None
+}
 
 impl SemanticMapper for ServerMapper {
     fn build(&self) -> &'static str {
@@ -19,40 +112,116 @@ impl SemanticMapper for ServerMapper {
             state: input.state.clone(),
             ..MapOutput::default()
         };
-        let Some(scope) = input.capture.declared_subject_refs.first() else {
-            output.diagnostics.push(MappingDiagnostic {
-                evidence: vec![input.canonical_observation.clone()],
-                code: DiagnosticCode::MissingOwner,
-                message: "A server control occurrence has no declared target".into(),
-            });
-            return output;
-        };
-        let mut add = |slot: &str, fact| {
-            output
-                .claims
-                .push(claim(&input, scope, slot, self.build(), fact))
-        };
-        if input.capture.declared_subject_refs.len() != 1
-            || !matches!(input.capture.observation_ref.issuer, Issuer::Server(_))
-            || input.capture.transport_kind != TransportKind::Control
-        {
-            add("server/invalid-capture", diagnostic(scope, DiagnosticCode::ConflictingOwner,
-                "A server control occurrence requires one declared target and a server control source"));
-            return output;
-        }
         let fact = match serde_json::from_slice::<OperationalFact>(input.raw) {
             Ok(fact) => fact,
             Err(error) => {
-                add(
-                    "server/decode",
-                    diagnostic(scope, DiagnosticCode::DecodeFailure, &error.to_string()),
+                source_issue(
+                    &input,
+                    &mut output,
+                    DiagnosticCode::DecodeFailure,
+                    &error.to_string(),
                 );
                 return output;
             }
         };
+        if input.capture.declared_subject_refs.len() > 1
+            || !matches!(input.capture.observation_ref.issuer, Issuer::Server(_))
+            || input.capture.transport_kind != TransportKind::Control
+        {
+            source_issue(
+                &input,
+                &mut output,
+                DiagnosticCode::ConflictingOwner,
+                "Control evidence requires one known target at most and a server control source",
+            );
+            return output;
+        }
+        let Some(resolved_scope) = control_scope(&input, &fact, &mut output) else {
+            return output;
+        };
+        let scope = &resolved_scope;
+        let scope_evidence = match &fact {
+            OperationalFact::Accepted { command }
+                if matches!(command.target, CommandTarget::Launch { .. }) =>
+            {
+                input
+                    .archive
+                    .correlation_evidence
+                    .get(&command_identity_key(
+                        &input.capture.observation_ref.issuer,
+                        &command.command_id,
+                    ))
+                    .cloned()
+                    .unwrap_or_default()
+            }
+            _ => vec![],
+        };
+        let mut add = |slot: &str, fact| {
+            let mut value = claim(&input, scope, slot, self.build(), fact);
+            value.evidence.extend(scope_evidence.iter().cloned());
+            output.claims.push(value)
+        };
         match fact {
+            OperationalFact::IdentityBound {
+                command_id,
+                agent_ref,
+                source_evidence,
+            } => {
+                if source_evidence.is_empty() || !matches!(&agent_ref, AgentRef::Session(_))
+                    || source_evidence.iter().any(|reference| !matches!(&reference.issuer, Issuer::Environment(environment) if environment == agent_ref.environment())) {
+                    source_issue(&input, &mut output, DiagnosticCode::ConflictingIdentity, "Identity binding requires native environment evidence");
+                    return output;
+                }
+                let missing: Vec<_> = source_evidence
+                    .iter()
+                    .filter(|reference| !input.archive.observations.contains(*reference))
+                    .cloned()
+                    .collect();
+                if !missing.is_empty() {
+                    output.requests.extend(
+                        missing
+                            .into_iter()
+                            .map(|observation| ArchiveRequest::Observation { observation }),
+                    );
+                    return output;
+                }
+                let subject = AnyObjectRef::Agent(agent_ref.clone());
+                if !input
+                    .archive
+                    .object_evidence
+                    .get(&subject)
+                    .is_some_and(|proof| {
+                        source_evidence
+                            .iter()
+                            .any(|observation| proof.contains(observation))
+                    })
+                {
+                    output.requests.push(ArchiveRequest::Object {
+                        object_ref: subject,
+                    });
+                    source_issue(
+                        &input,
+                        &mut output,
+                        DiagnosticCode::MissingOwner,
+                        "The retained native observations do not yet prove this agent identity",
+                    );
+                    return output;
+                }
+                let key = command_identity_key(&input.capture.observation_ref.issuer, &command_id);
+                output.bound_agents.push(agent_ref.clone());
+                output
+                    .correlations
+                    .insert(key.clone(), AnyObjectRef::Agent(agent_ref));
+                output.correlation_evidence.insert(
+                    key,
+                    source_evidence
+                        .into_iter()
+                        .chain(std::iter::once(input.canonical_observation.clone()))
+                        .collect(),
+                );
+            }
             OperationalFact::Accepted { command } => {
-                if &command.target != scope
+                if command.target.agent().is_some_and(|target| target != scope)
                     || command.ingestion_authorization_epoch
                         != input.capture.ingestion_authorization_epoch
                 {
@@ -68,11 +237,18 @@ impl SemanticMapper for ServerMapper {
                         "The accepted command is missing its command, revision, or author identity"));
                     return output;
                 }
-                let submitted = derived_payload(
+                let submitted_encoding = if std::str::from_utf8(&command.input.bytes).is_ok() {
+                    PayloadEncoding::Utf8
+                } else {
+                    PayloadEncoding::Binary
+                };
+                let submitted = derived_payload_with_media(
                     &input,
                     command.input.bytes.clone(),
                     "/command/input/bytes",
                     "server/base64-submitted-bytes",
+                    command.input.media_type.clone(),
+                    submitted_encoding,
                 );
                 let payload = submitted.reference.clone();
                 output.payloads.push(submitted);
@@ -80,6 +256,10 @@ impl SemanticMapper for ServerMapper {
                     scope,
                     "sylph.command",
                     std::slice::from_ref(&command.command_id),
+                );
+                output.correlation_evidence.insert(
+                    correlation.clone(),
+                    vec![input.canonical_observation.clone()],
                 );
                 if !matches!(
                     command.kind,
@@ -156,6 +336,8 @@ impl SemanticMapper for ServerMapper {
                             representation: Representation::Submitted,
                             form: RevisionForm::Complete,
                             parts: vec![ContentPart {
+                                media_type: Some(command.input.media_type.clone()),
+                                encoding: submitted_encoding,
                                 part_ref: MessagePartRef::native(
                                     scope.clone(),
                                     "sylph.command.part",

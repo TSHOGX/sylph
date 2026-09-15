@@ -7,7 +7,7 @@ use serde_json::Value;
 use sylph_protocol::{trace::*, AgentName, NativeId, SessionId};
 
 use super::{
-    claim, correlation_key, derived_payload, ArchiveRequest, MapInput, MapOutput,
+    claim, correlation_key, derived_payload_with_media, ArchiveRequest, MapInput, MapOutput,
     MappingDiagnostic, SemanticMapper,
 };
 
@@ -185,20 +185,45 @@ impl Context<'_, '_> {
     }
 
     fn content(&mut self, bytes: Vec<u8>, selector: &str) -> PayloadRef {
-        let payload = derived_payload(self.input, bytes, selector, "codex/json-field-decoding");
+        let payload = derived_payload_with_media(
+            self.input,
+            bytes,
+            selector,
+            "codex/json-field-decoding",
+            "text/plain",
+            PayloadEncoding::Utf8,
+        );
         let reference = payload.reference.clone();
         self.output.payloads.push(payload);
         reference
     }
 
     fn opaque(&mut self, value: &Value, selector: &str) -> PayloadRef {
-        self.content(
+        let payload = derived_payload_with_media(
+            self.input,
             serde_json::to_vec(value).expect("retained JSON value serializes"),
             selector,
-        )
+            "codex/json-field-decoding",
+            "application/json",
+            PayloadEncoding::Utf8,
+        );
+        let reference = payload.reference.clone();
+        self.output.payloads.push(payload);
+        reference
     }
 
     fn announce_agent(&mut self, agent: &AgentRef, value: &Value, live: bool) {
+        if !live {
+            self.output.source_owners.push(super::SourceOwnership {
+                source: self.input.capture.source_position.source.clone(),
+                generation: self.input.capture.source_position.generation,
+                owner: super::SourceOwner {
+                    agent: agent.clone(),
+                    evidence: vec![self.input.canonical_observation.clone()],
+                    rule: "codex/governing-native-header".into(),
+                },
+            });
+        }
         let name = string(
             value,
             if live {
@@ -929,6 +954,15 @@ impl Context<'_, '_> {
                     );
                 }
                 parts.push(ContentPart {
+                    media_type: Some(
+                        if kind == ContentKind::Text {
+                            "text/plain"
+                        } else {
+                            "application/json"
+                        }
+                        .into(),
+                    ),
+                    encoding: PayloadEncoding::Utf8,
                     part_ref: MessagePartRef::occurrence(
                         owner.clone(),
                         self.input.capture.source_position.clone(),
@@ -1318,6 +1352,15 @@ impl Context<'_, '_> {
                 parts: payload
                     .as_ref()
                     .map(|payload| ContentPart {
+                        media_type: Some(
+                            if value["output"].is_string() {
+                                "text/plain"
+                            } else {
+                                "application/json"
+                            }
+                            .into(),
+                        ),
+                        encoding: PayloadEncoding::Utf8,
                         part_ref: MessagePartRef::occurrence(
                             owner.clone(),
                             self.input.capture.source_position.clone(),

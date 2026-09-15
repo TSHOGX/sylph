@@ -283,6 +283,15 @@ fn normalized_relation(
             transformed: resolved_ref!(registry, MessageRevision, transformed),
             rule: rule.clone(),
         },
+        Relation::ContextMembership {
+            checkpoint,
+            selection,
+            disposition,
+        } => Relation::ContextMembership {
+            checkpoint: resolved_ref!(registry, ContextCheckpoint, checkpoint),
+            selection: resolved_ref!(registry, HistorySelection, selection),
+            disposition: *disposition,
+        },
         Relation::ReadingOrder { before, after } => Relation::ReadingOrder {
             before: resolved_ref!(registry, HistoryEntry, before),
             after: resolved_ref!(registry, HistoryEntry, after),

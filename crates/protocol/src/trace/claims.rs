@@ -43,6 +43,11 @@ pub enum Relation {
         checkpoint: CheckpointRef,
         original_owner: OwnerRef,
     },
+    ContextMembership {
+        checkpoint: CheckpointRef,
+        selection: SelectionRef,
+        disposition: ContextMembershipKind,
+    },
     Representation {
         original: MessageRevisionRef,
         transformed: MessageRevisionRef,
@@ -52,6 +57,14 @@ pub enum Relation {
         before: EntryRef,
         after: EntryRef,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextMembershipKind {
+    Included,
+    Preserved,
+    Replaced,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -255,6 +268,40 @@ impl TraceFactKind {
 }
 
 impl Fact {
+    pub fn payload_refs(&self) -> Vec<&super::PayloadRef> {
+        match self {
+            Self::Declare { object } => object.payload_refs(),
+            Self::Execution {
+                boundary: ExecutionBoundary::Outcome { detail, .. },
+                ..
+            } => detail.iter().collect(),
+            Self::ResourceState {
+                state: ResourceState::GoalUpdated { detail, .. },
+                ..
+            } => detail.iter().collect(),
+            Self::ResourceState {
+                state: ResourceState::ScheduleRegistered { registration },
+                ..
+            } => vec![registration],
+            Self::DeliveryStage {
+                stage:
+                    DeliveryStage::Included {
+                        coverage: InclusionCoverage::ByteRanges { payload, .. },
+                        ..
+                    },
+                ..
+            } => vec![payload],
+            Self::Coverage {
+                coverage:
+                    Coverage {
+                        interval: CoverageInterval::Payload { payload, .. },
+                        ..
+                    },
+            } => vec![payload],
+            _ => vec![],
+        }
+    }
+
     pub fn kind(&self) -> TraceFactKind {
         match self {
             Self::Declare { .. } => TraceFactKind::Declaration,
@@ -367,6 +414,14 @@ impl Relation {
             } => vec![
                 AnyObjectRef::MessageRevision(transformed.clone()),
                 AnyObjectRef::MessageRevision(original.clone()),
+            ],
+            Self::ContextMembership {
+                checkpoint,
+                selection,
+                ..
+            } => vec![
+                AnyObjectRef::ContextCheckpoint(checkpoint.clone()),
+                AnyObjectRef::HistorySelection(selection.clone()),
             ],
         }
     }

@@ -35,6 +35,7 @@ fts5-jieba = { path = "../fts5-jieba" }
 # A path dependency rather than a module because the adapters and the envagent link
 # against it without linking against the server.
 sylph-protocol = { path = "../protocol" }
+sylph-trace = { path = "../trace" }
 
 # Serialization
 serde = { workspace = true }

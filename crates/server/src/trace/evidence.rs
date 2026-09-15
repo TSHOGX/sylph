@@ -17,9 +17,12 @@ use sylph_protocol::trace::{
         PayloadRef,
     },
     identity::{AgentRef, Issuer, ObservationRef},
+    IngestionScope,
 };
 
 use crate::storage::cas::BlobStore;
+
+pub mod catalogue;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdmissionLimits {
@@ -197,6 +200,9 @@ impl EvidenceStore {
                 sqlx::raw_sql(include_str!("evidence/schema.sql"))
                     .execute(&mut *tx)
                     .await?;
+                sqlx::raw_sql(include_str!("evidence/catalogue/schema.sql"))
+                    .execute(&mut *tx)
+                    .await?;
                 sqlx::query("PRAGMA user_version = 1")
                     .execute(&mut *tx)
                     .await?;
@@ -231,7 +237,7 @@ impl EvidenceStore {
     /// The caller has already checked current environment control authority.
     pub async fn authorize_scope(
         &self,
-        scope: &AgentRef,
+        scope: &IngestionScope,
         subjects: &[AgentRef],
     ) -> Result<IngestionEpoch> {
         self.inventory(scope, subjects, false).await
@@ -241,7 +247,7 @@ impl EvidenceStore {
     /// Old producer receipts and tombstones remain permanent.
     pub async fn readopt_scope(
         &self,
-        scope: &AgentRef,
+        scope: &IngestionScope,
         subjects: &[AgentRef],
     ) -> Result<IngestionEpoch> {
         self.inventory(scope, subjects, true).await
@@ -249,18 +255,20 @@ impl EvidenceStore {
 
     async fn inventory(
         &self,
-        scope: &AgentRef,
+        scope: &IngestionScope,
         subjects: &[AgentRef],
         readopt: bool,
     ) -> Result<IngestionEpoch> {
-        if subjects.is_empty() || subjects.len() > self.limits.max_inventory_subjects {
+        if (subjects.is_empty() && matches!(scope, IngestionScope::Agent(_)))
+            || subjects.len() > self.limits.max_inventory_subjects
+        {
             return Err(EvidenceError::Limit("inventory subject limit"));
         }
         scope.validate().map_err(invalid)?;
-        let environment = agent_environment(scope);
+        let environment = scope.environment().as_str();
         for subject in subjects {
             subject.validate().map_err(invalid)?;
-            if agent_environment(subject) != environment {
+            if !scope.permits_subject(subject) {
                 return Err(EvidenceError::Authority);
             }
         }
@@ -273,7 +281,9 @@ impl EvidenceStore {
         .fetch_optional(&mut *tx)
         .await?;
         let epoch = if let Some(row) = existing {
-            let suppressed = row.try_get::<i64, _>("suppressed")? != 0;
+            let held_epoch: String = row.try_get("current_epoch")?;
+            let suppressed = row.try_get::<i64, _>("suppressed")? != 0
+                || epoch_tombstone(&mut tx, &held_epoch).await?.is_some();
             if suppressed && !readopt {
                 return Err(EvidenceError::Suppressed);
             }
@@ -283,6 +293,21 @@ impl EvidenceStore {
                 ));
             }
             if suppressed {
+                if let IngestionScope::Agent(agent) = scope {
+                    // Closing suppression fences every inventory authorized during
+                    // it, including identities whose vendor binding arrives later.
+                    // Append a cutoff fact; the original deletion stays immutable.
+                    let tombstone = epoch_tombstone(&mut tx, &held_epoch)
+                        .await?
+                        .ok_or(EvidenceError::Epoch)?;
+                    let through: i64 = sqlx::query_scalar(
+                        "SELECT epoch_order FROM ingestion_clock WHERE singleton=1",
+                    )
+                    .fetch_one(&mut *tx)
+                    .await?;
+                    sqlx::query("INSERT INTO agent_deletions(agent_ref,deleted_through_order,tombstone_id,deleted_at_ms) VALUES(?,?,?,?) ON CONFLICT DO NOTHING")
+                        .bind(agent.encode()).bind(through).bind(tombstone).bind(now_ms()).execute(&mut *tx).await?;
+                }
                 let epoch = uuid::Uuid::new_v4().to_string();
                 sqlx::query("UPDATE ingestion_scopes SET current_epoch = ?, suppressed = 0 WHERE scope_ref = ?")
                     .bind(&epoch).bind(&scope_key).execute(&mut *tx).await?;
@@ -295,12 +320,20 @@ impl EvidenceStore {
                 return Err(EvidenceError::Epoch);
             }
             let epoch = uuid::Uuid::new_v4().to_string();
-            sqlx::query("INSERT INTO ingestion_scopes (scope_ref, issuer_ref, current_epoch, suppressed) VALUES (?, ?, ?, 0)")
-                .bind(&scope_key).bind(environment).bind(&epoch).execute(&mut *tx).await?;
+            sqlx::query("INSERT INTO ingestion_scopes (scope_ref, scope_json, issuer_ref, vendor, current_epoch, suppressed) VALUES (?, ?, ?, ?, ?, 0)")
+                .bind(&scope_key).bind(serde_json::to_string(scope)?).bind(environment).bind(scope.vendor().as_str()).bind(&epoch).execute(&mut *tx).await?;
             epoch
         };
-        sqlx::query("INSERT INTO ingestion_epochs (epoch, scope_ref, opened_at_ms) VALUES (?, ?, ?) ON CONFLICT DO NOTHING")
-            .bind(&epoch).bind(&scope_key).bind(now_ms()).execute(&mut *tx).await?;
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM ingestion_epochs WHERE epoch=?)")
+                .bind(&epoch)
+                .fetch_one(&mut *tx)
+                .await?;
+        if !exists {
+            let epoch_order:i64=sqlx::query_scalar("UPDATE ingestion_clock SET epoch_order=epoch_order+1 WHERE singleton=1 RETURNING epoch_order").fetch_one(&mut *tx).await?;
+            sqlx::query("INSERT INTO ingestion_epochs (epoch, scope_ref, opened_at_ms,epoch_order) VALUES (?, ?, ?,?)")
+                .bind(&epoch).bind(&scope_key).bind(now_ms()).bind(epoch_order).execute(&mut *tx).await?;
+        }
         for subject in subjects {
             sqlx::query("INSERT INTO inventory_subjects (epoch, subject_ref) VALUES (?, ?) ON CONFLICT DO NOTHING")
                 .bind(&epoch).bind(subject.encode()).execute(&mut *tx).await?;
@@ -318,7 +351,8 @@ impl EvidenceStore {
     }
 
     /// Commit the permanent visibility boundary before any eventual byte GC.
-    pub async fn delete_scope(&self, scope: &AgentRef) -> Result<String> {
+    pub async fn delete_scope(&self, scope: &IngestionScope) -> Result<String> {
+        scope.validate().map_err(invalid)?;
         let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
         let scope_key = scope.encode();
         let epoch: Option<String> =
@@ -326,7 +360,19 @@ impl EvidenceStore {
                 .bind(&scope_key)
                 .fetch_optional(&mut *tx)
                 .await?;
-        let epoch = epoch.ok_or(EvidenceError::Epoch)?;
+        let epoch = match epoch {
+            Some(epoch) => epoch,
+            None if matches!(scope, IngestionScope::Agent(_)) => {
+                let epoch = uuid::Uuid::new_v4().to_string();
+                let epoch_order:i64=sqlx::query_scalar("UPDATE ingestion_clock SET epoch_order=epoch_order+1 WHERE singleton=1 RETURNING epoch_order").fetch_one(&mut *tx).await?;
+                sqlx::query("INSERT INTO ingestion_scopes(scope_ref,scope_json,issuer_ref,vendor,current_epoch,suppressed) VALUES(?,?,?,?,?,0)")
+                    .bind(&scope_key).bind(serde_json::to_string(scope)?).bind(scope.environment().as_str()).bind(scope.vendor().as_str()).bind(&epoch).execute(&mut *tx).await?;
+                sqlx::query("INSERT INTO ingestion_epochs(epoch,scope_ref,opened_at_ms,epoch_order) VALUES(?,?,?,?)")
+                    .bind(&epoch).bind(&scope_key).bind(now_ms()).bind(epoch_order).execute(&mut *tx).await?;
+                epoch
+            }
+            None => return Err(EvidenceError::Epoch),
+        };
         if let Some(id) = sqlx::query_scalar::<_, String>(
             "SELECT tombstone_id FROM deletion_tombstones WHERE epoch = ?",
         )
@@ -343,13 +389,34 @@ impl EvidenceStore {
             .bind(&scope_key)
             .execute(&mut *tx)
             .await?;
+        if let IngestionScope::Agent(agent) = scope {
+            let through: i64 =
+                sqlx::query_scalar("SELECT epoch_order FROM ingestion_clock WHERE singleton=1")
+                    .fetch_one(&mut *tx)
+                    .await?;
+            sqlx::query("INSERT INTO agent_deletions(agent_ref,deleted_through_order,tombstone_id,deleted_at_ms) VALUES(?,?,?,?)")
+                .bind(agent.encode()).bind(through).bind(&id).bind(now_ms()).execute(&mut *tx).await?;
+        }
+        catalogue::record_scope_deletion(&mut tx, &scope_key, &epoch, &id, now_ms()).await?;
         tx.commit().await?;
         Ok(id)
     }
 
+    pub async fn current_scope_epoch(
+        &self,
+        scope: &IngestionScope,
+    ) -> Result<Option<IngestionEpoch>> {
+        scope.validate().map_err(invalid)?;
+        let epoch:Option<String>=sqlx::query_scalar("SELECT s.current_epoch FROM ingestion_scopes s JOIN ingestion_epoch_tombstones d ON d.epoch=s.current_epoch WHERE s.scope_ref=? AND s.suppressed=0 AND d.tombstone_id IS NULL")
+            .bind(scope.encode()).fetch_optional(&self.readers).await?;
+        epoch
+            .map(|value| IngestionEpoch::new(value).map_err(invalid))
+            .transpose()
+    }
+
     /// Publish one bounded exact-byte chunk, including lexical JSON spelling.
     /// Larger records use a manifest; the chunk bound never truncates a record.
-    pub async fn stage_payload(&self, bytes: &[u8]) -> Result<PayloadRef> {
+    pub(crate) async fn stage_payload(&self, bytes: &[u8]) -> Result<PayloadRef> {
         self.stage_payload_inner(bytes, None).await
     }
 
@@ -362,17 +429,29 @@ impl EvidenceStore {
             return Err(EvidenceError::Limit("payload chunk bytes"));
         }
         fail_at(crash, CrashPoint::BeforePayloadSync)?;
-        let digest = self.blobs.put(bytes).await.map_err(payload_error)?;
+        let digest = blake3::hash(bytes).to_hex().to_string();
+        let write_id = self.begin_blob_write(&digest).await?;
+        let written = self.blobs.put(bytes).await.map_err(payload_error);
+        if let Err(error) = written {
+            self.end_blob_write(&write_id).await?;
+            return Err(error);
+        }
         fail_at(crash, CrashPoint::AfterPayloadSync)?;
         let reference = PayloadRef::bytes(digest.clone()).map_err(invalid)?;
-        sqlx::query("INSERT INTO payloads (payload_ref, kind, stored_length, decoded_length, decoded_digest, complete, staged_at_ms) VALUES (?, 'bytes', ?, ?, ?, 1, ?) ON CONFLICT DO NOTHING")
-            .bind(reference.as_str()).bind(bytes.len() as i64).bind(bytes.len() as i64).bind(&digest).bind(now_ms())
-            .execute(&self.writer).await?;
+        let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
+        sqlx::query("INSERT INTO payloads (payload_ref, physical_digest, availability, kind, stored_length, decoded_length, decoded_digest, complete, staged_at_ms) VALUES (?, ?, 'available', 'bytes', ?, ?, ?, 1, ?) ON CONFLICT(payload_ref) DO UPDATE SET availability='available'")
+            .bind(reference.as_str()).bind(&digest).bind(bytes.len() as i64).bind(bytes.len() as i64).bind(&digest).bind(now_ms())
+            .execute(&mut *tx).await?;
+        sqlx::query("DELETE FROM trace_blob_writes WHERE write_id=?")
+            .bind(write_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
         Ok(reference)
     }
 
     /// Manifest identity covers representation metadata and ordered byte ranges.
-    pub async fn stage_manifest(&self, manifest: &PayloadManifest) -> Result<PayloadRef> {
+    pub(crate) async fn stage_manifest(&self, manifest: &PayloadManifest) -> Result<PayloadRef> {
         manifest.validate().map_err(invalid)?;
         if manifest.chunks.len() > self.limits.max_manifest_chunks {
             return Err(EvidenceError::Limit("manifest chunk count"));
@@ -412,24 +491,34 @@ impl EvidenceStore {
         // The encoding marker pins manifest serialization; the typed payload key
         // distinguishes this interpretation from the same bytes captured as raw data.
         let encoded = manifest_bytes(manifest)?;
-        let digest = self.blobs.put(&encoded).await.map_err(payload_error)?;
-        let reference = PayloadRef::manifest(digest).map_err(invalid)?;
+        let digest = blake3::hash(&encoded).to_hex().to_string();
+        let write_id = self.begin_blob_write(&digest).await?;
+        let written = self.blobs.put(&encoded).await.map_err(payload_error);
+        if let Err(error) = written {
+            self.end_blob_write(&write_id).await?;
+            return Err(error);
+        }
+        let reference = PayloadRef::manifest(&digest).map_err(invalid)?;
         let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
-        sqlx::query("INSERT INTO payloads (payload_ref, kind, stored_length, decoded_length, decoded_digest, complete, manifest_json, staged_at_ms) VALUES (?, 'manifest', ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING")
-            .bind(reference.as_str()).bind(encoded.len() as i64).bind(total).bind(&decoded_digest).bind(i64::from(complete))
+        sqlx::query("INSERT INTO payloads (payload_ref, physical_digest, availability, kind, stored_length, decoded_length, decoded_digest, complete, manifest_json, staged_at_ms) VALUES (?, ?, 'available', 'manifest', ?, ?, ?, ?, ?, ?) ON CONFLICT(payload_ref) DO UPDATE SET availability='available'")
+            .bind(reference.as_str()).bind(&digest).bind(encoded.len() as i64).bind(total).bind(&decoded_digest).bind(i64::from(complete))
             .bind(std::str::from_utf8(&serialized).expect("JSON is UTF-8")).bind(now_ms()).execute(&mut *tx).await?;
         for (ordinal, chunk) in manifest.chunks.iter().enumerate() {
             sqlx::query("INSERT INTO payload_chunks (manifest_ref, ordinal, chunk_ref, chunk_offset, length, payload_offset) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING")
                 .bind(reference.as_str()).bind(ordinal as i64).bind(chunk.digest.as_str()).bind(signed(chunk.chunk_offset)?)
                 .bind(signed(chunk.length)?).bind(signed(chunk.payload_offset)?).execute(&mut *tx).await?;
         }
+        sqlx::query("DELETE FROM trace_blob_writes WHERE write_id=?")
+            .bind(write_id)
+            .execute(&mut *tx)
+            .await?;
         tx.commit().await?;
         Ok(reference)
     }
 
     /// Admit a contiguous batch belonging to one authenticated producer epoch.
     /// Every returned prefix already survived a FULL-durable evidence commit.
-    pub async fn admit_batch(
+    pub(crate) async fn admit_batch(
         &self,
         issuer: &Issuer,
         captures: &[Capture],
@@ -481,6 +570,27 @@ impl EvidenceStore {
         issuer: &Issuer,
         captures: &[Capture],
         crash: Option<CrashPoint>,
+    ) -> Result<AdmissionBatch> {
+        self.admit_guarded_inner(issuer, captures, crash, None)
+            .await
+    }
+
+    pub(crate) async fn admit_owned(
+        &self,
+        issuer: &Issuer,
+        capture: &Capture,
+        guard: &crate::trace::upload::AdmissionGuard,
+    ) -> Result<AdmissionBatch> {
+        self.admit_guarded_inner(issuer, std::slice::from_ref(capture), None, Some(guard))
+            .await
+    }
+
+    async fn admit_guarded_inner(
+        &self,
+        issuer: &Issuer,
+        captures: &[Capture],
+        crash: Option<CrashPoint>,
+        guard: Option<&crate::trace::upload::AdmissionGuard>,
     ) -> Result<AdmissionBatch> {
         if captures.is_empty() || captures.len() > self.limits.max_batch_items {
             return Err(EvidenceError::Limit("capture batch items"));
@@ -575,6 +685,7 @@ impl EvidenceStore {
                 if row.try_get::<String, _>("envelope_digest")? != digest {
                     return Err(EvidenceError::ReceiptCollision);
                 }
+                if let Some(guard)=guard{catalogue::upload_store::finish_guard(&mut tx,guard,capture,&disposition(&row)?,false).await?;}
                 receipts.push(AdmissionReceipt { observation_ref: observation.clone(), disposition: disposition(&row)?, newly_recorded: false });
                 continue;
             }
@@ -586,6 +697,11 @@ impl EvidenceStore {
             }
             let epoch = capture.ingestion_authorization_epoch.as_str();
             let tombstone = check_inventory(&mut tx, issuer, capture).await?;
+            if tombstone.is_none() {
+                if let Some(guard) = guard {
+                    catalogue::upload_store::verify_guard(&mut tx, guard, capture, true).await?;
+                }
+            }
             let receipt_disposition = if let Some(tombstone_id) = tombstone {
                 ReceiptDisposition::DiscardedByDeletion { tombstone_id }
             } else {
@@ -618,6 +734,15 @@ impl EvidenceStore {
                 for payload in capture_payload_refs(capture) {
                     sqlx::query("INSERT INTO observation_payload_roots (admission_seq, payload_ref) VALUES (?, ?)")
                         .bind(admission_seq).bind(payload.as_str()).execute(&mut *tx).await?;
+                    catalogue::gc_store::add_payload_roots(
+                        &mut tx,
+                        "observation",
+                        &observation_key,
+                        epoch,
+                        payload,
+                    )
+                    .await
+                    .map_err(|e| EvidenceError::Invalid(e.to_string()))?;
                 }
                 ReceiptDisposition::Retained {
                     admission_seq: unsigned(admission_seq)?,
@@ -634,6 +759,16 @@ impl EvidenceStore {
             sqlx::query("INSERT INTO producer_receipts (observation_ref, issuer_ref, producer_id, producer_epoch, producer_seq, envelope_digest, disposition, admission_seq, tombstone_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
                 .bind(observation_key).bind(&issuer_key).bind(&observation.producer_id).bind(&observation.producer_epoch)
                 .bind(signed(observation.producer_seq)?).bind(digest).bind(kind).bind(admitted).bind(deleted).execute(&mut *tx).await?;
+            if let Some(guard) = guard {
+                catalogue::upload_store::finish_guard(
+                    &mut tx,
+                    guard,
+                    capture,
+                    &receipt_disposition,
+                    false,
+                )
+                .await?;
+            }
             prefix = observation.producer_seq;
             receipts.push(AdmissionReceipt {
                 observation_ref: observation.clone(),
@@ -665,6 +800,27 @@ impl EvidenceStore {
                 observation_ref: observation.clone(),
                 disposition: disposition(&row)?,
                 newly_recorded: false,
+            })
+        })
+        .transpose()
+    }
+
+    /// A source proof is read from admitted occurrence metadata, never from a
+    /// routing hint or a reconstructed filename. Deleted epochs remain invisible.
+    pub async fn observation_source(
+        &self,
+        observation: &ObservationRef,
+    ) -> Result<Option<sylph_protocol::trace::SourcePosition>> {
+        let row=sqlx::query("SELECT c.source_ref,c.generation,c.locator_json FROM observations o JOIN occurrences c ON c.occurrence_id=o.occurrence_id JOIN ingestion_epoch_tombstones t ON t.epoch=c.ingestion_epoch WHERE o.observation_ref=? AND t.tombstone_id IS NULL")
+            .bind(observation.encode()).fetch_optional(&self.readers).await?;
+        row.map(|row| {
+            Ok(sylph_protocol::trace::SourcePosition {
+                source: sylph_protocol::trace::SourceRef::decode(
+                    &row.try_get::<String, _>("source_ref")?,
+                )
+                .map_err(invalid)?,
+                generation: unsigned(row.try_get("generation")?)?,
+                locator: serde_json::from_str(&row.try_get::<String, _>("locator_json")?)?,
             })
         })
         .transpose()
@@ -708,7 +864,7 @@ impl EvidenceStore {
             sqlx::query_scalar("SELECT COALESCE(MAX(admission_seq), 0) FROM observations")
                 .fetch_one(&mut *tx)
                 .await?;
-        let rows = sqlx::query("SELECT o.admission_seq, o.occurrence_id, o.envelope_bytes, c.canonical_observation_ref, d.tombstone_id FROM observations o JOIN occurrences c ON c.occurrence_id = o.occurrence_id LEFT JOIN deletion_tombstones d ON d.epoch = c.ingestion_epoch WHERE o.admission_seq > ? ORDER BY o.admission_seq LIMIT ?")
+        let rows = sqlx::query("SELECT o.admission_seq, o.occurrence_id, o.envelope_bytes, c.canonical_observation_ref, d.tombstone_id FROM observations o JOIN occurrences c ON c.occurrence_id = o.occurrence_id LEFT JOIN ingestion_epoch_tombstones d ON d.epoch = c.ingestion_epoch WHERE o.admission_seq > ? ORDER BY o.admission_seq LIMIT ?")
             .bind(signed(after)?).bind((limit + 1) as i64).fetch_all(&mut *tx).await?;
         if let Some((read, resume)) = interleave {
             read.notify_one();
@@ -840,6 +996,17 @@ impl EvidenceStore {
             .transpose()
     }
 
+    /// Indexed decoded length; reading a preview does not materialize the full body.
+    pub async fn payload_length(&self, payload: &PayloadRef) -> Result<Option<u64>> {
+        let length: Option<i64> =
+            sqlx::query_scalar("SELECT decoded_length FROM payloads WHERE payload_ref=?")
+                .bind(payload.as_str())
+                .fetch_optional(&self.readers)
+                .await?
+                .ok_or_else(|| EvidenceError::Payload(payload.as_str().into()))?;
+        length.map(unsigned).transpose()
+    }
+
     /// Read one bounded retained range. A gap is an explicit error; it never
     /// becomes a shorter body that appears complete to an interpretation worker.
     pub async fn payload_range(
@@ -925,7 +1092,7 @@ impl EvidenceStore {
         observation: &ObservationRef,
         max_bytes: usize,
     ) -> Result<Option<Vec<u8>>> {
-        let payload: Option<String> = sqlx::query_scalar("SELECT c.payload_ref FROM observations o JOIN occurrences c ON c.occurrence_id = o.occurrence_id WHERE o.observation_ref = ? AND NOT EXISTS (SELECT 1 FROM deletion_tombstones d WHERE d.epoch = c.ingestion_epoch)")
+        let payload: Option<String> = sqlx::query_scalar("SELECT c.payload_ref FROM observations o JOIN occurrences c ON c.occurrence_id = o.occurrence_id WHERE o.observation_ref = ? AND NOT EXISTS (SELECT 1 FROM ingestion_epoch_tombstones d WHERE d.epoch = c.ingestion_epoch AND d.tombstone_id IS NOT NULL)")
             .bind(observation.encode()).fetch_optional(&self.readers).await?;
         match payload {
             Some(payload) => Ok(Some(
@@ -974,10 +1141,33 @@ impl EvidenceStore {
         self.readers.close().await;
         self.writer.close().await;
     }
-}
 
-fn agent_environment(agent: &AgentRef) -> &str {
-    agent.environment().as_str()
+    async fn begin_blob_write(&self, digest: &str) -> Result<String> {
+        let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
+        let deleting:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM trace_blob_gc WHERE physical_digest=? AND state='deleting')").bind(digest).fetch_one(&mut *tx).await?;
+        if deleting {
+            return Err(EvidenceError::Payload(
+                "physical payload is being collected; retry the upload".into(),
+            ));
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO trace_blob_inventory VALUES(?,0) ON CONFLICT(physical_digest) DO UPDATE SET collected=0").bind(digest).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO trace_blob_writes VALUES(?,?)")
+            .bind(&id)
+            .bind(digest)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(id)
+    }
+
+    async fn end_blob_write(&self, id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM trace_blob_writes WHERE write_id=?")
+            .bind(id)
+            .execute(&self.writer)
+            .await?;
+        Ok(())
+    }
 }
 
 fn capture_payload_refs(capture: &Capture) -> BTreeSet<&PayloadRef> {
@@ -991,6 +1181,15 @@ fn capture_payload_refs(capture: &Capture) -> BTreeSet<&PayloadRef> {
         .collect()
 }
 
+async fn epoch_tombstone(conn: &mut SqliteConnection, epoch: &str) -> Result<Option<String>> {
+    let tombstone: Option<Option<String>> =
+        sqlx::query_scalar("SELECT tombstone_id FROM ingestion_epoch_tombstones WHERE epoch=?")
+            .bind(epoch)
+            .fetch_optional(conn)
+            .await?;
+    Ok(tombstone.flatten())
+}
+
 // Preflight and the transaction use the same policy against different read
 // snapshots. Only the latter authorizes admission; duplicating this policy would
 // eventually make upload eligibility disagree with the durable receipt boundary.
@@ -1000,12 +1199,21 @@ async fn check_inventory(
     capture: &Capture,
 ) -> Result<Option<String>> {
     let epoch = capture.ingestion_authorization_epoch.as_str();
-    let row = sqlx::query("SELECT s.issuer_ref, s.current_epoch, s.suppressed, d.tombstone_id FROM ingestion_epochs e JOIN ingestion_scopes s ON s.scope_ref = e.scope_ref LEFT JOIN deletion_tombstones d ON d.epoch = e.epoch WHERE e.epoch = ?")
+    let row = sqlx::query("SELECT s.scope_json, s.issuer_ref, s.current_epoch, s.suppressed, d.tombstone_id FROM ingestion_epochs e JOIN ingestion_scopes s ON s.scope_ref = e.scope_ref LEFT JOIN ingestion_epoch_tombstones d ON d.epoch = e.epoch WHERE e.epoch = ?")
         .bind(epoch).fetch_optional(&mut *conn).await?.ok_or(EvidenceError::Epoch)?;
+    let scope: IngestionScope = serde_json::from_str(&row.try_get::<String, _>("scope_json")?)?;
     if let Issuer::Environment(environment) = issuer {
-        if environment.as_str() != row.try_get::<String, _>("issuer_ref")? {
+        if environment != scope.environment() {
             return Err(EvidenceError::Authority);
         }
+    }
+    if (matches!(scope, IngestionScope::Agent(_)) && capture.declared_subject_refs.is_empty())
+        || capture
+            .declared_subject_refs
+            .iter()
+            .any(|subject| !scope.permits_subject(subject))
+    {
+        return Err(EvidenceError::Authority);
     }
     for subject in &capture.declared_subject_refs {
         let included: bool = sqlx::query_scalar(

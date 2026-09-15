@@ -369,6 +369,13 @@ context requires the observed ordered request or replacement set, settings and p
 references; a summary alone supplies only summary coverage. Compaction changes model
 context, not the append-origin historical record. It never authorizes evidence deletion.
 
+Context membership is a separate typed relation from a checkpoint to an immutable
+HistorySelection, identifying included, preserved or replaced members. Later evidence
+can establish membership without rewriting the summary payload or claiming that the
+summary alone was an exact model request. Missing source/predecessor evidence leaves
+membership unresolved; an explicit complete mapping witness is required to conclude
+that a source extent contains no semantic entries.
+
 A fork creates a new native session and records context lineage. Spawn ownership,
 logical fork boundary, physical base rollout, inherited-prefix end, and selected history
 head may all differ. An adapter maps each actual field; it cannot collapse them into

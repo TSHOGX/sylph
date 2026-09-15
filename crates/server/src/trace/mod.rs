@@ -7,3 +7,7 @@ pub mod evidence;
 pub mod exporter;
 pub mod generation;
 pub mod outbox;
+pub mod worker;
+pub mod publication;
+pub mod upload;
+pub mod gc;
