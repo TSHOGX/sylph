@@ -55,8 +55,13 @@ test("a new session accepts a turn and streams the reply", async ({ page }) => {
   // visible is the assertion: reasoning must not compete with output.
   const thinking = page.getByText("Considering the request.");
   await expect(thinking).toBeHidden();
+  const work = page.locator(".reading-work > button").first();
+  await work.click();
+  if (await work.getAttribute("aria-expanded") === "false") await work.click();
   await page.getByRole("button",{name:/^Thinking/}).first().click();
-  await page.getByRole("button",{name:/^Thinking/}).last().click();
+  const thought = page.getByLabel("Tool calls", {exact: true}).getByRole("button", {name:"Thinking",exact:true});
+  await expect(thought).toBeVisible();
+  await thought.click();
   await expect(thinking).toBeVisible();
 
   // The user's own message is journalled too, so history is complete.

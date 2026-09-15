@@ -91,6 +91,9 @@ test("disclosure supports keyboard focus and reduced motion without shifting tex
     page,
     "exercise tools please",
   );
+  const work = page.locator(".reading-work > button").first();
+  await work.click();
+  if (await work.getAttribute("aria-expanded") === "false") await work.click();
   const group = (await rootNodes(page, sessionId)).find(
     (node) => node.turnId === turnId && node.event.kind === "execution",
   )!;

@@ -140,6 +140,24 @@ export class ExecutionStore {
     visit(parent, 0);
     return rows;
   }
+  /** An intentional interaction inside work also pins its enclosing process.
+   * Reading addresses differ from physical execution parents, so follow this
+   * view's loaded windows rather than recomputing a synthetic work id. */
+  chooseDisclosure(id: string, open: boolean) {
+    this.disclosureChoices.set(id, open);
+    const seen = new Set<string>([id]);
+    let child = id;
+    for (;;) {
+      const parent = [...this.branches].find(
+        ([key, branch]) => !seen.has(key) && branch.ids.includes(child),
+      )?.[0];
+      if (parent === undefined) break;
+      seen.add(parent);
+      if (this.nodes.get(parent)?.event.kind === "work")
+        this.disclosureChoices.set(parent, true);
+      child = parent;
+    }
+  }
   private endpoint(parent: string) {
     if (this.targetId) return "nodes";
     return this.reading &&

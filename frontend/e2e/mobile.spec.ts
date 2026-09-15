@@ -133,7 +133,7 @@ test("the conversation owns the full width; sidebars are not in flow", async ({
     page.getByRole("complementary", { name: "Workspaces" }),
   ).toBeHidden();
   await expect(
-    page.getByRole("complementary", { name: "Artifacts" }),
+    page.getByRole("complementary", { name: "Work panel" }),
   ).toBeHidden();
 
   const width = await viewportWidth(page);
@@ -455,7 +455,10 @@ test("a delegation tree three levels deep still fits the viewport", async ({
   );
   await openExecutionGroups(page, sessionId, turnId, true);
   const verify = page.getByRole("region", { name: "Verify delegation" });
-  await verify.locator("button[aria-expanded]").tap();
+  await verify.getByRole("button").first().tap();
+  const panel = page.getByRole("dialog",{name:"Work panel"});
+  const work = panel.locator(".reading-work > button").first();
+  if (await work.getAttribute("aria-expanded") === "false") await work.tap();
   const id = (await verify.getAttribute("data-node-id"))!;
   const response = await page.request.get(
     `/api/v1/sessions/${encodeURIComponent(sessionId)}/nodes?parent=${encodeURIComponent(id)}`,
@@ -472,10 +475,8 @@ test("a delegation tree three levels deep still fits the viewport", async ({
     page.getByRole("region", { name: "Worker delegation" }),
   ).toBeVisible();
   expect(await overflowingElements(page)).toEqual([]);
-  await verify.getByRole("button", { name: "Focus this branch" }).tap();
-  await expect(
-    page.getByRole("button", { name: "Back to conversation" }),
-  ).toBeVisible();
+  await panel.getByRole("button", { name: "All subagents" }).tap();
+  await expect(panel.getByRole("searchbox")).toBeVisible();
   expect(await overflowingElements(page)).toEqual([]);
 });
 

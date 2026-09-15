@@ -67,7 +67,7 @@ test("both sidebars toggle by keyboard and the state persists across navigation"
   await createSession(page);
 
   const left = page.getByRole("complementary", { name: "Workspaces" });
-  const right = page.getByRole("complementary", { name: "Artifacts" });
+  const right = page.getByRole("complementary", { name: "Work panel" });
 
   await expect(left).toBeVisible();
   // The Artifacts pane starts hidden: it is only useful once a file is chosen.
@@ -82,7 +82,7 @@ test("both sidebars toggle by keyboard and the state persists across navigation"
   // Persisted in localStorage, so a reload keeps the layout the user chose.
   await page.reload();
   await expect(page.getByRole("complementary", { name: "Workspaces" })).toBeHidden();
-  await expect(page.getByRole("complementary", { name: "Artifacts" })).toBeVisible();
+  await expect(page.getByRole("complementary", { name: "Work panel" })).toBeVisible();
 
   await page.keyboard.press("ControlOrMeta+b");
   await expect(page.getByRole("complementary", { name: "Workspaces" })).toBeVisible();
@@ -98,16 +98,16 @@ test("the command palette opens, filters, and runs an action", async ({ page }) 
   const input = dialog.getByRole("combobox");
   await expect(input).toBeFocused();
 
-  // Fuzzy matching on a subsequence: "artif" must reach the artifacts toggle.
-  await input.fill("artif");
+  // Fuzzy matching on a subsequence: "wrk pnl" must reach the work-panel toggle.
+  await input.fill("wrk pnl");
   const option = dialog.getByRole("option").first();
-  await expect(option).toContainText(/artifacts/i);
+  await expect(option).toContainText(/work panel/i);
 
   await page.keyboard.press("Enter");
   await expect(dialog).toBeHidden();
   // The palette dispatches through the same path as the shortcut, so running the
   // command must have the same effect as pressing the key.
-  await expect(page.getByRole("complementary", { name: "Artifacts" })).toBeVisible();
+  await expect(page.getByRole("complementary", { name: "Work panel" })).toBeVisible();
 });
 
 /**
@@ -298,7 +298,7 @@ test("the Artifacts pane browses the workspace and previews a file", async ({ pa
   await createSession(page);
 
   await page.keyboard.press("ControlOrMeta+Backslash");
-  const pane = page.getByRole("complementary", { name: "Artifacts" });
+  const pane = page.getByRole("complementary", { name: "Work panel" });
   await expect(pane).toBeVisible();
 
   // The session runs in `/tmp`, which the backend serves as the tree root. The

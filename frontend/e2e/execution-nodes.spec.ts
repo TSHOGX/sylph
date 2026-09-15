@@ -12,7 +12,7 @@ async function pagedHistory(page: Page) {
     event: { seq: id, kind: "assistant", text: `History reply ${id}`, stability: "stable",
       source: "agent", arrivalAtMs: id, createdAtMs: id },
   });
-  await page.route(`**/api/v1/sessions/${encodeURIComponent(sessionId)}/nodes?*`, (route) => {
+  await page.route(`**/api/v1/sessions/${encodeURIComponent(sessionId)}/conversation?*`, (route) => {
     const params = new URL(route.request().url()).searchParams;
     const changes = params.has("changes");
     if (changes) state.patchReads++;
@@ -104,12 +104,15 @@ test("execution is fetched one disclosure level at a time and collapse all never
   await expect(
     page.getByRole("button", { name: "Expand all", exact: true }),
   ).toHaveCount(0);
+  const work = page.locator(".reading-work > button").first();
+  await work.click();
+  if (await work.getAttribute("aria-expanded") === "false") await work.click();
   const group = page
     .locator("button[aria-expanded=false]")
     .filter({ hasText: /file reads/ })
     .first();
   await expect(
-    page.locator("[data-node-id] button").filter({ hasText: /failed/ }),
+    page.locator(".reading-work > button").filter({ hasText: /failed/ }),
   ).toBeVisible();
   await group.click();
   const read = page.getByRole("button", { name: /Read · src\/lib.rs/ });
@@ -134,7 +137,7 @@ test("reading a large body does not refetch it on subsequent streaming patches",
     bodyReads = 0,
     nodeReads = 0;
   const base = `**/api/v1/sessions/${encodeURIComponent(sessionId)}`;
-  await page.route(`${base}/nodes?*`, (route) => {
+  await page.route(`${base}/conversation?*`, (route) => {
     nodeReads++;
     return route.fulfill({
       json: {

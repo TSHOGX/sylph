@@ -198,7 +198,7 @@ test("the conversation canvas has no automated accessibility violations", async 
 
   // Both sidebars open, so the tree and the panes are in scope too.
   await page.keyboard.press("ControlOrMeta+Backslash");
-  await expect(page.getByRole("complementary", { name: "Artifacts" })).toBeVisible();
+  await expect(page.getByRole("complementary", { name: "Work panel" })).toBeVisible();
 
   await audit(page, "conversation canvas with tool calls");
 });
@@ -219,11 +219,10 @@ test("a nested delegation tree has no automated accessibility violations", async
   const {sessionId,turnId}=await runExecution(page,"delegate this please");
   await openExecutionGroups(page,sessionId,turnId);
   const explore=page.getByRole("region",{name:"Explore delegation"});
-  await explore.locator("button[aria-expanded]").click();
-  await audit(page,"delegation tree");
-  await explore.getByRole("button",{name:"Focus this branch"}).click();
-  await expect(page.getByRole("button",{name:"Back to conversation"})).toBeVisible();
-  await audit(page,"delegation tree in focus mode");
+  await explore.getByRole("button").first().click();
+  await audit(page,"delegation detail beside the conversation");
+  await page.getByRole("button",{name:"All subagents"}).click();
+  await audit(page,"delegation catalogue");
 });
 
 /**

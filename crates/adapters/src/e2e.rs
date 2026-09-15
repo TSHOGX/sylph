@@ -760,6 +760,7 @@ enum Scenario {
     /// under test would see duplicate fixture output.
     Setup,
     Bulk,
+    Reading,
     Tools,
     Approval,
     Narrow,
@@ -778,6 +779,7 @@ impl Scenario {
     /// The token each scenario answers to, in match order.
     const TOKENS: &'static [(&'static str, Scenario)] = &[
         ("fixture setup", Scenario::Setup),
+        ("reading benchmark", Scenario::Reading),
         ("bulk", Scenario::Bulk),
         ("tools", Scenario::Tools),
         ("approval", Scenario::Approval),
@@ -861,6 +863,7 @@ async fn run_turn(
 
     match scenario {
         Scenario::Setup => unreachable!("setup turns return before scenario dispatch"),
+        Scenario::Reading => reading_benchmark(&emit, if text.contains("500") {500} else {50}).await,
         Scenario::Bulk => bulk(&emit).await,
         Scenario::Tools => tools(&emit).await,
         Scenario::Approval => approval(&emit, turn).await,
@@ -3247,4 +3250,27 @@ mod tests {
             );
         }
     }
+}
+
+
+/// A deterministic long inspection window, with enough delegates to test catalogue
+/// navigation independently from a bounded execution window.
+async fn reading_benchmark(emit: &Emitter, count: usize) {
+    emit.event(Ev::new(EventKind::Assistant, Some(Phase::Completed)).stream_id("reading-intro")
+        .text("I will inspect the workspace and verify the changes.").data(json!({"phase":"commentary"})).done()).await;
+    for i in 0..25 {
+        let id=format!("audit-{i}"); let name=format!("Audit {i}");
+        open_delegate(emit,&id,Some(&name),None).await;
+        emit.event(Ev::new(EventKind::Assistant,Some(Phase::Completed)).stream_id(&format!("audit-answer-{i}")).span(&id)
+            .text("The delegated inspection is complete.").data(json!({"phase":"final_answer"})).done()).await;
+        close_delegate(emit,&id,None,"Inspection complete",false,sylph_protocol::InteriorState::Full).await;
+    }
+    emit.event(Ev::new(EventKind::Assistant,Some(Phase::Completed)).stream_id("reading-progress")
+        .text("The delegated inspections finished. I am checking the files.").data(json!({"phase":"commentary"})).done()).await;
+    for i in 0..count {
+        let id=format!("reading-tool-{i}");
+        tool(emit,ToolPair{stream_id:&id,name:"Read",input:json!({"file_path":format!("src/module_{i}.rs")}),result:"Recorded file contents",..Default::default()}).await;
+    }
+    emit.event(Ev::new(EventKind::Assistant,Some(Phase::Completed)).stream_id("reading-answer")
+        .text("Inspection complete. The workspace is ready for review.").data(json!({"phase":"final_answer"})).done()).await;
 }

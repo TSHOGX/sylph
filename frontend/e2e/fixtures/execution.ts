@@ -41,6 +41,16 @@ export async function openExecutionGroups(
   turnId: string,
   touch = false,
 ) {
+  const outline = await page.request.get(`/api/v1/sessions/${encodeURIComponent(sessionId)}/conversation`);
+  const work = (await outline.json()).nodes.find((node: ExecutionNode) => node.turnId === turnId && node.event.kind === "work");
+  if (work) {
+    const summary = page.locator(`[data-node-id=${JSON.stringify(work.id)}] > button[aria-expanded]`);
+    await expect(summary).toBeVisible();
+    // Establish explicit reading intent even if live work auto-opened before its
+    // terminal patch arrived. Then completion cannot race the test's navigation.
+    await summary.click();
+    if (await summary.getAttribute("aria-expanded") === "false") await summary.click();
+  }
   const groups = (await rootNodes(page, sessionId)).filter(
     (node) => node.turnId === turnId && node.event.kind === "execution",
   );

@@ -336,12 +336,23 @@ export function WorkPanel() {
       ))}
     </aside>
   );
-  return sheet ? (
-    <Sheet title={t("reading.files")} onClose={close}>
-      {content}
-    </Sheet>
-  ) : (
-    content
+  return (
+    <>
+      {overlay && !sheet && (
+        <div
+          aria-hidden="true"
+          className="fixed inset-0 z-30 bg-canvas/60"
+          onPointerDown={close}
+        />
+      )}
+      {sheet ? (
+        <Sheet title={t("reading.files")} onClose={close}>
+          {content}
+        </Sheet>
+      ) : (
+        content
+      )}
+    </>
   );
 }
 
@@ -633,6 +644,7 @@ function TrajectoryReader({
 function ToolDetail({ owner }: { owner: string }) {
   const { detail } = usePanelState(owner);
   const ui = useWorkspaceUI();
+  const t = useT();
   const session = useQuery({
     queryKey: ["session", detail?.sessionId],
     queryFn: ({ signal }) => api.sessions.get(detail!.sessionId, signal),
@@ -641,14 +653,18 @@ function ToolDetail({ owner }: { owner: string }) {
   const results = useQuery({
     queryKey: ["session", detail?.sessionId, "tool-results", detail?.node.id],
     queryFn: ({ signal }) =>
-      readResource<{ nodes: ExecutionNode[] }>(
+      readResource<{ nodes: ExecutionNode[]; parentNode?: ExecutionNode }>(
         `/api/v1/sessions/${segment(detail!.sessionId)}/nodes?${new URLSearchParams({ parent: detail!.node.id })}`,
         signal,
       ),
     enabled: Boolean(detail),
+    refetchInterval: 1000,
   });
   if (!detail) return null;
-  const { node, sessionId } = detail;
+  const { sessionId } = detail;
+  const current = results.data?.parentNode;
+  const node =
+    current && current.revision >= detail.node.revision ? current : detail.node;
   return (
     <div className="pane min-h-0 flex-1 p-4">
       <EventBody
@@ -676,10 +692,16 @@ function ToolDetail({ owner }: { owner: string }) {
                   }
                 />
               ))}
-              <OutputBlock
-                text={event.text || JSON.stringify(event.data, null, 2)}
-                maxLines={200}
-              />
+              {event.text || event.data != null ? (
+                <OutputBlock
+                  text={event.text || JSON.stringify(event.data, null, 2)}
+                  maxLines={200}
+                />
+              ) : (
+                <p className="text-sm text-ink-muted">
+                  {t("reading.noToolInput")}
+                </p>
+              )}
             </>
           );
         }}

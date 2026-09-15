@@ -46,6 +46,14 @@ import { describeTool } from "@/lib/tool-shape";
 import { DiffView } from "./diff-view";
 import { OutputBlock } from "./code-block";
 
+const closeReasonLabels = {
+  spool_full: "reading.reason.spoolFull",
+  grant_revoked: "reading.reason.grantRevoked",
+  link_lost: "reading.reason.linkLost",
+  agent_exited: "reading.reason.agentExited",
+  adapter_silent: "reading.reason.noOutcome",
+} as const;
+
 function label(node: ExecutionNode) {
   if (node.trajectory?.name) return node.trajectory.name;
   if (node.event.kind !== "execution") {
@@ -601,6 +609,11 @@ const NodeRow = memo(function NodeRow({
       "interrupted",
       "failed",
     ].includes(workStatus ?? "");
+    const reason = node.turn?.closeReason;
+    const reasonLabel =
+      reason && Object.hasOwn(closeReasonLabels, reason)
+        ? closeReasonLabels[reason as keyof typeof closeReasonLabels]
+        : undefined;
     const title =
       workStatus === "cancelled"
         ? t("reading.stopped")
@@ -615,12 +628,12 @@ const NodeRow = memo(function NodeRow({
                 : !workStatus || workStatus === "unknown"
                   ? t("reading.workDetails")
                   : !terminal
-                  ? t("reading.working")
-                  : duration !== undefined
-                    ? t("reading.worked", {
-                        duration: formatDuration(duration),
-                      })
-                    : t("reading.workDetails");
+                    ? t("reading.working")
+                    : duration !== undefined
+                      ? t("reading.worked", {
+                          duration: formatDuration(duration),
+                        })
+                      : t("reading.workDetails");
     return (
       <section
         ref={rowRef}
@@ -634,7 +647,7 @@ const NodeRow = memo(function NodeRow({
           aria-expanded={open}
           className="reading-summary focus-ring"
           onClick={() => {
-            store.disclosureChoices.set(id, !open);
+            store.chooseDisclosure(id, !open);
             if (open) store.close(id);
             else store.open(id);
           }}
@@ -654,6 +667,9 @@ const NodeRow = memo(function NodeRow({
         </button>
         {node.waiting > 0 && (
           <p className="text-sm text-ink-muted">{t("reading.waiting")}</p>
+        )}
+        {reasonLabel && !node.turn?.errorMessage && (
+          <p className="text-sm text-ink-muted">{t(reasonLabel)}</p>
         )}
         {node.turn?.errorMessage && (
           <p role="alert" className="text-sm text-ink-muted">
@@ -761,6 +777,7 @@ const NodeRow = memo(function NodeRow({
             type="button"
             aria-expanded={report ? undefined : open}
             onClick={() => {
+              store.chooseDisclosure(id, !open);
               if (report) {
                 const target = {
                   sessionId: store.sessionId,

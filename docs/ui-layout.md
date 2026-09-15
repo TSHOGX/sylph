@@ -46,10 +46,10 @@ a pane's collapse breakpoint is layout even though it is implemented in a hook.
 └──────────────┴────────────────────────────────────┴──────────────────┘
 ```
 
-Flexbox with fixed sidebar widths, not a grid with `fr` units: sidebars must not
-shrink as conversation content grows, and only the centre pane scrolls. Panes
-toggle with `hidden`/`flex` rather than conditional rendering, so a hidden sidebar
-keeps its expanded groups and scroll position.
+Flexbox keeps navigation, conversation and the work panel independently sized.
+The conversation and each inspection surface own their scrolling. The work panel
+resizes within the available space; `docs/ui-layout.md` § Work panel owns its bounds.
+Hidden inspection views retain lightweight state and release their subscriptions.
 
 **Height is `h-dvh`, never `h-screen`.** See "The viewport" below — this is the
 single most consequential line in the shell.

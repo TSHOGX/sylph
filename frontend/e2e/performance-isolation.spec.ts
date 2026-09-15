@@ -18,7 +18,7 @@ test("file browsing stays responsive with a large transcript and concurrent exec
       JSON.stringify({ ...stored, showRightSidebar: true }),
     );
     const watch = new MutationObserver(() => {
-      const pane = document.querySelector('aside[aria-label="Artifacts"]');
+      const pane = document.querySelector('aside[aria-label="Work panel"]');
       if (!pane) return;
       watch.disconnect();
       const files = new MutationObserver(() => {
@@ -63,7 +63,7 @@ test("file browsing stays responsive with a large transcript and concurrent exec
       .toBe("completed");
     await page.reload();
     await expect(page.getByText("Hello from the E2E runner.")).toBeVisible();
-    const pane = page.getByRole("complementary", { name: "Artifacts" });
+    const pane = page.getByRole("complementary", { name: "Work panel" });
     if (!(await pane.isVisible()))
       await page.keyboard.press("ControlOrMeta+\\");
     await expect(pane.getByTitle("latency-000", { exact: true })).toBeVisible();

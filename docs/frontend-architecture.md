@@ -355,7 +355,7 @@ Live and historical turn sections expose `data-turn-id` and `data-turn-status` f
 fact. Send and Stop describe available actions and never serve as lifecycle signals.
 Running history snapshots preserve producer phase, stability and block identity; only
 terminal turns use the archival fold. A sealed content block rejects late deltas.
-Execution nodes are the sole interactive transcript projection; a turn replay stream
+Execution nodes and their bounded conversation reading map form the interactive transcript projection; a turn replay stream
 must not merge its independently timed block replacements into the same renderer.
 
 ### Event rendering

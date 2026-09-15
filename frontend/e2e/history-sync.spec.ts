@@ -57,7 +57,7 @@ async function fixture(page: Page) {
     const base = `**${sessionPath(session)}`;
     await page.route(base, (route) => route.fulfill({ json: { session } }));
     await page.route(`${base}/turn-state?*`, (route) => route.fulfill({ json: { turns: [], hasMore: false, nextCursor: null, snapshotSeq: -1 } }));
-    await page.route(`${base}/nodes?*`, (route) => route.fulfill({ json: { parent:"",nodes:[],snapshot:0,nextCursor:null,hasMore:false } }));
+    await page.route(`${base}/conversation?*`, (route) => route.fulfill({ json: { parent:"",nodes:[],snapshot:0,nextCursor:null,hasMore:false } }));
     await page.route(`${base}/capabilities`, (route) => route.fulfill({ json: { link: { observe: { available: true }, control: { available: false, reason: "environment_unreachable" } }, supports: [] } }));
     await page.route(`${base}/requests`, (route) => route.fulfill({ json: [] }));
     await page.route(`${base}/controls`, (route) => route.fulfill({ json: { controls: [] } }));
@@ -108,7 +108,7 @@ for (const source of ["native input", "journaled input", "native input with late
     });
     const projected=[{seq:-1,kind:"user",text:nativeTurn.requestText,stability:"stable",source:"user",createdAtMs:3},...events.filter(event=>event.kind!=="user" || event.text!==nativeTurn.requestText)];
     await page.route(`**${sessionPath()}/turn-state?*`,(route)=>route.fulfill({json:{turns:[{turn:nativeTurn}]}}));
-    await page.route(`**${sessionPath()}/nodes?*`, (route) => route.fulfill({json:{parent:"",snapshot:1,hasMore:false,nextCursor:null,
+    await page.route(`**${sessionPath()}/conversation?*`, (route) => route.fulfill({json:{parent:"",snapshot:1,hasMore:false,nextCursor:null,
       nodes:projected.map((event,index)=>({id:`node-${index}`,parentId:"",turnId:nativeTurn.id,ordinal:index,orderTie:index,revision:1,bodyRevision:1,event,children:0,tools:0,reads:0,commands:0,thinking:0,failed:0,running:0,waiting:0,activity:""}))}}));
     await gotoReady(page, `/sessions/${encodeURIComponent(firstSession.id)}`);
     const transcript = page.getByRole("main");
@@ -216,7 +216,7 @@ test("finishing an import refreshes an already open transcript and file tree", a
   await expect(settings.getByText(/^completed ·/)).toBeVisible();
   await settings.getByRole("button", { name: "Close", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Synchronized title" })).toBeVisible();
-  await expect(page.getByRole("complementary", { name: "Artifacts" }).getByTitle("synced.txt", { exact: true })).toBeVisible();
+  await expect(page.getByRole("complementary", { name: "Work panel" }).getByTitle("synced.txt", { exact: true })).toBeVisible();
 });
 
 test("refreshing a transcript refreshes a file tree that previously failed", async ({ page }) => {
@@ -230,7 +230,7 @@ test("refreshing a transcript refreshes a file tree that previously failed", asy
     return route.fulfill({ json: { reread: { examined: 1, ingested: 1, alreadyHeld: 0, readErrors: 0 } } });
   });
   await gotoReady(page, `/sessions/${encodeURIComponent(firstSession.id)}`);
-  const pane = page.getByRole("complementary", { name: "Artifacts" });
+  const pane = page.getByRole("complementary", { name: "Work panel" });
   await expect(pane.getByText(/No recorded workdir/)).toBeVisible();
   const sidebar = page.getByRole("complementary", { name: "Workspaces" });
   await sidebar.getByRole("link", { name: /First history session/ }).click({ button: "right" });
@@ -241,7 +241,7 @@ test("refreshing a transcript refreshes a file tree that previously failed", asy
 test("switching sessions resets the file tree expansion state", async ({ page }) => {
   await fixture(page);
   await gotoReady(page, `/sessions/${encodeURIComponent(firstSession.id)}`);
-  const pane = page.getByRole("complementary", { name: "Artifacts" });
+  const pane = page.getByRole("complementary", { name: "Work panel" });
   await pane.getByTitle("src", { exact: true }).click();
   await expect(pane.getByTitle("src/nested.txt", { exact: true })).toBeVisible();
   await page.getByRole("complementary", { name: "Workspaces" }).getByRole("link", { name: /Second history session/ }).click();
@@ -249,7 +249,7 @@ test("switching sessions resets the file tree expansion state", async ({ page })
   await expect(pane.getByRole("treeitem", { name: /src/ }).first()).toHaveAttribute("aria-expanded", "false");
 });
 
-for (const suffix of ["", "/turn-state", "/nodes", "/capabilities", "/requests", "/files"]) {
+for (const suffix of ["", "/turn-state", "/conversation", "/capabilities", "/requests", "/files"]) {
   test(`switching sessions aborts the outstanding ${suffix || "session"} read`, async ({ page }) => {
     await fixture(page);
     let received = false;

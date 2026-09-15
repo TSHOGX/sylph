@@ -43,7 +43,7 @@ function workdir(files: Record<string, string>): string {
 async function openPane(page: Page, dir: string) {
   await createSession(page, { workdir: dir });
   await page.keyboard.press("ControlOrMeta+Backslash");
-  const pane = page.getByRole("complementary", { name: "Artifacts" });
+  const pane = page.getByRole("complementary", { name: "Work panel" });
   await expect(pane).toBeVisible();
   return pane;
 }
@@ -95,7 +95,7 @@ test("opening a file swaps the tree for the viewer, and Back restores both", asy
   await expect(pane.getByRole("region", { name: /preview of notes\.md/i })).toBeVisible();
   await expect(tree).toBeHidden();
 
-  await pane.getByRole("button", { name: /Files/ }).click();
+  await pane.getByRole("button", { name: "Files", exact: true }).click();
   await expect(tree).toBeVisible();
   // The expanded directory is still expanded: this is what `hidden` buys.
   await expect(treeRow(pane, "nested/inner.txt")).toBeVisible();
@@ -139,7 +139,7 @@ test("the fullscreen dialog fits a table but fills for a rendered page", async (
   const viewport = page.viewportSize()!;
 
   async function widthFor(file: string) {
-    const back = pane.getByRole("button", { name: /Files/ });
+    const back = pane.getByRole("button", { name: "Files", exact: true });
     if ((await back.count()) && (await back.first().isVisible())) await back.first().click();
     await treeRow(pane, file).click();
     await pane.getByRole("button", { name: "Open full screen" }).click();
@@ -237,7 +237,7 @@ test("HTML renders in a frame that cannot run scripts or reach the page", async 
   // ...while the script did not run: the title it tried to set is unchanged, and
   // the parent document it tried to rewrite is intact.
   expect(await page.title()).toBe(titleBefore);
-  await expect(pane.getByRole("button", { name: /Files/ })).toBeVisible();
+  await expect(pane.getByRole("button", { name: "Files", exact: true })).toBeVisible();
 
   // The frame cannot read the session cookie, which is the actual escalation
   // this closes: an opaque origin has no access to it at all.

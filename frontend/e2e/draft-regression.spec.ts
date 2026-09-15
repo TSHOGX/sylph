@@ -13,7 +13,7 @@ test("draft remains usable while opening files and changing config", async ({ pa
   const { draftId } = await created.json();
   await page.goto(`/sessions/draft/${encodeURIComponent(draftId)}`);
   await expect(page.getByLabel("Message", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Show artifacts sidebar" }).click();
+  await page.getByRole("button", { name: "Show work panel" }).click();
   await expect(page.getByRole("heading", { name: "Files" })).toBeVisible();
   await expect(page.getByText("before-send.txt")).toHaveCount(0);
   const tree = await page.request.get(`/api/v1/sessions/draft/${encodeURIComponent(draftId)}/files`);

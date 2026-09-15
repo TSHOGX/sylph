@@ -137,7 +137,7 @@ test("the file pane translates, including its accessible names", async ({ page }
   await page.keyboard.press("Escape");
 
   await page.keyboard.press("ControlOrMeta+Backslash");
-  const pane = page.getByRole("complementary", { name: "产物" });
+  const pane = page.getByRole("complementary", { name: "工作面板" });
   await expect(pane).toBeVisible();
 
   // With no session open the pane is its empty state, which is the one part of it

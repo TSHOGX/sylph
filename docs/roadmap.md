@@ -289,10 +289,14 @@ deployment are outside this delivery.
 
 | Stage | Deliverable | State |
 | --- | --- | --- |
-| P0 | Governing interaction and bounded read contracts | In progress: baseline validation |
-| P1 | Reading roles, lifecycle summaries and delegation catalogue | Open |
-| P2 | Shared data and independent reading state | Open |
-| P3 | Conversation bubbles and three-level bounded work disclosure | Open |
-| P4 | Work-panel tabs, files, details and responsive sizing | Open |
-| P5 | Delegation directory and shared trajectory navigation | Open |
-| P6 | Full checks, visual, performance and accessibility validation | Open |
+| P0 | Governing interaction and bounded read contracts | Complete: governing rules and fixture baselines |
+| P1 | Reading roles, lifecycle summaries and delegation catalogue | Implemented; API and role regression checks pass |
+| P2 | Shared data and independent reading state | Implemented; shared transport and entity lifetime checks pass |
+| P3 | Conversation bubbles and three-level bounded work disclosure | Implemented; large-window regression checks pass |
+| P4 | Work-panel tabs, files, details and responsive sizing | Implemented; file, tab, keyboard and responsive regressions pass |
+| P5 | Delegation directory and shared trajectory navigation | Implemented; directory and nested navigation checks pass |
+| P6 | Full checks, visual, performance and accessibility validation | Automated suites, axe and screenshot matrix pass. Manual VoiceOver and iOS Safari acceptance remain open |
+
+Manual acceptance remains open: perform a real VoiceOver reading pass and an iOS Safari
+keyboard/safe-area pass. Chromium mobile emulation and axe do not establish those
+properties. Production deployment and any real-store rebuild require a separate task.

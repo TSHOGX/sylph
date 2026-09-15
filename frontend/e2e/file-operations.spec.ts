@@ -35,7 +35,7 @@ function workdir(files: Record<string, string> = {}): string {
 async function openPane(page: Page, dir: string) {
   await createSession(page, { workdir: dir });
   await page.keyboard.press("ControlOrMeta+Backslash");
-  const pane = page.getByRole("complementary", { name: "Artifacts" });
+  const pane = page.getByRole("complementary", { name: "Work panel" });
   await expect(pane).toBeVisible();
   return pane;
 }
@@ -231,7 +231,7 @@ test("deleting the previewed file returns to the tree instead of erroring", asyn
   await expect(pane.getByRole("region", { name: /preview of doomed\.md/i })).toBeVisible();
 
   // Back to the tree to reach the row menu, with the file still selected.
-  await pane.getByRole("button", { name: /Files/ }).click();
+  await pane.getByRole("button", { name: "Files", exact: true }).click();
   const menu = await openRowMenu(pane, "doomed.md");
   await menu.getByRole("menuitem", { name: "Delete" }).click();
   await page

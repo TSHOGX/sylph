@@ -117,3 +117,32 @@ test("visiting many delegates never evicts the visible main reader", () => {
     vi.unstubAllGlobals();
   }
 });
+
+test("interacting with a tool group keeps its reading parent open on completion", () => {
+  const store = new ExecutionStore("reading-intent", true);
+  const work = { ...node, id: "work", event: { ...node.event, kind: "work" } };
+  const group = {
+    ...node,
+    id: "group",
+    event: { ...node.event, kind: "execution" },
+  };
+  store.branches.set("", { ids: [], open: true, initialized: false });
+  store.merge("", {
+    nodes: [work],
+    snapshot: 1,
+    nextCursor: null,
+    hasMore: false,
+  });
+  store.branches.set("work", { ids: [], open: true, initialized: false });
+  store.merge("work", {
+    nodes: [group],
+    snapshot: 1,
+    nextCursor: null,
+    hasMore: false,
+  });
+  store.chooseDisclosure("group", true);
+  expect(store.disclosureChoices.get("work")).toBe(true);
+  store.chooseDisclosure("work", false);
+  expect(store.disclosureChoices.get("work")).toBe(false);
+  store.dispose();
+});
