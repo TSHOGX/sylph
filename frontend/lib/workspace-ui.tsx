@@ -1,5 +1,8 @@
 "use client";
 
+import { useSessionIdParam } from "./use-session-id-param";
+import { activatePanel, updatePanel, usePanelState } from "./work-panel-state";
+
 /**
  * Shell-wide UI state: which panes are open, which overlay is up, and which
  * artifact the right pane is showing.
@@ -198,6 +201,8 @@ export function WorkspaceUIProvider({
   onQuickStart: () => void;
   onCreateSessionIn: (workdir: string | undefined, environmentId?: string | null) => void;
 }) {
+  const routeSessionId = useSessionIdParam();
+  const panel = usePanelState(routeSessionId ?? "");
   const { settings, update } = useSettings();
   const queryClient = useQueryClient();
 
@@ -210,8 +215,8 @@ export function WorkspaceUIProvider({
   const rightOpen = settings.showRightSidebar;
 
   const [overlay, setOverlay] = useState<Overlay>("none");
-  const [artifact, setArtifact] = useState<ArtifactTarget | null>(null);
-  const [artifactView, setArtifactView] = useState<ArtifactView>("tree");
+  const artifact = panel.artifact;
+  const artifactView = panel.artifactView;
   const [artifactFullscreen, setArtifactFullscreen] = useState(false);
   const [activeWorkdir, setActiveWorkdir] = useState<string | null>(null);
   const [activeEnvironment, setActiveEnvironment] = useState<string | null>(null);
@@ -336,11 +341,12 @@ export function WorkspaceUIProvider({
 
   const showArtifact = useCallback(
     (target: ArtifactTarget) => {
-      setArtifact(target);
+      activatePanel(routeSessionId ?? target.sessionId, "files");
+      updatePanel(routeSessionId ?? "", { artifact: target, artifactView: "preview" });
       // One atomic update rather than an effect keyed on the target: the action
       // already knows a file was chosen, so deriving "show the preview" from a
       // state change would cascade a render to re-establish a fact we have.
-      setArtifactView("preview");
+
       if (isMobile) {
         // The file sheet, not the persisted pane. Writing `showRightSidebar` here
         // would silently change what the user sees when they next open a desktop
@@ -352,22 +358,22 @@ export function WorkspaceUIProvider({
       // Opening a file from a tool call is meaningless if the pane stays hidden.
       update({ showRightSidebar: true });
     },
-    [update, isMobile, openDrawer],
+    [update, isMobile, openDrawer, routeSessionId],
   );
 
   // Deliberately keeps `artifact` set. The tree derives its expanded ancestors
   // from the selection, so clearing it here would collapse the directories the
   // user navigated through on the way to the file.
   const backToTree = useCallback(() => {
-    setArtifactView("tree");
+    updatePanel(routeSessionId ?? "", { artifactView: "tree" });
     setArtifactFullscreen(false);
-  }, []);
+  }, [routeSessionId]);
 
   const clearArtifact = useCallback(() => {
-    setArtifact(null);
-    setArtifactView("tree");
+    updatePanel(routeSessionId ?? "", { artifact: null });
+    updatePanel(routeSessionId ?? "", { artifactView: "tree" });
     setArtifactFullscreen(false);
-  }, []);
+  }, [routeSessionId]);
 
   // At most one modal surface at a time. Without this, Escape and focus
   // restoration have to reason about which of two stacked dialogs owns them —

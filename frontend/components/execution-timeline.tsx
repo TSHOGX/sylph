@@ -12,13 +12,35 @@ import {
 } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useVirtualizer, type Virtualizer } from "@tanstack/react-virtual";
+import { readingView } from "@/lib/reading-view-state";
+import { useT } from "@/lib/i18n";
+import { useWorkspaceUI } from "@/lib/workspace-ui";
+import { useSessionIdParam } from "@/lib/use-session-id-param";
+import {
+  activatePanel,
+  updatePanel,
+  panelSnapshot,
+} from "@/lib/work-panel-state";
 import { formatDuration } from "@/lib/format";
 import type { Fidelity } from "@/lib/api-types";
 import { api, segment } from "@/lib/api";
-import { ExecutionStore, reportedUsage, type ExecutionNode } from "@/lib/execution-store";
+import {
+  ExecutionStore,
+  reportedUsage,
+  type ExecutionNode,
+} from "@/lib/execution-store";
 import { Markdown } from "./markdown";
 import { EventBody } from "./event-body";
-import { ChevronRightIcon } from "./icons";
+import {
+  ChevronRightIcon,
+  BranchIcon,
+  TerminalIcon,
+  FileTextIcon,
+  PencilIcon,
+  SearchIcon,
+  SparklesIcon,
+  ToolIcon,
+} from "./icons";
 import { interiorMessage } from "@/lib/interior-state";
 import { describeTool } from "@/lib/tool-shape";
 import { DiffView } from "./diff-view";
@@ -61,7 +83,11 @@ export function ExecutionTimeline({
   isLive,
   onReviewRequest,
   fidelity,
+  root = "",
+  view = "main",
 }: {
+  view?: string;
+  root?: string;
   sessionId: string;
   scroller: RefObject<HTMLDivElement | null>;
   collapseEpoch: number;
@@ -73,7 +99,10 @@ export function ExecutionTimeline({
   fidelity: Fidelity;
   turns: { turn: { id: string; status: string } }[];
 }) {
-  const store = useMemo(() => new ExecutionStore(sessionId), [sessionId]);
+  const store = useMemo(
+    () => readingView(sessionId, root, view),
+    [sessionId, root, view],
+  );
   const virtualRef = useRef<Virtualizer<HTMLDivElement, Element> | null>(null);
   const subscribe = useMemo(
     () => (fn: () => void) =>
@@ -88,9 +117,9 @@ export function ExecutionTimeline({
             const rect = element.getBoundingClientRect();
             return rect.bottom > viewport.top && rect.top < viewport.bottom;
           });
-          const index = store.snapshot().findIndex(
-            (row) => row.id === anchor?.dataset.nodeId,
-          );
+          const index = store
+            .snapshot()
+            .findIndex((row) => row.id === anchor?.dataset.nodeId);
           // With controls above the first row, the reading anchor can sit below
           // the viewport edge. A newly prepended row in that gap must compensate
           // its estimated height too. Virtual's default viewport-edge predicate
@@ -152,12 +181,26 @@ export function ExecutionTimeline({
   }, [scroller, store]);
   useEffect(() => {
     store.start();
-    return () => store.stop();
-  }, [store]);
+    const pane = scroller.current;
+    if (pane && store.scrollTop) pane.scrollTop = store.scrollTop;
+    return () => {
+      if (pane) store.scrollTop = pane.scrollTop;
+      store.stop();
+    };
+  }, [store, scroller]);
   useEffect(() => {
     store.active = isLive;
   }, [store, isLive]);
-  useEffect(() => store.collapseAll(), [store, collapseEpoch]);
+  const previousCollapse = useRef(collapseEpoch);
+  useEffect(() => {
+    if (previousCollapse.current !== collapseEpoch) {
+      previousCollapse.current = collapseEpoch;
+      store.collapseAll();
+      for (const node of store.nodes.values())
+        if (node.event.kind === "work")
+          store.disclosureChoices.set(node.id, false);
+    }
+  }, [store, collapseEpoch]);
   // Variable-height measurements preserve the visible anchor when preceding rows
   // resize. Only the expanded, loaded list enters the virtualizer.
   // eslint-disable-next-line react-hooks/incompatible-library
@@ -211,13 +254,16 @@ export function ExecutionTimeline({
       }}
     >
       {store.rootParent && <FocusedContext store={store} />}
-      {(store.rootParent || store.targetId) && (
-        <button className="focus-ring text-xs" onClick={() => store.focus("")}>
+      {(store.rootParent !== root || store.targetId) && (
+        <button
+          className="focus-ring text-xs"
+          onClick={() => store.focus(root)}
+        >
           Back to conversation
         </button>
       )}
       {search.error && (
-        <p role="alert" className="text-danger">
+        <p role="alert" className="text-ink-muted">
           {search.error.message}
         </p>
       )}
@@ -235,7 +281,7 @@ export function ExecutionTimeline({
         </section>
       )}
       {store.error && (
-        <p role="alert" className="text-danger">
+        <p role="alert" className="text-ink-muted">
           {store.error}
         </p>
       )}
@@ -258,7 +304,10 @@ export function ExecutionTimeline({
         </button>
       )}
       {store.branches.get(store.rootParent)?.detached && (
-        <button className="focus-ring text-xs" onClick={() => store.focus(store.rootParent)}>
+        <button
+          className="focus-ring text-xs"
+          onClick={() => store.focus(store.rootParent)}
+        >
           Back to latest
         </button>
       )}
@@ -298,8 +347,57 @@ export function ExecutionTimeline({
           </div>
         ))}
       </div>
+      {root && store.rootParent === root && <TrajectoryReport store={store} />}
     </div>
   );
+}
+
+function TrajectoryReport({ store }: { store: ExecutionStore }) {
+  const id = store.rootParent;
+  const subscribe = useMemo(
+    () => (fn: () => void) => store.subscribe(id, fn),
+    [store, id],
+  );
+  const node = useSyncExternalStore(
+    subscribe,
+    () => store.nodes.get(id),
+    () => store.nodes.get(id),
+  );
+  if (!node) return null;
+  const report =
+    node.trajectory ??
+    (node.event.kind === "subagent" ? node.event : undefined);
+  if (!report?.text) return null;
+  return (
+    <div className="py-4 text-base leading-relaxed">
+      <EventBody
+        event={report}
+        bodyVersion={node.bodyRevision}
+        bodyUrl={`/api/v1/sessions/${segment(store.sessionId)}/bodies/${report.bodyRef?.seq ?? report.seq}`}
+      >
+        {(event) => <Markdown text={event.text ?? ""} />}
+      </EventBody>
+    </div>
+  );
+}
+
+function ExecutionSymbol({ node }: { node: ExecutionNode }) {
+  const kind = node.event.toolSummary?.kind;
+  const Icon =
+    node.trajectory || node.event.kind === "subagent"
+      ? BranchIcon
+      : kind === "shell" || node.commands > 0
+        ? TerminalIcon
+        : kind === "read" || node.reads > 0
+          ? FileTextIcon
+          : kind === "edit" || kind === "write"
+            ? PencilIcon
+            : kind === "search"
+              ? SearchIcon
+              : node.event.kind === "thinking" || node.thinking > 0
+                ? SparklesIcon
+                : ToolIcon;
+  return <Icon size={16} className="mt-0.5 shrink-0" />;
 }
 
 function FocusedContext({ store }: { store: ExecutionStore }) {
@@ -319,7 +417,9 @@ function FocusedContext({ store }: { store: ExecutionStore }) {
       aria-label="Focused execution"
       className="mb-3 border-b border-line pb-2"
     >
-      <h3 className="text-sm font-medium">{label(node)}</h3>
+      {store.rootParent !== store.initialRoot && (
+        <h3 className="text-sm font-medium">{label(node)}</h3>
+      )}
       {node.running > 0 && (
         <p
           data-running-activity
@@ -343,7 +443,7 @@ function FocusedContext({ store }: { store: ExecutionStore }) {
           </p>
         )}
       {node.failed > 0 && (
-        <p className="text-xs text-danger">{node.failed} failed</p>
+        <p className="text-xs text-ink-muted">{node.failed} failed</p>
       )}
       {node.waiting > 0 && (
         <p className="text-xs text-warning">Waiting for input</p>
@@ -351,7 +451,7 @@ function FocusedContext({ store }: { store: ExecutionStore }) {
       {node.structureError && (
         <p className="text-xs text-warning">{node.structureError}</p>
       )}
-      {node.event.kind !== "execution" && (
+      {node.event.kind !== "execution" && node.event.kind !== "subagent" && (
         <EventBody
           event={node.event}
           bodyVersion={node.bodyRevision}
@@ -435,8 +535,142 @@ const NodeRow = memo(function NodeRow({
       setCopyState(error instanceof Error ? error.message : "Copy failed");
     }
   }
-  if (!node) return null;
+  const t = useT();
+  const ui = useWorkspaceUI();
+  const ownerSession = useSessionIdParam() ?? store.sessionId;
+
+  const rowRef = useRef<HTMLElement>(null);
+  const workStatus = node?.turn?.status;
   const open = store.branches.get(id)?.open ?? false;
+  useEffect(() => {
+    if (node?.event.kind !== "work") return;
+    const terminal = [
+      "completed",
+      "cancelled",
+      "interrupted",
+      "failed",
+    ].includes(workStatus ?? "");
+    if (
+      !store.observedStatus.has(id) &&
+      !terminal &&
+      !store.disclosureChoices.has(id)
+    )
+      store.open(id);
+    if (
+      store.observedStatus.has(id) &&
+      !terminal &&
+      !store.disclosureChoices.has(id) &&
+      !store.branches.has(id)
+    )
+      store.open(id);
+    if (
+      terminal &&
+      store.observedStatus.has(id) &&
+      !["completed", "cancelled", "interrupted", "failed"].includes(
+        store.observedStatus.get(id)!,
+      ) &&
+      !store.disclosureChoices.has(id)
+    ) {
+      const pane = rowRef.current?.closest<HTMLElement>("[data-scroller]");
+      if (
+        pane &&
+        pane.scrollHeight - pane.scrollTop - pane.clientHeight < 120 &&
+        !window.getSelection()?.toString()
+      )
+        store.close(id);
+    }
+    if (workStatus) store.observedStatus.set(id, workStatus);
+  }, [node?.event.kind, workStatus, store, id]);
+  const revealPanel = (tab: string) => {
+    activatePanel(ownerSession, tab);
+    if (ui.isMobile) ui.openDrawer("files");
+    else ui.setRightOpen(true);
+  };
+  if (!node) return null;
+  if (node.event.kind === "work") {
+    const duration =
+      fidelity === "stream" &&
+      node.turn?.startedAtMs != null &&
+      node.turn.completedAtMs != null &&
+      node.turn.completedAtMs >= node.turn.startedAtMs
+        ? node.turn.completedAtMs - node.turn.startedAtMs
+        : undefined;
+    const terminal = [
+      "completed",
+      "cancelled",
+      "interrupted",
+      "failed",
+    ].includes(workStatus ?? "");
+    const title =
+      workStatus === "cancelled"
+        ? t("reading.stopped")
+        : workStatus === "interrupted"
+          ? t("reading.interrupted")
+          : workStatus === "failed"
+            ? t("reading.failed")
+            : workStatus === "stopping"
+              ? t("reading.stopping")
+              : workStatus === "settling"
+                ? t("reading.settling")
+                : !workStatus || workStatus === "unknown"
+                  ? t("reading.workDetails")
+                  : !terminal
+                  ? t("reading.working")
+                  : duration !== undefined
+                    ? t("reading.worked", {
+                        duration: formatDuration(duration),
+                      })
+                    : t("reading.workDetails");
+    return (
+      <section
+        ref={rowRef}
+        data-node-id={id}
+        data-turn-id={node.turnId}
+        data-turn-status={workStatus}
+        className="reading-work"
+      >
+        <button
+          type="button"
+          aria-expanded={open}
+          className="reading-summary focus-ring"
+          onClick={() => {
+            store.disclosureChoices.set(id, !open);
+            if (open) store.close(id);
+            else store.open(id);
+          }}
+        >
+          <span>{title}</span>
+          <ChevronRightIcon size={14} className={open ? "rotate-90" : ""} />
+          {node.failed > 0 && (
+            <span className="text-xs">
+              {t("reading.failedCount", { count: node.failed })}
+            </span>
+          )}
+          {node.running > 0 && terminal && (
+            <span className="text-xs">
+              {t("reading.stillWorking", { count: node.running })}
+            </span>
+          )}
+        </button>
+        {node.waiting > 0 && (
+          <p className="text-sm text-ink-muted">{t("reading.waiting")}</p>
+        )}
+        {node.turn?.errorMessage && (
+          <p role="alert" className="text-sm text-ink-muted">
+            {node.turn.errorMessage}
+          </p>
+        )}
+        {open && store.branches.get(id)?.cursor && (
+          <button
+            className="text-xs focus-ring"
+            onClick={() => store.earlier(id)}
+          >
+            {t("reading.earlier")}
+          </button>
+        )}
+      </section>
+    );
+  }
   const prose = ["user", "assistant", "status", "error", "usage"].includes(
     node.event.kind,
   );
@@ -454,10 +688,6 @@ const NodeRow = memo(function NodeRow({
       : undefined;
   const abandoned =
     (report?.data as { closedBy?: string })?.closedBy === "server";
-  const attention =
-    node.failed > 0 ||
-    node.waiting > 0 ||
-    report?.interiorState === "unreadable";
   return (
     <section
       data-node-id={id}
@@ -473,7 +703,7 @@ const NodeRow = memo(function NodeRow({
               : `Turn ${node.turnId}`
       }
       style={{ paddingLeft: Math.min(depth, 3) * 12 }}
-      className="py-1"
+      className={`reading-node py-2 ${node.event.kind === "user" ? "reading-input" : ""}`}
     >
       {prose ? (
         <EventBody
@@ -488,8 +718,10 @@ const NodeRow = memo(function NodeRow({
                 event.kind === "error"
                   ? "text-danger"
                   : event.kind === "user"
-                    ? "font-medium text-ink"
-                    : "text-ink"
+                    ? "reading-bubble text-ink"
+                    : node.readingRole === "progress"
+                      ? "text-ink-soft"
+                      : "text-ink"
               }
             >
               {event.kind === "usage" ? (
@@ -503,11 +735,15 @@ const NodeRow = memo(function NodeRow({
           )}
         </EventBody>
       ) : node.event.kind === "tool_result" ? (
-        <EventBody event={node.event} bodyVersion={node.bodyRevision}>
+        <EventBody
+          event={node.event}
+          bodyVersion={node.bodyRevision}
+          bodyUrl={`/api/v1/sessions/${segment(store.sessionId)}/nodes/${segment(node.id)}/body`}
+        >
           {(event) => (
             <div className="pl-4 text-xs">
               {node.failed > 0 && (
-                <p className="text-danger">
+                <p className="text-ink-muted">
                   Failed
                   {typeof (event.data as { exitCode?: number })?.exitCode ===
                   "number"
@@ -515,10 +751,7 @@ const NodeRow = memo(function NodeRow({
                     : ""}
                 </p>
               )}
-              <OutputBlock
-                text={event.text ?? ""}
-                tone={node.failed ? "error" : "neutral"}
-              />
+              <OutputBlock text={event.text ?? ""} tone="neutral" />
             </div>
           )}
         </EventBody>
@@ -526,16 +759,41 @@ const NodeRow = memo(function NodeRow({
         <>
           <button
             type="button"
-            aria-expanded={open}
-            onClick={() => (open ? store.close(id) : store.open(id))}
-            className={`group flex w-full items-start gap-1 rounded px-1 py-1 text-left text-xs focus-ring ${node.failed > 0 || report?.interiorState === "unreadable" ? "text-danger bg-danger-bg" : attention ? "text-warning bg-warning-bg" : "text-ink-soft bg-hover"}`}
+            aria-expanded={report ? undefined : open}
+            onClick={() => {
+              if (report) {
+                const target = {
+                  sessionId: store.sessionId,
+                  nodeId: id,
+                  name: label(node),
+                };
+                const panel = panelSnapshot(ownerSession);
+                updatePanel(ownerSession, {
+                  directory: false,
+                  trail: store.initialRoot
+                    ? [...panel.trail, target]
+                    : [target],
+                });
+                revealPanel("subagents");
+              } else if (open) store.close(id);
+              else store.open(id);
+            }}
+            className="group flex w-full items-start gap-2 rounded py-1 text-left text-sm text-ink-muted hover:bg-hover focus-ring"
           >
             <ChevronRightIcon
               size={12}
-              className={`mt-0.5 shrink-0 ${open ? "rotate-90" : "opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100"}`}
+              className={`mt-0.5 shrink-0 ${open ? "rotate-90" : ""}`}
             />
-            <span className="min-w-0 break-words">
-              <span>{label(node)}</span>
+            <ExecutionSymbol node={node} />
+            <span className="min-w-0 flex-1 break-words">
+              <span
+                title={label(node)}
+                className={
+                  node.event.kind === "tool_call" ? "block truncate" : ""
+                }
+              >
+                {label(node)}
+              </span>
               {elapsed !== undefined && node.event.kind !== "execution" && (
                 <span className="ml-2">{formatDuration(elapsed)}</span>
               )}
@@ -579,6 +837,17 @@ const NodeRow = memo(function NodeRow({
               )}
             </span>
           </button>
+          {open && node.event.kind === "execution" && (
+            <ToolWindow
+              store={store}
+              parent={id}
+              fidelity={fidelity}
+              onOpenFile={onOpenFile}
+              onResend={onResend}
+              isLive={isLive}
+              onReviewRequest={onReviewRequest}
+            />
+          )}
           {open && report && node.trajectory && (
             <EventBody event={report}>
               {(event) => <Markdown text={event.text ?? ""} />}
@@ -598,6 +867,18 @@ const NodeRow = memo(function NodeRow({
           )}
           {open && node.event.kind !== "execution" && (
             <div className="pl-4">
+              <button
+                type="button"
+                className="focus-ring text-xs text-ink-muted underline"
+                onClick={() => {
+                  updatePanel(ownerSession, {
+                    detail: { sessionId: store.sessionId, node },
+                  });
+                  revealPanel("detail");
+                }}
+              >
+                {t("reading.openDetails")}
+              </button>
               <EventBody
                 event={node.event}
                 bodyVersion={node.bodyRevision}
@@ -627,10 +908,7 @@ const NodeRow = memo(function NodeRow({
                       ))}
                       {event.text &&
                         (event.kind === "tool_result" ? (
-                          <OutputBlock
-                            text={event.text}
-                            tone={node.failed ? "error" : "neutral"}
-                          />
+                          <OutputBlock text={event.text} tone="neutral" />
                         ) : (
                           <Markdown text={event.text} />
                         ))}
@@ -646,14 +924,17 @@ const NodeRow = memo(function NodeRow({
               </EventBody>
             </div>
           )}
-          {open && node.children > 0 && (
-            <button
-              className="focus-ring text-xs"
-              onClick={() => store.focus(id)}
-            >
-              Focus this branch
-            </button>
-          )}
+          {open &&
+            !report &&
+            node.event.kind !== "execution" &&
+            node.children > 0 && (
+              <button
+                className="focus-ring text-xs"
+                onClick={() => store.focus(id)}
+              >
+                Focus this branch
+              </button>
+            )}
           {open && store.branches.get(id)?.cursor && (
             <button
               className="focus-ring text-xs"
@@ -663,7 +944,10 @@ const NodeRow = memo(function NodeRow({
             </button>
           )}
           {open && store.branches.get(id)?.detached && (
-            <button className="focus-ring text-xs" onClick={() => store.focus(id)}>
+            <button
+              className="focus-ring text-xs"
+              onClick={() => store.focus(id)}
+            >
               View latest items
             </button>
           )}
@@ -698,3 +982,92 @@ const NodeRow = memo(function NodeRow({
     </section>
   );
 });
+
+function ToolWindow({
+  store,
+  parent,
+  ...props
+}: {
+  store: ExecutionStore;
+  parent: string;
+  fidelity: Fidelity;
+  onOpenFile: (path: string, line?: number) => void;
+  onResend: (text: string) => void;
+  isLive: boolean;
+  onReviewRequest: (id: string) => void;
+}) {
+  const t = useT();
+  const scroller = useRef<HTMLDivElement>(null);
+  const subscribe = useMemo(
+    () => (fn: () => void) => store.subscribe("", fn),
+    [store],
+  );
+  useSyncExternalStore(subscribe, store.snapshot, store.snapshot);
+  const rows = store.rowsUnder(parent);
+  useLayoutEffect(() => {
+    if (scroller.current)
+      scroller.current.scrollTop = store.groupScroll.get(parent) ?? 0;
+  }, [store, parent]);
+  // eslint-disable-next-line react-hooks/incompatible-library
+  const virtual = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => scroller.current,
+    estimateSize: () => 36,
+    getItemKey: (index) => rows[index].id,
+    overscan: 5,
+    anchorTo: "end",
+    followOnAppend: true,
+    scrollEndThreshold: 80,
+  });
+  return (
+    <div
+      ref={scroller}
+      className="reading-tools pane"
+      tabIndex={0}
+      aria-label={t("reading.toolCalls")}
+      data-tool-window
+      onScroll={(event) =>
+        store.groupScroll.set(parent, event.currentTarget.scrollTop)
+      }
+    >
+      {store.branches.get(parent)?.cursor && (
+        <button
+          className="text-xs focus-ring"
+          onClick={() => store.earlier(parent)}
+        >
+          {t("reading.earlier")}
+        </button>
+      )}
+      <div style={{ height: virtual.getTotalSize(), position: "relative" }}>
+        {virtual.getVirtualItems().map((item) => (
+          <div
+            key={item.key}
+            data-index={item.index}
+            ref={virtual.measureElement}
+            style={{
+              position: "absolute",
+              top: 0,
+              width: "100%",
+              transform: `translateY(${item.start}px)`,
+            }}
+          >
+            <NodeRow
+              store={store}
+              id={rows[item.index].id}
+              depth={rows[item.index].depth}
+              {...props}
+            />
+          </div>
+        ))}
+      </div>
+      {store.branches.get(parent)?.detached && (
+        <button
+          className="text-xs focus-ring"
+          onClick={() => store.latest(parent)}
+        >
+          {t("reading.latest")}
+        </button>
+      )}
+    </div>
+  );
+}

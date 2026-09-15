@@ -42,7 +42,7 @@
  */
 
 import dynamic from "next/dynamic";
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, api, type FileEntry } from "@/lib/api";
 import { formatBytes, formatRelative } from "@/lib/format";
@@ -105,10 +105,14 @@ const FullscreenViewer = dynamic(
   { ssr: false },
 );
 
+const filePositions = new Map<string, { toggled: Set<string>; collapsed: Set<string>; scroll: number }>();
+
 export function ArtifactsPane() {
   // Decoded, or the file endpoints receive a double-encoded id and the pane reports
   // "Could not list the working directory" — see `use-session-id-param`.
-  const sessionId = useSessionIdParam();
+  const routeSessionId = useSessionIdParam();
+  const { artifact } = useWorkspaceUI();
+  const sessionId = artifact?.sessionId ?? routeSessionId;
   // Expansion and file operations belong to one session. The shell survives
   // navigation, so key this state boundary instead of loading an old expansion
   // tree against every newly selected session.
@@ -206,8 +210,18 @@ function SessionArtifactsPane({ sessionId }: { sessionId: string | undefined }) 
    * what they deliberately closed. The second is what keeps an ancestor of the
    * selected file from re-opening under them; see `expandedFrom`.
    */
-  const [toggled, setToggled] = useState<Set<string>>(new Set());
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [toggled, setToggled] = useState<Set<string>>(() => filePositions.get(sessionId ?? "")?.toggled ?? new Set());
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => filePositions.get(sessionId ?? "")?.collapsed ?? new Set());
+  const treeScroller = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const key = sessionId ?? "";
+    const scroll = filePositions.get(key)?.scroll ?? 0;
+    filePositions.delete(key); filePositions.set(key, { toggled, collapsed, scroll });
+    while (filePositions.size > 10) filePositions.delete(filePositions.keys().next().value!);
+  }, [sessionId, toggled, collapsed]);
+  useLayoutEffect(() => {
+    if (treeScroller.current) treeScroller.current.scrollTop = filePositions.get(sessionId ?? "")?.scroll ?? 0;
+  }, [sessionId]);
 
   const expanded = useMemo(
     () => expandedFrom(toggled, collapsed, selected),
@@ -278,7 +292,10 @@ function SessionArtifactsPane({ sessionId }: { sessionId: string | undefined }) 
     <div className="flex min-h-0 flex-1 flex-col">
       {/* `hidden` rather than unmounting: see the module comment. */}
       <div className={`${viewing ? "hidden" : "flex"} min-h-0 flex-1 flex-col`}>
-        <div className="min-h-0 flex-1 pane">
+        <div ref={treeScroller} className="min-h-0 flex-1 pane" onScroll={event => {
+          const position = filePositions.get(sessionId ?? "");
+          if (position) position.scroll = event.currentTarget.scrollTop;
+        }}>
           <FileTree
             sessionId={sessionId}
             selected={selected}

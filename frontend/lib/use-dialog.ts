@@ -49,6 +49,7 @@ function tabbable(container: HTMLElement): HTMLElement[] {
 }
 
 export interface DialogOptions {
+  enabled?: boolean;
   onClose: () => void;
   /**
    * Move focus to the first tabbable control on mount.
@@ -73,11 +74,13 @@ export interface Dialog<T extends HTMLElement> {
 export function useDialog<T extends HTMLElement>({
   onClose,
   autoFocus = true,
+  enabled = true,
 }: DialogOptions): Dialog<T> {
   const ref = useRef<T | null>(null);
   const openerRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
+    if (!enabled) return;
     // Captured before focus moves, so it can be handed back.
     openerRef.current = document.activeElement as HTMLElement | null;
 
@@ -111,10 +114,11 @@ export function useDialog<T extends HTMLElement>({
       // to `<body>`, which is worse than leaving it where it is.
       if (opener?.isConnected) opener.focus();
     };
-  }, [autoFocus]);
+  }, [autoFocus, enabled]);
 
   const onKeyDown = useCallback(
     (event: KeyboardEvent) => {
+      if (!enabled) return;
       if (event.key === "Escape") {
         // Stopped here so it closes *this* surface only. Without this the shell's
         // document-level handler also fires and closes whatever is behind.
@@ -139,7 +143,7 @@ export function useDialog<T extends HTMLElement>({
         first.focus();
       }
     },
-    [onClose],
+    [onClose, enabled],
   );
 
   return { ref, onKeyDown };

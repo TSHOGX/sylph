@@ -1,4 +1,5 @@
 import { segment } from "./api";
+import { readResource } from "./reading-resource";
 import type { StreamEvent } from "./api-types";
 
 export interface ExecutionNode {
@@ -23,6 +24,16 @@ export interface ExecutionNode {
   waiting: number;
   unfinished?: number;
   activity: string;
+  readingRole?: "progress" | "answer" | "unknown";
+  turn?: {
+    id: string;
+    status: string;
+    origin: string;
+    startedAtMs: number | null;
+    completedAtMs: number | null;
+    closeReason?: string | null;
+    errorMessage?: string | null;
+  };
 }
 interface Page {
   parentNode?: ExecutionNode;
@@ -48,12 +59,18 @@ export interface VisibleNode {
   id: string;
   depth: number;
 }
+interface EntityPool {
+  nodes: Map<string, ExecutionNode>;
+  views: Set<ExecutionStore>;
+}
+const pools = new Map<string, EntityPool>();
 const MAX_BRANCHES = 16;
 const MAX_CHILDREN = 160;
 
 function compareOrder(a: ExecutionNode, b: ExecutionNode) {
   return (
-    a.ordinal - b.ordinal || a.orderTie - b.orderTie ||
+    a.ordinal - b.ordinal ||
+    a.orderTie - b.orderTie ||
     (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
   );
 }
@@ -61,7 +78,12 @@ function compareOrder(a: ExecutionNode, b: ExecutionNode) {
 /** Entity updates notify only that row. The visible list changes only on insertion
  * or disclosure, not on token updates. The cache and subscriptions are bounded. */
 export class ExecutionStore {
-  readonly nodes = new Map<string, ExecutionNode>();
+  readonly nodes: Map<string, ExecutionNode>;
+  private pool?: EntityPool;
+  private started = false;
+  get visibleReader() {
+    return this.started;
+  }
   readonly branches = new Map<string, Branch>();
   private listeners = new Map<string, Set<() => void>>();
   private visible: VisibleNode[] = [];
@@ -71,7 +93,61 @@ export class ExecutionStore {
   rootParent = "";
   targetId: string | null = null;
   private seekController?: AbortController;
-  constructor(readonly sessionId: string) {}
+  readonly disclosureChoices = new Map<string, boolean>();
+  readonly observedStatus = new Map<string, string>();
+  scrollTop = 0;
+  readonly groupScroll = new Map<string, number>();
+  constructor(
+    readonly sessionId: string,
+    readonly reading = false,
+    readonly initialRoot = "",
+  ) {
+    this.rootParent = initialRoot;
+    if (reading) {
+      this.pool = pools.get(sessionId) ?? {
+        nodes: new Map(),
+        views: new Set(),
+      };
+      pools.set(sessionId, this.pool);
+      this.pool.views.add(this);
+    }
+    this.nodes = this.pool?.nodes ?? new Map();
+  }
+  dispose() {
+    this.stop();
+    this.branches.clear();
+    this.pool?.views.delete(this);
+    this.prune();
+    if (this.pool?.views.size === 0) pools.delete(this.sessionId);
+  }
+  private prune() {
+    for (const id of this.nodes.keys()) this.evict(id);
+  }
+  /** Independent inner scrollers consume the same branch windows, not a second fetch. */
+  rowsUnder(parent: string): VisibleNode[] {
+    const rows: VisibleNode[] = [];
+    const seen = new Set<string>();
+    const visit = (id: string, depth: number) => {
+      if (!this.branches.get(id)?.open) return;
+      for (const child of this.branches.get(id)?.ids ?? []) {
+        if (seen.has(child)) continue;
+        seen.add(child);
+        rows.push({ id: child, depth });
+        if (this.nodes.get(child)?.event.kind !== "execution")
+          visit(child, depth + 1);
+      }
+    };
+    visit(parent, 0);
+    return rows;
+  }
+  private endpoint(parent: string) {
+    if (this.targetId) return "nodes";
+    return this.reading &&
+      (parent === this.initialRoot ||
+        this.nodes.get(parent)?.event.kind === "work")
+      ? "conversation"
+      : "nodes";
+  }
   subscribe = (id: string, fn: () => void) => {
     const listeners = this.listeners.get(id) ?? new Set();
     listeners.add(fn);
@@ -83,7 +159,8 @@ export class ExecutionStore {
     };
   };
   private emit(id: string) {
-    this.listeners.get(id)?.forEach((fn) => fn());
+    const views = id && this.pool ? this.pool.views : [this];
+    for (const view of views) view.listeners.get(id)?.forEach((fn) => fn());
   }
   snapshot = () => this.visible;
   private rebuild() {
@@ -96,10 +173,25 @@ export class ExecutionStore {
         if (seen.has(id)) continue;
         seen.add(id);
         next.push({ id, depth });
-        visit(id, depth + 1);
+        if (!this.reading || this.nodes.get(id)?.event.kind !== "execution")
+          visit(id, depth + 1);
       }
     };
     visit(this.rootParent, 0);
+    if (this.reading) {
+      // Disclosure changes visibility, never narrative order. Root steering and
+      // unclassified prose must stay between the process items surrounding them.
+      next.sort((left, right) => {
+        const a = this.nodes.get(left.id)!;
+        const b = this.nodes.get(right.id)!;
+        return (
+          a.ordinal - b.ordinal ||
+          a.orderTie - b.orderTie ||
+          Number(b.event.kind === "work") - Number(a.event.kind === "work") ||
+          (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
+        );
+      });
+    }
     this.visible = next;
     this.emit("");
   }
@@ -151,7 +243,8 @@ export class ExecutionStore {
       const reordered =
         existing &&
         previous &&
-        (previous.ordinal !== node.ordinal || previous.orderTie !== node.orderTie);
+        (previous.ordinal !== node.ordinal ||
+          previous.orderTie !== node.orderTie);
       // Corrections can change order without changing identity. Reinsert that one
       // address; sorting the window would also touch every unchanged row.
       if (reordered) branch.ids.splice(branch.ids.indexOf(node.id), 1);
@@ -172,8 +265,7 @@ export class ExecutionStore {
         while (lo < hi) {
           const mid = (lo + hi) >>> 1,
             other = this.nodes.get(branch.ids[mid])!;
-          if (compareOrder(other, node) < 0)
-            lo = mid + 1;
+          if (compareOrder(other, node) < 0) lo = mid + 1;
           else hi = mid;
         }
         branch.ids.splice(lo, 0, node.id);
@@ -209,6 +301,18 @@ export class ExecutionStore {
     if (parent) this.emit(parent);
   }
   private evict(id: string) {
+    if (
+      this.pool &&
+      [...this.pool.views].some(
+        (view) =>
+          view !== this &&
+          (view.rootParent === id ||
+            [...view.branches.values()].some((branch) =>
+              branch.ids.includes(id),
+            )),
+      )
+    )
+      return;
     // A move can reach its destination before its former-parent removal. Only
     // the last loaded owner can release an entity and its child window.
     if (
@@ -228,7 +332,8 @@ export class ExecutionStore {
   }
   private async read(parent: string, changes: boolean, earlier = false) {
     const branch = this.branches.get(parent);
-    if (!branch?.open || branch.controller) return;
+    if (!branch?.open || branch.controller || (this.reading && !this.started))
+      return;
     const controller = new AbortController();
     branch.controller = controller;
     if (earlier) branch.earlierRequested = false;
@@ -246,17 +351,10 @@ export class ExecutionStore {
           : undefined;
       if (cursor) params.set("cursor", cursor);
       if (changes) params.set("changes", "true");
-      const response = await fetch(
-        `/api/v1/sessions/${segment(this.sessionId)}/nodes?${params}`,
-        {
-          signal: controller.signal,
-          credentials: "include",
-          cache: "no-store",
-        },
+      const page = await readResource<Page>(
+        `/api/v1/sessions/${segment(this.sessionId)}/${this.endpoint(parent)}?${params}`,
+        controller.signal,
       );
-      if (!response.ok)
-        throw new Error(`Could not read timeline (${response.status})`);
-      const page = (await response.json()) as Page;
       if (controller.signal.aborted || this.branches.get(parent) !== branch)
         return;
       this.merge(parent, page, changes);
@@ -282,7 +380,23 @@ export class ExecutionStore {
     }
   }
   open(parent: string) {
-    if (!this.branches.has(parent) && this.branches.size >= MAX_BRANCHES) {
+    const views = this.pool ? [...this.pool.views] : [this];
+    if (
+      !this.branches.has(parent) &&
+      views.reduce((sum, view) => sum + view.branches.size, 0) >= MAX_BRANCHES
+    ) {
+      const dormant = views.find(
+        (view) => view !== this && !view.started && view.branches.size,
+      );
+      if (dormant) {
+        dormant.branches.clear();
+        dormant.prune();
+      }
+    }
+    if (
+      !this.branches.has(parent) &&
+      views.reduce((sum, view) => sum + view.branches.size, 0) >= MAX_BRANCHES
+    ) {
       const candidate = [...this.branches].find(([id, b]) => id && !b.open);
       // Discard the closed window, not the summary its parent still renders.
       if (candidate) this.releaseBranch(candidate[0]);
@@ -303,6 +417,8 @@ export class ExecutionStore {
     this.rebuild();
     this.emit(parent);
     void this.read(parent, branch.initialized);
+    for (const child of branch.ids)
+      if (this.branches.get(child)?.open) this.open(child);
   }
   close(parent: string) {
     const branch = this.branches.get(parent);
@@ -311,8 +427,15 @@ export class ExecutionStore {
     branch.controller?.abort();
     branch.controller = undefined;
     clearTimeout(branch.timer);
-    for (const child of branch.ids)
-      if (this.branches.get(child)?.open) this.close(child);
+    const suspend = (id: string) => {
+      const child = this.branches.get(id);
+      if (!child) return;
+      child.controller?.abort();
+      child.controller = undefined;
+      clearTimeout(child.timer);
+      for (const nested of child.ids) suspend(nested);
+    };
+    for (const child of branch.ids) suspend(child);
     this.rebuild();
     this.emit(parent);
   }
@@ -328,14 +451,20 @@ export class ExecutionStore {
       void this.read(parent, false, true);
     }
   }
+  latest(parent: string) {
+    this.releaseBranch(parent);
+    this.open(parent);
+  }
   start() {
+    this.started = true;
     this.open(this.rootParent);
   }
   focus(parent: string) {
     this.stop();
-    this.nodes.clear();
     this.branches.clear();
+    this.prune();
     this.rootParent = parent;
+    this.started = true;
     this.targetId = null;
     this.ready = false;
     this.open(parent);
@@ -361,8 +490,8 @@ export class ExecutionStore {
         branch.controller?.abort();
         clearTimeout(branch.timer);
       }
-      this.nodes.clear();
       this.branches.clear();
+      this.prune();
       this.rootParent = page.parent;
       this.targetId = page.targetId;
       this.branches.set(page.parent, {
@@ -381,9 +510,9 @@ export class ExecutionStore {
     }
   }
   stop() {
+    this.started = false;
     this.seekController?.abort();
     for (const branch of this.branches.values()) {
-      branch.open = false;
       branch.controller?.abort();
       branch.controller = undefined;
       clearTimeout(branch.timer);

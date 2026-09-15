@@ -75,7 +75,7 @@ export interface AgentSession {
   current?: PendingRequest;
   /** Whether the agent declared it can do something. */
   can: (capability: string) => boolean;
-  resolve: (option: string, input?: unknown) => void;
+  resolve: (id: string, option: string, input?: unknown) => void;
   resolving: boolean;
   /** Set when the last answer lost a race, so the UI can say the dialog was stale. */
   staleAnswer: boolean;
@@ -279,11 +279,10 @@ export function useAgentSession(sessionId: string | undefined): AgentSession {
   );
 
   const resolve = useCallback(
-    (option: string, input?: unknown) => {
-      if (!current) return;
-      resolveMutation.mutate({ id: current.id, option, input });
+    (id: string, option: string, input?: unknown) => {
+      resolveMutation.mutate({ id, option, input });
     },
-    [current, resolveMutation],
+    [resolveMutation],
   );
 
   return {

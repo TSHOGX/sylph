@@ -66,8 +66,8 @@ import {
  * `ssr: false` on all four: they render nothing until state opens them, so
  * prerendering them produces markup the client immediately discards.
  */
-const ArtifactsPane = dynamic(
-  () => import("@/components/artifacts-pane").then((m) => m.ArtifactsPane),
+const WorkPanel = dynamic(
+  () => import("@/components/work-panel").then((m) => m.WorkPanel),
   { ssr: false },
 );
 const SearchOverlay = dynamic(
@@ -105,9 +105,7 @@ const AdoptPicker = dynamic(
 const Drawer = dynamic(() => import("@/components/ui/sheet").then((m) => m.Drawer), {
   ssr: false,
 });
-const Sheet = dynamic(() => import("@/components/ui/sheet").then((m) => m.Sheet), {
-  ssr: false,
-});
+
 
 /**
  * Routes that own the full width and get no shell.
@@ -164,7 +162,7 @@ function ShellFrame({
   createPending: boolean;
   createError: unknown;
 }) {
-  const { leftOpen, rightOpen, overlay, drawer, closeDrawer, isMobile, rereadNotice } = useWorkspaceUI();
+  const { leftOpen, overlay, drawer, closeDrawer, isMobile, rereadNotice } = useWorkspaceUI();
   const t = useT();
 
   return (
@@ -256,12 +254,7 @@ function ShellFrame({
           {children}
         </main>
 
-        <aside
-          aria-label={t("shell.artifacts")}
-          className={`${rightOpen ? "md:flex" : "md:hidden"} hidden w-80 shrink-0 flex-col border-l border-line bg-sunken xl:w-96`}
-        >
-          <ArtifactsPane />
-        </aside>
+        <WorkPanel />
       </div>
 
       {/*
@@ -301,11 +294,7 @@ function ShellFrame({
         </Drawer>
       )}
 
-      {isMobile && drawer === "files" && (
-        <Sheet title={t("shell.files")} onClose={closeDrawer}>
-          <ArtifactsPane />
-        </Sheet>
-      )}
+
 
       {overlay === "search" && <SearchOverlay />}
       {overlay === "palette" && <CommandPalette />}
@@ -398,8 +387,8 @@ function TopBar() {
               ? t("shell.closeFiles")
               : t("shell.openFiles")
             : rightOpen
-              ? t("shell.hideArtifacts")
-              : t("shell.showArtifacts")
+              ? t("shell.hideWorkPanel")
+              : t("shell.showWorkPanel")
         }
         hint={hint("toggleRightSidebar")}
         onClick={toggleRight}

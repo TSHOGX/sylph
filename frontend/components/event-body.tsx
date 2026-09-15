@@ -12,10 +12,12 @@ export function EventBody({
   bodyUrl,
   bodyVersion,
   label = "Load full content",
+  initiallyRequested = false,
 }: {
   event: StreamEvent;
   children: (event: StreamEvent) => ReactNode;
   label?: string;
+  initiallyRequested?: boolean;
   bodyUrl?: string;
   bodyVersion?: number;
 }) {
@@ -25,6 +27,7 @@ export function EventBody({
       label={label}
       bodyUrl={bodyUrl}
       bodyVersion={bodyVersion}
+      initiallyRequested={initiallyRequested}
     >
       {children}
     </DeferredEventBody>
@@ -39,10 +42,12 @@ function DeferredEventBody({
   label,
   bodyUrl,
   bodyVersion,
+  initiallyRequested,
 }: {
   event: StreamEvent;
   children: (event: StreamEvent) => ReactNode;
   label: string;
+  initiallyRequested: boolean;
   bodyUrl?: string;
   bodyVersion?: number;
 }) {
@@ -51,7 +56,9 @@ function DeferredEventBody({
     event: StreamEvent;
     bodyUrl?: string;
     version?: number;
-  } | null>(null);
+  } | null>(() =>
+    initiallyRequested ? { event, bodyUrl, version: bodyVersion } : null,
+  );
   const selected = requested?.event ?? event;
   const selectedUrl = requested?.bodyUrl ?? bodyUrl;
   const query = useQuery({
