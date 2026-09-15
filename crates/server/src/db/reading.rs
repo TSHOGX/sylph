@@ -81,16 +81,53 @@ async fn node_value(
             if let Some(parent) = super::timeline::get(conn, session, scope).await? {
                 let result = if parent.event.kind == "tool_call" && parent.trajectory.is_none() {
                     super::timeline::get(conn, session, &format!("r:{scope}")).await?
-                } else { None };
-                let report = parent.trajectory.as_ref().or(result.as_ref().map(|r| &r.event)).unwrap_or(&parent.event);
-                let closed_by_server = report.data.as_ref().and_then(|d|d.get("closedBy")).and_then(Value::as_str)==Some("server");
-                let terminal = report.phase.as_deref()==Some("completed") && (parent.event.kind!="tool_call" || parent.trajectory.is_some() || result.is_some());
-                let status=if closed_by_server {"interrupted"} else if terminal {if report.is_error {"failed"} else {"completed"}} else {"running"};
-                value["turn"]["status"]=json!(status);
-                value["turn"]["startedAtMs"]=json!(parent.event.started_at_ms);
-                value["turn"]["completedAtMs"]=if terminal {json!(report.arrival_at_ms)}else{Value::Null};
-                value["turn"]["closeReason"]=report.data.as_ref().and_then(|d|d.get("reason")).cloned().unwrap_or(Value::Null);
-                value["turn"]["errorMessage"]=Value::Null;
+                } else {
+                    None
+                };
+                let report = parent
+                    .trajectory
+                    .as_ref()
+                    .or(result.as_ref().map(|r| &r.event))
+                    .unwrap_or(&parent.event);
+                let closed_by_server = report
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.get("closedBy"))
+                    .and_then(Value::as_str)
+                    == Some("server");
+                let terminal = report.phase.as_deref() == Some("completed")
+                    && (parent.event.kind != "tool_call"
+                        || parent.trajectory.is_some()
+                        || result.is_some());
+                let status = if closed_by_server {
+                    "interrupted"
+                } else if terminal {
+                    if report.is_error {
+                        "failed"
+                    } else {
+                        "completed"
+                    }
+                } else if matches!(report.phase.as_deref(), Some("started" | "delta"))
+                    || parent.running > 0
+                {
+                    "running"
+                } else {
+                    "unknown"
+                };
+                value["turn"]["status"] = json!(status);
+                value["turn"]["startedAtMs"] = json!(parent.event.started_at_ms);
+                value["turn"]["completedAtMs"] = if terminal {
+                    json!(report.arrival_at_ms)
+                } else {
+                    Value::Null
+                };
+                value["turn"]["closeReason"] = report
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.get("reason"))
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                value["turn"]["errorMessage"] = Value::Null;
             }
         }
     }
@@ -136,6 +173,9 @@ impl super::JournalStore {
         } else {
             "SELECT id,ordinal,order_tie,revision,0 AS work FROM conversation_entries WHERE session_id=? AND parent_id=? AND process=0 UNION ALL SELECT id,ordinal,order_tie,revision,1 AS work FROM conversation_work WHERE session_id=? AND parent_id=?".to_owned()
         };
+        if !changes && work.is_none() {
+            source.push_str(" AND children>0");
+        }
         if changes {
             source.push_str(" UNION ALL SELECT id,0 AS ordinal,0 AS order_tie,revision,2 AS work FROM conversation_removals WHERE session_id=? AND parent_id=?");
         }

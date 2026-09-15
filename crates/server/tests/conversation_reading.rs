@@ -163,22 +163,115 @@ async fn delegation_catalogue_is_paged_without_expanding_any_trajectory() {
 
 #[tokio::test]
 async fn a_presentation_correction_moves_the_same_address_without_losing_its_body() {
-    let backend=TestBackend::start().await;
-    let id=fixture(&backend).await;
-    let outline=backend.state.store.conversation_page(&id,"",None,false,40).await.unwrap();
-    let work=outline["nodes"][1]["id"].as_str().unwrap();
-    let process=backend.state.store.conversation_page(&id,work,None,false,40).await.unwrap();
-    let address=process["nodes"][0]["id"].as_str().unwrap().to_owned();
-    let cursor=format!("{}:",outline["snapshot"].as_i64().unwrap()+1);
-    let correction=Event{id:None,session_id:SessionId::decode(&id).unwrap(),turn_id:Some("reading-turn".into()),seq:6,
-      kind:"assistant".into(),phase:Some("completed".into()),stream_id:Some("item-0".into()),span:None,interior_state:None,
-      name:None,text:"I will inspect the files".into(),data_json:json!({"phase":"final_answer"}).to_string(),is_error:false,
-      stability:"stable".into(),source:"agent".into(),arrival_at_ms:30,recorded_at_ms:None,created_at_ms:30};
-    backend.state.store.append_events(&[correction]).await.unwrap();
-    let changes=backend.state.store.conversation_page(&id,"",Some(&cursor),true,40).await.unwrap();
-    assert!(changes["nodes"].as_array().unwrap().iter().any(|n|n["id"]==address && n["readingRole"]=="answer"));
-    let removals=backend.state.store.conversation_page(&id,work,Some(&cursor),true,40).await.unwrap();
-    assert!(removals["nodes"].as_array().unwrap().iter().any(|n|n["id"]==address && n["removed"]==true));
-    let body:Value=json_body(backend.get_authed(&format!("/api/v1/sessions/{id}/nodes/{address}/body")).await).await;
-    assert_eq!(body["text"],"I will inspect the files");
+    let backend = TestBackend::start().await;
+    let id = fixture(&backend).await;
+    let outline = backend
+        .state
+        .store
+        .conversation_page(&id, "", None, false, 40)
+        .await
+        .unwrap();
+    let work = outline["nodes"][1]["id"].as_str().unwrap();
+    let process = backend
+        .state
+        .store
+        .conversation_page(&id, work, None, false, 40)
+        .await
+        .unwrap();
+    let address = process["nodes"][0]["id"].as_str().unwrap().to_owned();
+    let cursor = format!("{}:", outline["snapshot"].as_i64().unwrap() + 1);
+    let correction = Event {
+        id: None,
+        session_id: SessionId::decode(&id).unwrap(),
+        turn_id: Some("reading-turn".into()),
+        seq: 6,
+        kind: "assistant".into(),
+        phase: Some("completed".into()),
+        stream_id: Some("item-0".into()),
+        span: None,
+        interior_state: None,
+        name: None,
+        text: "I will inspect the files".into(),
+        data_json: json!({"phase":"final_answer"}).to_string(),
+        is_error: false,
+        stability: "stable".into(),
+        source: "agent".into(),
+        arrival_at_ms: 30,
+        recorded_at_ms: None,
+        created_at_ms: 30,
+    };
+    backend
+        .state
+        .store
+        .append_events(&[correction])
+        .await
+        .unwrap();
+    let changes = backend
+        .state
+        .store
+        .conversation_page(&id, "", Some(&cursor), true, 40)
+        .await
+        .unwrap();
+    assert!(changes["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|n| n["id"] == address && n["readingRole"] == "answer"));
+    let removals = backend
+        .state
+        .store
+        .conversation_page(&id, work, Some(&cursor), true, 40)
+        .await
+        .unwrap();
+    assert!(removals["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|n| n["id"] == address && n["removed"] == true));
+    let body: Value = json_body(
+        backend
+            .get_authed(&format!("/api/v1/sessions/{id}/nodes/{address}/body"))
+            .await,
+    )
+    .await;
+    assert_eq!(body["text"], "I will inspect the files");
+}
+
+#[tokio::test]
+async fn an_empty_retired_work_summary_cannot_displace_the_latest_answer() {
+    let backend = TestBackend::start().await;
+    let id = backend.create_session("mock").await;
+    let turn:Turn=serde_json::from_value(json!({"id":"retired-work","sessionId":id,"status":"running","origin":"user","requestText":"Read","createdAtMs":1})).unwrap();
+    backend.state.store.create_turn(&turn).await.unwrap();
+    for (seq, role) in ["commentary", "final_answer"].into_iter().enumerate() {
+        let event = Event {
+            id: None,
+            session_id: SessionId::decode(&id).unwrap(),
+            turn_id: Some(turn.id.clone()),
+            seq: seq as i32,
+            kind: "assistant".into(),
+            phase: Some("completed".into()),
+            stream_id: Some("reply".into()),
+            span: None,
+            interior_state: None,
+            name: None,
+            text: "The answer".into(),
+            data_json: json!({"phase":role}).to_string(),
+            is_error: false,
+            stability: "stable".into(),
+            source: "agent".into(),
+            arrival_at_ms: seq as i64,
+            recorded_at_ms: None,
+            created_at_ms: seq as i64,
+        };
+        backend.state.store.append_events(&[event]).await.unwrap();
+    }
+    let page = backend
+        .state
+        .store
+        .conversation_page(&id, "", None, false, 1)
+        .await
+        .unwrap();
+    assert_eq!(page["nodes"][0]["event"]["text"], "The answer");
+    assert_ne!(page["nodes"][0]["removed"], true);
 }
