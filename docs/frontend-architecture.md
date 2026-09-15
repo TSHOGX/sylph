@@ -10,7 +10,7 @@ prose is connective tissue, and navigation is keyboard-first.
 Two things shape almost every decision below, so they are stated once here:
 
 - **No runtime dependency is added without a measured reason.** The runtime tree is
-  `next`, `react`, `react-dom`, and `@tanstack/react-query`; Markdown, diffing, fuzzy
+  `next`, `react`, `react-dom`, `@tanstack/react-query`, and `@tanstack/react-virtual`; Markdown, diffing, fuzzy
   ranking, icons, and every UI primitive are implemented directly. § Technology Stack
   gives the cost of each library that was declined and what the replacement gives up,
   and § Performance Optimization gives the budget that motivates it.
@@ -53,7 +53,7 @@ is reachable only through a relay.
   case here, and a state library would add a dependency for a store that holds
   about a dozen fields.
 - **Not the `EventSource` API.** SSE is read with `fetch` and a hand-written frame
-  parser (`lib/execution-store.ts`, `lib/sse-parse.ts`); § SSE Connection Management states
+  parser (`lib/sse-parse.ts`); § SSE Connection Management states
   the three properties that reach.
 
 **UI components:**
@@ -118,7 +118,7 @@ the components do; this is the shape they sit in.
 | --- | --- | --- |
 | `app/` | Four routes: start screen, search, `sessions/[id]`, and the root layout | Routing and the providers. A page renders its own scrolling content and nothing else |
 | `components/` | The shell, the panes, the timeline and its renderers, the overlays, the composer, and `ui/` primitives | Everything that draws. `viewers/` splits by file family so a route pays only for the format it opens |
-| `lib/` | The typed API client, the SSE reader and frame parser, the timeline fold and tree, settings and shell state, and the pure algorithms that replaced dependencies | Every rule enforced in code, with the reasoning in the comment beside it. React-free wherever a unit test wants it |
+| `lib/` | The typed API client, the SSE frame parser, execution entities and paged windows, settings and shell state, and the pure algorithms that replaced dependencies | Every rule enforced in code, with the reasoning in the comment beside it. React-free wherever a unit test wants it |
 | `e2e/` | Playwright specs and the reset script | Rendered behaviour, against a fixture agent |
 
 Configuration sits at the root: `next.config.ts` (proxy rewrite, standalone output),
@@ -210,7 +210,7 @@ navigation, and because a conversation event needs to ask the Artifacts pane to
 open a file — a request that has to reach it from outside its own subtree.
 
 **`lib/settings.tsx` — preferences, `useSyncExternalStore` over `localStorage`.**
-Default agent and model, density, expansion defaults, shortcut bindings, pane
+Default agent and model, density, shortcut bindings, pane
 visibility, pinned workspaces, workspace display names.
 
 The external-store hook rather than state-plus-effect, for three reasons:
@@ -302,7 +302,9 @@ what it refused, and localizing them would mean cataloguing every string the API
 
 ### SSE Connection Management
 
-The stream is read with `fetch` and parsed in the client, which is what makes three
+Notification and explicit replay streams are read with `fetch` and parsed in the client.
+The interactive timeline uses bounded revision reads (§ Event rendering).
+Reading SSE directly makes three
 properties reachable. `EventSource` dispatches by frame name, so a client would have to
 enumerate every kind and a kind added later would be dropped silently; a frame named `error`
 would arrive as the same event the browser fires for a dropped socket; and its built-in
@@ -328,7 +330,7 @@ for (;;) {
     const event = JSON.parse(frame.data)
     if (event.seq <= cursor) continue   // drop replay overlap after reconnect
     cursor = event.seq
-    enqueue(event)                      // coalesced, see below
+    enqueue(event)                      // explicit replay consumer
   }
 }
 ```
@@ -340,10 +342,9 @@ until its block flushes, and the whole turn then lands at once. The header belon
 backend response so the guarantee survives any proxy, tunnel, or nginx in front of the
 endpoint.
 
-**Repaint is coalesced, not per-event.** Deltas arrive at token rate — the claude runner
-measures ~20ms between tool-input deltas — so events are batched into one flush per
-animation frame, bounding repaints by the display rather than by the model's speed while
-staying far below the ~100ms at which a human perceives lag.
+**Timeline updates are coalesced by projection revision.** Polling reads the latest
+revision of changed nodes within a bounded page. Token-rate events do not replay or fold
+the transcript in the browser; each changed entity notifies its own mounted row.
 
 Reconnection is covered in § Error handling.
 
@@ -354,8 +355,8 @@ Live and historical turn sections expose `data-turn-id` and `data-turn-status` f
 fact. Send and Stop describe available actions and never serve as lifecycle signals.
 Running history snapshots preserve producer phase, stability and block identity; only
 terminal turns use the archival fold. A sealed content block rejects late deltas.
-The session trace is the sole live event projection; a second turn stream must not merge
-its independently timed block replacements into the same renderer.
+Execution nodes are the sole interactive transcript projection; a turn replay stream
+must not merge its independently timed block replacements into the same renderer.
 
 ### Event rendering
 
@@ -373,6 +374,15 @@ corrections reinsert the affected address using the complete server ordering key
 body revisions preserve the visible list and unrelated entity references. Evicting the
 oldest loaded rows during live growth advances the history cursor to the retained edge,
 so the discarded rows remain reachable even if the initial window was complete.
+Window eviction releases cached descendants but preserves a summary still owned by a
+loaded parent. Removal patches release entities once no loaded window references them;
+a move already received by another parent retains that parent's entity and descendants.
+Paging far enough back to evict newer rows detaches that window from the live tail.
+Revisions still update its loaded entities, but new arrivals outside its ordering bounds
+cannot bridge the unloaded gap. An explicit latest-window action resumes following;
+search windows follow the same rule. Every bound compares the full server ordering key.
+An initial read failure retries the recent page before subscribing to changes. Cancelling
+and restarting a subscription releases the aborted request before opening its replacement.
 
 Large bodies use `components/event-body.tsx`, which fetches only on an explicit action,
 cancels abandoned requests, and shows failures without replacing the readable preview.
@@ -433,11 +443,10 @@ rows and failure details. Edits and cancellation carry the displayed revision, s
 changes produce a visible conflict followed by a resource refresh. Rendering is paged within
 the bounded recent ledger, while every pending item remains reachable.
 
-**Streaming a turn** — `lib/execution-store.ts` reads the body and hands frames to the page, which
-merges them into the live projection and refetches history when the turn settles. The
-handover from live stream to durable history is the subtle part: the live turn is filtered
-out of history until the refetched history actually contains it, which closes the frame
-where it would otherwise vanish from both.
+**Streaming a turn** — `lib/execution-store.ts` merges revision pages into stable entities.
+Consolidation preserves those addresses, so settling a turn does not switch the renderer
+between separate live and historical collections. Control state has its own bounded
+metadata read; it never hydrates transcript bodies.
 
 **That refetch is sound because a terminal turn status means the record is finished** — a
 server guarantee rather than a race the client wins (`docs/database-schema.md` § A terminal
@@ -750,7 +759,10 @@ First-screen work is bounded by the node and byte limits in `docs/storage.md` §
 node projection. Collapsed execution mounts no descendants. Each parent caches a bounded
 window, and only the currently expanded visible list enters TanStack Virtual. Its end-anchor
 mode preserves reading position across prepend and resize, and follows appends only near
-the bottom. Tests measure entity identity, subscriber notifications, body requests and
+the bottom. A structural update captures the visible node before notifying React; resize
+corrections preserve that node even when controls leave space above it. The next user
+gesture releases that anchor. Native scroll anchoring is disabled so the browser cannot
+apply a second adjustment. Tests measure entity identity, subscriber notifications, body requests and
 mounted rows separately from HTTP latency.
 
 ### Document previews
@@ -1199,10 +1211,6 @@ their text nodes, which is why it is not a small change.
 
 **Collaboration** — sharing, comments, and session-to-session diff are out of scope; the
 Milestone 3 account and grant model provides the boundary for a future sharing surface.
-
-**Virtualization** stays deferred, with measurement behind it rather than as an
-aspiration (§ Render cost). The evidence that would reverse it is scroll jank while *idle*
-on a large session, which indicates DOM size rather than render count.
 
 ## Decision Log
 

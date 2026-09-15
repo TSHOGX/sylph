@@ -198,6 +198,28 @@ archive identity, late parent declarations, cycles, corrected failures, paginati
 transaction lock windows, and fault-injected query scans. Measurements belong under
 `docs/measurements/`, and distinguish bounded node reads from full-turn exports.
 
+The follow-up workload measurements exposed quadratic stream-metadata lookups during
+consolidation. The fold now indexes those facts once and runs on a blocking worker under
+the existing consolidation gate. No producer sharding or new scheduling policy was needed.
+Authenticated file reads remain responsive while native retention, archive publication,
+search, pruning, CAS deletion, and continuous discovery overlap in the disposable harness.
+Raw lexical bytes, archived block counts, search removal, and new identity discovery are
+asserted after the run; GC deferrals are measured separately from successful deletion.
+
+Timeline cache ownership now preserves visible summaries when evicting closed child
+windows and releases unreferenced moved nodes. Older windows cannot acquire a disconnected
+live tail, and callers can explicitly return to the latest window. Initial-read retries
+and cancellation/restart preserve the initial-page boundary. Browser regressions cover
+stable reading anchors during pagination, including height corrections in the gap below
+timeline controls. These defects were reproduced before their fixes; the activity-index
+and lazy-body regressions also fail with the corresponding storage fault restored.
+The baseline, bounded-work, and browser measurements are in
+`docs/measurements/performance/storage-baseline.json`,
+`docs/measurements/performance/storage-bounded.json`, and
+`docs/measurements/performance/file-tree-bounded.json`. Observed regression failures and
+the corresponding restored behavior are recorded in
+`docs/measurements/performance/regression-evidence.json`.
+
 Still open: producer sharding and byte-weighted scheduling have not been introduced;
 full body requests still read whole retained bodies rather than independently compressed
 ranges. Native checkpointing and separate current sync-state tables remain measurement-led

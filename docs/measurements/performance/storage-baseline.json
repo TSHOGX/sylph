@@ -1,0 +1,4149 @@
+{
+  "label": "95a7f96 before fold optimization; mixed fixture before discovery and external GC strengthening",
+  "collectedAt": "2026-09-15T02:05:26.802718+00:00",
+  "profile": "Rust test profile, unoptimized with debuginfo",
+  "commands": [
+    "cargo test -p sylph-server --test timeline_nodes -- --nocapture",
+    "cargo test -p sylph-server --test storage folding_ten_times_more -- --nocapture"
+  ],
+  "measurements": {
+    "folds": [
+      {
+        "medianUs": 29795,
+        "phase": "completed",
+        "streams": 2000
+      },
+      {
+        "medianUs": 2564067,
+        "phase": "completed",
+        "streams": 20000
+      }
+    ],
+    "mixedWorkloads": [
+      {
+        "archive": {
+          "blocks": 8000,
+          "endUs": 10544031,
+          "startUs": 324
+        },
+        "cleanup": {
+          "endUs": 7008266,
+          "pruned": 4000,
+          "startUs": 347,
+          "swept": 0
+        },
+        "files": [
+          {
+            "allWritersActive": true,
+            "durationUs": 601113,
+            "startUs": 29
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1445,
+            "startUs": 611709
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1180,
+            "startUs": 623713
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1227,
+            "startUs": 635723
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1251,
+            "startUs": 647773
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1233,
+            "startUs": 659740
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1118,
+            "startUs": 671710
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1357,
+            "startUs": 683714
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1729,
+            "startUs": 696580
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1056,
+            "startUs": 708712
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1346,
+            "startUs": 720749
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1207,
+            "startUs": 732767
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1155,
+            "startUs": 744761
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1919,
+            "startUs": 757097
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1397,
+            "startUs": 769726
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1375,
+            "startUs": 781746
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1298,
+            "startUs": 793733
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1293,
+            "startUs": 805733
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1298,
+            "startUs": 817728
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1230,
+            "startUs": 829893
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1183,
+            "startUs": 841740
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1258,
+            "startUs": 853709
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1172,
+            "startUs": 865740
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1119,
+            "startUs": 877727
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1230,
+            "startUs": 889717
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1219,
+            "startUs": 901707
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1494,
+            "startUs": 913730
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1361,
+            "startUs": 925750
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1393,
+            "startUs": 937709
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1300,
+            "startUs": 949734
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1155,
+            "startUs": 961737
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1239,
+            "startUs": 973705
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1430,
+            "startUs": 985711
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 2096,
+            "startUs": 997712
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1340,
+            "startUs": 1010725
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1332,
+            "startUs": 1022735
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1381,
+            "startUs": 1034716
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1332,
+            "startUs": 1046717
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1110,
+            "startUs": 1058749
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1323,
+            "startUs": 1070704
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1189,
+            "startUs": 1082732
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 2085,
+            "startUs": 1094723
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1293,
+            "startUs": 1107749
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1403,
+            "startUs": 1119733
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1293,
+            "startUs": 1131722
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1391,
+            "startUs": 1143708
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1202,
+            "startUs": 1155709
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 923,
+            "startUs": 1167704
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1187,
+            "startUs": 1178759
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1039,
+            "startUs": 1190732
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 992,
+            "startUs": 1202742
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1328,
+            "startUs": 1214738
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1074,
+            "startUs": 1226745
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1090,
+            "startUs": 1238713
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1707,
+            "startUs": 1250716
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1379,
+            "startUs": 1262756
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1266,
+            "startUs": 1274717
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1452,
+            "startUs": 1286709
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1277,
+            "startUs": 1298712
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1464,
+            "startUs": 1310710
+          },
+          {
+            "allWritersActive": true,
+            "durationUs": 1290,
+            "startUs": 1322773
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1349,
+            "startUs": 1335241
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1105,
+            "startUs": 1347251
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1432,
+            "startUs": 1358748
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1609,
+            "startUs": 1370932
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1527,
+            "startUs": 1383099
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1326,
+            "startUs": 1394962
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1411,
+            "startUs": 1407074
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1401,
+            "startUs": 1418740
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1711,
+            "startUs": 1430796
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1453,
+            "startUs": 1443175
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1613,
+            "startUs": 1454731
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1360,
+            "startUs": 1467109
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1290,
+            "startUs": 1479221
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1271,
+            "startUs": 1491268
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1493,
+            "startUs": 1502784
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1417,
+            "startUs": 1515162
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1512,
+            "startUs": 1526983
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1255,
+            "startUs": 1539182
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1470,
+            "startUs": 1551231
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1378,
+            "startUs": 1563749
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1351,
+            "startUs": 1575719
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1576,
+            "startUs": 1587883
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1456,
+            "startUs": 1600182
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1439,
+            "startUs": 1612304
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1351,
+            "startUs": 1625101
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1416,
+            "startUs": 1636765
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1410,
+            "startUs": 1648932
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1533,
+            "startUs": 1660986
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1482,
+            "startUs": 1672716
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1143,
+            "startUs": 1684942
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1195,
+            "startUs": 1696718
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1314,
+            "startUs": 1708934
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1433,
+            "startUs": 1720977
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1353,
+            "startUs": 1732947
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1651,
+            "startUs": 1744761
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1321,
+            "startUs": 1756958
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1128,
+            "startUs": 1769197
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1497,
+            "startUs": 1781244
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1250,
+            "startUs": 1793888
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1349,
+            "startUs": 1805739
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1416,
+            "startUs": 1818216
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1411,
+            "startUs": 1829749
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1200,
+            "startUs": 1841850
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1140,
+            "startUs": 1853722
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1401,
+            "startUs": 1865738
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1288,
+            "startUs": 1878097
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1278,
+            "startUs": 1890390
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1253,
+            "startUs": 1901817
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1569,
+            "startUs": 1913810
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1185,
+            "startUs": 1925926
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 941,
+            "startUs": 1938046
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1474,
+            "startUs": 1949910
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1448,
+            "startUs": 1962315
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1375,
+            "startUs": 1974802
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1257,
+            "startUs": 1986877
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1339,
+            "startUs": 1999221
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1179,
+            "startUs": 2011069
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1365,
+            "startUs": 2022743
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1066,
+            "startUs": 2035098
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1713,
+            "startUs": 2046778
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1350,
+            "startUs": 2058846
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1502,
+            "startUs": 2070750
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1309,
+            "startUs": 2083163
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1215,
+            "startUs": 2094858
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1288,
+            "startUs": 2107111
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1506,
+            "startUs": 2118828
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1696,
+            "startUs": 2130748
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1427,
+            "startUs": 2143089
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1474,
+            "startUs": 2155051
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1411,
+            "startUs": 2166989
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1651,
+            "startUs": 2178844
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1162,
+            "startUs": 2190801
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1571,
+            "startUs": 2202725
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1399,
+            "startUs": 2214836
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1390,
+            "startUs": 2227072
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1233,
+            "startUs": 2239095
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1440,
+            "startUs": 2251071
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1183,
+            "startUs": 2262986
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1466,
+            "startUs": 2275008
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 2222,
+            "startUs": 2286757
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1394,
+            "startUs": 2300176
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1264,
+            "startUs": 2311739
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1365,
+            "startUs": 2323741
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1128,
+            "startUs": 2336052
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1590,
+            "startUs": 2348020
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1148,
+            "startUs": 2359707
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1470,
+            "startUs": 2371855
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1418,
+            "startUs": 2384009
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1233,
+            "startUs": 2395932
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1244,
+            "startUs": 2407735
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1544,
+            "startUs": 2419736
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1443,
+            "startUs": 2431775
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1481,
+            "startUs": 2444172
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1591,
+            "startUs": 2455762
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1451,
+            "startUs": 2468087
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1143,
+            "startUs": 2479712
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1206,
+            "startUs": 2492022
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1463,
+            "startUs": 2503883
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1421,
+            "startUs": 2516249
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1492,
+            "startUs": 2528135
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1425,
+            "startUs": 2539773
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1335,
+            "startUs": 2552261
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1400,
+            "startUs": 2563713
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1416,
+            "startUs": 2575724
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1401,
+            "startUs": 2588175
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1438,
+            "startUs": 2600018
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1339,
+            "startUs": 2612133
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1437,
+            "startUs": 2623915
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1455,
+            "startUs": 2635875
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1225,
+            "startUs": 2647794
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1362,
+            "startUs": 2660068
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1581,
+            "startUs": 2672032
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1372,
+            "startUs": 2683904
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1377,
+            "startUs": 2695767
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1410,
+            "startUs": 2708272
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1358,
+            "startUs": 2719756
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1403,
+            "startUs": 2732173
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1341,
+            "startUs": 2743727
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1596,
+            "startUs": 2755866
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1462,
+            "startUs": 2768015
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1572,
+            "startUs": 2779944
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1392,
+            "startUs": 2792039
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 25827,
+            "startUs": 2811601
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 9691,
+            "startUs": 2848401
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 19337,
+            "startUs": 2869992
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 4449,
+            "startUs": 2900297
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1592,
+            "startUs": 2916168
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 9624,
+            "startUs": 2928786
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1546,
+            "startUs": 2948739
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1645,
+            "startUs": 2961165
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1393,
+            "startUs": 2974301
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1468,
+            "startUs": 2986132
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 2004,
+            "startUs": 2998749
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1505,
+            "startUs": 3011745
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1189,
+            "startUs": 3023778
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1385,
+            "startUs": 3035998
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1499,
+            "startUs": 3047814
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1081,
+            "startUs": 3059710
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1354,
+            "startUs": 3071715
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1235,
+            "startUs": 3083752
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1243,
+            "startUs": 3095794
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1229,
+            "startUs": 3107736
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1294,
+            "startUs": 3120278
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1485,
+            "startUs": 3131762
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1372,
+            "startUs": 3144161
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1257,
+            "startUs": 3156013
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1356,
+            "startUs": 3168161
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1056,
+            "startUs": 3179732
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1350,
+            "startUs": 3191796
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 2128,
+            "startUs": 3204211
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1516,
+            "startUs": 3216774
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1288,
+            "startUs": 3228918
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1400,
+            "startUs": 3240900
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1164,
+            "startUs": 3253045
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1499,
+            "startUs": 3264960
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1109,
+            "startUs": 3277227
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1096,
+            "startUs": 3288723
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1511,
+            "startUs": 3300851
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1213,
+            "startUs": 3313096
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1335,
+            "startUs": 3324729
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1372,
+            "startUs": 3336969
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1109,
+            "startUs": 3349075
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1401,
+            "startUs": 3361086
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1129,
+            "startUs": 3372748
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1083,
+            "startUs": 3384778
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1231,
+            "startUs": 3396783
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1144,
+            "startUs": 3408998
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1352,
+            "startUs": 3420731
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1131,
+            "startUs": 3432821
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1401,
+            "startUs": 3445202
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1341,
+            "startUs": 3456749
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1068,
+            "startUs": 3469218
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1270,
+            "startUs": 3480990
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1082,
+            "startUs": 3493041
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1150,
+            "startUs": 3505164
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1590,
+            "startUs": 3516883
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1397,
+            "startUs": 3529221
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1408,
+            "startUs": 3540900
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1487,
+            "startUs": 3553088
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1382,
+            "startUs": 3564855
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1410,
+            "startUs": 3576933
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1372,
+            "startUs": 3589271
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 991,
+            "startUs": 3600759
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 973,
+            "startUs": 3613157
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1445,
+            "startUs": 3625012
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1518,
+            "startUs": 3637230
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1213,
+            "startUs": 3650046
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1417,
+            "startUs": 3661961
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1447,
+            "startUs": 3673942
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1542,
+            "startUs": 3685729
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1619,
+            "startUs": 3698052
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1185,
+            "startUs": 3709830
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1159,
+            "startUs": 3721737
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1095,
+            "startUs": 3733765
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1147,
+            "startUs": 3746198
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1123,
+            "startUs": 3757948
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1140,
+            "startUs": 3770216
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1113,
+            "startUs": 3782290
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1342,
+            "startUs": 3794142
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1546,
+            "startUs": 3806201
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1119,
+            "startUs": 3819108
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1461,
+            "startUs": 3830828
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1489,
+            "startUs": 3843031
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1163,
+            "startUs": 3854860
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 993,
+            "startUs": 3866737
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1162,
+            "startUs": 3878756
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1298,
+            "startUs": 3891152
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1403,
+            "startUs": 3902726
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1405,
+            "startUs": 3914790
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1382,
+            "startUs": 3926850
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1386,
+            "startUs": 3938981
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1108,
+            "startUs": 3950760
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1245,
+            "startUs": 3962947
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1430,
+            "startUs": 3975144
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1500,
+            "startUs": 3987110
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1397,
+            "startUs": 3998749
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1482,
+            "startUs": 4011286
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1372,
+            "startUs": 4023904
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1427,
+            "startUs": 4036344
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1427,
+            "startUs": 4048761
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1270,
+            "startUs": 4061278
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1520,
+            "startUs": 4073314
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1371,
+            "startUs": 4086189
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1285,
+            "startUs": 4098299
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1313,
+            "startUs": 4109797
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1367,
+            "startUs": 4122039
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1381,
+            "startUs": 4134253
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1571,
+            "startUs": 4145814
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1451,
+            "startUs": 4157985
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1198,
+            "startUs": 4169748
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1143,
+            "startUs": 4182184
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1480,
+            "startUs": 4193724
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 2331,
+            "startUs": 4206010
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1278,
+            "startUs": 4219265
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1431,
+            "startUs": 4231247
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1538,
+            "startUs": 4243232
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1246,
+            "startUs": 4255758
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1399,
+            "startUs": 4267730
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1005,
+            "startUs": 4279912
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1276,
+            "startUs": 4292044
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 2539,
+            "startUs": 4304201
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1444,
+            "startUs": 4317807
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1507,
+            "startUs": 4329922
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1270,
+            "startUs": 4342204
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1347,
+            "startUs": 4354078
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1326,
+            "startUs": 4365918
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1308,
+            "startUs": 4377968
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1338,
+            "startUs": 4389746
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1307,
+            "startUs": 4401726
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1608,
+            "startUs": 4413786
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1363,
+            "startUs": 4426207
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1280,
+            "startUs": 4437815
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1310,
+            "startUs": 4449915
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1316,
+            "startUs": 4461813
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1357,
+            "startUs": 4474289
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1494,
+            "startUs": 4486221
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1307,
+            "startUs": 4498922
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1110,
+            "startUs": 4510873
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1263,
+            "startUs": 4523253
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1267,
+            "startUs": 4534722
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1210,
+            "startUs": 4546732
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1004,
+            "startUs": 4558745
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1311,
+            "startUs": 4570991
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1313,
+            "startUs": 4582745
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1349,
+            "startUs": 4594933
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 2345,
+            "startUs": 4607138
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1370,
+            "startUs": 4619727
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1374,
+            "startUs": 4632199
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1453,
+            "startUs": 4644036
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1358,
+            "startUs": 4655947
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1390,
+            "startUs": 4667777
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1303,
+            "startUs": 4680247
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 968,
+            "startUs": 4691724
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1335,
+            "startUs": 4702764
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1384,
+            "startUs": 4714863
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1337,
+            "startUs": 4726824
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1303,
+            "startUs": 4739156
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1213,
+            "startUs": 4750730
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 769,
+            "startUs": 4762988
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1445,
+            "startUs": 4774889
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1241,
+            "startUs": 4786730
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1435,
+            "startUs": 4799085
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1129,
+            "startUs": 4810796
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1115,
+            "startUs": 4822706
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 993,
+            "startUs": 4835246
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1242,
+            "startUs": 4847062
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1091,
+            "startUs": 4859139
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1559,
+            "startUs": 4870782
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1288,
+            "startUs": 4882724
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1380,
+            "startUs": 4894727
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1526,
+            "startUs": 4906746
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1386,
+            "startUs": 4918755
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1361,
+            "startUs": 4931088
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1467,
+            "startUs": 4943132
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1297,
+            "startUs": 4954761
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1225,
+            "startUs": 4967007
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1417,
+            "startUs": 4979076
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1470,
+            "startUs": 4991111
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1269,
+            "startUs": 5002991
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1323,
+            "startUs": 5015082
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1426,
+            "startUs": 5026967
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1426,
+            "startUs": 5039154
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1230,
+            "startUs": 5051138
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1660,
+            "startUs": 5063147
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1306,
+            "startUs": 5075833
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1531,
+            "startUs": 5087861
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1138,
+            "startUs": 5099726
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1423,
+            "startUs": 5112090
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1332,
+            "startUs": 5123858
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1574,
+            "startUs": 5135832
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1278,
+            "startUs": 5148299
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1262,
+            "startUs": 5159901
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1069,
+            "startUs": 5171758
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1376,
+            "startUs": 5183739
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1385,
+            "startUs": 5195751
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1199,
+            "startUs": 5208929
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1210,
+            "startUs": 5220741
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1400,
+            "startUs": 5232850
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1370,
+            "startUs": 5244724
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1273,
+            "startUs": 5256731
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1448,
+            "startUs": 5268725
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1261,
+            "startUs": 5280773
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1380,
+            "startUs": 5292724
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1489,
+            "startUs": 5305023
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1260,
+            "startUs": 5317161
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1313,
+            "startUs": 5328736
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1357,
+            "startUs": 5340784
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1214,
+            "startUs": 5352898
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1490,
+            "startUs": 5364924
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1384,
+            "startUs": 5377035
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1394,
+            "startUs": 5389238
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1244,
+            "startUs": 5400715
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1329,
+            "startUs": 5412787
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1508,
+            "startUs": 5425242
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1534,
+            "startUs": 5438037
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1626,
+            "startUs": 5449822
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1509,
+            "startUs": 5462135
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1408,
+            "startUs": 5474192
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1017,
+            "startUs": 5485713
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1413,
+            "startUs": 5497735
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1318,
+            "startUs": 5510204
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1358,
+            "startUs": 5521919
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1180,
+            "startUs": 5534066
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1395,
+            "startUs": 5546022
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1173,
+            "startUs": 5557966
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1339,
+            "startUs": 5570175
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1442,
+            "startUs": 5581753
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1406,
+            "startUs": 5593946
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1430,
+            "startUs": 5606129
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1409,
+            "startUs": 5618011
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1651,
+            "startUs": 5630007
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1403,
+            "startUs": 5641725
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1501,
+            "startUs": 5653937
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1282,
+            "startUs": 5666243
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1366,
+            "startUs": 5677864
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1364,
+            "startUs": 5690195
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1044,
+            "startUs": 5702259
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1537,
+            "startUs": 5714099
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1503,
+            "startUs": 5725960
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1525,
+            "startUs": 5737734
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1436,
+            "startUs": 5750060
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1489,
+            "startUs": 5761753
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1362,
+            "startUs": 5774047
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1496,
+            "startUs": 5786258
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1419,
+            "startUs": 5798751
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1339,
+            "startUs": 5810741
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1369,
+            "startUs": 5823616
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1536,
+            "startUs": 5836103
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1363,
+            "startUs": 5847949
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1411,
+            "startUs": 5860019
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 972,
+            "startUs": 5871748
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1439,
+            "startUs": 5883807
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1790,
+            "startUs": 5895755
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1347,
+            "startUs": 5907874
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1464,
+            "startUs": 5919799
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1225,
+            "startUs": 5931895
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1418,
+            "startUs": 5944009
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1325,
+            "startUs": 5955751
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1402,
+            "startUs": 5968130
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1086,
+            "startUs": 5979894
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1316,
+            "startUs": 5991730
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1489,
+            "startUs": 6003851
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1304,
+            "startUs": 6015729
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1308,
+            "startUs": 6028230
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1345,
+            "startUs": 6039932
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1420,
+            "startUs": 6052009
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1326,
+            "startUs": 6064239
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1326,
+            "startUs": 6075785
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1441,
+            "startUs": 6087728
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1203,
+            "startUs": 6099734
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1330,
+            "startUs": 6111736
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1110,
+            "startUs": 6123767
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1155,
+            "startUs": 6136081
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1026,
+            "startUs": 6148275
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1111,
+            "startUs": 6160153
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1412,
+            "startUs": 6171739
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1513,
+            "startUs": 6184082
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1549,
+            "startUs": 6195720
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1358,
+            "startUs": 6207957
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1411,
+            "startUs": 6220158
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1420,
+            "startUs": 6231843
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1447,
+            "startUs": 6244064
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1359,
+            "startUs": 6255995
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1392,
+            "startUs": 6268071
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 954,
+            "startUs": 6279728
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1170,
+            "startUs": 6291131
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1392,
+            "startUs": 6303198
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1434,
+            "startUs": 6315029
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1423,
+            "startUs": 6327227
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1196,
+            "startUs": 6338745
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1440,
+            "startUs": 6350769
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1287,
+            "startUs": 6362932
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1441,
+            "startUs": 6375081
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1442,
+            "startUs": 6387088
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1512,
+            "startUs": 6399219
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1388,
+            "startUs": 6411748
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1494,
+            "startUs": 6424079
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1227,
+            "startUs": 6435817
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1509,
+            "startUs": 6447822
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1392,
+            "startUs": 6460085
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1191,
+            "startUs": 6471733
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1324,
+            "startUs": 6483771
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1430,
+            "startUs": 6495962
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1237,
+            "startUs": 6507913
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1249,
+            "startUs": 6520202
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1497,
+            "startUs": 6531960
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 942,
+            "startUs": 6544126
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1376,
+            "startUs": 6555771
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1262,
+            "startUs": 6567835
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1099,
+            "startUs": 6580211
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1085,
+            "startUs": 6592145
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1154,
+            "startUs": 6603725
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1131,
+            "startUs": 6615826
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 2261,
+            "startUs": 6627860
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1374,
+            "startUs": 6641158
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1426,
+            "startUs": 6653237
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1434,
+            "startUs": 6664873
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1321,
+            "startUs": 6677166
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1282,
+            "startUs": 6688727
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1525,
+            "startUs": 6700838
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1198,
+            "startUs": 6712833
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1425,
+            "startUs": 6724875
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1578,
+            "startUs": 6737275
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1495,
+            "startUs": 6750144
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1371,
+            "startUs": 6761779
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1346,
+            "startUs": 6773810
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1215,
+            "startUs": 6786110
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1599,
+            "startUs": 6797855
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1379,
+            "startUs": 6810060
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1496,
+            "startUs": 6821762
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1160,
+            "startUs": 6833953
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1516,
+            "startUs": 6845950
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1537,
+            "startUs": 6858222
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1370,
+            "startUs": 6870740
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1211,
+            "startUs": 6883008
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1430,
+            "startUs": 6894729
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1203,
+            "startUs": 6907221
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1155,
+            "startUs": 6919233
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1435,
+            "startUs": 6930713
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1254,
+            "startUs": 6943186
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 938,
+            "startUs": 6954957
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1103,
+            "startUs": 6966717
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1439,
+            "startUs": 6978755
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1388,
+            "startUs": 6990844
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1343,
+            "startUs": 7002744
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1421,
+            "startUs": 7015145
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1411,
+            "startUs": 7027064
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1584,
+            "startUs": 7038855
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1428,
+            "startUs": 7050743
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 2496,
+            "startUs": 7063138
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1342,
+            "startUs": 7076176
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1345,
+            "startUs": 7087753
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1461,
+            "startUs": 7099834
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1306,
+            "startUs": 7112067
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1327,
+            "startUs": 7123982
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1447,
+            "startUs": 7136079
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1357,
+            "startUs": 7148150
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1310,
+            "startUs": 7159728
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1028,
+            "startUs": 7171710
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1442,
+            "startUs": 7184116
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1569,
+            "startUs": 7195737
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1430,
+            "startUs": 7207748
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1212,
+            "startUs": 7219832
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1169,
+            "startUs": 7231782
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1367,
+            "startUs": 7243729
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1551,
+            "startUs": 7256295
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1356,
+            "startUs": 7269227
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1433,
+            "startUs": 7280754
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1206,
+            "startUs": 7292852
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1369,
+            "startUs": 7304786
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1512,
+            "startUs": 7317159
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1254,
+            "startUs": 7328814
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1094,
+            "startUs": 7340938
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1378,
+            "startUs": 7352726
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1402,
+            "startUs": 7364714
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1318,
+            "startUs": 7376735
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 2217,
+            "startUs": 7388826
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1430,
+            "startUs": 7402266
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1572,
+            "startUs": 7415116
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1410,
+            "startUs": 7426758
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1413,
+            "startUs": 7438868
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1413,
+            "startUs": 7450839
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1384,
+            "startUs": 7462732
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1304,
+            "startUs": 7475075
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1512,
+            "startUs": 7487005
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1139,
+            "startUs": 7498728
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1378,
+            "startUs": 7511103
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1406,
+            "startUs": 7523010
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1376,
+            "startUs": 7534743
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1173,
+            "startUs": 7546756
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1308,
+            "startUs": 7559269
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1141,
+            "startUs": 7571210
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1427,
+            "startUs": 7583000
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1481,
+            "startUs": 7595004
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1096,
+            "startUs": 7606927
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1533,
+            "startUs": 7619273
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1289,
+            "startUs": 7632259
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1271,
+            "startUs": 7644192
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1127,
+            "startUs": 7655881
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1052,
+            "startUs": 7668175
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1389,
+            "startUs": 7679935
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1380,
+            "startUs": 7691778
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1438,
+            "startUs": 7704057
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1571,
+            "startUs": 7716156
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1466,
+            "startUs": 7729178
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1080,
+            "startUs": 7740781
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1320,
+            "startUs": 7752741
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1304,
+            "startUs": 7765454
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1448,
+            "startUs": 7778068
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1258,
+            "startUs": 7789810
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1380,
+            "startUs": 7802002
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1454,
+            "startUs": 7814316
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1507,
+            "startUs": 7827222
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1463,
+            "startUs": 7839743
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1330,
+            "startUs": 7851753
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1586,
+            "startUs": 7863813
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 2329,
+            "startUs": 7875870
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1841,
+            "startUs": 7888820
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1361,
+            "startUs": 7900774
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1369,
+            "startUs": 7912928
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1197,
+            "startUs": 7925071
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1011,
+            "startUs": 7936773
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1139,
+            "startUs": 7948735
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1274,
+            "startUs": 7961022
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1360,
+            "startUs": 7973164
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1400,
+            "startUs": 7985151
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1266,
+            "startUs": 7997265
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1259,
+            "startUs": 8009125
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1129,
+            "startUs": 8020708
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1277,
+            "startUs": 8032875
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1281,
+            "startUs": 8044745
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1393,
+            "startUs": 8057173
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1314,
+            "startUs": 8068946
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1491,
+            "startUs": 8080963
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1337,
+            "startUs": 8093228
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1609,
+            "startUs": 8105049
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1332,
+            "startUs": 8116959
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1424,
+            "startUs": 8129305
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1236,
+            "startUs": 8141757
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1275,
+            "startUs": 8153764
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1377,
+            "startUs": 8165770
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1114,
+            "startUs": 8177735
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1404,
+            "startUs": 8190219
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1418,
+            "startUs": 8201725
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1362,
+            "startUs": 8213822
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1408,
+            "startUs": 8225878
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1569,
+            "startUs": 8237926
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1401,
+            "startUs": 8250210
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1432,
+            "startUs": 8261996
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1291,
+            "startUs": 8273720
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1276,
+            "startUs": 8285748
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1415,
+            "startUs": 8297821
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1447,
+            "startUs": 8309768
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1651,
+            "startUs": 8322033
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1262,
+            "startUs": 8333931
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1013,
+            "startUs": 8346116
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1361,
+            "startUs": 8357717
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1322,
+            "startUs": 8370257
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1371,
+            "startUs": 8381888
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1420,
+            "startUs": 8394167
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1479,
+            "startUs": 8405742
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1118,
+            "startUs": 8417805
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1188,
+            "startUs": 8429910
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1373,
+            "startUs": 8441720
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1339,
+            "startUs": 8453759
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1176,
+            "startUs": 8465919
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1283,
+            "startUs": 8478085
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1357,
+            "startUs": 8490112
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1143,
+            "startUs": 8501951
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1455,
+            "startUs": 8514162
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 2196,
+            "startUs": 8526401
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1488,
+            "startUs": 8539271
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1514,
+            "startUs": 8552224
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1303,
+            "startUs": 8564722
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1429,
+            "startUs": 8576738
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1371,
+            "startUs": 8588809
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1012,
+            "startUs": 8601063
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1172,
+            "startUs": 8612766
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1398,
+            "startUs": 8624713
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 973,
+            "startUs": 8637174
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1327,
+            "startUs": 8649140
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1434,
+            "startUs": 8660733
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1213,
+            "startUs": 8672836
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1976,
+            "startUs": 8684815
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1458,
+            "startUs": 8698209
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1150,
+            "startUs": 8710119
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1474,
+            "startUs": 8721880
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 951,
+            "startUs": 8734185
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1159,
+            "startUs": 8746215
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1352,
+            "startUs": 8757766
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1331,
+            "startUs": 8769765
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1446,
+            "startUs": 8781724
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 2213,
+            "startUs": 8793768
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1465,
+            "startUs": 8807213
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1159,
+            "startUs": 8819128
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1386,
+            "startUs": 8830973
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1374,
+            "startUs": 8842722
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1498,
+            "startUs": 8855228
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1173,
+            "startUs": 8868063
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1407,
+            "startUs": 8879903
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1263,
+            "startUs": 8891807
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1494,
+            "startUs": 8903908
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1026,
+            "startUs": 8915714
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1376,
+            "startUs": 8928041
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1243,
+            "startUs": 8939796
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1124,
+            "startUs": 8952620
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1428,
+            "startUs": 8964864
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1064,
+            "startUs": 8977107
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1500,
+            "startUs": 8988833
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1149,
+            "startUs": 9000812
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1380,
+            "startUs": 9012712
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1296,
+            "startUs": 9024731
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1280,
+            "startUs": 9036901
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1383,
+            "startUs": 9049127
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 952,
+            "startUs": 9060722
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1074,
+            "startUs": 9072154
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1055,
+            "startUs": 9083980
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1366,
+            "startUs": 9095978
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1040,
+            "startUs": 9108018
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1495,
+            "startUs": 9120277
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1366,
+            "startUs": 9133116
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1392,
+            "startUs": 9144954
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1391,
+            "startUs": 9157074
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1395,
+            "startUs": 9168791
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1503,
+            "startUs": 9180888
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1232,
+            "startUs": 9193042
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1195,
+            "startUs": 9205033
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1306,
+            "startUs": 9216951
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1213,
+            "startUs": 9228719
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1386,
+            "startUs": 9241093
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1457,
+            "startUs": 9253132
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1411,
+            "startUs": 9264816
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1254,
+            "startUs": 9276709
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1487,
+            "startUs": 9288861
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1099,
+            "startUs": 9301187
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1690,
+            "startUs": 9313083
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 995,
+            "startUs": 9326038
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1165,
+            "startUs": 9337720
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1453,
+            "startUs": 9350005
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1200,
+            "startUs": 9362029
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1057,
+            "startUs": 9375452
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1092,
+            "startUs": 9387162
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1340,
+            "startUs": 9399235
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1098,
+            "startUs": 9410742
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1097,
+            "startUs": 9423171
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 999,
+            "startUs": 9434750
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1024,
+            "startUs": 9447114
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 960,
+            "startUs": 9459271
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1594,
+            "startUs": 9471118
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1365,
+            "startUs": 9484627
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1202,
+            "startUs": 9496713
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1095,
+            "startUs": 9508791
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1569,
+            "startUs": 9520805
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1353,
+            "startUs": 9533144
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1486,
+            "startUs": 9544723
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1288,
+            "startUs": 9557038
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1158,
+            "startUs": 9568803
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1236,
+            "startUs": 9580939
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1212,
+            "startUs": 9592764
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1460,
+            "startUs": 9605050
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1027,
+            "startUs": 9617118
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1095,
+            "startUs": 9628813
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1340,
+            "startUs": 9641014
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1450,
+            "startUs": 9652923
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1282,
+            "startUs": 9664726
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1663,
+            "startUs": 9676919
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1499,
+            "startUs": 9688752
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1316,
+            "startUs": 9700866
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1545,
+            "startUs": 9712972
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1369,
+            "startUs": 9724795
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1525,
+            "startUs": 9736913
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1266,
+            "startUs": 9748748
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1426,
+            "startUs": 9760779
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1330,
+            "startUs": 9772978
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1408,
+            "startUs": 9784729
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1326,
+            "startUs": 9796742
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1180,
+            "startUs": 9809135
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1510,
+            "startUs": 9820941
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1481,
+            "startUs": 9833250
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1376,
+            "startUs": 9845787
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1175,
+            "startUs": 9858536
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1176,
+            "startUs": 9871068
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1501,
+            "startUs": 9883027
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1341,
+            "startUs": 9895010
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1435,
+            "startUs": 9906852
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1193,
+            "startUs": 9919167
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1174,
+            "startUs": 9931198
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1495,
+            "startUs": 9943041
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1564,
+            "startUs": 9955242
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1443,
+            "startUs": 9968059
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1670,
+            "startUs": 9980127
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1422,
+            "startUs": 9993239
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1304,
+            "startUs": 10005163
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1378,
+            "startUs": 10016723
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 994,
+            "startUs": 10028725
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1359,
+            "startUs": 10040723
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1366,
+            "startUs": 10052963
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1416,
+            "startUs": 10065087
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1367,
+            "startUs": 10077935
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1424,
+            "startUs": 10089915
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1388,
+            "startUs": 10101808
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1494,
+            "startUs": 10114091
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1459,
+            "startUs": 10125941
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1418,
+            "startUs": 10137710
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1368,
+            "startUs": 10149878
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1476,
+            "startUs": 10161979
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1337,
+            "startUs": 10173757
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1301,
+            "startUs": 10186283
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1247,
+            "startUs": 10197729
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1318,
+            "startUs": 10209913
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1514,
+            "startUs": 10221907
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1448,
+            "startUs": 10233972
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1562,
+            "startUs": 10246372
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1449,
+            "startUs": 10259015
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1554,
+            "startUs": 10270725
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1410,
+            "startUs": 10283099
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1473,
+            "startUs": 10294722
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1462,
+            "startUs": 10306897
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1255,
+            "startUs": 10318929
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1260,
+            "startUs": 10330726
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1113,
+            "startUs": 10342731
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1320,
+            "startUs": 10356243
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1381,
+            "startUs": 10369631
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1238,
+            "startUs": 10382850
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1422,
+            "startUs": 10395655
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1393,
+            "startUs": 10409156
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1306,
+            "startUs": 10422620
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1403,
+            "startUs": 10435023
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1313,
+            "startUs": 10448455
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1475,
+            "startUs": 10461856
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1359,
+            "startUs": 10475429
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1261,
+            "startUs": 10488822
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1070,
+            "startUs": 10501290
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1782,
+            "startUs": 10513568
+          },
+          {
+            "allWritersActive": false,
+            "durationUs": 1625,
+            "startUs": 10527141
+          }
+        ],
+        "native": {
+          "endUs": 1330247,
+          "records": 2000,
+          "startUs": 450
+        },
+        "searches": 119,
+        "transport": "in-process authenticated router; file operations cross the envagent bridge",
+        "fileSummary": {
+          "samples": 816,
+          "allWritersActiveSamples": 61,
+          "medianUs": 1366,
+          "p95Us": 1625,
+          "maximumUs": 601113
+        }
+      }
+    ]
+  },
+  "limits": [
+    "Synthetic records in disposable databases; no vendor files or model turns.",
+    "Authenticated router and envagent bridge timings exclude browser layout and HTTP sockets.",
+    "Wall-clock values depend on concurrent load; VM steps measure query and projection work.",
+    "GC may defer while a publisher owns the shared publication gate; sweepPasses reports retries.",
+    "coldUs names the first request after seeding, not an OS cold-cache measurement."
+  ],
+  "host": {
+    "macOS": "26.2",
+    "machine": "MacBookPro18,3",
+    "cpu": "Apple M1 Pro",
+    "memoryBytes": 17179869184,
+    "rust": "rustc 1.94.1 (e408947bf 2026-03-25)",
+    "node": "v24.13.0"
+  }
+}

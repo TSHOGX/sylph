@@ -42,6 +42,7 @@ interface Branch {
   open: boolean;
   initialized: boolean;
   earlierRequested?: boolean;
+  detached?: boolean;
 }
 export interface VisibleNode {
   id: string;
@@ -49,6 +50,13 @@ export interface VisibleNode {
 }
 const MAX_BRANCHES = 16;
 const MAX_CHILDREN = 160;
+
+function compareOrder(a: ExecutionNode, b: ExecutionNode) {
+  return (
+    a.ordinal - b.ordinal || a.orderTie - b.orderTie ||
+    (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
+  );
+}
 
 /** Entity updates notify only that row. The visible list changes only on insertion
  * or disclosure, not on token updates. The cache and subscriptions are bounded. */
@@ -122,6 +130,7 @@ export class ExecutionStore {
           branch.ids.splice(index, 1);
           structural = true;
         }
+        this.evict(node.id);
         this.emit(node.id);
         continue;
       }
@@ -148,13 +157,13 @@ export class ExecutionStore {
       if (reordered) branch.ids.splice(branch.ids.indexOf(node.id), 1);
       if (!existing || reordered) {
         const first = this.nodes.get(branch.ids[0]);
+        const last = this.nodes.get(branch.ids[branch.ids.length - 1]);
         // An update to unloaded older history is not permission to load that window.
         if (
           !existing &&
           changes &&
-          branch.cursor &&
-          first &&
-          node.ordinal < first.ordinal
+          ((branch.cursor && first && compareOrder(node, first) < 0) ||
+            (branch.detached && (!last || compareOrder(node, last) > 0)))
         )
           continue;
         this.nodes.set(node.id, node);
@@ -163,12 +172,7 @@ export class ExecutionStore {
         while (lo < hi) {
           const mid = (lo + hi) >>> 1,
             other = this.nodes.get(branch.ids[mid])!;
-          if (
-            other.ordinal < node.ordinal ||
-            (other.ordinal === node.ordinal &&
-              (other.orderTie < node.orderTie ||
-                (other.orderTie === node.orderTie && other.id < node.id)))
-          )
+          if (compareOrder(other, node) < 0)
             lo = mid + 1;
           else hi = mid;
         }
@@ -179,6 +183,7 @@ export class ExecutionStore {
       this.emit(node.id);
     }
     if (branch.ids.length > MAX_CHILDREN) {
+      if (!changes && branch.initialized) branch.detached = true;
       for (const id of branch.ids.splice(
         !changes && branch.initialized ? MAX_CHILDREN : 0,
         branch.ids.length - MAX_CHILDREN,
@@ -204,12 +209,22 @@ export class ExecutionStore {
     if (parent) this.emit(parent);
   }
   private evict(id: string) {
+    // A move can reach its destination before its former-parent removal. Only
+    // the last loaded owner can release an entity and its child window.
+    if (
+      id === this.rootParent ||
+      [...this.branches.values()].some((b) => b.ids.includes(id))
+    )
+      return;
+    this.releaseBranch(id);
+    this.nodes.delete(id);
+  }
+  private releaseBranch(id: string) {
     const branch = this.branches.get(id);
     branch?.controller?.abort();
     clearTimeout(branch?.timer);
-    if (branch) for (const child of branch.ids) this.evict(child);
     this.branches.delete(id);
-    this.nodes.delete(id);
+    if (branch) for (const child of branch.ids) this.evict(child);
   }
   private async read(parent: string, changes: boolean, earlier = false) {
     const branch = this.branches.get(parent);
@@ -259,7 +274,7 @@ export class ExecutionStore {
           () =>
             void this.read(
               parent,
-              !branch.earlierRequested,
+              branch.initialized && !branch.earlierRequested,
               Boolean(branch.earlierRequested),
             ),
           branch.earlierRequested ? 0 : delay,
@@ -269,7 +284,8 @@ export class ExecutionStore {
   open(parent: string) {
     if (!this.branches.has(parent) && this.branches.size >= MAX_BRANCHES) {
       const candidate = [...this.branches].find(([id, b]) => id && !b.open);
-      if (candidate) this.evict(candidate[0]);
+      // Discard the closed window, not the summary its parent still renders.
+      if (candidate) this.releaseBranch(candidate[0]);
       else {
         this.error = "Collapse a branch before opening more.";
         this.rebuild();
@@ -282,6 +298,7 @@ export class ExecutionStore {
       initialized: false,
     };
     branch.open = true;
+    clearTimeout(branch.timer);
     this.branches.set(parent, branch);
     this.rebuild();
     this.emit(parent);
@@ -352,6 +369,7 @@ export class ExecutionStore {
         ids: [],
         open: true,
         initialized: false,
+        detached: true,
       });
       this.merge(page.parent, page);
       void this.read(page.parent, true);
@@ -367,6 +385,7 @@ export class ExecutionStore {
     for (const branch of this.branches.values()) {
       branch.open = false;
       branch.controller?.abort();
+      branch.controller = undefined;
       clearTimeout(branch.timer);
     }
   }

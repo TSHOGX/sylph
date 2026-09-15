@@ -1,0 +1,113 @@
+{
+  "baseCommit": "95a7f9613654134b2e07c24a19a996b1690c7c31",
+  "scope": "Regression failures observed before fixes or with the corresponding production fault restored; all fault edits restored afterwards.",
+  "regressions": [
+    {
+      "test": "evicting a collapsed child window preserves its visible summary",
+      "before": "Expected n:0 summary; received undefined",
+      "after": "summary retained; child window and unreferenced children released"
+    },
+    {
+      "test": "removal patches release unreferenced nodes and their descendant windows",
+      "before": "Expected 0 entities; received 2",
+      "after": "0 entities, root window retained"
+    },
+    {
+      "test": "live arrivals do not splice a disconnected tail into a historical window",
+      "before": "Live arrival changed the historical visible list and inserted a disconnected tail",
+      "after": "list identity retained; loaded node revision still updates"
+    },
+    {
+      "test": "the unloaded history boundary compares every ordering component",
+      "before": "Expected 1 entity; received 2 for equal ordinals with earlier tie key",
+      "after": "unloaded correction excluded by complete ordering key"
+    },
+    {
+      "test": "a failed initial read retries the latest page before subscribing to revisions",
+      "before": "Second request incorrectly included changes=true",
+      "after": "Second request reads initial latest page"
+    },
+    {
+      "test": "restarting after cancellation starts a fresh initial request",
+      "before": "Expected 2 requests; observed 1",
+      "after": "2 requests; aborted request cannot strand replacement"
+    },
+    {
+      "test": "folding_ten_times_more_streams_does_not_rescan_the_turn_for_each_block",
+      "beforeMedianUs": [
+        29795,
+        2564067
+      ],
+      "beforeStreams": [
+        2000,
+        20000
+      ],
+      "failure": "85x growth exceeded the 30x quadratic-regression threshold"
+    },
+    {
+      "test": "a_streaming_projection_patch_does_not_walk_settled_siblings",
+      "fault": "Temporarily remove timeline_active for the measured projection, then recreate before further seeding",
+      "faultVmSteps": [
+        10698,
+        100698
+      ],
+      "fixedVmSteps": [
+        724,
+        724
+      ]
+    },
+    {
+      "test": "collapsed_and_direct_child_pages_do_not_open_archived_bodies",
+      "fault": "Temporarily hydrate retained blocks in the node endpoint",
+      "failure": "Root page failed while fixture CAS directory was unavailable",
+      "fixed": "Both root and direct-child pages succeed; explicit body fails until fixture bodies are restored"
+    },
+    {
+      "test": "prepending history preserves the mounted reading position",
+      "failure": "First mounted node moved 16 px after prepending history",
+      "mechanism": "Resize compensation used the viewport edge instead of the existing visible node when controls left a gap above it"
+    },
+    {
+      "test": "a bounded historical window returns explicitly to an advancing live tail",
+      "before": "Back to latest button absent on preceding implementation",
+      "after": "Historical window excludes live tail until explicit return"
+    }
+  ],
+  "incrementalEntityUpdate": {
+    "loadedNodes": 100,
+    "changedNotifications": 1,
+    "unrelatedNotifications": 0,
+    "structureNotifications": 0,
+    "visibleListIdentityPreserved": true
+  },
+  "commands": [
+    "cd frontend && npm test -- lib/execution-store.test.ts",
+    "cd frontend && npm run e2e -- execution-nodes.spec.ts",
+    "cargo test -p sylph-server --test storage folding_ten_times_more -- --nocapture",
+    "cargo test -p sylph-server --test timeline_nodes -- --nocapture"
+  ],
+  "host": {
+    "macOS": "26.2",
+    "machine": "MacBookPro18,3",
+    "cpu": "Apple M1 Pro",
+    "memoryBytes": 17179869184,
+    "rust": "rustc 1.94.1 (e408947bf 2026-03-25)",
+    "node": "v24.13.0"
+  },
+  "readingAnchor": {
+    "before": {
+      "y": 134,
+      "scroll": 0,
+      "margin": 32,
+      "transform": "translateY(0px)",
+      "paneY": 102
+    },
+    "after": {
+      "y": 134,
+      "scroll": 1632,
+      "margin": 32,
+      "transform": "translateY(1632px)",
+      "paneY": 102
+    }
+  }
+}

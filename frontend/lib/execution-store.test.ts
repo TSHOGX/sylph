@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   ExecutionStore,
   reportedUsage,
@@ -46,6 +46,88 @@ function seeded(count: number) {
   return store;
 }
 describe("execution entities", () => {
+  it("restarting after cancellation starts a fresh initial request", async () => {
+    let requests = 0;
+    vi.stubGlobal("fetch", (_url: string, init: RequestInit) => {
+      requests++;
+      return new Promise((_resolve, reject) => {
+        init.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+      });
+    });
+    const store = new ExecutionStore("session");
+    try {
+      store.start();
+      store.stop();
+      store.start();
+      expect(requests).toBe(2);
+    } finally {
+      store.stop();
+      await Promise.resolve();
+      vi.unstubAllGlobals();
+    }
+  });
+  it("a failed initial read retries the latest page before subscribing to revisions", async () => {
+    vi.useFakeTimers();
+    const urls: string[] = [];
+    vi.stubGlobal("fetch", async (url: string) => {
+      urls.push(url);
+      return urls.length === 1
+        ? new Response(null, { status: 503 })
+        : Response.json({ nodes: [node(100)], snapshot: 101, hasMore: false, nextCursor: null });
+    });
+    const store = new ExecutionStore("session");
+    try {
+      store.start();
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(urls).toHaveLength(2);
+      expect(new URL(urls[1], "http://localhost").searchParams.has("changes")).toBe(false);
+      expect(store.snapshot().map((row) => row.id)).toEqual(["n:100"]);
+    } finally {
+      store.stop();
+      vi.unstubAllGlobals();
+      vi.useRealTimers();
+    }
+  });
+  it("evicting a collapsed child window preserves its visible summary", () => {
+    const store = seeded(16);
+    for (let id = 0; id < 15; id++) {
+      const parent = `n:${id}`;
+      store.branches.set(parent, { ids: [], open: false, initialized: true });
+      store.merge(parent, {
+        nodes: [{ ...node(100 + id), parentId: parent }],
+        snapshot: 200, hasMore: false, nextCursor: null,
+      });
+    }
+    const summary = store.nodes.get("n:0");
+    // Open the uncached sixteenth summary with a fetch that stays pending.
+    const original = globalThis.fetch;
+    globalThis.fetch = () => new Promise(() => {});
+    try {
+      store.open("n:15");
+      expect(store.nodes.get("n:0")).toBe(summary);
+      expect(store.nodes.has("n:100")).toBe(false);
+      expect(store.branches.has("n:0")).toBe(false);
+      expect(store.snapshot().every(({ id }) => store.nodes.has(id))).toBe(true);
+    } finally {
+      store.stop();
+      globalThis.fetch = original;
+    }
+  });
+  it("removal patches release unreferenced nodes and their descendant windows", () => {
+    const store = seeded(1);
+    store.branches.set("n:0", { ids: [], open: true, initialized: false });
+    store.merge("n:0", {
+      nodes: [{ ...node(1), parentId: "n:0" }],
+      snapshot: 2, hasMore: false, nextCursor: null,
+    });
+    store.merge("", {
+      nodes: [{ ...node(0, 3), removed: true }],
+      snapshot: 3, hasMore: false, nextCursor: null,
+    }, true);
+    expect(store.snapshot()).toEqual([]);
+    expect(store.nodes.size).toBe(0);
+    expect([...store.branches.keys()]).toEqual([""]);
+  });
   it("one streaming patch preserves the visible list and every unrelated entity", () => {
     const store = seeded(100),
       list = store.snapshot(),
@@ -141,6 +223,29 @@ describe("execution entities", () => {
     expect(store.nodes.size).toBe(160);
     expect(store.snapshot()[0].id).toBe("n:-1");
     expect(store.nodes.has("n:159")).toBe(false);
+  });
+  it("live arrivals do not splice a disconnected tail into a historical window", () => {
+    const store = seeded(160);
+    store.merge("", {
+      nodes: [node(-1)], snapshot: 160, hasMore: true, nextCursor: "-1:0:n:-1",
+    });
+    const before = store.snapshot();
+    store.merge("", {
+      nodes: [node(200, 201), node(50, 202)],
+      snapshot: 202, hasMore: false, nextCursor: null,
+    }, true);
+    expect(store.snapshot()).toBe(before);
+    expect(store.nodes.has("n:200")).toBe(false);
+    expect(store.nodes.get("n:50")!.revision).toBe(202);
+  });
+  it("the unloaded history boundary compares every ordering component", () => {
+    const store = seeded(1);
+    store.branches.get("")!.cursor = "0:1:n:0";
+    store.merge("", {
+      nodes: [{ ...node(1, 3), ordinal: 0, orderTie: 0 }],
+      snapshot: 3, hasMore: false, nextCursor: null,
+    }, true);
+    expect(store.nodes.size).toBe(1);
   });
 });
 

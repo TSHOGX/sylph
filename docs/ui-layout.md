@@ -1136,3 +1136,5 @@ chevron space: hide the collapsed chevron until hover or keyboard focus, includi
 touch screens; keep the down chevron visible while open. Active text pulses opacity
 without changing layout, honors reduced motion, and stops when settled. Collapse all
 only closes expanded content. There is no expand-all action or shortcut.
+An older window remains anchored while live work advances elsewhere. Back to latest
+returns to the recent conversation; a paged child window offers View latest items.

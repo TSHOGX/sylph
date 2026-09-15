@@ -11,7 +11,7 @@ import {
   type RefObject,
 } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { useVirtualizer } from "@tanstack/react-virtual";
+import { useVirtualizer, type Virtualizer } from "@tanstack/react-virtual";
 import { formatDuration } from "@/lib/format";
 import type { Fidelity } from "@/lib/api-types";
 import { api, segment } from "@/lib/api";
@@ -74,9 +74,33 @@ export function ExecutionTimeline({
   turns: { turn: { id: string; status: string } }[];
 }) {
   const store = useMemo(() => new ExecutionStore(sessionId), [sessionId]);
+  const virtualRef = useRef<Virtualizer<HTMLDivElement, Element> | null>(null);
   const subscribe = useMemo(
-    () => (fn: () => void) => store.subscribe("", fn),
-    [store],
+    () => (fn: () => void) =>
+      store.subscribe("", () => {
+        const pane = scroller.current;
+        const virtual = virtualRef.current;
+        if (pane && virtual) {
+          const viewport = pane.getBoundingClientRect();
+          const anchor = Array.from(
+            pane.querySelectorAll<HTMLElement>("[data-node-id]"),
+          ).find((element) => {
+            const rect = element.getBoundingClientRect();
+            return rect.bottom > viewport.top && rect.top < viewport.bottom;
+          });
+          const index = store.snapshot().findIndex(
+            (row) => row.id === anchor?.dataset.nodeId,
+          );
+          // With controls above the first row, the reading anchor can sit below
+          // the viewport edge. A newly prepended row in that gap must compensate
+          // its estimated height too. Virtual's default viewport-edge predicate
+          // misses it; retain the actual node until the next reading gesture.
+          virtual.shouldAdjustScrollPositionOnItemSizeChange =
+            anchor && index >= 0 ? (item) => item.index < index : undefined;
+        }
+        fn();
+      }),
+    [store, scroller],
   );
   const rows = useSyncExternalStore(subscribe, store.snapshot, store.snapshot);
   const top = useRef<HTMLDivElement>(null);
@@ -148,6 +172,22 @@ export function ExecutionTimeline({
     followOnAppend: true,
     scrollEndThreshold: 120,
   });
+  useLayoutEffect(() => {
+    virtualRef.current = virtual;
+    const pane = scroller.current;
+    const release = () => {
+      virtual.shouldAdjustScrollPositionOnItemSizeChange = undefined;
+    };
+    const gestures = ["wheel", "touchstart", "pointerdown", "keydown"];
+    for (const gesture of gestures)
+      pane?.addEventListener(gesture, release, { passive: true });
+    return () => {
+      for (const gesture of gestures)
+        pane?.removeEventListener(gesture, release);
+      release();
+      virtualRef.current = null;
+    };
+  }, [virtual, scroller]);
   useEffect(() => {
     if (store.targetId) {
       const index = rows.findIndex((row) => row.id === store.targetId);
@@ -215,6 +255,11 @@ export function ExecutionTimeline({
       {store.branches.get(store.rootParent)?.cursor && (
         <button className="focus-ring text-xs" onClick={() => store.earlier()}>
           Load earlier history
+        </button>
+      )}
+      {store.branches.get(store.rootParent)?.detached && (
+        <button className="focus-ring text-xs" onClick={() => store.focus(store.rootParent)}>
+          Back to latest
         </button>
       )}
       <div
@@ -354,7 +399,7 @@ const NodeRow = memo(function NodeRow({
     [store, id],
   );
   const snapshot = () =>
-    `${store.nodes.get(id)?.revision}:${store.branches.get(id)?.open}:${store.branches.get(id)?.cursor}`;
+    `${store.nodes.get(id)?.revision}:${store.branches.get(id)?.open}:${store.branches.get(id)?.cursor}:${store.branches.get(id)?.detached}`;
   useSyncExternalStore(subscribe, snapshot, snapshot);
   const node = store.nodes.get(id);
   const [copyState, setCopyState] = useState("");
@@ -615,6 +660,11 @@ const NodeRow = memo(function NodeRow({
               onClick={() => store.earlier(id)}
             >
               Load earlier items
+            </button>
+          )}
+          {open && store.branches.get(id)?.detached && (
+            <button className="focus-ring text-xs" onClick={() => store.focus(id)}>
+              View latest items
             </button>
           )}
         </>

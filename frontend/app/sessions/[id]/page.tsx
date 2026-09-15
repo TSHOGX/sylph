@@ -526,6 +526,9 @@ export default function SessionPage() {
         data-scroller
         tabIndex={0}
         aria-label="Conversation"
+        // The virtualizer owns node anchors across prepend and resize. Do not
+        // also let the browser anchor the DOM that virtualization replaces.
+        style={{ overflowAnchor: "none" }}
         className="pane min-h-0 flex-1 px-3 py-3 md:px-4"
       >
         <div className={`mx-auto max-w-3xl ${density.text}`}>

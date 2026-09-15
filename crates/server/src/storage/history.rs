@@ -1724,6 +1724,29 @@ impl HistoryStore {
 /// it, and folds them. An event with no `stream_id` — the user's message, a status —
 /// is its own block with no deltas.
 pub fn consolidate(events: &[Event]) -> Vec<Block> {
+    struct StreamFacts<'a> {
+        first: &'a Event,
+        max_seq: i32,
+        last_recorded_at_ms: Option<i64>,
+    }
+    // The first vendor stamp and identity belong to the entire logical stream.
+    // Repeated `events.iter().find(...)` per output made folding quadratic.
+    // Index references once, retaining original order and real missing stamps
+    // rather than substituting a later phase's timestamp.
+    let mut streams: HashMap<&str, StreamFacts<'_>> = HashMap::new();
+    for event in events {
+        if let Some(id) = event.stream_id.as_deref() {
+            let facts = streams.entry(id).or_insert(StreamFacts {
+                first: event,
+                max_seq: event.seq,
+                last_recorded_at_ms: None,
+            });
+            facts.max_seq = facts.max_seq.max(event.seq);
+            if event.recorded_at_ms.is_some() {
+                facts.last_recorded_at_ms = event.recorded_at_ms;
+            }
+        }
+    }
     // Deltas arrive before their completion, so they are collected first and
     // matched as each `completed` event is reached.
     let mut pending: HashMap<String, Vec<Delta>> = HashMap::new();
@@ -1882,13 +1905,10 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
                     arrival_at_ms: event.arrival_at_ms,
                     recorded_at_ms: event.recorded_at_ms,
                     started_at_ms,
-                    started_recorded_at_ms: stream_id.as_ref().and_then(|id| {
-                        // The first phase's vendor stamp is the only honest native anchor.
-                        events
-                            .iter()
-                            .find(|candidate| candidate.stream_id.as_ref() == Some(id))
-                            .and_then(|candidate| candidate.recorded_at_ms)
-                    }),
+                    started_recorded_at_ms: stream_id
+                        .as_deref()
+                        .and_then(|id| streams.get(id))
+                        .and_then(|facts| facts.first.recorded_at_ms),
                     created_at_ms: event.created_at_ms,
                 });
             }
@@ -1955,6 +1975,7 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
             .unwrap_or_else(|| deltas[0].at_ms);
         let last = deltas.last().map(|d| d.at_ms).unwrap_or(started_at_ms);
         let folded = fold::fold(&deltas, &text, started_at_ms);
+        let facts = &streams[stream_id.as_str()];
 
         warn!(
             "Block {} was never completed; storing what arrived",
@@ -1973,29 +1994,17 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
                 .unwrap_or_default(),
             // Sequence numbers order the stream, and an incomplete block has none
             // of its own. The last delta's is the closest true position.
-            seq: events
-                .iter()
-                .filter(|e| e.stream_id.as_deref() == Some(stream_id.as_str()))
-                .map(|e| e.seq)
-                .max()
-                .unwrap_or(0),
+            seq: facts.max_seq,
             turn_id: events
                 .first()
                 .and_then(|e| e.turn_id.clone())
                 .unwrap_or_default(),
-            kind: events
-                .iter()
-                .find(|e| e.stream_id.as_deref() == Some(stream_id.as_str()))
-                .map(|e| e.kind.clone())
-                .unwrap_or_else(|| "assistant".to_string()),
+            kind: facts.first.kind.clone(),
             phase: Some("incomplete".to_string()),
             // Read from the event that opened it, like `kind` above: an interrupted
             // block still belongs to the trajectory it ran in, and dropping that
             // would reparent the tail of an abandoned delegation onto the root.
-            span: events
-                .iter()
-                .find(|e| e.stream_id.as_deref() == Some(stream_id.as_str()))
-                .and_then(|e| e.span.clone()),
+            span: facts.first.span.clone(),
             interior_state: interiors.remove(&stream_id),
             // Same reason as the folded path: for a block whose only phases were
             // `started` and `delta`, that is the only place a name ever appeared.
@@ -2009,16 +2018,9 @@ pub fn consolidate(events: &[Event]) -> Vec<Block> {
             is_error: false,
             source: "agent".to_string(),
             arrival_at_ms: deltas.last().map(|_| last).unwrap_or(last),
-            recorded_at_ms: events
-                .iter()
-                .filter(|event| event.stream_id.as_deref() == Some(stream_id.as_str()))
-                .rev()
-                .find_map(|event| event.recorded_at_ms),
+            recorded_at_ms: facts.last_recorded_at_ms,
             started_at_ms,
-            started_recorded_at_ms: events
-                .iter()
-                .find(|event| event.stream_id.as_deref() == Some(stream_id.as_str()))
-                .and_then(|event| event.recorded_at_ms),
+            started_recorded_at_ms: facts.first.recorded_at_ms,
             created_at_ms: last,
         });
     }
@@ -2056,7 +2058,11 @@ pub async fn consolidate_turn(
         return Ok(0);
     }
 
-    let blocks = consolidate(&events);
+    // The consolidator already bounds concurrent turns. CPU work on an async
+    // worker can still delay unrelated file commands even without a SQL lock.
+    let blocks = tokio::task::spawn_blocking(move || consolidate(&events))
+        .await
+        .context("Consolidation worker failed")?;
     let count = blocks.len();
 
     history.put_blocks(&blocks).await?;

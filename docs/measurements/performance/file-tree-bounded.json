@@ -1,0 +1,238 @@
+{
+  "label": "working tree based on 95a7f96; bounded windows and explicit reading anchor",
+  "createdAt": "2026-09-15T02:09:57.148Z",
+  "browser": "148.0.7778.96",
+  "directories": 100,
+  "backgroundExecution": {
+    "turnId": "bf12eb45-5a9c-4b33-9f86-8f3d9579fb5f",
+    "startedAtMs": 1789438195423,
+    "completedAtMs": 1789438197039
+  },
+  "firstFile": {
+    "paintedMs": 84.70000004768372,
+    "requestMs": 66.70000004768372,
+    "responseMs": 77.5,
+    "bytes": 820,
+    "server": {
+      "lookup": 0.218,
+      "bridge": 2.642,
+      "auth": 0.774
+    }
+  },
+  "samples": [
+    {
+      "relative": "latency-000",
+      "totalMs": 60.200000047683716,
+      "beforeRequestMs": 5.400000095367432,
+      "requestToFirstByteMs": 4.799999952316284,
+      "httpTransferMs": 0.2999999523162842,
+      "afterResponseMs": 49.700000047683716,
+      "bytes": 245,
+      "server": {
+        "lookup": 0.263,
+        "bridge": 1.125,
+        "auth": 0.467
+      }
+    },
+    {
+      "relative": "latency-001",
+      "totalMs": 37.10000002384186,
+      "beforeRequestMs": 5.200000047683716,
+      "requestToFirstByteMs": 8.100000023841858,
+      "httpTransferMs": 0.2999999523162842,
+      "afterResponseMs": 23.5,
+      "bytes": 245,
+      "server": {
+        "lookup": 0.645,
+        "bridge": 1.883,
+        "auth": 1.976
+      }
+    },
+    {
+      "relative": "latency-002",
+      "totalMs": 34.799999952316284,
+      "beforeRequestMs": 4.799999952316284,
+      "requestToFirstByteMs": 5.399999976158142,
+      "httpTransferMs": 0.20000004768371582,
+      "afterResponseMs": 24.399999976158142,
+      "bytes": 245,
+      "server": {
+        "lookup": 0.321,
+        "bridge": 2.513,
+        "auth": 0.757
+      }
+    },
+    {
+      "relative": "latency-003",
+      "totalMs": 36.39999997615814,
+      "beforeRequestMs": 5.100000023841858,
+      "requestToFirstByteMs": 3.600000023841858,
+      "httpTransferMs": 0.19999992847442627,
+      "afterResponseMs": 27.5,
+      "bytes": 245,
+      "server": {
+        "lookup": 0.332,
+        "bridge": 0.968,
+        "auth": 0.558
+      }
+    },
+    {
+      "relative": "latency-004",
+      "totalMs": 11.300000071525574,
+      "beforeRequestMs": 4.300000071525574,
+      "requestToFirstByteMs": 2.600000023841858,
+      "httpTransferMs": 0.2999999523162842,
+      "afterResponseMs": 4.100000023841858,
+      "bytes": 245,
+      "server": {
+        "lookup": 0.201,
+        "bridge": 0.88,
+        "auth": 0.277
+      }
+    },
+    {
+      "relative": "latency-005",
+      "totalMs": 14.5,
+      "beforeRequestMs": 4.399999976158142,
+      "requestToFirstByteMs": 3.299999952316284,
+      "httpTransferMs": 0.30000007152557373,
+      "afterResponseMs": 6.5,
+      "bytes": 245,
+      "server": {
+        "lookup": 0.167,
+        "bridge": 0.949,
+        "auth": 0.431
+      }
+    },
+    {
+      "relative": "latency-006",
+      "totalMs": 14.299999952316284,
+      "beforeRequestMs": 4.399999976158142,
+      "requestToFirstByteMs": 3.3000000715255737,
+      "httpTransferMs": 0.19999992847442627,
+      "afterResponseMs": 6.399999976158142,
+      "bytes": 245,
+      "server": {
+        "lookup": 0.193,
+        "bridge": 0.903,
+        "auth": 0.422
+      }
+    },
+    {
+      "relative": "latency-007",
+      "totalMs": 12.200000047683716,
+      "beforeRequestMs": 4.300000071525574,
+      "requestToFirstByteMs": 3,
+      "httpTransferMs": 0.2999999523162842,
+      "afterResponseMs": 4.600000023841858,
+      "bytes": 245,
+      "server": {
+        "lookup": 0.243,
+        "bridge": 0.969,
+        "auth": 0.313
+      }
+    },
+    {
+      "relative": "latency-008",
+      "totalMs": 35.300000071525574,
+      "beforeRequestMs": 3.899999976158142,
+      "requestToFirstByteMs": 3.100000023841858,
+      "httpTransferMs": 0.20000004768371582,
+      "afterResponseMs": 28.100000023841858,
+      "bytes": 245,
+      "server": {
+        "lookup": 0.195,
+        "bridge": 1.009,
+        "auth": 0.339
+      }
+    },
+    {
+      "relative": "latency-009",
+      "totalMs": 36.89999997615814,
+      "beforeRequestMs": 4.899999976158142,
+      "requestToFirstByteMs": 2.899999976158142,
+      "httpTransferMs": 0.30000007152557373,
+      "afterResponseMs": 28.799999952316284,
+      "bytes": 245,
+      "server": {
+        "lookup": 0.146,
+        "bridge": 0.816,
+        "auth": 0.368
+      }
+    },
+    {
+      "relative": "latency-010",
+      "totalMs": 14.399999976158142,
+      "beforeRequestMs": 4.5,
+      "requestToFirstByteMs": 3.1999999284744263,
+      "httpTransferMs": 0.20000004768371582,
+      "afterResponseMs": 6.5,
+      "bytes": 245,
+      "server": {
+        "lookup": 0.188,
+        "bridge": 1.009,
+        "auth": 0.388
+      }
+    },
+    {
+      "relative": "latency-011",
+      "totalMs": 14.400000095367432,
+      "beforeRequestMs": 4.700000047683716,
+      "requestToFirstByteMs": 3,
+      "httpTransferMs": 0.2999999523162842,
+      "afterResponseMs": 6.400000095367432,
+      "bytes": 245,
+      "server": {
+        "lookup": 0.234,
+        "bridge": 1.038,
+        "auth": 0.314
+      }
+    },
+    {
+      "relative": "latency-012",
+      "totalMs": 36.89999997615814,
+      "beforeRequestMs": 5.100000023841858,
+      "requestToFirstByteMs": 3,
+      "httpTransferMs": 0.3999999761581421,
+      "afterResponseMs": 28.399999976158142,
+      "bytes": 245,
+      "server": {
+        "lookup": 0.262,
+        "bridge": 0.982,
+        "auth": 0.312
+      }
+    },
+    {
+      "relative": "latency-013",
+      "totalMs": 35,
+      "beforeRequestMs": 4.899999976158142,
+      "requestToFirstByteMs": 3.1999999284744263,
+      "httpTransferMs": 0.30000007152557373,
+      "afterResponseMs": 26.600000023841858,
+      "bytes": 245,
+      "server": {
+        "lookup": 0.203,
+        "bridge": 1.02,
+        "auth": 0.457
+      }
+    }
+  ],
+  "dom": {
+    "elements": 132,
+    "sections": 22
+  },
+  "heapBefore": 11349684,
+  "heapAfter": 44378312,
+  "limits": [
+    "Fixture execution and search overlap directory expansion; this browser run does not run native ingestion and GC. See storage-bounded.json for that authenticated bridge workload.",
+    "Heap sizes are observations without forced GC, not leak measurements."
+  ],
+  "host": {
+    "macOS": "26.2",
+    "machine": "MacBookPro18,3",
+    "cpu": "Apple M1 Pro",
+    "memoryBytes": 17179869184,
+    "rust": "rustc 1.94.1 (e408947bf 2026-03-25)",
+    "node": "v24.13.0"
+  }
+}

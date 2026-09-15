@@ -113,6 +113,13 @@ awaits the flush.
 
 ## Consolidation
 
+Stream metadata is indexed once per fold. Looking up a stream's first event, last
+recorded timestamp, or terminal sequence cannot rescan the turn for each output block.
+The CPU fold runs on a blocking worker under the existing consolidation gate, so a
+large archive cannot occupy the async executor that dispatches sync and file commands.
+History publication still commits before journal eviction; offloading computation does
+not change producer order, receipt ownership, or the retained record.
+
 When a turn reaches a terminal state, its rows move from `journal.db` to `history.db`,
 folding as they go:
 

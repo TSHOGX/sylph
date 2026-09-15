@@ -583,6 +583,49 @@ fn event(
     }
 }
 
+#[test]
+fn folding_ten_times_more_streams_does_not_rescan_the_turn_for_each_block() {
+    for phase in ["completed", "delta"] {
+        let mut timings = Vec::new();
+        for count in [2_000, 20_000] {
+            let events: Vec<_> = (0..count)
+                .map(|seq| {
+                    let mut row = event(
+                        seq,
+                        "assistant",
+                        Some(phase),
+                        Some(&format!("stream-{seq}")),
+                        "kept text",
+                        i64::from(seq),
+                    );
+                    row.recorded_at_ms = Some(10_000 + i64::from(seq));
+                    row
+                })
+                .collect();
+            let mut samples = Vec::new();
+            for _ in 0..3 {
+                let started = std::time::Instant::now();
+                let blocks = history::consolidate(&events);
+                samples.push(started.elapsed().as_micros());
+                assert_eq!(blocks.len(), count as usize);
+                for (seq, block) in blocks.iter().enumerate() {
+                    assert_eq!(block.seq, seq as i32);
+                    assert_eq!(block.text, "kept text");
+                    assert_eq!(block.started_recorded_at_ms, Some(10_000 + seq as i64));
+                }
+            }
+            samples.sort();
+            timings.push(samples[1]);
+            eprintln!(
+                "fold_measurement {}",
+                serde_json::json!({"phase":phase,"streams":count,"medianUs":samples[1]})
+            );
+        }
+        assert!(timings[1] < timings[0] * 30,
+            "ten times more {phase} streams took {timings:?} microseconds; per-block history scans are quadratic");
+    }
+}
+
 #[tokio::test]
 async fn large_block_summaries_keep_bounded_previews_without_reading_the_body() {
     let (history, _dir) = history_store().await;

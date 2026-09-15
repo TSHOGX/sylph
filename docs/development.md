@@ -380,6 +380,21 @@ history-lock window containing file and node reads. `SYLPH_TIMELINE_TEST_SCAN=1`
 regression-test-only fault switch that removes the child index in disposable databases;
 the query-work test must fail under that switch.
 
+The same test binary measures a production projection patch with differently sized
+settled sibling sets, verifies direct-child reads while archived bodies are unavailable,
+and runs native retention, archiving, search, pruning, CAS deletion, and discovery alongside
+authenticated file requests. Its barriers establish an overlap window; recorded task
+intervals and sample flags distinguish overlapping work from steady-state reads. GC retries
+report deferred passes instead of counting an attempted sweep as deletion.
+
+`cargo test -p sylph-server --test storage folding_ten_times_more -- --nocapture` measures
+completed and unfinished stream folds at two turn sizes. The broad ratio gate catches
+quadratic rescanning, not small timing changes. Preserve per-stream timestamps and sequence
+assertions when changing this benchmark; speed without the retained facts is not a pass.
+Collect these logs with `docs/measurements/performance/collect-storage-timing.py` into
+separate baseline and changed-checkout JSON files. This measures the real storage code
+with synthetic payloads, not the speed of a vendor catalogue scan or a model run.
+
 `npm run e2e -- performance-isolation.spec.ts` measures a browser with a large transcript,
 a second executing fixture session, concurrent searches, and uncached directory expansions.
 Set `RUST_LOG=sylph_envagent::client=debug,sylph_server=warn` to capture local queue and

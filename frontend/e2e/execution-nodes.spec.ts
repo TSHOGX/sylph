@@ -1,5 +1,85 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { createSession } from "./fixtures/session";
+import type { ExecutionNode } from "../lib/execution-store";
+
+async function pagedHistory(page: Page) {
+  const sessionId = await createSession(page);
+  const state = { latest: 399, patchReads: 0 };
+  const node = (id: number): ExecutionNode => ({
+    id: `reply-${id}`, parentId: "", turnId: "history-turn", ordinal: id, orderTie: id,
+    revision: id + 1, bodyRevision: id + 1, children: 0, tools: 0, reads: 0, commands: 0,
+    thinking: 0, failed: 0, running: 0, waiting: 0, activity: "",
+    event: { seq: id, kind: "assistant", text: `History reply ${id}`, stability: "stable",
+      source: "agent", arrivalAtMs: id, createdAtMs: id },
+  });
+  await page.route(`**/api/v1/sessions/${encodeURIComponent(sessionId)}/nodes?*`, (route) => {
+    const params = new URL(route.request().url()).searchParams;
+    const changes = params.has("changes");
+    if (changes) state.patchReads++;
+    const latest = state.latest;
+    const boundary = Number(params.get("cursor")?.split(":")[0] ?? latest + 1);
+    const end = Math.min(latest + 1, boundary);
+    const start = Math.max(0, end - 40);
+    return route.fulfill({ json: {
+      parent: "", snapshot: latest + 1,
+      nodes: changes ? (latest === 400 ? [node(400)] : []) : Array.from({ length: end - start }, (_, i) => node(start + i)),
+      hasMore: !changes && start > 0,
+      nextCursor: changes ? `${latest + 2}:` : start > 0 ? `${start}:${start}:reply-${start}` : null,
+    } });
+  });
+  await page.reload();
+  await expect(page.getByText("History reply 399", { exact: true })).toBeVisible();
+  return state;
+}
+
+test("prepending history preserves the mounted reading position", async ({ page }) => {
+  await pagedHistory(page);
+  const scroller = page.locator("[data-scroller]");
+  await scroller.evaluate((element) => { element.scrollTop = 0; });
+  const anchor = page.locator('[data-node-id="reply-360"]');
+  await expect(anchor).toBeVisible();
+  await page.evaluate(async () => {
+    await document.fonts.ready;
+    await new Promise(requestAnimationFrame);
+    await new Promise(requestAnimationFrame);
+  });
+  const before = (await anchor.boundingBox())!.y;
+  const geometry = () => anchor.evaluate((element) => {
+    const pane = element.closest<HTMLElement>("[data-scroller]")!;
+    const row = element.parentElement!;
+    const top = row.parentElement!;
+    return { y: element.getBoundingClientRect().y, scroll: pane.scrollTop,
+      margin: top.getBoundingClientRect().y + pane.scrollTop - pane.getBoundingClientRect().y,
+      transform: row.style.transform, paneY: pane.getBoundingClientRect().y };
+  });
+  const initial = await geometry();
+  await page.getByRole("button", { name: "Load earlier history", exact: true }).click();
+  await expect(anchor.locator("..")).toHaveAttribute("data-index", "40");
+  await page.evaluate(async () => { await new Promise(requestAnimationFrame); await new Promise(requestAnimationFrame); });
+  await expect.poll(async () => Math.abs((await anchor.boundingBox())!.y - before)).toBeLessThan(4);
+  console.log(`anchor_measurement ${JSON.stringify({ before: initial, after: await geometry() })}`);
+  expect(await page.locator("[data-node-id]").count()).toBeLessThan(40);
+});
+
+test("a bounded historical window returns explicitly to an advancing live tail", async ({ page }) => {
+  const state = await pagedHistory(page);
+  const scroller = page.locator("[data-scroller]");
+  for (let i = 0; i < 4; i++) {
+    await page.getByRole("button", { name: "Load earlier history", exact: true }).click();
+    await expect.poll(async () => {
+      await scroller.evaluate((element) => { element.scrollTop = 0; });
+      return page.getByText(`History reply ${320 - i * 40}`, { exact: true }).isVisible();
+    }).toBe(true);
+  }
+  await expect(page.getByRole("button", { name: "Back to latest", exact: true })).toBeVisible();
+  state.latest = 400;
+  const reads = state.patchReads;
+  await expect.poll(() => state.patchReads).toBeGreaterThan(reads + 1);
+  await expect(page.getByText("History reply 400", { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Back to latest", exact: true }).click();
+  await scroller.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+  await expect(page.getByText("History reply 400", { exact: true })).toBeVisible();
+});
 
 test("execution is fetched one disclosure level at a time and collapse all never expands", async ({
   page,

@@ -6,6 +6,10 @@ use sylph_protocol::SessionId;
 use sylph_server::models::{Event, Turn};
 
 async fn seed(backend: &TestBackend, count: i32) -> String {
+    seed_with_text(backend, count, "bounded preview ".repeat(64)).await
+}
+
+async fn seed_with_text(backend: &TestBackend, count: i32, text: String) -> String {
     let id = backend.create_session("mock").await;
     let session_id = SessionId::decode(&id).unwrap();
     let turn: Turn = serde_json::from_value(json!({
@@ -27,7 +31,7 @@ async fn seed(backend: &TestBackend, count: i32) -> String {
                 span: None,
                 interior_state: None,
                 name: None,
-                text: "bounded preview ".repeat(64),
+                text: text.clone(),
                 data_json: "{}".into(),
                 is_error: false,
                 stability: "stable".into(),
@@ -90,6 +94,51 @@ async fn oversized_turn_first_screen_is_bounded() {
             json!({"events":count,"nodes":2,"nodeBytes":bytes,"coldUs":cold,"medianUs":samples[3],"fullTurnBytes":serde_json::to_vec(&export).unwrap().len(),"fullTurnUs":start.elapsed().as_micros(),"journalBytes":journal_bytes,"journalWalBytes":wal_bytes,"nodePoolWaitUs":work.pool_wait_us,"nodeReadUs":work.projection_us})
         );
     }
+}
+
+#[tokio::test]
+async fn collapsed_and_direct_child_pages_do_not_open_archived_bodies() {
+    let backend = TestBackend::start().await;
+    let text = "unopened archive body ".repeat(1000);
+    let id = seed_with_text(&backend, 20, text.clone()).await;
+    sylph_server::storage::history::consolidate_turn(
+        &backend.state.store,
+        &backend.state.history,
+        "large-20",
+    )
+    .await
+    .unwrap();
+    let page = backend
+        .state
+        .store
+        .node_page(&id, "g:0", None, false, 40)
+        .await
+        .unwrap();
+    assert_eq!(page.nodes.len(), 20);
+    let address = &page.nodes[0].id;
+    let bodies = &backend.state.config.blobs_dir;
+    let held = bodies.with_extension("held-by-body-read-test");
+    // Only disposable fixture bodies are hidden. A body read now fails loudly,
+    // making accidental hydration observable even if a page discards the result.
+    std::fs::rename(bodies, &held).unwrap();
+    for parent in ["", "g:0"] {
+        let response = backend
+            .get_authed(&format!("/api/v1/sessions/{id}/nodes?parent={parent}"))
+            .await;
+        assert!(response.status().is_success());
+        let page = common::json_body(response).await;
+        assert!(!page["nodes"].as_array().unwrap().is_empty());
+    }
+    let body_path = format!("/api/v1/sessions/{id}/nodes/{address}/body");
+    assert!(!backend.get_authed(&body_path).await.status().is_success());
+    std::fs::rename(&held, bodies).unwrap();
+    let response = backend.get_authed(&body_path).await;
+    assert!(response.status().is_success());
+    assert_eq!(common::json_body(response).await["text"], text);
+    eprintln!(
+        "lazy_body_measurement {}",
+        json!({"pageReadsWithBodiesUnavailable":2,"children":20,"bodyBytes":text.len(),"unavailableBodyFails":true,"restoredBodyMatches":true})
+    );
 }
 
 // Explicit protocol axes keep each event fixture legible at its call site.
@@ -489,6 +538,68 @@ async fn indexed_child_query_work_does_not_grow_with_a_collapsed_turn() {
 }
 
 #[tokio::test]
+async fn a_streaming_projection_patch_does_not_walk_settled_siblings() {
+    use sqlx::Connection;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    let backend = TestBackend::start().await;
+    let mut measurements = Vec::new();
+    for count in [2_000, 20_000] {
+        let id = seed(&backend, count).await;
+        let mut conn = sqlx::SqliteConnection::connect_with(
+            &sqlx::sqlite::SqliteConnectOptions::new().filename(&backend.state.config.journal_path),
+        )
+        .await
+        .unwrap();
+        let mut event: Event =
+            sqlx::query_as("SELECT * FROM events WHERE turn_id=? ORDER BY seq DESC LIMIT 1")
+                .bind(format!("large-{count}"))
+                .fetch_one(&mut conn)
+                .await
+                .unwrap();
+        event.seq = count;
+        event.stream_id = Some("measured-live-stream".into());
+        event.phase = Some("started".into());
+        event.text = "Reading a file".into();
+        backend.state.store.append_event(&event).await.unwrap();
+        event.seq += 1;
+        event.phase = Some("delta".into());
+        event.text = " increment".into();
+        let steps = Arc::new(AtomicUsize::new(0));
+        let measured = steps.clone();
+        conn.lock_handle()
+            .await
+            .unwrap()
+            .set_progress_handler(1, move || {
+                measured.fetch_add(1, Ordering::Relaxed);
+                true
+            });
+        let started = std::time::Instant::now();
+        let mut tx = conn.begin_with("BEGIN IMMEDIATE").await.unwrap();
+        // The production projector runs inside the event transaction. Roll back
+        // this isolated measurement so it cannot leave an unjournalled address.
+        sylph_server::db::timeline::project(&mut tx, &event)
+            .await
+            .unwrap();
+        let elapsed = started.elapsed().as_micros();
+        let work = steps.load(Ordering::Relaxed);
+        tx.lock_handle().await.unwrap().remove_progress_handler();
+        tx.rollback().await.unwrap();
+        measurements.push(work);
+        eprintln!(
+            "timeline_patch_measurement {}",
+            json!({"siblings":count,"vmSteps":work,"elapsedUs":elapsed,"session":id})
+        );
+    }
+    assert!(
+        measurements[1] <= measurements[0] * 2,
+        "a streaming patch scanned settled siblings: {measurements:?}"
+    );
+}
+
+#[tokio::test]
 async fn file_browsing_and_node_reads_finish_inside_a_history_write_lock_window() {
     use sqlx::Connection;
     let backend = TestBackend::start().await;
@@ -526,6 +637,256 @@ async fn file_browsing_and_node_reads_finish_inside_a_history_write_lock_window(
     .await
     .expect("file and timeline reads must finish before the competing writer releases its lock");
     held.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn files_remain_responsive_during_native_ingestion_archiving_search_and_cleanup() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+    use sylph_protocol::NativeRecord;
+    use sylph_server::storage::history::consolidate_turn;
+    let backend = TestBackend::start().await;
+    let browsing = seed(&backend, 0).await;
+    let archived = seed(&backend, 8_000).await;
+    let cleaned = seed(&backend, 4_000).await;
+    consolidate_turn(&backend.state.store, &backend.state.history, "large-4000")
+        .await
+        .unwrap();
+    let mut external = backend
+        .state
+        .history
+        .turn_blocks("large-4000")
+        .await
+        .unwrap()
+        .remove(0);
+    external.text = "bounded external cleanup body ".repeat(200);
+    backend.state.history.put_blocks(&[external]).await.unwrap();
+    let environment = backend.environment_id().await;
+    let response = backend
+        .post_authed(
+            &format!("/api/v1/environments/{environment}/imports"),
+            json!({
+                "mode":"import_and_watch", "agents":["mock"], "workdir":backend.workdir(),
+                "idempotencyKey":"mixed-load-subscription"
+            }),
+        )
+        .await;
+    assert_eq!(response.status(), axum::http::StatusCode::ACCEPTED);
+    let job = common::json_body(response).await;
+    let job_id = job["job"]["id"].as_str().unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let job = common::json_body(
+                backend
+                    .get_authed(&format!("/api/v1/imports/{job_id}"))
+                    .await,
+            )
+            .await;
+            if job["job"]["status"] == "completed" {
+                assert_eq!(job["job"]["failed"], 0);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    backend.agents.add_stored_session("discovered-under-load");
+    std::fs::write(
+        backend.workdir().join("mixed-load.txt"),
+        "visible under mixed load",
+    )
+    .unwrap();
+    let barrier = tokio::sync::Barrier::new(6);
+    let done: [AtomicBool; 3] = std::array::from_fn(|_| AtomicBool::new(false));
+    let searches = AtomicUsize::new(0);
+    let started = Instant::now();
+    let native = async {
+        barrier.wait().await;
+        let begin = started.elapsed().as_micros();
+        for version in 0..2_000 {
+            let raw = format!(
+                "{{ \"future\":{},\"payload\":\"{}\" }}",
+                version,
+                "native bytes ".repeat(350)
+            )
+            .into_bytes();
+            let record = NativeRecord {
+                source: "synthetic.jsonl".into(),
+                version,
+                payload: serde_json::from_slice(&raw).unwrap(),
+                raw_json: Some(raw),
+                blobs: vec![],
+            };
+            backend
+                .state
+                .history
+                .put_native_record(&browsing, &record)
+                .await
+                .unwrap();
+        }
+        done[0].store(true, Ordering::SeqCst);
+        json!({"startUs":begin,"endUs":started.elapsed().as_micros(),"records":2000})
+    };
+    let archive = async {
+        barrier.wait().await;
+        let begin = started.elapsed().as_micros();
+        let blocks = consolidate_turn(&backend.state.store, &backend.state.history, "large-8000")
+            .await
+            .unwrap();
+        assert_eq!(blocks, 8_000);
+        done[1].store(true, Ordering::SeqCst);
+        json!({"startUs":begin,"endUs":started.elapsed().as_micros(),"blocks":blocks})
+    };
+    let cleanup = async {
+        barrier.wait().await;
+        let begin = started.elapsed().as_micros();
+        let pruned = backend
+            .state
+            .history
+            .prune_below(&cleaned, i32::MAX)
+            .await
+            .unwrap();
+        let mut sweep_passes = 0;
+        let swept = loop {
+            sweep_passes += 1;
+            let swept = backend
+                .state
+                .history
+                .sweep_unreferenced_blobs()
+                .await
+                .unwrap();
+            if swept > 0 {
+                break swept;
+            }
+            // Publication intentionally takes priority over GC. A deferred pass
+            // is not deletion; retry and report when an actual body was removed.
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        assert_eq!(pruned, 4_000);
+        assert!(swept > 0, "cleanup must remove a real external body");
+        done[2].store(true, Ordering::SeqCst);
+        json!({"startUs":begin,"endUs":started.elapsed().as_micros(),"pruned":pruned,"swept":swept,"sweepPasses":sweep_passes})
+    };
+    let search = async {
+        barrier.wait().await;
+        while done.iter().any(|flag| !flag.load(Ordering::SeqCst)) {
+            let response = backend
+                .get_authed("/api/v1/search?q=bounded&limit=20")
+                .await;
+            assert!(response.status().is_success());
+            let _body = common::json_body(response).await;
+            searches.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    let sync = async {
+        barrier.wait().await;
+        let begin = started.elapsed().as_micros();
+        let refreshed = sylph_server::api::imports::sync_once(&backend.state)
+            .await
+            .unwrap();
+        let id = SessionId::decode(&format!("{environment}:mock:discovered-under-load")).unwrap();
+        assert!(backend
+            .state
+            .store
+            .get_session(&id)
+            .await
+            .unwrap()
+            .is_some());
+        json!({"startUs":begin,"endUs":started.elapsed().as_micros(),"refreshed":refreshed,"discovered":id.encode()})
+    };
+    let files = async {
+        barrier.wait().await;
+        let mut samples = Vec::new();
+        while samples.len() < 40 || done.iter().any(|flag| !flag.load(Ordering::SeqCst)) {
+            let before = started.elapsed().as_micros();
+            let active = done.iter().all(|flag| !flag.load(Ordering::SeqCst));
+            let response = tokio::time::timeout(
+                Duration::from_secs(2),
+                backend.get_authed(&format!("/api/v1/sessions/{browsing}/files")),
+            )
+            .await
+            .expect("file request stalled behind storage work");
+            assert!(response.status().is_success());
+            let body = common::json_body(response).await;
+            assert!(body.to_string().contains("mixed-load.txt"));
+            samples.push(json!({"startUs":before,"durationUs":started.elapsed().as_micros()-before,"allWritersActive":active}));
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        samples
+    };
+    let (native, archive, cleanup, (), samples, sync) =
+        tokio::time::timeout(Duration::from_secs(60), async {
+            tokio::join!(native, archive, cleanup, search, files, sync)
+        })
+        .await
+        .expect("mixed workloads must all make progress");
+    assert!(
+        samples
+            .iter()
+            .any(|sample| sample["allWritersActive"] == true),
+        "the fixture must open an actual overlapping workload window"
+    );
+    assert!(searches.load(Ordering::SeqCst) > 0);
+    assert_eq!(
+        backend
+            .state
+            .history
+            .native_records(&browsing)
+            .await
+            .unwrap()
+            .len(),
+        2_000
+    );
+    let raw = backend
+        .state
+        .history
+        .native_record_bytes(&browsing, "synthetic.jsonl", 1999)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        raw,
+        format!(
+            "{{ \"future\":1999,\"payload\":\"{}\" }}",
+            "native bytes ".repeat(350)
+        )
+        .into_bytes()
+    );
+    assert!(backend
+        .state
+        .store
+        .turn_events_after("large-8000", -1)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        backend
+            .state
+            .history
+            .turn_blocks("large-8000")
+            .await
+            .unwrap()
+            .len(),
+        8_000
+    );
+    assert!(backend
+        .state
+        .history
+        .turn_blocks("large-4000")
+        .await
+        .unwrap()
+        .is_empty());
+    let hits = backend.state.history.search("bounded", 20).await.unwrap();
+    assert!(hits.iter().any(|hit| hit.session_id == archived));
+    assert!(!hits.iter().any(|hit| hit.session_id == cleaned));
+    eprintln!(
+        "mixed_storage_measurement {}",
+        json!({"native":native,"archive":archive,"cleanup":cleanup,"sync":sync,
+        "searches":searches.load(Ordering::SeqCst),"files":samples,
+        "transport":"in-process authenticated router; file operations cross the envagent bridge"})
+    );
 }
 
 #[tokio::test]
