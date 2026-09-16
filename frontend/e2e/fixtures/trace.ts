@@ -305,6 +305,8 @@ export async function installTraceFixture(page: Page, rows = [message(0)]) {
         ),
       });
     }
+    if (resource === "agents" && action === "activations")
+      return route.fulfill({ json: tracePage([], view) });
     if (resource === "agents" && action === "histories")
       return route.fulfill({
         json: tracePage(

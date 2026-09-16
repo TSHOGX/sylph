@@ -2,6 +2,7 @@
 import { useT } from "@/lib/i18n";
 import dynamic from "next/dynamic";
 import Link from "next/link";
+import { ChevronLeftIcon, ChevronRightIcon, EyeIcon, RefreshIcon } from "./icons";
 import {
   useEffect,
   useEffectEvent,
@@ -62,8 +63,7 @@ export type ObjectInspectionTarget = {
   scope: InspectionScope;
 };
 export type Inspection =
-  | Exclude<InspectionRequest, { kind: "object" }>
-  | ObjectInspectionTarget;
+  Exclude<InspectionRequest, { kind: "object" }> | ObjectInspectionTarget;
 interface DirectoryLocation {
   query: string;
   filter: string;
@@ -444,7 +444,28 @@ export function TraceInspector({
               <AgentSearch bootstrap={bootstrap} />
             )}
             {inspection.kind === "history" && (
-              <HistoryDirectory bootstrap={bootstrap} />
+              <>
+                <HistoryDirectory bootstrap={bootstrap} />
+                <ActivationDirectory
+                  bootstrap={bootstrap}
+                  onInspect={(reference, view) =>
+                    navigate({
+                      kind: "object",
+                      reference,
+                      scope: {
+                        agent: bootstrap.header.agent.address,
+                        history: null,
+                        view,
+                        changeCursor: bootstrap.changeCursor,
+                        maximumPayloadBytes:
+                          bootstrap.window.limits.maxPayloadBytes,
+                        anchor: null,
+                        offset: 0,
+                      },
+                    })
+                  }
+                />
+              </>
             )}
             {inspection.kind === "coverage" && (
               <Coverage bootstrap={bootstrap} />
@@ -674,6 +695,112 @@ function HistoryDirectory({ bootstrap }: { bootstrap: ReaderBootstrap }) {
         setCursor={setCursor}
       />
     </div>
+  );
+}
+
+function ActivationDirectory({
+  bootstrap,
+  onInspect,
+}: {
+  bootstrap: ReaderBootstrap;
+  onInspect: (reference: string, view: TraceView) => void;
+}) {
+  const t = useT();
+  const [position, setPosition] = useState<{
+    direction: "before" | "after";
+    cursor: string;
+  } | null>(null);
+  const [attempt, setAttempt] = useState(0);
+  const result = useTraceResource(
+    traceCacheKey(bootstrap.view, [
+      "activations",
+      bootstrap.header.agent.address,
+      position,
+    ]),
+    (signal) =>
+      traceAPI.activations(
+        bootstrap.header.agent.address,
+        bootstrap.view,
+        position,
+        signal,
+      ),
+    attempt,
+  );
+  const page = result.data;
+  return (
+    <section
+      aria-label={t("trace.ownActivations")}
+      className="mt-4 border-t border-line pt-4"
+    >
+      <h3 className="font-medium">{t("trace.ownActivations")}</h3>
+      {page && (
+        <p className="mt-1 text-xs text-ink-muted">
+          {describeCount(page.total, t("trace.activationsNoun"), t)}
+        </p>
+      )}
+      {result.pending && <p role="status">{t("trace.loadingDetails")}</p>}
+      {result.error && <p role="alert">{result.error.message}</p>}
+      {result.error && (
+        <button
+          className={button}
+          aria-label={t("trace.retry")}
+          title={t("trace.retry")}
+          onClick={() => setAttempt((value) => value + 1)}
+        >
+          <RefreshIcon />
+        </button>
+      )}
+      <ul>
+        {page?.items.map((activation) => (
+          <li
+            key={activation.reference}
+            className="flex min-h-11 items-center justify-between gap-2 border-b border-line py-2"
+          >
+            <span className="min-w-0 text-sm">
+              {executionLabel(activation, t)}
+            </span>
+            <button
+              className={button}
+              disabled={!activation.reference}
+              aria-label={t("trace.inspectActivation")}
+              title={t("trace.inspectActivation")}
+              onClick={() =>
+                activation.reference &&
+                onInspect(activation.reference, page.view)
+              }
+            >
+              <EyeIcon />
+            </button>
+          </li>
+        ))}
+      </ul>
+      <nav aria-label={t("trace.ownActivations")} className="mt-2 flex">
+        <button
+          className={button}
+          aria-label={t("trace.previousPage")}
+          title={t("trace.previousPage")}
+          disabled={result.pending || !page?.hasBefore || !page.beforeCursor}
+          onClick={() =>
+            page?.beforeCursor &&
+            setPosition({ direction: "before", cursor: page.beforeCursor })
+          }
+        >
+          <ChevronLeftIcon />
+        </button>
+        <button
+          className={button}
+          aria-label={t("trace.nextPage")}
+          title={t("trace.nextPage")}
+          disabled={result.pending || !page?.hasAfter || !page.afterCursor}
+          onClick={() =>
+            page?.afterCursor &&
+            setPosition({ direction: "after", cursor: page.afterCursor })
+          }
+        >
+          <ChevronRightIcon />
+        </button>
+      </nav>
+    </section>
   );
 }
 

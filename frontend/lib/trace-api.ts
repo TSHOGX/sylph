@@ -4,6 +4,7 @@ import type {
   CommandReceipt,
   CommandRequest,
   ControlAvailability,
+  ExecutionSummary,
   HistoryChoice,
   ObjectDetail,
   PartSummary,
@@ -71,7 +72,22 @@ export const traceAPI = {
       `${base}/agents/${segment(agent)}/histories${query({ at_snapshot: view.token, after: cursor })}`,
       { signal },
     ),
-  object: (reference: string, view: TraceView, history: string | null, signal?: AbortSignal) =>
+  activations: (
+    agent: string,
+    view: TraceView,
+    position: { direction: "before" | "after"; cursor: string } | null,
+    signal?: AbortSignal,
+  ) =>
+    fetchAPI<TracePage<ExecutionSummary>>(
+      `${base}/agents/${segment(agent)}/activations${query({ at_snapshot: view.token, ...(position ? { [position.direction]: position.cursor } : {}) })}`,
+      { signal },
+    ),
+  object: (
+    reference: string,
+    view: TraceView,
+    history: string | null,
+    signal?: AbortSignal,
+  ) =>
     fetchAPI<ObjectDetail>(
       `${base}/objects/${segment(reference)}${query({ at_snapshot: view.token, selection: history })}`,
       { signal },

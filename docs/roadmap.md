@@ -174,6 +174,8 @@ from retained evidence, and the product schedules garbage collection.
 The own-activation catalogue is now independently paged at a retained snapshot. It
 includes proven activations without readable history, keeps unresolved owners outside
 invented agent containers, and exposes each activation's own outcome and detail link.
+The History inspector provides this catalogue alongside recorded history selections;
+opening an activation retains its view without restricting it to the selected branch.
 
 Administrator reprojection requests return a durable job receipt before replay begins.
 Concurrent requests share the active job. Status and cancellation remain available while
