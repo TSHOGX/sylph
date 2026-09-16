@@ -1,6 +1,6 @@
 //! Pi's native entry tree and outer runtime loop, interpreted from retained evidence.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
@@ -41,11 +41,15 @@ struct LiveMessage {
     reference: MessageRef,
     start: SourcePosition,
     previous_revision: Option<MessageRevisionRef>,
+    previous_entry: Option<EntryRef>,
+    value: Value,
+    closed_parts: BTreeSet<usize>,
+    evidence: Vec<ObservationRef>,
 }
 
 impl SemanticMapper for PiMapper {
     fn build(&self) -> &'static str {
-        "pi-1"
+        "pi-2"
     }
 
     fn map(&self, input: MapInput<'_>) -> MapOutput {
@@ -115,7 +119,7 @@ struct Context<'a, 'b> {
 
 impl Context<'_, '_> {
     fn add(&mut self, owner: &AgentRef, slot: &str, fact: Fact) {
-        let mut claim = claim(self.input, owner, slot, "pi-1", fact);
+        let mut claim = claim(self.input, owner, slot, PiMapper.build(), fact);
         if let Some(evidence) = &self.state.header_evidence {
             if !claim.evidence.contains(evidence) {
                 claim.evidence.push(evidence.clone());
@@ -602,6 +606,13 @@ impl Context<'_, '_> {
                         }
                     }
                 }
+                Some("toolCall") if part.get("partial_json").is_some() => (
+                    ContentKind::Opaque,
+                    self.payload(
+                        text(part, "partial_json").unwrap_or("").as_bytes().to_vec(),
+                        &format!("{part_slot}/partial_json"),
+                    ),
+                ),
                 Some("toolCall") => {
                     if let (Some(id), Some(name)) = (text(part, "id"), text(part, "name")) {
                         if native_entry.is_some() || matches!(form, RevisionForm::Final { .. }) {
@@ -615,7 +626,10 @@ impl Context<'_, '_> {
                             } else {
                                 OperationRef::occurrence(
                                     owner.clone(),
-                                    self.input.capture.source_position.clone(),
+                                    self.state.message.as_ref().map_or_else(
+                                        || self.input.capture.source_position.clone(),
+                                        |message| message.start.clone(),
+                                    ),
                                     vec!["tool-call".into(), id.into(), index.to_string()],
                                 )
                                 .unwrap()
@@ -670,7 +684,10 @@ impl Context<'_, '_> {
             } else {
                 MessagePartRef::occurrence(
                     owner.clone(),
-                    self.input.capture.source_position.clone(),
+                    self.state.message.as_ref().map_or_else(
+                        || self.input.capture.source_position.clone(),
+                        |message| message.start.clone(),
+                    ),
                     vec![selector.into(), index.to_string()],
                 )
                 .unwrap()
@@ -702,7 +719,18 @@ impl Context<'_, '_> {
         );
         if role == "toolResult" {
             if let Some(operation) = operation {
-                for field in ["persistedOutputPath","outputFile"] {if let Some(path)=text(&value["details"],field) {let key=super::attachment_key(self.input.canonical_observation,selector,path);self.output.correlations.insert(key.clone(),AnyObjectRef::Operation(operation.clone()));self.output.correlation_evidence.insert(key,vec![self.input.canonical_observation.clone()]);}}
+                for field in ["persistedOutputPath", "outputFile"] {
+                    if let Some(path) = text(&value["details"], field) {
+                        let key =
+                            super::attachment_key(self.input.canonical_observation, selector, path);
+                        self.output
+                            .correlations
+                            .insert(key.clone(), AnyObjectRef::Operation(operation.clone()));
+                        self.output
+                            .correlation_evidence
+                            .insert(key, vec![self.input.canonical_observation.clone()]);
+                    }
+                }
                 let payload = self.json(&value["content"], &format!("{selector}/content"));
                 self.result(
                     owner,
@@ -852,23 +880,25 @@ impl Context<'_, '_> {
             let (entry, evidence) = if let Some(entry) = self.local_history.get(&reference) {
                 (entry, vec![self.input.canonical_observation.clone()])
             } else {
-                let Some(entry) = self.input.archive.semantic.history_entries.get(&reference) else {
+                let Some(entry) = self.input.archive.semantic.history_entries.get(&reference)
+                else {
                     self.output
                         .requests
                         .push(ArchiveRequest::Object { object_ref: object });
                     return;
                 };
-                let Some(evidence) =
-                    self.input
-                        .archive
-                        .semantic.object_evidence
-                        .get(&object)
-                        .filter(|evidence| {
-                            !evidence.is_empty()
-                                && evidence.iter().all(|reference| {
-                                    self.input.archive.observations.contains(reference)
-                                })
-                        })
+                let Some(evidence) = self
+                    .input
+                    .archive
+                    .semantic
+                    .object_evidence
+                    .get(&object)
+                    .filter(|evidence| {
+                        !evidence.is_empty()
+                            && evidence.iter().all(|reference| {
+                                self.input.archive.observations.contains(reference)
+                            })
+                    })
                 else {
                     self.output
                         .requests
@@ -1006,6 +1036,314 @@ impl Context<'_, '_> {
         );
     }
 
+    fn live_history(
+        &mut self,
+        owner: &AgentRef,
+        current: &mut LiveMessage,
+        revision: MessageRevisionRef,
+        reconstructed: bool,
+    ) {
+        let entry = EntryRef::occurrence(
+            owner.clone(),
+            self.input.capture.source_position.clone(),
+            vec!["live-history".into()],
+        )
+        .unwrap();
+        // Each observed prefix has immutable membership. The reader selects the
+        // latest revision of this message without equating it to a native entry.
+        self.object(
+            owner,
+            "pi/live-history",
+            TraceObject::HistoryEntry(HistoryEntry {
+                entry_ref: entry.clone(),
+                containing_agent: owner.clone(),
+                content: vec![HistoryContent::Message(revision.clone())],
+                predecessor: current.previous_entry.clone(),
+                original_owner: None,
+            }),
+        );
+        let evidence = if reconstructed {
+            current.evidence.clone()
+        } else {
+            vec![
+                current.evidence[0].clone(),
+                self.input.canonical_observation.clone(),
+            ]
+        };
+        for claim in &mut self.output.claims {
+            claim.evidence.extend(evidence.iter().cloned());
+            claim.evidence.sort();
+            claim.evidence.dedup();
+        }
+        for payload in &mut self.output.payloads {
+            payload.evidence.extend(evidence.iter().cloned());
+            payload.evidence.sort();
+            payload.evidence.dedup();
+            if reconstructed {
+                payload.rule = "pi/rpc-stream-reconstruction".into();
+            }
+        }
+        current.previous_revision = Some(revision);
+        current.previous_entry = Some(entry);
+    }
+
+    fn stream_update(&mut self, owner: &AgentRef, mut current: LiveMessage, value: &Value) {
+        let event = &value["assistantMessageEvent"];
+        let Some(index) = event["contentIndex"]
+            .as_u64()
+            .and_then(|index| usize::try_from(index).ok())
+        else {
+            self.issue(
+                Some(owner),
+                "pi/stream-index",
+                DiagnosticCode::DecodeFailure,
+                "RPC message update lacks its content index",
+            );
+            return;
+        };
+        if text(&current.value, "role") != Some("assistant") {
+            self.issue(
+                Some(owner),
+                "pi/stream-role",
+                DiagnosticCode::CaptureGap,
+                "Assistant delta has no observed assistant message start",
+            );
+            return;
+        }
+        let Some(parts) = current
+            .value
+            .get_mut("content")
+            .and_then(Value::as_array_mut)
+        else {
+            self.issue(
+                Some(owner),
+                "pi/stream-content",
+                DiagnosticCode::DecodeFailure,
+                "Assistant message start lacks its content array",
+            );
+            return;
+        };
+        let kind = text(event, "type").unwrap_or("");
+        let (part_type, field, content_kind) = match kind {
+            "text_start" | "text_delta" | "text_end" => ("text", "text", ContentKind::Text),
+            "thinking_start" | "thinking_delta" | "thinking_end" => {
+                ("thinking", "thinking", ContentKind::DisclosedReasoning)
+            }
+            "toolcall_start" | "toolcall_delta" | "toolcall_end" => {
+                ("toolCall", "partial_json", ContentKind::Opaque)
+            }
+            _ => {
+                self.issue(
+                    Some(owner),
+                    "pi/stream-event",
+                    DiagnosticCode::UnsupportedKind,
+                    "Unknown Pi assistant-message event remains retained",
+                );
+                return;
+            }
+        };
+        let segment = if kind.ends_with("_start") {
+            // contentIndex is an array coordinate. A gap is missing evidence, not
+            // permission to allocate an attacker-sized array of invented parts.
+            if index != parts.len() {
+                self.issue(
+                    Some(owner),
+                    "pi/stream-part-start",
+                    DiagnosticCode::CaptureGap,
+                    "Content part start is duplicated or skips an unobserved index",
+                );
+                return;
+            }
+            let part = if part_type == "toolCall" {
+                let (Some(id), Some(name)) = (text(event, "id"), text(event, "toolName")) else {
+                    self.issue(
+                        Some(owner),
+                        "pi/stream-tool-start",
+                        DiagnosticCode::DecodeFailure,
+                        "Tool-call start lacks its ID or name",
+                    );
+                    return;
+                };
+                serde_json::json!({"type":"toolCall","id":id,"name":name,"partial_json":""})
+            } else {
+                serde_json::json!({"type":part_type,field:""})
+            };
+            parts.push(part);
+            Some("")
+        } else {
+            let Some(part) = parts
+                .get_mut(index)
+                .filter(|part| text(part, "type") == Some(part_type))
+            else {
+                self.issue(
+                    Some(owner),
+                    "pi/stream-part",
+                    DiagnosticCode::CaptureGap,
+                    "Delta or end has no matching observed content-part start",
+                );
+                return;
+            };
+            if current.closed_parts.contains(&index) {
+                self.issue(
+                    Some(owner),
+                    "pi/stream-part-closed",
+                    DiagnosticCode::InvalidRelation,
+                    "Content update follows the observed end of that part",
+                );
+                return;
+            }
+            if kind.ends_with("_delta") {
+                let Some(delta) = text(event, "delta") else {
+                    self.issue(
+                        Some(owner),
+                        "pi/stream-delta",
+                        DiagnosticCode::DecodeFailure,
+                        "Content delta lacks its string segment",
+                    );
+                    return;
+                };
+                let Some(previous) = text(part, field) else {
+                    self.issue(
+                        Some(owner),
+                        "pi/stream-prefix",
+                        DiagnosticCode::CaptureGap,
+                        "Content delta has no observed string prefix",
+                    );
+                    return;
+                };
+                part[field] = Value::String(previous.to_owned() + delta);
+                Some(delta)
+            } else {
+                if part_type == "toolCall" {
+                    let complete = &event["toolCall"];
+                    if text(complete, "type") != Some("toolCall")
+                        || text(complete, "id") != text(part, "id")
+                        || text(complete, "name") != text(part, "name")
+                        || !complete["arguments"].is_object()
+                    {
+                        self.issue(Some(owner), "pi/stream-tool-end", DiagnosticCode::DecodeFailure,
+                            "Tool-call end lacks complete arguments or changes the observed identity");
+                        return;
+                    }
+                    *part = complete.clone();
+                } else {
+                    let Some(content) = text(event, "content") else {
+                        self.issue(
+                            Some(owner),
+                            "pi/stream-part-end",
+                            DiagnosticCode::DecodeFailure,
+                            "Content-part end lacks its complete string",
+                        );
+                        return;
+                    };
+                    part[field] = Value::String(content.into());
+                }
+                current.closed_parts.insert(index);
+                None
+            }
+        };
+        current
+            .evidence
+            .push(self.input.canonical_observation.clone());
+        if let Some(usage) = value.get("usage") {
+            current.value["usage"] = usage.clone();
+        }
+        let activation = self.state.outer.as_ref().map(|run| run.activation.clone());
+        let revision = if let Some(segment) = segment {
+            self.object(
+                owner,
+                "live/message/message",
+                TraceObject::Message(Message {
+                    message_ref: current.reference.clone(),
+                    author: Author::Agent {
+                        agent: OwnerRef::Agent {
+                            agent: owner.clone(),
+                        },
+                    },
+                    protocol_role: Some(ProtocolRole::Assistant),
+                    purpose: MessagePurpose::Unclassified,
+                    production: Some(ProductionScope {
+                        owner: OwnerRef::Agent {
+                            agent: owner.clone(),
+                        },
+                        activation,
+                    }),
+                }),
+            );
+            // Pi 0.85.1's toJsonEvent removes cumulative snapshots. Persist the
+            // concrete segment once; the reader composes its predecessor chain.
+            let selector = if kind.ends_with("_start") {
+                "/assistantMessageEvent/type"
+            } else {
+                "/assistantMessageEvent/delta"
+            };
+            let payload = self.payload(segment.as_bytes().to_vec(), selector);
+            self.output.payloads.last_mut().unwrap().rule = if kind.ends_with("_start") {
+                "pi/rpc-empty-part-start"
+            } else {
+                "pi/rpc-content-delta"
+            }
+            .into();
+            let part = ContentPart {
+                part_ref: MessagePartRef::occurrence(
+                    owner.clone(),
+                    current.start.clone(),
+                    vec!["live/message".into(), index.to_string()],
+                )
+                .unwrap(),
+                kind: content_kind,
+                payload,
+                media_type: Some("text/plain".into()),
+                encoding: PayloadEncoding::Utf8,
+            };
+            let revision = MessageRevisionRef::occurrence(
+                owner.clone(),
+                self.input.capture.source_position.clone(),
+                vec!["live/message".into(), "revision".into()],
+            )
+            .unwrap();
+            self.object(
+                owner,
+                "live/message/revision",
+                TraceObject::MessageRevision(MessageRevision {
+                    revision_ref: revision.clone(),
+                    message: current.reference.clone(),
+                    representation: Representation::Conversation,
+                    form: RevisionForm::Append {
+                        predecessor: current.previous_revision.clone(),
+                    },
+                    parts: vec![part],
+                }),
+            );
+            self.usage(
+                owner,
+                &value["usage"],
+                "live/message",
+                AnyObjectRef::MessageRevision(revision.clone()),
+            );
+            revision
+        } else {
+            self.message(
+                owner,
+                current.reference.clone(),
+                &OwnerRef::Agent {
+                    agent: owner.clone(),
+                },
+                &current.value,
+                "live/message",
+                None,
+                RevisionForm::Replacement {
+                    covers: Some(SourcePrefix {
+                        through: self.input.capture.source_position.clone(),
+                    }),
+                },
+                activation,
+            )
+        };
+        self.live_history(owner, &mut current, revision, segment.is_none());
+        self.state.message = Some(current);
+    }
+
     fn live(&mut self, value: &Value) {
         let kind = text(value, "type").unwrap_or("");
         if kind == "response"
@@ -1139,6 +1477,10 @@ impl Context<'_, '_> {
                     reference,
                     start: self.input.capture.source_position.clone(),
                     previous_revision: None,
+                    previous_entry: None,
+                    value: value["message"].clone(),
+                    closed_parts: BTreeSet::new(),
+                    evidence: vec![self.input.canonical_observation.clone()],
                 });
                 if text(&value["message"], "role") == Some("assistant") {
                     if let Some(run) = &mut self.state.outer {
@@ -1156,8 +1498,12 @@ impl Context<'_, '_> {
                     );
                     return;
                 };
-                // `message` is a complete partial snapshot. Only its concrete delta
-                // fields may be appended; replacing the snapshot preserves extensions.
+                if kind == "message_update" && value.get("message").is_none() {
+                    self.stream_update(&owner, current, value);
+                    return;
+                }
+                // Historical SDK snapshots and the final RPC message replace the
+                // streamed prefix. The current RPC serializer omits partial snapshots.
                 let message = &value["message"];
                 let form = if kind == "message_end" {
                     RevisionForm::Final {
@@ -1184,7 +1530,7 @@ impl Context<'_, '_> {
                     form,
                     self.state.outer.as_ref().map(|run| run.activation.clone()),
                 );
-                current.previous_revision = Some(revision.clone());
+                self.live_history(&owner, &mut current, revision, false);
                 if kind == "message_end" {
                     if text(message, "role") == Some("assistant") {
                         if let Some(run) = &mut self.state.outer {
@@ -1193,26 +1539,14 @@ impl Context<'_, '_> {
                             });
                         }
                     }
-                    let entry = EntryRef::occurrence(
-                        owner.clone(),
-                        current.start,
-                        vec!["live-history".into()],
-                    )
-                    .unwrap();
-                    self.object(
-                        &owner,
-                        "pi/live-history",
-                        TraceObject::HistoryEntry(HistoryEntry {
-                            entry_ref: entry,
-                            containing_agent: owner.clone(),
-                            content: vec![HistoryContent::Message(revision)],
-                            predecessor: None,
-                            original_owner: None,
-                        }),
-                    );
                     self.state.message = None;
                     self.issue(Some(&owner),"pi/live-native-unjoined",DiagnosticCode::CaptureGap,"Live message_end precedes native entry ID allocation; no live/native identity certificate was captured");
                 } else {
+                    current.value = message.clone();
+                    current.evidence = vec![
+                        current.evidence[0].clone(),
+                        self.input.canonical_observation.clone(),
+                    ];
                     self.state.message = Some(current);
                 }
             }
@@ -1574,3 +1908,7 @@ fn terminal(message: &Value) -> Option<(TerminalOutcome, Option<ExecutionCloseRe
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "pi/stream_tests.rs"]
+mod stream_tests;

@@ -201,6 +201,23 @@ boundaries, `stopReason: stop`, file EOF, and wall-clock gaps do not prove a set
 outer interval. Native import keeps unknown Activation association where evidence is
 missing rather than synthesizing a turn for each user-role record.
 
+### Compact RPC content
+
+The pinned [`toJsonEvent` serializer](https://github.com/earendil-works/pi/blob/bbb61e34aaf231639fdaaad1adbd757947034eac/packages/coding-agent/src/modes/json-event.ts)
+removes cumulative message and partial snapshots from `message_update`. The concrete
+`assistantMessageEvent` retains its type, `contentIndex`, delta or final content, with
+tool ID and name added to `toolcall_start`. `message_start` supplies the initial content
+and `message_end` supplies the authoritative final message. Retained historical events
+that explicitly include a message snapshot remain replacement evidence.
+
+Starts and deltas produce readable immutable prefixes before message end. A part keeps
+its message-start occurrence and content index through end snapshots and finalization;
+repeated equal delta bytes remain separate append occurrences. Text/thinking part ends
+replace the observed prefix. Tool argument fragments stay opaque until complete tool
+content is observed. Missing starts, skipped indices, incompatible kinds and post-end
+updates produce diagnostics without overwriting the last readable prefix. These content
+events neither seal the outer Activation nor join it to native entries by matching text.
+
 Pi's built-in tool set supplies no universal subagent identity protocol. An extension
 named `subagent` remains an Operation until versioned extension evidence supplies an
 actual child ID, parent relation, delivery, and child trace source. A textual result
