@@ -3145,6 +3145,10 @@
         }
       }
     },
+    "/api/v1/trace/reprojection": {
+      "get": {"summary":"GET /api/v1/trace/reprojection","responses":{"200":{"description":"Reprojection status"},"403":{"description":"Administrator required"}}},
+      "post": {"summary":"POST /api/v1/trace/reprojection","responses":{"202":{"description":"Reprojection queued"},"403":{"description":"Administrator required"}}}
+    },
     "/api/v1/trace/changes": {
       "get": {
         "summary": "GET /api/v1/trace/changes",

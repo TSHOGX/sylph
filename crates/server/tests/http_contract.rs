@@ -649,3 +649,45 @@ async fn patch_on_a_missing_session_is_not_found() {
         .await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn retained_reprojection_status_is_hidden_from_non_admin_subjects() {
+    let backend = TestBackend::start().await;
+    let _admin = backend
+        .post("/api/v1/auth/register", json!({"name":"trace-admin"}))
+        .await;
+    let registration = backend
+        .post("/api/v1/auth/register", json!({"name":"trace-reader"}))
+        .await;
+    let cookie = registration.headers()[header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        backend
+            .get_with_cookie("/api/v1/trace/reprojection", &cookie)
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        backend
+            .request("POST", "/api/v1/trace/reprojection", None, Some(&cookie))
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+}
+
+#[tokio::test]
+async fn retained_reprojection_is_an_admin_action_with_durable_status() {
+    let backend = TestBackend::start().await;
+    let status = backend.get_authed("/api/v1/trace/reprojection").await;
+    assert_eq!(status.status(), StatusCode::OK);
+    let queued = backend
+        .post_authed("/api/v1/trace/reprojection", json!({}))
+        .await;
+    assert_eq!(queued.status(), StatusCode::ACCEPTED);
+    let status = backend.get_authed("/api/v1/trace/reprojection").await;
+    assert_eq!(status.status(), StatusCode::OK);
+}

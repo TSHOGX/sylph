@@ -126,9 +126,84 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/trace/changes", get(changes))
         .route("/api/v1/trace/search", get(search))
         .route(
+            "/api/v1/trace/reprojection",
+            get(reprojection_status).post(start_reprojection),
+        )
+        .route(
             "/api/v1/trace/views/{token}",
             axum::routing::delete(release_view),
         )
+}
+
+async fn reprojection_status(
+    State(state): State<AppState>,
+    Extension(subject): Extension<SubjectId>,
+) -> Result<Json<serde_json::Value>> {
+    if !state.store.is_admin(&subject.0).await.map_err(internal)? {
+        return Err(TraceError {
+            status: StatusCode::FORBIDDEN,
+            code: "admin_required",
+            message: "Server administration authority required".into(),
+            response: None,
+        });
+    }
+    let pointer = state.trace.catalogue().pointer().await.map_err(internal)?;
+    let pending = state
+        .trace
+        .catalogue()
+        .pending_builds()
+        .await
+        .map_err(internal)?;
+    Ok(Json(serde_json::json!({
+        "activeGeneration": pointer.generation,
+        "pointerSerial": pointer.serial,
+        "jobs": pending,
+        "recovering": state.trace.progress().await.fault,
+    })))
+}
+
+async fn start_reprojection(
+    State(state): State<AppState>,
+    Extension(subject): Extension<SubjectId>,
+) -> Result<(StatusCode, Json<serde_json::Value>)> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(internal)?;
+    tokio::task::spawn_blocking(move || runtime.block_on(start_reprojection_inner(state, subject)))
+        .await
+        .map_err(internal)?
+}
+
+async fn start_reprojection_inner(
+    state: AppState,
+    subject: SubjectId,
+) -> Result<(StatusCode, Json<serde_json::Value>)> {
+    if !state.store.is_admin(&subject.0).await.map_err(internal)? {
+        return Err(TraceError {
+            status: StatusCode::FORBIDDEN,
+            code: "admin_required",
+            message: "Server administration authority required".into(),
+            response: None,
+        });
+    }
+    let pending = state
+        .trace
+        .catalogue()
+        .pending_builds()
+        .await
+        .map_err(internal)?;
+    if !pending.is_empty() {
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({"state":"running","jobs":pending})),
+        ));
+    }
+    let generation = state.trace.rebuild().await.map_err(internal)?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({"state":"completed","generation":generation})),
+    ))
 }
 
 #[derive(Deserialize)]

@@ -41,7 +41,7 @@ external proposals or discussion threads are not project instructions.
 | Boundary | Owner | State |
 | --- | --- | --- |
 | Vendor trace semantics | Foundation implementation below | Runtime cutover is implemented; full vendor certificates and replay/mutation conformance remain open |
-| Trace rebuild product action | Foundation implementation below | Startup recovery and atomic publication are connected; no explicit retained-reprojection HTTP action is exposed |
+| Trace rebuild product action | Foundation implementation below | Administrator-only retained reprojection is exposed with durable build status and atomic publication |
 | Projection and delivery scale | Milestone 4 and foundation implementation below | Reader pages are bounded; whole-reduction reader materialization and mixed spool/socket/ACK load still need production measurements |
 | Reader acceptance | Conversation and work panel delivery below | Normalized reader is implemented; full visual/resource acceptance, VoiceOver and real iOS Safari remain open |
 
@@ -73,8 +73,8 @@ production reducer. [Conformance](unified-trace-conformance.md) names their limi
    authored expectations and the semantic mutations in the conformance contract.
 3. Measure the connected production pipeline under large retained histories, high
    version density, concurrent captures, reconnects and deletion. Bound projection and
-   search rebuild work as well as returned pages. Expose a retained-reprojection action
-   when its authorization, cancellation and job lifecycle are complete.
+   search rebuild work as well as returned pages. Complete cancellation and long-running
+   job lifecycle coverage for the retained-reprojection action.
 4. Complete reader visual, accessibility and scale acceptance against the normalized
    contract, including manual VoiceOver and real iOS Safari. Synthetic layout fixtures
    do not establish vendor semantic correctness or production delivery isolation.

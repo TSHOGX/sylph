@@ -385,8 +385,8 @@ No caller gets silently mixed objects from both generations.
 
 ## Read protocol
 
-The following replaces the event/block-derived reading API. It is an implementation
-contract, not a statement that these endpoints exist today. Agent/object references are
+The following replaces the event/block-derived reading API. It is the authenticated implementation
+contract for these endpoints. Agent/object references are
 opaque encoded typed references. Routes remain under the existing authenticated API
 origin and preserve environment-grant checks.
 
@@ -401,6 +401,8 @@ origin and preserve environment-grant checks.
 | `GET /api/v1/trace/payloads/{payload_ref}` | An authorized object/snapshot-scoped manifest or bounded byte/part range; immutable revision required |
 | `GET /api/v1/trace/changes` | SSE change invalidations from a bounded projection cursor, with reset/generation notices |
 | `GET /api/v1/trace/search` | Authorized generation/scoped search at a declared search checkpoint; paged snippets and object anchors |
+| `GET /api/v1/trace/reprojection` | Administrator-only durable build status, active generation and pending jobs |
+| `POST /api/v1/trace/reprojection` | Administrator-only retained-evidence reprojection; returns accepted status after the new generation is published |
 
 Action targets are typed routes, not a guessed Session ID. A Session control route is
 returned only when that native identity addresses the focused agent. Embedded control
