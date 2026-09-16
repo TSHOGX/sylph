@@ -299,11 +299,9 @@ impl Context<'_, '_> {
                     "codex/cell-result",
                     body,
                     disposition,
-                    if kind == "code_cell_initial_response" {
-                        Representation::CallerResult
-                    } else {
-                        Representation::Runtime
-                    },
+                    // The vendor records RuntimeResponse before formatting the
+                    // custom-tool output that its caller will receive.
+                    Representation::Runtime,
                 );
                 let state = match status {
                     "starting" | "running" => ResourceState::Running,
@@ -866,7 +864,9 @@ impl Context<'_, '_> {
                 } else {
                     runtime_outcome(string(value, "status"))
                 }
-            } else if value["result"].get("Err").is_some() {
+            } else if value["result"].get("Err").is_some()
+                || value["result"]["Ok"]["isError"].as_bool() == Some(true)
+            {
                 TerminalOutcome::Failed
             } else if value["result"].get("Ok").is_some() {
                 TerminalOutcome::Succeeded

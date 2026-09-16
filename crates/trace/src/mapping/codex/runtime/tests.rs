@@ -356,3 +356,59 @@ fn bare_subagent_activity_identifies_a_peer_without_inventing_its_spawn_or_run()
         }
     )));
 }
+
+#[test]
+fn successful_mcp_transport_preserves_a_tool_reported_error() {
+    let output = map(
+        1,
+        runtime("tool_call_runtime_ended", "runtime_payload"),
+        &MapperState::default(),
+        Some((
+            "runtime_payload",
+            json!({"call_id":"exec-a","invocation":{"server":"tools","tool":"lookup","arguments":{}},"duration":{"secs":0,"nanos":0},"result":{"Ok":{"content":[],"isError":true}}}),
+        )),
+    );
+    let operation = operation(&output);
+    assert!(output.claims.iter().any(|claim|matches!(&claim.fact,Fact::Execution {execution:ExecutionRef::Operation(reference),boundary:ExecutionBoundary::Outcome {outcome:TerminalOutcome::Failed,..}} if reference==&operation.operation_ref)));
+}
+
+#[test]
+fn initial_code_cell_response_remains_runtime_bytes_before_caller_formatting() {
+    let mut start = runtime("code_cell_started", "unused");
+    start["payload"] = json!({"type":"code_cell_started","runtime_cell_id":"cell-a","model_visible_call_id":"model-a"});
+    let started = map(1, start, &MapperState::default(), None);
+    let mut response = runtime("code_cell_initial_response", "response_payload");
+    response["payload"]["runtime_cell_id"] = json!("cell-a");
+    response["payload"]["status"] = json!("yielded");
+    let initial = map(
+        2,
+        response,
+        &started.state,
+        Some((
+            "response_payload",
+            json!({"type":"yielded","cell_id":"cell-a","stdout":"unformatted stdout"}),
+        )),
+    );
+    let result = initial
+        .claims
+        .iter()
+        .find_map(|claim| match &claim.fact {
+            Fact::Declare {
+                object: TraceObject::Result(result),
+            } => Some(result),
+            _ => None,
+        })
+        .expect("initial runtime response must be retained");
+    assert_eq!(result.representation, Representation::Runtime);
+    assert_eq!(result.disposition, ResultDisposition::Yield);
+    let caller = map(
+        3,
+        runtime("tool_call_ended", "result_payload"),
+        &initial.state,
+        Some((
+            "result_payload",
+            json!({"type":"code_mode_response","value":"caller formatting"}),
+        )),
+    );
+    assert!(caller.claims.iter().any(|claim|matches!(&claim.fact,Fact::Declare {object:TraceObject::Result(result)} if result.representation==Representation::CallerResult)));
+}
