@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "./fixtures/test";
+import { installTraceFixture, message, openTrace, MAIN_AGENT } from "./fixtures/trace";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -154,7 +155,6 @@ test("the palette groups commands, and the cursor skips the headings", async ({ 
 });
 
 test("global search finds a retained message and opens its addressed conversation", async ({ page }) => {
-  const { installTraceFixture, message, openTrace, MAIN_AGENT } = await import("./fixtures/trace");
   await installTraceFixture(page, [message(3, "A retained hit outside the visible window")]); await openTrace(page);
   await page.keyboard.press("ControlOrMeta+k"); const dialog = page.getByRole("dialog");
   await dialog.getByRole("textbox", { name: "Search retained conversations" }).fill("needle");
@@ -165,7 +165,7 @@ test("global search finds a retained message and opens its addressed conversatio
 });
 
 test("a global index hit keeps its retained excerpt and checkpoint visible", async ({ page }) => {
-  const { installTraceFixture, openTrace } = await import("./fixtures/trace"); await installTraceFixture(page); await openTrace(page);
+  await installTraceFixture(page); await openTrace(page);
   await page.keyboard.press("ControlOrMeta+k"); const dialog = page.getByRole("dialog");
   await dialog.getByRole("textbox", { name: "Search retained conversations" }).fill("deadlock"); await dialog.getByRole("button", { name: "Search", exact: true }).click();
   await expect(dialog.getByText("A retained hit outside the visible window", { exact: true })).toBeVisible();
@@ -350,6 +350,8 @@ test("a workspace group creates in its own directory, with one menu item and no 
   await expect(page.getByLabel("Message", { exact: true })).toBeVisible();
   // The directory was inherited from the group, not re-asked. The empty draft is
   // deliberately not a sidebar row; it becomes one only after a real message.
+  // The preceding conversation also has a Message textbox until navigation commits.
+  await expect(page).toHaveURL(/\/sessions\/draft\/(?:draft-|remote-draft-)/);
   await expect(rows).toHaveCount(1);
   await page.getByLabel("Message", { exact: true }).fill("persist this draft");
   await page.getByRole("button", { name: "Send", exact: true }).click();
