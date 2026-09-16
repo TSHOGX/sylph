@@ -23,7 +23,10 @@ use super::{
     upload::{CaptureUploads, UploadLimits},
     worker::{ProjectionWorker, WorkerLimits, WorkerProgress},
 };
+mod reprojection;
 mod search;
+#[cfg(test)]
+type ReprojectionPause = Arc<Mutex<Option<(Arc<Notify>, Arc<Notify>)>>>;
 #[cfg(test)]
 mod tests;
 
@@ -50,6 +53,9 @@ pub struct TraceService {
     search_queries: Arc<Semaphore>,
     recovery: Arc<RwLock<Option<String>>>,
     gc: TraceGarbageCollector,
+    reprojection_wake: Arc<Notify>,
+    #[cfg(test)]
+    reprojection_pause: ReprojectionPause,
 }
 
 /// A newly reserved view belongs to its request until the successful response
@@ -189,7 +195,14 @@ impl TraceService {
             search_limits,
             recovery: Arc::new(RwLock::new(None)),
             gc,
+            reprojection_wake: Arc::new(Notify::new()),
+            #[cfg(test)]
+            reprojection_pause: Arc::new(Mutex::new(None)),
         };
+        service
+            .catalogue
+            .recover_reprojection_jobs(crate::models::now_ms())
+            .await?;
         service.uploads.recover_interrupted_writes().await?;
         service.gc.recover_interrupted_pass().await?;
         // Abandoned private work is disposable, never an alternative active
@@ -276,6 +289,7 @@ impl TraceService {
     }
 
     pub fn spawn(self: &Arc<Self>) {
+        self.spawn_reprojection();
         let weak = Arc::downgrade(self);
         let wake = self.wake.clone();
         tokio::spawn(async move {
@@ -384,7 +398,9 @@ impl TraceService {
         let generation = self.active().await?;
         let checkpoint = generation.checkpoint().await?;
         let cut = self.evidence.evidence_cut().await?;
-        if cut > checkpoint.snapshot.evidence_cut || self.worker.has_continuations(&generation).await? {
+        if cut > checkpoint.snapshot.evidence_cut
+            || self.worker.has_continuations(&generation).await?
+        {
             let worker = self
                 .worker
                 .catch_up(&generation, checkpoint.fence_token, cut)
@@ -496,31 +512,9 @@ impl TraceService {
 
     async fn rebuild_locked(&self, recovery: bool) -> anyhow::Result<String> {
         let generation = format!("trace-{}", uuid::Uuid::new_v4());
-        let manifest = GenerationManifest {
-            generation: generation.clone(),
-            semantic_schema: "trace-1".into(),
-            mapper_builds: [
-                ("server", mapping::server::ServerMapper.build()),
-                ("codex", mapping::codex::CodexMapper.build()),
-                ("claude", mapping::claude::ClaudeMapper.build()),
-                ("pi", mapping::pi::PiMapper.build()),
-                ("inventory", mapping::inventory::InventoryMapper.build()),
-                ("attachment", mapping::attachment::AttachmentMapper.build()),
-                (
-                    "observation",
-                    mapping::observation::ObservationMapper.build(),
-                ),
-            ]
-            .into_iter()
-            .map(|(vendor, build)| (vendor.into(), build.into()))
-            .collect(),
-            reducer_build: "trace-reducer-1".into(),
-            capture_inventory_build: "source-inventory-1".into(),
-            encoding_build: "typed-blake3-1".into(),
-        };
         let (ticket, private) = self
             .publication
-            .begin_build(manifest, crate::models::now_ms())
+            .begin_build(Self::manifest(generation.clone()), crate::models::now_ms())
             .await?;
         let result = if recovery {
             self.publication
@@ -551,5 +545,30 @@ impl TraceService {
         self.notify_admission();
         self.search_wake.notify_one();
         Ok(generation)
+    }
+
+    fn manifest(generation: String) -> GenerationManifest {
+        GenerationManifest {
+            generation: generation.clone(),
+            semantic_schema: "trace-1".into(),
+            mapper_builds: [
+                ("server", mapping::server::ServerMapper.build()),
+                ("codex", mapping::codex::CodexMapper.build()),
+                ("claude", mapping::claude::ClaudeMapper.build()),
+                ("pi", mapping::pi::PiMapper.build()),
+                ("inventory", mapping::inventory::InventoryMapper.build()),
+                ("attachment", mapping::attachment::AttachmentMapper.build()),
+                (
+                    "observation",
+                    mapping::observation::ObservationMapper.build(),
+                ),
+            ]
+            .into_iter()
+            .map(|(vendor, build)| (vendor.into(), build.into()))
+            .collect(),
+            reducer_build: "trace-reducer-1".into(),
+            capture_inventory_build: "source-inventory-1".into(),
+            encoding_build: "typed-blake3-1".into(),
+        }
     }
 }

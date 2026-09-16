@@ -1,4 +1,5 @@
 use super::*;
+use crate::trace::evidence::catalogue::ReprojectionState;
 use crate::{
     trace::cas::BlobStore,
     trace::{
@@ -23,6 +24,88 @@ struct Fixture {
     coordinator: PublicationCoordinator,
     agent: AgentRef,
     epoch: IngestionEpoch,
+}
+
+#[tokio::test]
+async fn cancellation_before_pointer_commit_resumes_the_fenced_old_generation() {
+    let fixture = Fixture::new(PublicationLimits::default()).await;
+    fixture.admit(1).await;
+    let old = fixture.initial().await;
+    let original = fixture.catalogue.pointer().await.unwrap();
+    let job = fixture
+        .catalogue
+        .admit_reprojection("admin", 100)
+        .await
+        .unwrap();
+    fixture.catalogue.claim_reprojection(101).await.unwrap();
+    let (ticket, private) = fixture
+        .coordinator
+        .begin_build(manifest(&job.generation), 102)
+        .await
+        .unwrap();
+    let worker = Arc::new(Worker::pausing(2));
+    let task = {
+        let coordinator = fixture.coordinator.clone();
+        let old = old.clone();
+        let private = private.clone();
+        let ticket = ticket.clone();
+        let worker = worker.clone();
+        tokio::spawn(async move {
+            coordinator
+                .publish(&ticket, &private, Some(&old), worker.as_ref())
+                .await
+        })
+    };
+    worker.entered.notified().await;
+    assert_eq!(
+        old.checkpoint().await.unwrap().writer_mode,
+        WriterMode::Fenced
+    );
+    fixture
+        .catalogue
+        .cancel_reprojection(&job.job_id, 103)
+        .await
+        .unwrap();
+    worker.resume.notify_one();
+    assert!(matches!(
+        task.await.unwrap(),
+        Err(PublicationError::Catalogue(CatalogueError::BuildCancelled))
+    ));
+    assert_eq!(fixture.catalogue.pointer().await.unwrap(), original);
+    assert_eq!(
+        old.checkpoint().await.unwrap().writer_mode,
+        WriterMode::Running
+    );
+    fixture
+        .catalogue
+        .cancel_build(&ticket, "cancelled")
+        .await
+        .unwrap();
+    fixture
+        .catalogue
+        .finish_reprojection_failure(&job.job_id, 104)
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture
+            .catalogue
+            .reprojection_job(&job.job_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        ReprojectionState::Cancelled
+    );
+    let (next_ticket, next) = fixture
+        .coordinator
+        .begin_build(manifest("next-after-cancellation"), 105)
+        .await
+        .unwrap();
+    fixture
+        .coordinator
+        .publish(&next_ticket, &next, Some(&old), &Worker::plain())
+        .await
+        .unwrap();
 }
 impl Fixture {
     async fn new(limits: PublicationLimits) -> Self {

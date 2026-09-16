@@ -15,6 +15,8 @@ use crate::trace::generation::{GenerationManifest, Snapshot};
 
 pub(super) mod gc_store;
 pub(super) mod upload_store;
+mod reprojection;
+pub use reprojection::{ReprojectionJob, ReprojectionState};
 
 #[derive(Debug, Clone)]
 pub struct CatalogueLimits {
@@ -55,6 +57,8 @@ pub enum CatalogueError {
     PublicationConflict,
     #[error("another job holds the publication barrier")]
     PublicationBusy,
+    #[error("reprojection cancellation committed before publication")]
+    BuildCancelled,
     #[error("scope deletion invalidated this build or view")]
     DeletedScope,
     #[error("snapshot lease is expired, cancelled or unavailable")]
@@ -421,6 +425,7 @@ impl EvidenceCatalogue {
         if current != ticket.expected_pointer {
             return Err(CatalogueError::PublicationConflict);
         }
+        reprojection::check_cancellation(&mut tx, &ticket.manifest.generation).await?;
         let json:Option<String>=sqlx::query_scalar("SELECT r.ready_json FROM trace_ready_manifests r JOIN trace_build_jobs j ON j.ready_id=r.ready_id WHERE j.generation=? AND j.job_id=?").bind(&ticket.manifest.generation).bind(&ticket.job_id).fetch_optional(&mut *tx).await?;
         let ready: ReadyManifest = serde_json::from_str(&json.ok_or(CatalogueError::NotReady)?)?;
         if ready.snapshot.evidence_cut < old_fenced_cut {
@@ -448,6 +453,7 @@ impl EvidenceCatalogue {
             .bind(&ticket.job_id)
             .execute(&mut *tx)
             .await?;
+        reprojection::complete(&mut tx, &ready.snapshot).await?;
         tx.commit().await?;
         Ok(PublishedGeneration {
             pointer: ActivePointer {

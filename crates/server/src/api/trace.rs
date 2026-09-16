@@ -130,6 +130,10 @@ pub fn router() -> Router<AppState> {
             get(reprojection_status).post(start_reprojection),
         )
         .route(
+            "/api/v1/trace/reprojection/{id}",
+            get(reprojection_job).delete(cancel_reprojection),
+        )
+        .route(
             "/api/v1/trace/views/{token}",
             axum::routing::delete(release_view),
         )
@@ -148,16 +152,16 @@ async fn reprojection_status(
         });
     }
     let pointer = state.trace.catalogue().pointer().await.map_err(internal)?;
-    let pending = state
+    let jobs = state
         .trace
         .catalogue()
-        .pending_builds()
+        .reprojection_jobs()
         .await
         .map_err(internal)?;
     Ok(Json(serde_json::json!({
         "activeGeneration": pointer.generation,
         "pointerSerial": pointer.serial,
-        "jobs": pending,
+        "jobs": jobs,
         "recovering": state.trace.progress().await.fault,
     })))
 }
@@ -165,19 +169,6 @@ async fn reprojection_status(
 async fn start_reprojection(
     State(state): State<AppState>,
     Extension(subject): Extension<SubjectId>,
-) -> Result<(StatusCode, Json<serde_json::Value>)> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(internal)?;
-    tokio::task::spawn_blocking(move || runtime.block_on(start_reprojection_inner(state, subject)))
-        .await
-        .map_err(internal)?
-}
-
-async fn start_reprojection_inner(
-    state: AppState,
-    subject: SubjectId,
 ) -> Result<(StatusCode, Json<serde_json::Value>)> {
     if !state.store.is_admin(&subject.0).await.map_err(internal)? {
         return Err(TraceError {
@@ -187,23 +178,69 @@ async fn start_reprojection_inner(
             response: None,
         });
     }
-    let pending = state
+    let job = state
+        .trace
+        .start_reprojection(&subject.0)
+        .await
+        .map_err(lease_error)?;
+    Ok((StatusCode::ACCEPTED, Json(serde_json::json!({"job":job}))))
+}
+
+async fn reprojection_job(
+    State(state): State<AppState>,
+    Extension(subject): Extension<SubjectId>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>> {
+    require_reprojection_admin(&state, &subject).await?;
+    let job = state
         .trace
         .catalogue()
-        .pending_builds()
+        .reprojection_job(&id)
         .await
-        .map_err(internal)?;
-    if !pending.is_empty() {
-        return Ok((
-            StatusCode::ACCEPTED,
-            Json(serde_json::json!({"state":"running","jobs":pending})),
-        ));
+        .map_err(internal)?
+        .ok_or_else(reprojection_not_found)?;
+    Ok(Json(serde_json::json!({"job":job})))
+}
+
+async fn cancel_reprojection(
+    State(state): State<AppState>,
+    Extension(subject): Extension<SubjectId>,
+    Path(id): Path<String>,
+) -> Result<(StatusCode, Json<serde_json::Value>)> {
+    require_reprojection_admin(&state, &subject).await?;
+    let job = state
+        .trace
+        .cancel_reprojection(&id)
+        .await
+        .map_err(internal)?
+        .ok_or_else(reprojection_not_found)?;
+    let status = if job.state == crate::trace::evidence::catalogue::ReprojectionState::Cancelling {
+        StatusCode::ACCEPTED
+    } else {
+        StatusCode::OK
+    };
+    Ok((status, Json(serde_json::json!({"job":job}))))
+}
+
+async fn require_reprojection_admin(state: &AppState, subject: &SubjectId) -> Result<()> {
+    if !state.store.is_admin(&subject.0).await.map_err(internal)? {
+        return Err(TraceError {
+            status: StatusCode::FORBIDDEN,
+            code: "admin_required",
+            message: "Server administration authority required".into(),
+            response: None,
+        });
     }
-    let generation = state.trace.rebuild().await.map_err(internal)?;
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(serde_json::json!({"state":"completed","generation":generation})),
-    ))
+    Ok(())
+}
+
+fn reprojection_not_found() -> TraceError {
+    TraceError {
+        status: StatusCode::NOT_FOUND,
+        code: "reprojection_not_found",
+        message: "Reprojection job not found".into(),
+        response: None,
+    }
 }
 
 #[derive(Deserialize)]

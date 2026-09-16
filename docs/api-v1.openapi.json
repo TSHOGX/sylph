@@ -3146,8 +3146,12 @@
       }
     },
     "/api/v1/trace/reprojection": {
-      "get": {"summary":"GET /api/v1/trace/reprojection","responses":{"200":{"description":"Reprojection status"},"403":{"description":"Administrator required"}}},
-      "post": {"summary":"POST /api/v1/trace/reprojection","responses":{"202":{"description":"Reprojection queued"},"403":{"description":"Administrator required"}}}
+      "get": {"summary":"Read bounded recent reprojection jobs","responses":{"200":{"description":"Active generation and at most 32 recent jobs","content":{"application/json":{"schema":{"type":"object","properties":{"activeGeneration":{"type":["string","null"]},"pointerSerial":{"type":"integer"},"jobs":{"type":"array","items":{"$ref":"#/components/schemas/ReprojectionJob"}},"recovering":{"type":["string","null"]}},"required":["activeGeneration","pointerSerial","jobs","recovering"]}}}},"403":{"description":"Administrator required"}}},
+      "post": {"summary":"Admit or coalesce a durable reprojection job","responses":{"202":{"description":"Job admitted before replay completes","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ReprojectionReceipt"}}}},"403":{"description":"Administrator required"}}}
+    },
+    "/api/v1/trace/reprojection/{id}": {
+      "get":{"summary":"Read a durable reprojection job","parameters":[{"name":"id","in":"path","required":true,"schema":{"type":"string"}}],"responses":{"200":{"description":"Current or terminal job status","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ReprojectionReceipt"}}}},"403":{"description":"Administrator required"},"404":{"description":"Job not found"}}},
+      "delete":{"summary":"Cancel an unpublished reprojection","parameters":[{"name":"id","in":"path","required":true,"schema":{"type":"string"}}],"responses":{"200":{"description":"Job is terminal; publication committed first remains completed","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ReprojectionReceipt"}}}},"202":{"description":"Cancellation committed; running work is unwinding","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ReprojectionReceipt"}}}},"403":{"description":"Administrator required"},"404":{"description":"Job not found"}}}
     },
     "/api/v1/trace/changes": {
       "get": {
@@ -3329,6 +3333,19 @@
       }
     },
     "schemas": {
+      "ReprojectionJob": {
+        "type":"object",
+        "properties":{
+          "jobId":{"type":"string"},"generation":{"type":"string"},
+          "state":{"type":"string","enum":["queued","running","cancelling","completed","cancelled","failed"]},
+          "createdAtMs":{"type":"integer"},"startedAtMs":{"type":["integer","null"]},"finishedAtMs":{"type":["integer","null"]},
+          "projectedCut":{"type":"integer","minimum":0},
+          "snapshot":{"type":["object","null"],"properties":{"generation":{"type":"string"},"evidenceCut":{"type":"integer"},"viewRevision":{"type":"integer"}}},
+          "errorCode":{"type":["string","null"],"enum":["server_restarted","reprojection_failed",null]}
+        },
+        "required":["jobId","generation","state","createdAtMs","startedAtMs","finishedAtMs","projectedCut","snapshot","errorCode"]
+      },
+      "ReprojectionReceipt":{"type":"object","properties":{"job":{"$ref":"#/components/schemas/ReprojectionJob"}},"required":["job"]},
       "SessionId": {
         "type": "string",
         "description": "Opaque native identity tuple environment:agent:native_id; not a UUID."
@@ -4050,6 +4067,7 @@
                   "SESSION_ALREADY_RUNNING",
                   "SESSION_NOT_FOUND",
                   "UNAUTHORIZED",
+                  "admin_required",
                   "forbidden",
                   "internal",
                   "interpretation_withdrawn",
@@ -4058,6 +4076,7 @@
                   "payload_not_reachable",
                   "projection_pending",
                   "projection_recovering",
+                  "reprojection_not_found",
                   "search_indexing",
                   "search_work_budget",
                   "snapshot_expired",

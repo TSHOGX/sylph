@@ -41,6 +41,21 @@ CREATE TABLE trace_build_jobs (
   created_at_ms INTEGER NOT NULL
 ) WITHOUT ROWID;
 CREATE INDEX trace_build_jobs_state ON trace_build_jobs(state,created_at_ms,job_id);
+CREATE TABLE trace_reprojection_jobs (
+  job_id TEXT PRIMARY KEY,
+  generation TEXT NOT NULL UNIQUE,
+  requested_by TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('queued','running','cancelling','completed','cancelled','failed')),
+  created_at_ms INTEGER NOT NULL,
+  started_at_ms INTEGER,
+  finished_at_ms INTEGER,
+  projected_cut INTEGER NOT NULL DEFAULT 0,
+  snapshot_json TEXT,
+  error_code TEXT
+) WITHOUT ROWID;
+CREATE UNIQUE INDEX trace_reprojection_one_active ON trace_reprojection_jobs((1))
+  WHERE state IN ('queued','running','cancelling');
+CREATE INDEX trace_reprojection_recent ON trace_reprojection_jobs(created_at_ms DESC,job_id DESC);
 CREATE TABLE trace_ready_manifests (
   ready_id TEXT PRIMARY KEY,
   generation TEXT NOT NULL REFERENCES trace_generations(generation),

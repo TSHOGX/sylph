@@ -401,8 +401,33 @@ origin and preserve environment-grant checks.
 | `GET /api/v1/trace/payloads/{payload_ref}` | An authorized object/snapshot-scoped manifest or bounded byte/part range; immutable revision required |
 | `GET /api/v1/trace/changes` | SSE change invalidations from a bounded projection cursor, with reset/generation notices |
 | `GET /api/v1/trace/search` | Authorized generation/scoped search at a declared search checkpoint; paged snippets and object anchors |
-| `GET /api/v1/trace/reprojection` | Administrator-only durable build status, active generation and pending jobs |
-| `POST /api/v1/trace/reprojection` | Administrator-only retained-evidence reprojection; returns accepted status after the new generation is published |
+| `GET /api/v1/trace/reprojection` | Administrator-only active generation and bounded recent reprojection job status |
+| `POST /api/v1/trace/reprojection` | Administrator-only durable job admission; returns `202` before replay completes |
+| `GET /api/v1/trace/reprojection/{job_id}` | Administrator-only durable status of one reprojection job |
+| `DELETE /api/v1/trace/reprojection/{job_id}` | Administrator-only cancellation request; returns the resulting durable job status |
+
+### Reprojection jobs
+
+Reprojection admits at most one active product job. Concurrent submissions coalesce onto
+that job in the same catalogue transaction that admits it; callers receive its stable
+job ID, generation, state and timestamps. The states are `queued`, `running`,
+`cancelling`, `completed`, `cancelled` and `failed`. Status reports include terminal jobs
+and bounded progress metadata, never internal build tickets or filesystem paths. The
+collection returns at most the latest 32 jobs; an individual job remains addressable.
+
+Admission does not wait for replay or publication. A background worker replays retained
+evidence into a private generation while current reads, active projection and capture
+admission continue. Cancellation is cooperative at bounded replay checkpoints. It is
+also checked in the publication pointer transaction: cancellation committed first
+prevents publication; publication committed first leaves the job `completed`. The job's
+completed state and published snapshot commit with the pointer. Cancellation never
+aborts the coordinator while its publication guards or writers are fenced.
+
+An accepted cancellation returns `202` while a running job unwinds, or `200` once it is
+terminal. Repeating cancellation of a terminal job returns that same terminal state.
+After exclusive startup recovery, an unpublished interrupted job becomes `failed`
+with reason `server_restarted`, or `cancelled` when cancellation had already committed.
+A pointer already committed before the crash remains authoritative and completed.
 
 Action targets are typed routes, not a guessed Session ID. A Session control route is
 returned only when that native identity addresses the focused agent. Embedded control

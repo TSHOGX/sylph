@@ -677,6 +677,20 @@ async fn retained_reprojection_status_is_hidden_from_non_admin_subjects() {
             .status(),
         StatusCode::FORBIDDEN
     );
+    for method in ["GET", "DELETE"] {
+        assert_eq!(
+            backend
+                .request(
+                    method,
+                    "/api/v1/trace/reprojection/unknown",
+                    None,
+                    Some(&cookie)
+                )
+                .await
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+    }
 }
 
 #[tokio::test]
@@ -688,6 +702,24 @@ async fn retained_reprojection_is_an_admin_action_with_durable_status() {
         .post_authed("/api/v1/trace/reprojection", json!({}))
         .await;
     assert_eq!(queued.status(), StatusCode::ACCEPTED);
+    let receipt = json_body(queued).await;
+    assert!(receipt["job"]["jobId"].is_string());
+    assert_eq!(receipt["job"]["state"], "queued");
+    assert!(receipt["job"].get("relativeFile").is_none());
+    let id = receipt["job"]["jobId"].as_str().unwrap();
+    let route = format!("/api/v1/trace/reprojection/{id}");
+    assert_eq!(backend.get_authed(&route).await.status(), StatusCode::OK);
+    let cancelled = backend.delete_authed(&route).await;
+    assert!(matches!(
+        cancelled.status(),
+        StatusCode::OK | StatusCode::ACCEPTED
+    ));
     let status = backend.get_authed("/api/v1/trace/reprojection").await;
     assert_eq!(status.status(), StatusCode::OK);
+    let status = json_body(status).await;
+    assert!(status["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|job| job["jobId"] == id));
 }

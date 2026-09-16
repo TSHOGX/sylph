@@ -4,7 +4,7 @@ use sylph_protocol::{AgentName, EnvironmentId, SessionId};
 const NATIVE: &[u8] =
     include_bytes!("../../../../../fixtures/native/codex/user-input-response-item.jsonl");
 
-async fn admit_native(service: &TraceService) {
+pub(super) async fn admit_native(service: &TraceService) {
     let environment = EnvironmentId::parse("env7fk2").unwrap();
     let issuer = Issuer::Environment(environment.clone());
     let scope = IngestionScope::Inventory(InventoryRef {
@@ -60,7 +60,7 @@ async fn admit_native(service: &TraceService) {
     }
 }
 
-async fn close(service: TraceService) {
+pub(super) async fn close(service: TraceService) {
     for generation in service.generations.read().await.values() {
         generation.close().await;
     }
