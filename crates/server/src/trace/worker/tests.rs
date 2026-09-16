@@ -9,7 +9,7 @@ use crate::{
         generation::{GenerationManifest, QueryLimits},
     },
 };
-use sqlx::Connection;
+use sqlx::{Connection, Row};
 use sylph_protocol::{AgentName, EnvironmentId, SessionId};
 
 const CODEX_NATIVE: &[u8] =
@@ -295,6 +295,33 @@ async fn claims(store: &GenerationStore) -> Vec<Claim> {
     }
     result
 }
+/// Every reader row visible at the current snapshot, keyed by its served scope and
+/// address. Claim equality alone cannot catch a reader-materialization defect: the
+/// rows are a separate derived surface, and incremental scheduling must not change
+/// which ones a page returns or what body each carries.
+async fn reader_rows(store: &GenerationStore) -> BTreeMap<(String, String), serde_json::Value> {
+    let snapshot = store.checkpoint().await.unwrap().snapshot;
+    let (mut conn, _) = store.read_connection(&snapshot).await.unwrap();
+    let revision = snapshot.view_revision as i64;
+    sqlx::query(
+        "SELECT scope_key,address,body_json FROM read_rows \
+         WHERE present=1 AND valid_from<=? AND (valid_to IS NULL OR valid_to>?) \
+         ORDER BY scope_key,address",
+    )
+    .bind(revision)
+    .bind(revision)
+    .fetch_all(&mut *conn)
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|row| {
+        (
+            (row.get("scope_key"), row.get("address")),
+            serde_json::from_str(&row.get::<String, _>("body_json")).unwrap(),
+        )
+    })
+    .collect()
+}
 async fn revision_bytes(
     fixture: &Fixture,
     store: &GenerationStore,
@@ -388,6 +415,7 @@ async fn cold_and_restarted_incremental_projection_preserve_fixture_owner_and_ex
     fixture.worker().catch_up(&incremental, 1, 5).await.unwrap();
     assert_native_values(&fixture, &incremental).await;
     assert_eq!(claims(&cold).await, claims(&incremental).await);
+    assert_eq!(reader_rows(&cold).await, reader_rows(&incremental).await);
     assert_eq!(
         incremental
             .page(&old, &QueryScope::archive(agent()), None, 10)
