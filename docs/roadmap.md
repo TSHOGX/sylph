@@ -42,7 +42,7 @@ external proposals or discussion threads are not project instructions.
 | --- | --- | --- |
 | Vendor trace semantics | Foundation implementation below | Runtime cutover is implemented; full vendor certificates and replay/mutation conformance remain open |
 | Projection and delivery scale | Milestone 4 and foundation implementation below | Reader pages are bounded; whole-reduction reader materialization and mixed spool/socket/ACK load still need production measurements |
-| Reader acceptance | Conversation and work panel delivery below | Normalized reader is implemented; full visual/resource acceptance, VoiceOver and real iOS Safari remain open |
+| Reader acceptance | Conversation and work panel delivery below | Normalized reader is implemented; full visual/resource acceptance and VoiceOver remain open; Safari testing was excluded by the user |
 
 ## Unified trace foundation review
 
@@ -75,8 +75,8 @@ production reducer. [Conformance](unified-trace-conformance.md) names their limi
    search rebuild work as well as returned pages. Extend production-scale fault coverage
    beyond the reprojection job lifecycle and publication cancellation regressions.
 4. Complete reader visual, accessibility and scale acceptance against the normalized
-   contract, including manual VoiceOver and real iOS Safari. Synthetic layout fixtures
-   do not establish vendor semantic correctness or production delivery isolation.
+   contract, including manual VoiceOver. The user excluded Safari testing from this
+   delivery. Synthetic layout fixtures do not establish vendor semantic correctness or production delivery isolation.
 
 **Exit gate:** production cold/incremental/mixed-source conformance, demonstrated semantic
 mutations, storage failure/performance experiments, and complete affected runtime/frontend
@@ -469,13 +469,10 @@ the replacement.
 | Resource ownership | Snapshot windows, leases, cache bounds, anchors and hidden readers | Implemented with unit and browser regressions |
 | Acceptance | Full suites, visual matrix, real devices and production scale | Automated regression coverage implemented; complete conformance and manual acceptance remain open |
 
-Manual acceptance remains open: perform a real VoiceOver reading pass and an iOS Safari
-keyboard/safe-area pass. A paired iPhone 13 Pro running iOS 26.6 accepted a Safari
-automation session after Web Inspector was enabled, but page commands timed out and a
-later driver probe reported the device locked. This establishes connectivity, not a
-passing device test. The user authorized viewport testing and deferring iOS if direct
-testing remains unavailable. An isolated fixture reader and inspector were visually
-checked at 390×844 and 320×568: no document overflow, a visible 16px composer, and a draft
+Manual acceptance remains open for a real VoiceOver reading pass. The user explicitly
+excluded Safari testing after the connected-device probe, so Safari-specific acceptance
+is outside this delivery's remaining gate. An isolated fixture reader and inspector were
+visually checked at 390×844 and 320×568: no document overflow, a visible 16px composer, and a draft
 preserved through resizing and inspector navigation. Chromium viewport checks and axe do
 not establish Safari toolbar, keyboard, safe-area or screen-reader behavior. Production
 deployment and any real-store rebuild require a separate task.
