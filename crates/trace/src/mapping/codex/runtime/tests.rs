@@ -685,6 +685,25 @@ fn agent_result_keeps_retained_notice_bytes_and_explicit_delivery_without_execut
     assert!(
         matches!(&delivery.route,DeliveryRoute::VendorMailbox {occurrence,..} if occurrence.contains(&event["payload"]["child_codex_turn_id"].as_str().unwrap().to_owned()))
     );
+    let bindings = output
+        .claims
+        .iter()
+        .filter_map(|claim| match &claim.fact {
+            Fact::DeliveryRevisionObserved { delivery, revision } => Some((delivery, revision)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(bindings.len(), 1);
+    assert_eq!(bindings[0].0, &delivery.delivery_ref);
+    assert_eq!(
+        bindings[0].1,
+        &MessageRevisionRef::occurrence(
+            child.clone(),
+            capture(1).source_position,
+            vec!["agent-result-notice".into()],
+        )
+        .unwrap()
+    );
     assert!(output.claims.iter().any(|claim|matches!(&claim.fact,Fact::Declare {object:TraceObject::Message(message)} if matches!(message.author,Author::Harness {..}) && message.purpose==MessagePurpose::Notice && message.production.is_none())));
     assert!(output.claims.iter().any(|claim|matches!(&claim.fact,Fact::Declare {object:TraceObject::MessageRevision(revision)} if revision.representation==Representation::Runtime && revision.parts.len()==2)));
     assert!(output

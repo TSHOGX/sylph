@@ -30,6 +30,11 @@ pub enum ArchiveRequest {
         source: SourceRef,
         generation: u64,
     },
+    HistoryContent {
+        entry: EntryRef,
+        position: SourcePosition,
+        mapping_rule: String,
+    },
     CapturedPayload {
         parent: ObservationRef,
         slot: String,
@@ -124,9 +129,17 @@ pub struct ArchiveContext {
 pub struct ArchiveSemantic {
     pub agents: BTreeMap<AgentRef, AgentThread>,
     pub history_entries: BTreeMap<EntryRef, HistoryEntry>,
+    pub history_contents: BTreeMap<EntryRef, Vec<ArchiveHistoryContent>>,
     pub operations: BTreeMap<OperationRef, Operation>,
     pub object_evidence: BTreeMap<AnyObjectRef, Vec<ObservationRef>>,
     pub result_operations: BTreeMap<ResultRef, OperationRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchiveHistoryContent {
+    pub claim_ref: ClaimRef,
+    pub observation: HistoryContentObservation,
+    pub evidence: Vec<ObservationRef>,
 }
 impl ArchiveContext {
     pub fn semantic_mut(&mut self) -> &mut ArchiveSemantic {

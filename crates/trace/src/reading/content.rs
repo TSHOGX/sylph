@@ -24,30 +24,35 @@ pub(super) fn resolve(
         .values()
         .filter_map(|object| object.declaration.known())
         .filter_map(|object| match object {
-            TraceObject::Delivery(delivery) => Some(delivery.message_revision.clone()),
+            TraceObject::Delivery(delivery) => reduction
+                .select_delivery_revision(&delivery.delivery_ref, None)
+                .known()
+                .cloned(),
             _ => None,
         })
         .collect();
-    for entries in reduction
+    for (selection, entries) in reduction
         .histories
         .values()
-        .map(|history| history.archive_order.as_slice())
+        .map(|history| (None, history.archive_order.as_slice()))
         .chain(
             reduction
                 .selection_memberships
-                .values()
-                .filter_map(|members| members.as_deref()),
+                .iter()
+                .filter_map(|(selection, members)| {
+                    members.as_deref().map(|members| (Some(selection), members))
+                }),
         )
     {
         let mut messages = BTreeMap::<MessageRef, BTreeSet<MessageRevisionRef>>::new();
         for entry in entries {
-            let Some(TraceObject::HistoryEntry(entry)) = reduction
-                .object(&AnyObjectRef::HistoryEntry(entry.clone()))
-                .and_then(|object| object.declaration.known())
-            else {
-                continue;
-            };
-            for content in &entry.content {
+            let contents = reduction.entry_contents(entry, selection);
+            for content in contents
+                .slots
+                .values()
+                .filter_map(Resolved::known)
+                .flatten()
+            {
                 let HistoryContent::Message(reference) = content else {
                     continue;
                 };
@@ -65,8 +70,9 @@ pub(super) fn resolve(
         }
         for (message, included) in messages {
             if let Some(reference) = reduction
-                .message(&message)
-                .and_then(|history| history.select_in(&included).known().cloned())
+                .select_message_in(&message, &included)
+                .known()
+                .cloned()
             {
                 requested.insert(reference);
             }

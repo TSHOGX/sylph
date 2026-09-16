@@ -38,7 +38,7 @@ struct CodexState {
 
 impl SemanticMapper for CodexMapper {
     fn build(&self) -> &'static str {
-        "codex-1"
+        "codex-2"
     }
 
     fn map(&self, input: MapInput<'_>) -> MapOutput {
@@ -1139,10 +1139,25 @@ impl Context<'_, '_> {
             TraceObject::HistoryEntry(HistoryEntry {
                 entry_ref: entry.clone(),
                 containing_agent: owner.clone(),
-                content,
                 predecessor: predecessor.clone(),
                 original_owner,
             }),
+        );
+        self.add(
+            owner,
+            "codex/history-content",
+            Fact::HistoryContentObserved {
+                observation: HistoryContentObservation::complete(
+                    entry.clone(),
+                    self.input.capture.source_position.clone(),
+                    if self.input.capture.transport_kind == TransportKind::NativeJsonl {
+                        "codex/native-history"
+                    } else {
+                        "codex/live-history"
+                    },
+                    content,
+                ),
+            },
         );
         if self.input.capture.transport_kind == TransportKind::NativeJsonl {
             if let SourceLocator::Jsonl { record_ordinal, .. } =
@@ -1296,12 +1311,19 @@ impl Context<'_, '_> {
                 delivery_ref: delivery.clone(),
                 sender,
                 recipient: recipient.map_or(Recipient::Unknown, |agent| Recipient::Agent { agent }),
-                message_revision: revision,
                 route: DeliveryRoute::VendorMailbox {
                     namespace: "codex.agent-message".into(),
                     occurrence: vec![string(value, "id").unwrap_or("").into()],
                 },
             }),
+        );
+        self.add(
+            containing,
+            "codex/communication-delivery-revision",
+            Fact::DeliveryRevisionObserved {
+                delivery: delivery.clone(),
+                revision,
+            },
         );
         self.add(
             containing,
@@ -1516,11 +1538,18 @@ impl Context<'_, '_> {
                         agent: owner.clone(),
                     },
                 },
-                message_revision: revision,
                 route: DeliveryRoute::ToolReturn {
                     operation: operation.clone(),
                 },
             }),
+        );
+        self.add(
+            owner,
+            "codex/tool-result-delivery-revision",
+            Fact::DeliveryRevisionObserved {
+                delivery: delivery.clone(),
+                revision,
+            },
         );
         self.add(
             owner,

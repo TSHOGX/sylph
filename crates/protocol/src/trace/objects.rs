@@ -250,12 +250,11 @@ pub enum DeliveryRoute {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Delivery {
     pub delivery_ref: DeliveryRef,
     pub sender: Author,
     pub recipient: Recipient,
-    pub message_revision: MessageRevisionRef,
     pub route: DeliveryRoute,
 }
 
@@ -568,17 +567,59 @@ pub enum HistoryContent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HistoryEntry {
     pub entry_ref: EntryRef,
     pub containing_agent: AgentRef,
-    pub content: Vec<HistoryContent>,
     pub predecessor: Option<EntryRef>,
     pub original_owner: Option<OwnerRef>,
 }
 
-/// Coordinates retain their domain; a recorded vendor ordinal is never a line number.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HistorySlot {
+    pub slot: u32,
+    pub content: HistoryContent,
+}
+
+/// One immutable source observation of an entry's ordered content. Topology does
+/// not change when another source observes an additional revision in a slot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HistoryContentObservation {
+    pub entry: EntryRef,
+    pub position: SourcePosition,
+    pub mapping_rule: String,
+    pub slots: Vec<HistorySlot>,
+    pub complete: bool,
+}
+
+impl HistoryContentObservation {
+    pub fn complete(
+        entry: EntryRef,
+        position: SourcePosition,
+        mapping_rule: impl Into<String>,
+        contents: Vec<HistoryContent>,
+    ) -> Self {
+        Self {
+            entry,
+            position,
+            mapping_rule: mapping_rule.into(),
+            slots: contents
+                .into_iter()
+                .enumerate()
+                .map(|(slot, content)| HistorySlot {
+                    slot: u32::try_from(slot).expect("bounded history content slots"),
+                    content,
+                })
+                .collect(),
+            complete: true,
+        }
+    }
+}
+
+/// Coordinates retain their domain; a recorded vendor ordinal is never a line number.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
     rename_all = "snake_case",
@@ -622,12 +663,28 @@ pub enum SelectionMembership {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HistorySelection {
     pub selection_ref: SelectionRef,
     pub agent: AgentRef,
     pub membership: SelectionMembership,
+    pub content_scope: HistoryContentScope,
     pub excluded_heads: Vec<EntryRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum HistoryContentScope {
+    /// No source selected one content observation. Alternatives remain visible
+    /// at the query cut; this does not choose the latest captured revision.
+    AllObservedAtCut,
+    ObservationSet {
+        observations: Vec<ClaimRef>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -789,14 +846,6 @@ impl TraceObject {
             Self::MessageRevision(value) => value.parts.iter().map(|part| &part.payload).collect(),
             Self::Operation(value) => value.input_revision.iter().collect(),
             Self::Result(value) => value.payload.iter().collect(),
-            Self::HistoryEntry(value) => value
-                .content
-                .iter()
-                .filter_map(|content| match content {
-                    HistoryContent::Opaque(payload) => Some(payload),
-                    _ => None,
-                })
-                .collect(),
             Self::ContextCheckpoint(value) => {
                 let mut refs = match &value.content {
                     ContextContent::Ordered { settings, .. } => settings.iter().collect(),

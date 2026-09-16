@@ -1,7 +1,7 @@
 use super::*;
 use sylph_protocol::{
     trace::{
-        AgentThread, ClaimRef, EntryRef, Fact, HistoryContent, HistoryEntry, Issuer,
+        AgentThread, ClaimRef, EntryRef, Fact, HistoryEntry, Issuer,
         ObservationRef, OwnerRef,
     },
     SessionId,
@@ -57,7 +57,6 @@ impl Fixture {
         TraceObject::HistoryEntry(HistoryEntry {
             entry_ref: EntryRef::native(self.agent.clone(), "entries", vec![id.into()]).unwrap(),
             containing_agent: self.agent.clone(),
-            content: vec![],
             predecessor: None,
             original_owner: None,
         })
@@ -130,9 +129,7 @@ async fn late_order_and_body_changes_do_not_omit_or_duplicate_old_snapshot_membe
     );
     let mut changed_b = b.clone();
     if let TraceObject::HistoryEntry(entry) = &mut changed_b {
-        entry.content.push(HistoryContent::Opaque(
-            PayloadRef::bytes("b".repeat(64)).unwrap(),
-        ));
+        entry.predecessor = Some(EntryRef::native(fixture.agent.clone(), "entries", vec!["a".into()]).unwrap());
     }
     let new = fixture
         .publish(ProjectionBatch {
@@ -382,7 +379,6 @@ async fn payload_authorization_requires_the_exact_anchor_revision_recipient_and_
     let entry = TraceObject::HistoryEntry(HistoryEntry {
         entry_ref: EntryRef::native(recipient.clone(), "copied", vec!["entry".into()]).unwrap(),
         containing_agent: recipient.clone(),
-        content: vec![],
         predecessor: None,
         original_owner: Some(OwnerRef::Agent {
             agent: fixture.agent.clone(),

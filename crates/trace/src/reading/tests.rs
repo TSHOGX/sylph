@@ -139,20 +139,24 @@ fn duplicate_deliveries_keep_distinct_reading_rows_without_inventing_history_ent
         },
     ];
     for key in ["delivery-a", "delivery-b"] {
+        let delivery = DeliveryRef::native(agent(), "delivery", vec![key.into()]).unwrap();
         facts.push(Fact::Declare {
             object: TraceObject::Delivery(Delivery {
-                delivery_ref: DeliveryRef::native(agent(), "delivery", vec![key.into()]).unwrap(),
+                delivery_ref: delivery.clone(),
                 sender: Author::Human {
                     subject: Some("writer".into()),
                 },
                 recipient: Recipient::Agent {
                     agent: OwnerRef::Agent { agent: agent() },
                 },
-                message_revision: revision.clone(),
                 route: DeliveryRoute::ServerCommand {
                     command_id: key.into(),
                 },
             }),
+        });
+        facts.push(Fact::DeliveryRevisionObserved {
+            delivery,
+            revision: revision.clone(),
         });
     }
     let claims: Vec<_> = facts
@@ -191,8 +195,12 @@ fn duplicate_deliveries_keep_distinct_reading_rows_without_inventing_history_ent
     assert!(window.iter().all(|unit| unit.activation.is_none()));
 }
 
-fn objects_projection(objects: Vec<TraceObject>, relations: Vec<Relation>) -> ReadingProjection {
-    let claims: Vec<_> = objects
+fn objects_projection(
+    objects: Vec<TraceObject>,
+    relations: Vec<Relation>,
+    observations: Vec<HistoryContentObservation>,
+) -> ReadingProjection {
+    let facts = objects
         .into_iter()
         .map(|object| Fact::Declare { object })
         .chain(
@@ -200,10 +208,28 @@ fn objects_projection(objects: Vec<TraceObject>, relations: Vec<Relation>) -> Re
                 .into_iter()
                 .map(|relation| Fact::Relation { relation }),
         )
+        .chain(
+            observations
+                .into_iter()
+                .map(|observation| Fact::HistoryContentObserved { observation }),
+        )
+        .collect();
+    facts_projection(facts, &BTreeMap::new())
+}
+
+fn reader_claim_ref(index: usize) -> ClaimRef {
+    ClaimRef::native(agent(), "reader-test-claim", vec![index.to_string()]).unwrap()
+}
+
+fn facts_projection(
+    facts: Vec<Fact>,
+    payloads: &BTreeMap<PayloadRef, PayloadPreview>,
+) -> ReadingProjection {
+    let claims: Vec<_> = facts
+        .into_iter()
         .enumerate()
         .map(|(index, fact)| Claim {
-            claim_ref: ClaimRef::native(agent(), "reader-test-claim", vec![index.to_string()])
-                .unwrap(),
+            claim_ref: reader_claim_ref(index),
             fact,
             evidence: vec![capture(index as u64 + 1).observation_ref],
             rule_id: "reader-test".into(),
@@ -223,7 +249,7 @@ fn objects_projection(objects: Vec<TraceObject>, relations: Vec<Relation>) -> Re
             1000,
         )
         .unwrap();
-    project(&reducer.resolve(), &BTreeMap::new(), 32)
+    project(&reducer.resolve(), payloads, 32)
 }
 fn declared_agent(reference: AgentRef) -> TraceObject {
     TraceObject::Agent(AgentThread {
@@ -270,6 +296,7 @@ fn activation_catalogues_require_own_proven_execution_even_without_history() {
             child: child.clone(),
             operation: None,
         }],
+        vec![],
     );
     assert!(projection.windows.values().all(Vec::is_empty));
     let parent_rows = &projection.activations[&agent()];
@@ -323,7 +350,6 @@ fn selected_details_include_nested_work_without_reaching_discarded_siblings() {
             TraceObject::HistoryEntry(HistoryEntry {
                 entry_ref: entry.clone(),
                 containing_agent: agent(),
-                content: vec![HistoryContent::Operation(included.operation_ref.clone())],
                 predecessor: None,
                 original_owner: None,
             }),
@@ -331,8 +357,9 @@ fn selected_details_include_nested_work_without_reaching_discarded_siblings() {
                 selection_ref: selection.clone(),
                 agent: agent(),
                 membership: SelectionMembership::EntrySet {
-                    entries: vec![entry],
+                    entries: vec![entry.clone()],
                 },
+                content_scope: HistoryContentScope::AllObservedAtCut,
                 excluded_heads: vec![],
             }),
         ],
@@ -340,6 +367,12 @@ fn selected_details_include_nested_work_without_reaching_discarded_siblings() {
             enclosing: included.operation_ref.clone(),
             nested: nested.operation_ref.clone(),
         }],
+        vec![HistoryContentObservation::complete(
+            entry,
+            capture(1).source_position,
+            "reader-test",
+            vec![HistoryContent::Operation(included.operation_ref.clone())],
+        )],
     );
     let selected = &projection.selected_objects[&ReadingScope {
         agent: agent(),
@@ -358,6 +391,8 @@ fn inherited_content_keeps_original_authorship_without_a_recipient_activation() 
     let message = MessageRef::native(agent(), "message", vec!["original".into()]).unwrap();
     let revision =
         MessageRevisionRef::native(agent(), "revision", vec!["original".into()]).unwrap();
+    let entry =
+        EntryRef::native(recipient.clone(), "inherited-entry", vec!["copy".into()]).unwrap();
     let projection = objects_projection(
         vec![
             declared_agent(agent()),
@@ -386,19 +421,19 @@ fn inherited_content_keeps_original_authorship_without_a_recipient_activation() 
                 parts: vec![],
             }),
             TraceObject::HistoryEntry(HistoryEntry {
-                entry_ref: EntryRef::native(
-                    recipient.clone(),
-                    "inherited-entry",
-                    vec!["copy".into()],
-                )
-                .unwrap(),
+                entry_ref: entry.clone(),
                 containing_agent: recipient.clone(),
-                content: vec![HistoryContent::Message(revision)],
                 predecessor: None,
                 original_owner: Some(OwnerRef::Agent { agent: agent() }),
             }),
         ],
         vec![],
+        vec![HistoryContentObservation::complete(
+            entry,
+            capture(1).source_position,
+            "reader-test",
+            vec![HistoryContent::Message(revision)],
+        )],
     );
     let units = &projection.windows[&ReadingScope {
         agent: recipient,
@@ -419,6 +454,333 @@ fn inherited_content_keeps_original_authorship_without_a_recipient_activation() 
     };
     assert_eq!(author.address.agent(), agent());
     assert_eq!(original.address.agent(), agent());
+}
+
+fn observed_content_fixture(
+    payloads: [&PayloadRef; 2],
+) -> (Vec<Fact>, EntryRef, [MessageRevisionRef; 2]) {
+    let entry = EntryRef::native(agent(), "entry", vec!["shared".into()]).unwrap();
+    let message = MessageRef::native(agent(), "message", vec!["shared".into()]).unwrap();
+    let revisions = ["native", "snapshot"]
+        .map(|name| MessageRevisionRef::native(agent(), "revision", vec![name.into()]).unwrap());
+    let mut facts = vec![
+        Fact::Declare {
+            object: declared_agent(agent()),
+        },
+        Fact::Declare {
+            object: TraceObject::Message(Message {
+                message_ref: message.clone(),
+                author: Author::Unknown,
+                protocol_role: None,
+                purpose: MessagePurpose::Unclassified,
+                production: None,
+            }),
+        },
+        Fact::Declare {
+            object: TraceObject::HistoryEntry(HistoryEntry {
+                entry_ref: entry.clone(),
+                containing_agent: agent(),
+                predecessor: None,
+                original_owner: None,
+            }),
+        },
+    ];
+    for (index, (reference, payload)) in revisions.iter().zip(payloads).enumerate() {
+        facts.push(Fact::Declare {
+            object: TraceObject::MessageRevision(MessageRevision {
+                revision_ref: reference.clone(),
+                message: message.clone(),
+                representation: Representation::Conversation,
+                form: RevisionForm::Complete,
+                parts: vec![ContentPart {
+                    part_ref: MessagePartRef::native(agent(), "part", vec![index.to_string()])
+                        .unwrap(),
+                    kind: ContentKind::Text,
+                    payload: payload.clone(),
+                    media_type: Some("text/plain".into()),
+                    encoding: PayloadEncoding::Utf8,
+                }],
+            }),
+        });
+        facts.push(Fact::HistoryContentObserved {
+            observation: HistoryContentObservation::complete(
+                entry.clone(),
+                capture(index as u64 + 1).source_position,
+                "reader-test",
+                vec![HistoryContent::Message(reference.clone())],
+            ),
+        });
+    }
+    (facts, entry, revisions)
+}
+
+fn text_preview(value: &str) -> PayloadPreview {
+    PayloadPreview {
+        preview: value.into(),
+        preview_limit: 2048,
+        total_bytes: Some(value.len() as u64),
+        availability: Some(ReadAvailability::Available),
+        ..PayloadPreview::default()
+    }
+}
+
+#[test]
+fn selected_entry_body_and_detail_reachability_exclude_other_source_observations() {
+    let first = PayloadRef::bytes("a".repeat(64)).unwrap();
+    let second = PayloadRef::bytes("b".repeat(64)).unwrap();
+    let (mut facts, entry, revisions) = observed_content_fixture([&first, &second]);
+    let selection =
+        SelectionRef::native(agent(), "selection", vec!["native-observation".into()]).unwrap();
+    facts.push(Fact::Declare {
+        object: TraceObject::HistorySelection(HistorySelection {
+            selection_ref: selection.clone(),
+            agent: agent(),
+            membership: SelectionMembership::EntrySet {
+                entries: vec![entry.clone()],
+            },
+            content_scope: HistoryContentScope::ObservationSet {
+                observations: vec![reader_claim_ref(4)],
+            },
+            excluded_heads: vec![],
+        }),
+    });
+    let delivery = DeliveryRef::native(agent(), "delivery", vec!["other-source".into()]).unwrap();
+    facts.push(Fact::Declare {
+        object: TraceObject::Delivery(Delivery {
+            delivery_ref: delivery.clone(),
+            sender: Author::Unknown,
+            recipient: Recipient::Unknown,
+            route: DeliveryRoute::NativeHistory,
+        }),
+    });
+    facts.push(Fact::DeliveryRevisionObserved {
+        delivery: delivery.clone(),
+        revision: revisions[1].clone(),
+    });
+    facts.push(Fact::DeliveryStage {
+        delivery: delivery.clone(),
+        stage: DeliveryStage::Admitted {
+            entry: Some(entry.clone()),
+        },
+    });
+    let projection = facts_projection(
+        facts,
+        &BTreeMap::from([
+            (first, text_preview("selected source")),
+            (second, text_preview("unselected source")),
+        ]),
+    );
+    let scope = ReadingScope {
+        agent: agent(),
+        selection: Some(selection.clone()),
+    };
+    let rows = &projection.windows[&scope];
+    assert_eq!(rows.len(), 1);
+    let ReadingContent::Message {
+        revision_ref,
+        parts,
+        ..
+    } = &rows[0].content
+    else {
+        panic!("selected content was lost");
+    };
+    assert_eq!(revision_ref, &revisions[0]);
+    assert_eq!(parts[0].preview, "selected source");
+    assert_eq!(rows[0].anchor.object(), AnyObjectRef::HistoryEntry(entry));
+    let reachable = &projection.selected_objects[&scope];
+    assert!(reachable.contains(&AnyObjectRef::MessageRevision(revisions[0].clone())));
+    assert!(!reachable.contains(&AnyObjectRef::MessageRevision(revisions[1].clone())));
+    assert!(!reachable.contains(&AnyObjectRef::Delivery(delivery)));
+}
+
+#[test]
+fn equal_complete_observations_render_once_but_different_content_retains_the_entry_diagnostic() {
+    let first = PayloadRef::bytes("a".repeat(64)).unwrap();
+    let second = PayloadRef::bytes("b".repeat(64)).unwrap();
+    for (other, expected_message) in [(&first, true), (&second, false)] {
+        let (facts, entry, _) = observed_content_fixture([&first, other]);
+        let projection = facts_projection(
+            facts,
+            &BTreeMap::from([
+                (first.clone(), text_preview("first")),
+                (second.clone(), text_preview("different")),
+            ]),
+        );
+        let rows = &projection.windows[&ReadingScope {
+            agent: agent(),
+            selection: None,
+        }];
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].anchor.object(), AnyObjectRef::HistoryEntry(entry));
+        assert_eq!(
+            matches!(rows[0].content, ReadingContent::Message { .. }),
+            expected_message
+        );
+        if !expected_message {
+            assert!(matches!(rows[0].content, ReadingContent::Unknown { .. }));
+        }
+    }
+}
+
+#[test]
+fn missing_content_is_visible_while_an_observed_empty_entry_has_no_fabricated_slot() {
+    let entry = EntryRef::native(agent(), "entry", vec!["empty".into()]).unwrap();
+    for complete in [false, true] {
+        let projection = objects_projection(
+            vec![
+                declared_agent(agent()),
+                TraceObject::HistoryEntry(HistoryEntry {
+                    entry_ref: entry.clone(),
+                    containing_agent: agent(),
+                    predecessor: None,
+                    original_owner: None,
+                }),
+            ],
+            vec![],
+            vec![HistoryContentObservation {
+                entry: entry.clone(),
+                position: capture(1).source_position,
+                mapping_rule: "reader-test".into(),
+                slots: vec![],
+                complete,
+            }],
+        );
+        let rows = &projection.windows[&ReadingScope {
+            agent: agent(),
+            selection: None,
+        }];
+        if complete {
+            assert!(rows.is_empty());
+        } else {
+            assert_eq!(rows.len(), 1);
+            assert!(matches!(rows[0].content, ReadingContent::Unknown { .. }));
+            assert!(rows[0].address.ends_with(":unobserved-content"));
+        }
+    }
+}
+
+#[test]
+fn repeated_native_admission_observations_render_one_delivery_occurrence() {
+    let payload = PayloadRef::bytes("a".repeat(64)).unwrap();
+    let (mut facts, entry, revisions) = observed_content_fixture([&payload, &payload]);
+    let delivery =
+        DeliveryRef::native(agent(), "native-admission", vec!["same-entry".into()]).unwrap();
+    facts.push(Fact::Declare {
+        object: TraceObject::Delivery(Delivery {
+            delivery_ref: delivery.clone(),
+            sender: Author::Unknown,
+            recipient: Recipient::Unknown,
+            route: DeliveryRoute::NativeHistory,
+        }),
+    });
+    for revision in &revisions {
+        facts.push(Fact::DeliveryRevisionObserved {
+            delivery: delivery.clone(),
+            revision: revision.clone(),
+        });
+        facts.push(Fact::DeliveryStage {
+            delivery: delivery.clone(),
+            stage: DeliveryStage::Admitted {
+                entry: Some(entry.clone()),
+            },
+        });
+    }
+    let projection = facts_projection(
+        facts,
+        &BTreeMap::from([(payload, text_preview("one observed delivery"))]),
+    );
+    let rows = &projection.windows[&ReadingScope {
+        agent: agent(),
+        selection: None,
+    }];
+    assert_eq!(rows.len(), 1);
+    let ReadingContent::Message {
+        parts,
+        delivery: Some(observed),
+        ..
+    } = &rows[0].content
+    else {
+        panic!("native admission was lost");
+    };
+    assert_eq!(parts[0].preview, "one observed delivery");
+    assert_eq!(
+        observed.reference.object(),
+        AnyObjectRef::Delivery(delivery)
+    );
+}
+
+#[test]
+fn message_corrections_do_not_rewrite_submitted_delivery_observations() {
+    let first = PayloadRef::bytes("a".repeat(64)).unwrap();
+    let second = PayloadRef::bytes("b".repeat(64)).unwrap();
+    for conflicting_delivery in [false, true] {
+        let (mut facts, _, revisions) = observed_content_fixture([&first, &second]);
+        for fact in &mut facts {
+            if let Fact::Declare {
+                object: TraceObject::MessageRevision(revision),
+            } = fact
+            {
+                if revision.revision_ref == revisions[1] {
+                    revision.form = RevisionForm::Correction {
+                        replaces: revisions[0].clone(),
+                    };
+                }
+            }
+        }
+        let delivery =
+            DeliveryRef::native(agent(), "submitted", vec!["one-attempt".into()]).unwrap();
+        facts.push(Fact::Declare {
+            object: TraceObject::Delivery(Delivery {
+                delivery_ref: delivery.clone(),
+                sender: Author::Unknown,
+                recipient: Recipient::Agent {
+                    agent: OwnerRef::Agent { agent: agent() },
+                },
+                route: DeliveryRoute::ServerCommand {
+                    command_id: "command".into(),
+                },
+            }),
+        });
+        facts.push(Fact::DeliveryRevisionObserved {
+            delivery: delivery.clone(),
+            revision: revisions[0].clone(),
+        });
+        if conflicting_delivery {
+            facts.push(Fact::DeliveryRevisionObserved {
+                delivery: delivery.clone(),
+                revision: revisions[1].clone(),
+            });
+        }
+        let projection = facts_projection(
+            facts,
+            &BTreeMap::from([
+                (first.clone(), text_preview("dispatched")),
+                (second.clone(), text_preview("corrected message")),
+            ]),
+        );
+        let rows = &projection.windows[&ReadingScope {
+            agent: agent(),
+            selection: None,
+        }];
+        let row = rows
+            .iter()
+            .find(|row| row.anchor.object() == AnyObjectRef::Delivery(delivery.clone()))
+            .expect("submitted delivery must remain visible");
+        if conflicting_delivery {
+            assert!(matches!(row.content, ReadingContent::Unknown { .. }));
+        } else {
+            let ReadingContent::Message {
+                parts,
+                revision_ref,
+                ..
+            } = &row.content
+            else {
+                panic!("exact submitted content unavailable");
+            };
+            assert_eq!(revision_ref, &revisions[0]);
+            assert_eq!(parts[0].preview, "dispatched");
+        }
+    }
 }
 
 #[test]
@@ -554,6 +916,7 @@ fn a_selected_stream_prefix_assembles_its_latest_included_revision_after_a_later
                 selection_ref: selection.clone(),
                 agent: agent(),
                 membership: SelectionMembership::EntrySet { entries: prefix },
+                content_scope: HistoryContentScope::AllObservedAtCut,
                 excluded_heads: vec![],
             }),
         },

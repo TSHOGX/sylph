@@ -250,7 +250,7 @@ contract; the exact Rust member spelling is defined once in the protocol impleme
 | Evidence payload roots | Observation/manifest references; immutable object digest, encoded/decoded length and availability |
 | Semantic claims | ClaimRef, kind, subject, typed value, rule/build, evidence joins, supersession joins |
 | Identity equivalences | Typed endpoints and proof; reversible derived equivalence classes; no destructive owner rewrite |
-| Agents, activations, messages, deliveries | Foundation object keys and owning references; message revision and delivery attempt indexed separately |
+| Agents, activations, messages, deliveries | Foundation object keys and owning references; immutable delivery-to-revision observation bindings indexed independently of delivery identity and stages |
 | Operations, result occurrences, resources | Invocation/result/resource keys; explicit requester, activation and lifetime references |
 | History entries, content observations, selections, context checkpoints | Independent predecessor adjacency; immutable content observations grouped by entry/source/slot; selected entry and observation membership; original ownership |
 | Measurements | Scope/metric/mode/counter-domain keys; series position uniqueness; no unqualified total column |

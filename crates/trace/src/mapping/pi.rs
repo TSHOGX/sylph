@@ -8,8 +8,8 @@ use serde_json::Value;
 use sylph_protocol::{trace::*, AgentName, NativeId, SessionId};
 
 use super::{
-    claim, correlation_key, derived_payload_with_media, ArchiveRequest, MapInput, MapOutput,
-    MappingDiagnostic, SemanticMapper,
+    claim, correlation_key, derived_payload_with_media, ArchiveHistoryContent, ArchiveRequest,
+    MapInput, MapOutput, MappingDiagnostic, SemanticMapper,
 };
 
 pub struct PiMapper;
@@ -49,7 +49,7 @@ struct LiveMessage {
 
 impl SemanticMapper for PiMapper {
     fn build(&self) -> &'static str {
-        "pi-2"
+        "pi-3"
     }
 
     fn map(&self, input: MapInput<'_>) -> MapOutput {
@@ -90,6 +90,7 @@ impl SemanticMapper for PiMapper {
             output: &mut output,
             state: &mut state,
             local_history: BTreeMap::new(),
+            local_history_contents: BTreeMap::new(),
         };
         if input.capture.transport_kind == TransportKind::NativeJsonl {
             context.native(&value);
@@ -115,6 +116,7 @@ struct Context<'a, 'b> {
     output: &'a mut MapOutput,
     state: &'a mut PiState,
     local_history: BTreeMap<EntryRef, HistoryEntry>,
+    local_history_contents: BTreeMap<EntryRef, Vec<ArchiveHistoryContent>>,
 }
 
 impl Context<'_, '_> {
@@ -129,6 +131,41 @@ impl Context<'_, '_> {
     }
     fn object(&mut self, owner: &AgentRef, slot: &str, object: TraceObject) {
         self.add(owner, slot, Fact::Declare { object });
+    }
+    fn history_content(
+        &mut self,
+        owner: &AgentRef,
+        slot: &str,
+        entry: EntryRef,
+        mapping_rule: &str,
+        contents: Vec<HistoryContent>,
+    ) {
+        let observation = HistoryContentObservation::complete(
+            entry.clone(),
+            self.input.capture.source_position.clone(),
+            mapping_rule,
+            contents,
+        );
+        self.add(
+            owner,
+            slot,
+            Fact::HistoryContentObserved {
+                observation: observation.clone(),
+            },
+        );
+        let claim = self
+            .output
+            .claims
+            .last()
+            .expect("content observation was added");
+        self.local_history_contents
+            .entry(entry)
+            .or_default()
+            .push(ArchiveHistoryContent {
+                claim_ref: claim.claim_ref.clone(),
+                observation,
+                evidence: claim.evidence.clone(),
+            });
     }
     fn issue(&mut self, owner: Option<&AgentRef>, slot: &str, code: DiagnosticCode, message: &str) {
         if let Some(owner) = owner {
@@ -419,7 +456,6 @@ impl Context<'_, '_> {
         let history = HistoryEntry {
             entry_ref: entry.clone(),
             containing_agent: owner.clone(),
-            content,
             predecessor: predecessor.clone(),
             original_owner: original,
         };
@@ -428,6 +464,17 @@ impl Context<'_, '_> {
             owner,
             &format!("{slot}/history"),
             TraceObject::HistoryEntry(history),
+        );
+        self.history_content(
+            owner,
+            &format!("{slot}/content"),
+            entry.clone(),
+            if self.input.capture.transport_kind == TransportKind::NativeJsonl {
+                "pi/native-history"
+            } else {
+                "pi/rpc-entry-history"
+            },
+            content,
         );
         if let Some(predecessor) = predecessor {
             self.add(
@@ -765,12 +812,17 @@ impl Context<'_, '_> {
             }
         }
         if protocol_role == Some(ProtocolRole::User) || role == "toolResult" {
-            let delivery = DeliveryRef::occurrence(
-                owner.clone(),
-                self.input.capture.source_position.clone(),
-                vec![selector.into(), "delivery".into()],
-            )
-            .unwrap();
+            let delivery = if let Some(entry) = native_entry {
+                DeliveryRef::native(owner.clone(), "pi.entry-admission", vec![entry.into()])
+                    .unwrap()
+            } else {
+                DeliveryRef::occurrence(
+                    owner.clone(),
+                    self.input.capture.source_position.clone(),
+                    vec![selector.into(), "delivery".into()],
+                )
+                .unwrap()
+            };
             self.object(
                 owner,
                 &format!("{selector}/delivery"),
@@ -782,9 +834,16 @@ impl Context<'_, '_> {
                             agent: owner.clone(),
                         },
                     },
-                    message_revision: revision.clone(),
                     route: DeliveryRoute::NativeHistory,
                 }),
+            );
+            self.add(
+                owner,
+                &format!("{selector}/delivery-revision"),
+                Fact::DeliveryRevisionObserved {
+                    delivery: delivery.clone(),
+                    revision: revision.clone(),
+                },
             );
             self.add(
                 owner,
@@ -838,13 +897,45 @@ impl Context<'_, '_> {
                 });
                 return None;
             };
-            for content in &entry.content {
-                if let HistoryContent::Operation(operation) = content {
-                    if matches!(operation.address(),ObjectAddress::Native{namespace,key,..} if namespace=="pi.tool-call"&&key.last().is_some_and(|native|native==id))
-                    {
-                        return Some(operation.clone());
-                    }
-                }
+            let observations = self
+                .local_history_contents
+                .get(&reference)
+                .or_else(|| self.input.archive.semantic.history_contents.get(&reference));
+            let Some(observations) = observations.filter(|observations| {
+                !observations.is_empty()
+                    && observations
+                        .iter()
+                        .all(|content| content.observation.complete)
+            }) else {
+                // A predecessor does not identify a particular source occurrence,
+                // so missing content cannot produce a precise archive request.
+                return None;
+            };
+            let candidates: BTreeSet<_> = observations
+                .iter()
+                .map(|content| {
+                    content
+                        .observation
+                        .slots
+                        .iter()
+                        .filter_map(|slot| {
+                            let HistoryContent::Operation(operation) = &slot.content else {
+                                return None;
+                            };
+                            matches!(operation.address(),ObjectAddress::Native{namespace,key,..} if namespace=="pi.tool-call"&&key.last().is_some_and(|native|native==id))
+                                .then(|| operation.clone())
+                        })
+                        .collect::<BTreeSet<_>>()
+                })
+                .collect();
+            if candidates.len() != 1 {
+                return None;
+            }
+            let operations = candidates.into_iter().next().unwrap();
+            match operations.len() {
+                0 => {}
+                1 => return operations.into_iter().next(),
+                _ => return None,
             }
             next = entry.predecessor.clone();
         }
@@ -945,6 +1036,7 @@ impl Context<'_, '_> {
                 selection_ref: selection.clone(),
                 agent: owner.clone(),
                 membership: SelectionMembership::EntrySet { entries },
+                content_scope: HistoryContentScope::AllObservedAtCut,
                 excluded_heads: vec![],
             }),
         );
@@ -1057,10 +1149,16 @@ impl Context<'_, '_> {
             TraceObject::HistoryEntry(HistoryEntry {
                 entry_ref: entry.clone(),
                 containing_agent: owner.clone(),
-                content: vec![HistoryContent::Message(revision.clone())],
                 predecessor: current.previous_entry.clone(),
                 original_owner: None,
             }),
+        );
+        self.history_content(
+            owner,
+            "pi/live-history-content",
+            entry.clone(),
+            "pi/rpc-live-history",
+            vec![HistoryContent::Message(revision.clone())],
         );
         let evidence = if reconstructed {
             current.evidence.clone()
@@ -1601,6 +1699,7 @@ impl Context<'_, '_> {
             return;
         }
         if matches!(command, "get_entries" | "get_tree") {
+            let first_claim = self.output.claims.len();
             if let Some(entries) = value["data"]["entries"].as_array() {
                 for entry in entries {
                     self.entry(owner, entry, "snapshot");
@@ -1617,6 +1716,13 @@ impl Context<'_, '_> {
                     }
                 }
             }
+            // An append window can name a head whose ancestors were omitted. Keep
+            // their topology, without claiming this response observed their content.
+            let observations = self.output.claims[first_claim..]
+                .iter()
+                .filter(|claim| matches!(claim.fact, Fact::HistoryContentObserved { .. }))
+                .map(|claim| claim.claim_ref.clone())
+                .collect();
             if let Some(leaf) = value["data"].get("leafId") {
                 let membership = if let Some(id) = leaf.as_str() {
                     SelectionMembership::EntryPath {
@@ -1646,6 +1752,7 @@ impl Context<'_, '_> {
                         selection_ref: selection.clone(),
                         agent: owner.clone(),
                         membership,
+                        content_scope: HistoryContentScope::ObservationSet { observations },
                         excluded_heads: vec![],
                     }),
                 );

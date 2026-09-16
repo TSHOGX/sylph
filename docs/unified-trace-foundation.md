@@ -63,7 +63,7 @@ detail but cannot replace core identity, ownership, ordering, or outcome fields.
 | AgentThread | One independently advancing agent conversation; `agent_ref`, vendor, optional evidenced name/model, existence and lifecycle claims |
 | Activation | One observed execution interval; `activation_ref`, owning agent, boundary evidence, triggering deliveries, own outcome |
 | Message | Authored content; `message_ref`, author, protocol role if known, purpose if known, immutable content revisions and ordered parts |
-| Delivery | One attempt/occurrence of routing a Message revision; `delivery_ref`, sender, recipient, message revision, route and stage evidence |
+| Delivery | One attempt/occurrence of routing content; `delivery_ref`, sender, recipient, route, immutable observed revision bindings and independent stage evidence |
 | Operation | One invocation; `operation_ref`, owner agent, typed requester, optional known activation, category, input revision, result occurrences, own lifecycle |
 | Resource | An identified entity that outlives an invocation; `resource_ref`, creator/host if known, kind, independently observed state |
 | HistoryEntry | One native or observed history position; `entry_ref`, containing agent, predecessor and original-owner evidence; immutable content observations bind its ordered slots separately |
@@ -201,6 +201,15 @@ Each content revision is immutable. An edit to queued human input creates a revi
 dispatch records the exact revision and its bytes. Native transformed input is another
 representation with provenance, not a replacement for what the user submitted. A vendor
 stream can establish successive message revisions under the streaming rules below.
+
+A Delivery's stable routing identity is separate from its immutable revision-binding
+observations. Reobserving one proved native admission does not create a second delivery
+because another source gives its content a distinct observed revision reference. Bindings
+retain every supporting claim and exact revision; differing content remains ambiguous
+unless a field-specific correction establishes it. Selected reads restrict delivery
+bindings to their eligible content observations. A server dispatch still binds exactly
+the accepted revision it sent; a queue edit creates a new revision-specific delivery,
+and native wrapping cannot substitute that submitted content.
 
 Delivery records these independently evidenced stages:
 

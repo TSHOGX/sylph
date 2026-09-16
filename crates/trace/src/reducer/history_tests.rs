@@ -45,7 +45,6 @@ fn entry_fact(index: u64, id: &str, parent: Option<&str>) -> Claim {
             object: TraceObject::HistoryEntry(HistoryEntry {
                 entry_ref: entry(id),
                 containing_agent: owner("parent"),
-                content: vec![],
                 predecessor: parent.map(entry),
                 original_owner: None,
             }),
@@ -61,6 +60,7 @@ fn selection_facts(index: u64, name: &str, membership: SelectionMembership) -> [
                     selection_ref: selection(name),
                     agent: owner(name),
                     membership,
+                    content_scope: HistoryContentScope::AllObservedAtCut,
                     excluded_heads: vec![],
                 }),
             },

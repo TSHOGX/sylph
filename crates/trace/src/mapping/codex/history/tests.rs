@@ -79,7 +79,8 @@ impl Fixture {
                     object: TraceObject::HistoryEntry(entry),
                 } => {
                     self.archive
-                        .semantic_mut().history_entries
+                        .semantic_mut()
+                        .history_entries
                         .insert(entry.entry_ref.clone(), entry.clone());
                     self.archive.semantic_mut().object_evidence.insert(
                         AnyObjectRef::HistoryEntry(entry.entry_ref.clone()),
@@ -97,6 +98,18 @@ impl Fixture {
                         .native_history_positions
                         .insert(entry.clone(), position.clone());
                 }
+                Fact::HistoryContentObserved { observation } => {
+                    self.archive
+                        .semantic_mut()
+                        .history_contents
+                        .entry(observation.entry.clone())
+                        .or_default()
+                        .push(crate::mapping::ArchiveHistoryContent {
+                            claim_ref: claim.claim_ref.clone(),
+                            observation: observation.clone(),
+                            evidence: claim.evidence.clone(),
+                        });
+                }
                 Fact::HistoryMappingComplete { extent } => self
                     .archive
                     .source_prefixes
@@ -107,6 +120,16 @@ impl Fixture {
             }
         }
         self.claims.extend(output.claims);
+    }
+    fn contents<'a>(&'a self, entry: &EntryRef) -> impl Iterator<Item = &'a HistoryContent> {
+        self.archive
+            .semantic
+            .history_contents
+            .get(entry)
+            .into_iter()
+            .flatten()
+            .flat_map(|content| &content.observation.slots)
+            .map(|slot| &slot.content)
     }
     fn native(
         &mut self,
@@ -283,11 +306,84 @@ fn referenced_parent_context_is_child_scoped_and_expands_in_bounded_pages() {
                 agent: agent("parent")
             })
         );
-        assert!(
-            matches!(&entry.content[0],HistoryContent::Message(revision) if revision.scope()==&agent("parent"))
-        );
+        assert!(matches!(
+            fixture.contents(&entry.entry_ref).next(),
+            Some(HistoryContent::Message(revision)) if revision.scope() == &agent("parent")
+        ));
     }
     assert!(selected.last().unwrap().original_owner.is_none());
+}
+
+#[test]
+fn frozen_alias_waits_for_content_at_the_proven_physical_position_and_rule() {
+    let mut fixture = Fixture::default();
+    fixture.native(ROOT, "parent", None, 0, 1);
+    let base = fixture.base(ROOT, 2);
+    fixture.native(CHILD, "child", Some(base), 2, 0);
+    let (entry, original) = fixture
+        .archive
+        .semantic
+        .history_contents
+        .iter()
+        .next()
+        .map(|(entry, observations)| (entry.clone(), observations[0].clone()))
+        .unwrap();
+    let mut other_position = original.clone();
+    other_position.observation.position.source = source("unrelated-live-source");
+    let mut other_rule = original.clone();
+    other_rule.observation.mapping_rule = "unrelated-history-rule".into();
+
+    for unavailable in [
+        vec![],
+        vec![other_position.clone()],
+        vec![other_rule.clone()],
+    ] {
+        fixture
+            .archive
+            .semantic_mut()
+            .history_contents
+            .insert(entry.clone(), unavailable);
+        let output = fixture.map(CHILD, "child", &MapperState::default());
+        assert!(
+            output.claims.is_empty(),
+            "The alias page must remain unpublished"
+        );
+        assert_eq!(
+            output.requests,
+            vec![ArchiveRequest::HistoryContent {
+                entry: entry.clone(),
+                position: original.observation.position.clone(),
+                mapping_rule: "codex/native-history".into(),
+            }]
+        );
+    }
+
+    fixture
+        .archive
+        .semantic_mut()
+        .history_contents
+        .insert(entry, vec![other_position, original.clone(), other_rule]);
+    fixture.select(CHILD, "child");
+    let selected = fixture.selected("child");
+    assert_eq!(selected.len(), 1);
+    let observations = &fixture.archive.semantic.history_contents[&selected[0].entry_ref];
+    assert_eq!(observations.len(), 1);
+    assert_eq!(
+        observations[0].observation.slots,
+        original.observation.slots
+    );
+    assert_eq!(
+        observations[0].observation.position,
+        original.observation.position
+    );
+    assert!(observations[0]
+        .observation
+        .mapping_rule
+        .starts_with("codex/history-base-context:"));
+    assert!(original
+        .evidence
+        .iter()
+        .all(|evidence| observations[0].evidence.contains(evidence)));
 }
 
 #[test]
@@ -302,7 +398,8 @@ fn chained_physical_bases_keep_each_frozen_cut_and_exclude_abandoned_suffixes() 
     assert_eq!(
         fixture
             .archive
-            .semantic_mut().history_entries
+            .semantic_mut()
+            .history_entries
             .values()
             .filter(|entry| entry.containing_agent == agent("child"))
             .count(),
@@ -465,7 +562,7 @@ fn selected_grandchild_does_not_reimport_its_parents_derived_context() {
     let selected = fixture.selected("c");
     let references: Vec<_> = selected
         .iter()
-        .flat_map(|entry| entry.content.iter())
+        .flat_map(|entry| fixture.contents(&entry.entry_ref))
         .filter_map(|content| match content {
             HistoryContent::Message(revision) => Some(revision.clone()),
             _ => None,
@@ -505,7 +602,7 @@ fn completing_a_parent_selection_cannot_shift_a_childs_continuation() {
     assert_eq!(selected.len(), 58);
     let references: BTreeSet<_> = selected
         .iter()
-        .flat_map(|entry| entry.content.iter())
+        .flat_map(|entry| fixture.contents(&entry.entry_ref))
         .map(|content| serde_json::to_string(content).unwrap())
         .collect();
     assert_eq!(references.len(), 58);

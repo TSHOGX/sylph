@@ -7,6 +7,8 @@
 use super::*;
 
 type SelectionObservationGroup<'a> = (&'a SourcePosition, Vec<(&'a SelectionRef, &'a ClaimRef)>);
+type PositionDomain = (SourceRef, u64, HistoryCoordinate, String);
+type EntryPositions = BTreeMap<EntryRef, BTreeMap<u64, BTreeSet<SourcePosition>>>;
 
 struct ReadingView {
     order: Vec<EntryRef>,
@@ -20,6 +22,7 @@ struct HistoryGraph {
     predecessor: BTreeMap<EntryRef, EntryRef>,
     invalid: BTreeSet<EntryRef>,
     claims: BTreeMap<EntryRef, Vec<ClaimRef>>,
+    positions: BTreeMap<PositionDomain, EntryPositions>,
 }
 
 impl HistoryGraph {
@@ -29,6 +32,7 @@ impl HistoryGraph {
             predecessor: BTreeMap::new(),
             invalid: BTreeSet::new(),
             claims: BTreeMap::new(),
+            positions: BTreeMap::new(),
         };
         for object in result.objects.values() {
             if let Resolved::Known {
@@ -54,6 +58,29 @@ impl HistoryGraph {
         // Native predecessors have their own validity graph. Read-order relations
         // must neither hide a conflicting native parent nor establish membership.
         for claim in active {
+            if let Fact::HistoryPosition {
+                entry,
+                position,
+                coordinate,
+                value,
+                mapping_rule,
+            } = &claim.fact
+            {
+                graph
+                    .positions
+                    .entry((
+                        position.source.clone(),
+                        position.generation,
+                        coordinate.clone(),
+                        mapping_rule.clone(),
+                    ))
+                    .or_default()
+                    .entry(entry.clone())
+                    .or_default()
+                    .entry(*value)
+                    .or_default()
+                    .insert(position.clone());
+            }
             if let Fact::Relation {
                 relation: Relation::HistoryPredecessor { predecessor, entry },
             } = &claim.fact
@@ -288,7 +315,25 @@ pub(super) fn resolve_histories(active: &[&Claim], result: &mut Reduction) {
         .map(|(index, entry)| (entry, index))
         .collect();
     for selection in selections.values() {
-        result.selection_memberships.insert(selection.selection_ref.clone(),membership(selection,&graph,&selections,active,&entry_order,&mut BTreeSet::new()));
+        let resolved = membership(
+            selection,
+            &graph,
+            &selections,
+            active,
+            &result.history_contents,
+            &entry_order,
+            &mut BTreeSet::new(),
+        );
+        result.selection_content_observations.insert(
+            selection.selection_ref.clone(),
+            resolved
+                .as_ref()
+                .map(|membership| membership.observations.clone()),
+        );
+        result.selection_memberships.insert(
+            selection.selection_ref.clone(),
+            resolved.map(|membership| membership.entries),
+        );
     }
     for agent in agents {
         let ReadingView {
@@ -311,7 +356,11 @@ pub(super) fn resolve_histories(active: &[&Claim], result: &mut Reduction) {
                 let prior = latest
                     .entry(selected_at.source.clone())
                     .or_insert((selected_at, vec![]));
-                let order=if selected_at.generation!=prior.0.generation {Some(selected_at.generation.cmp(&prior.0.generation))}else{source_order(selected_at,prior.0)};
+                let order = if selected_at.generation != prior.0.generation {
+                    Some(selected_at.generation.cmp(&prior.0.generation))
+                } else {
+                    source_order(selected_at, prior.0)
+                };
                 match order {
                     Some(std::cmp::Ordering::Greater) => {
                         *prior = (selected_at, vec![(selection, &claim.claim_ref)])
@@ -332,16 +381,9 @@ pub(super) fn resolve_histories(active: &[&Claim], result: &mut Reduction) {
             .known()
             .and_then(|reference| selections.get(reference))
             .filter(|selection| selection.agent == agent)
-            .and_then(|selection| {
-                membership(
-                    selection,
-                    &graph,
-                    &selections,
-                    active,
-                    &entry_order,
-                    &mut BTreeSet::new(),
-                )
-            });
+            .and_then(|selection| result.selection_memberships.get(&selection.selection_ref))
+            .cloned()
+            .flatten();
         if selected.known().is_some() && selected_entries.is_none() {
             diagnostic(result,DiagnosticCode::UnknownSelection,latest.values().flat_map(|(_,values)|values.iter().map(|(_,claim)|(*claim).clone())).collect(),"Selected history awaits complete source mapping or unambiguous predecessor evidence");
         }
@@ -360,18 +402,25 @@ pub(super) fn resolve_histories(active: &[&Claim], result: &mut Reduction) {
     }
 }
 
+struct SelectedMembership {
+    entries: Vec<EntryRef>,
+    observations: BTreeSet<ClaimRef>,
+}
+
 fn membership(
     selection: &HistorySelection,
     graph: &HistoryGraph,
     selections: &BTreeMap<SelectionRef, HistorySelection>,
     active: &[&Claim],
+    contents: &BTreeMap<EntryRef, BTreeMap<ClaimRef, HistoryContentObservation>>,
     entry_order: &BTreeMap<EntryRef, usize>,
     visiting: &mut BTreeSet<SelectionRef>,
-) -> Option<Vec<EntryRef>> {
+) -> Option<SelectedMembership> {
     if !visiting.insert(selection.selection_ref.clone()) {
         return None;
     }
     let mut members = Vec::new();
+    let mut observations = BTreeSet::new();
     match &selection.membership {
         SelectionMembership::EntryPath { head } => members = graph.path(&selection.agent, head)?,
         SelectionMembership::EntrySet { entries } => {
@@ -386,14 +435,17 @@ fn membership(
             inherited_selections,
         } => {
             for inherited in inherited_selections {
-                members.extend(membership(
+                let inherited = membership(
                     selections.get(inherited)?,
                     graph,
                     selections,
                     active,
+                    contents,
                     entry_order,
                     visiting,
-                )?);
+                )?;
+                members.extend(inherited.entries);
+                observations.extend(inherited.observations);
             }
             for extent in extents {
                 if !complete_mapping(extent, active) {
@@ -402,28 +454,15 @@ fn membership(
                 // First gather every binding in this coordinate domain, before
                 // filtering the selected range. Otherwise one conflicting value
                 // outside the range would disappear and bless the convenient one.
-                let mut bindings: BTreeMap<EntryRef, BTreeSet<u64>> = BTreeMap::new();
-                for claim in active {
-                    if let Fact::HistoryPosition {
-                        entry,
-                        position,
-                        coordinate,
-                        value,
-                        mapping_rule,
-                    } = &claim.fact
-                    {
-                        if position.source == extent.source
-                            && position.generation == extent.generation
-                            && coordinate == &extent.coordinate
-                            && mapping_rule == &extent.mapping_rule
-                        {
-                            bindings.entry(entry.clone()).or_default().insert(*value);
-                        }
-                    }
-                }
+                let bindings = graph.positions.get(&(
+                    extent.source.clone(),
+                    extent.generation,
+                    extent.coordinate.clone(),
+                    extent.mapping_rule.clone(),
+                ));
                 let mut positions = BTreeMap::new();
-                for (entry, values) in bindings {
-                    if !values.iter().any(|value| {
+                for (entry, values) in bindings.into_iter().flatten() {
+                    if !values.keys().any(|value| {
                         *value >= extent.start_inclusive && *value < extent.end_exclusive
                     }) {
                         continue;
@@ -431,7 +470,11 @@ fn membership(
                     if values.len() != 1 {
                         return None;
                     }
-                    let declaration = graph.entries.get(&entry)?;
+                    let (coordinate, source_positions) = values.first_key_value()?;
+                    if source_positions.len() != 1 {
+                        return None;
+                    }
+                    let declaration = graph.entries.get(entry)?;
                     if let Some(original) = &extent.original_owner {
                         let recorded =
                             declaration
@@ -444,7 +487,18 @@ fn membership(
                             return None;
                         }
                     }
-                    positions.insert((*values.first().unwrap(), entry.clone()), entry);
+                    observations.extend(
+                        contents
+                            .get(entry)
+                            .into_iter()
+                            .flatten()
+                            .filter(|(_, observation)| {
+                                source_positions.contains(&observation.position)
+                                    && observation.mapping_rule == extent.mapping_rule
+                            })
+                            .map(|(reference, _)| reference.clone()),
+                    );
+                    positions.insert((*coordinate, entry.clone()), entry.clone());
                 }
                 members.extend(positions.into_values());
             }
@@ -453,7 +507,29 @@ fn membership(
     visiting.remove(&selection.selection_ref);
     let mut unique = BTreeSet::new();
     members.retain(|entry| unique.insert(entry.clone()));
-    Some(members)
+    if !matches!(
+        selection.membership,
+        SelectionMembership::SourceExtents { .. }
+    ) {
+        observations.extend(members.iter().flat_map(|entry| {
+            contents
+                .get(entry)
+                .into_iter()
+                .flatten()
+                .map(|(reference, _)| reference.clone())
+        }));
+    }
+    if let HistoryContentScope::ObservationSet {
+        observations: selected,
+    } = &selection.content_scope
+    {
+        let selected: BTreeSet<_> = selected.iter().collect();
+        observations.retain(|reference| selected.contains(reference));
+    }
+    Some(SelectedMembership {
+        entries: members,
+        observations,
+    })
 }
 
 fn complete_mapping(extent: &SourceExtent, active: &[&Claim]) -> bool {

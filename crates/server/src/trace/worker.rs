@@ -1554,6 +1554,16 @@ fn archive_context(state: &mut WorkerState) -> ArchiveContext {
                 .object_evidence
                 .insert(value.object_ref(), evidence.into_iter().collect());
         }
+        for (entry, observations) in &state.reduction.history_contents {
+            semantic.history_contents.insert(entry.clone(), observations.iter().filter_map(|(reference, observation)| {
+                let proof = claims.get(reference)?;
+                Some(mapping::ArchiveHistoryContent {
+                    claim_ref: reference.clone(),
+                    observation: observation.clone(),
+                    evidence: proof.evidence.clone(),
+                })
+            }).collect());
+        }
         for (alias, canonical) in &state.reduction.representatives {
             if let Some(evidence) = semantic.object_evidence.get(canonical).cloned() {
                 semantic.object_evidence.insert(alias.clone(), evidence);
@@ -1642,6 +1652,8 @@ fn requests_may_resolve(requests: &[ArchiveRequest], state: &WorkerState) -> boo
         ArchiveRequest::HistorySource {source,generation}=>state.history_records.values().any(|record|&record.position.source==source&&record.position.generation==*generation),
         ArchiveRequest::AttachmentTarget {parent,slot,locator}=>state.correlations.contains_key(&mapping::attachment_key(parent,slot,locator)),
         ArchiveRequest::Object {object_ref}=>state.reduction.object(object_ref).is_some(),
+        ArchiveRequest::HistoryContent { entry, position, mapping_rule } => state.reduction.history_contents.get(entry)
+            .is_some_and(|observations| observations.values().any(|observation| &observation.position == position && &observation.mapping_rule == mapping_rule)),
         ArchiveRequest::Observation {observation}=>state.available_evidence.contains(observation),
         ArchiveRequest::CommandIdentity {issuer,command_id}=>state.correlations.contains_key(&mapping::command_identity_key(issuer,command_id)),
         ArchiveRequest::Correlation {agent,namespace,key}=>state.correlations.contains_key(&mapping::correlation_key(agent,namespace,key)),

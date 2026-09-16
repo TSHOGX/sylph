@@ -73,16 +73,30 @@ fn run(values: &[Value], live: bool) -> Vec<MapOutput> {
                         AnyObjectRef::HistoryEntry(entry.entry_ref.clone()),
                         claim.evidence.clone(),
                     );
-                    archive.semantic_mut()
+                    archive
+                        .semantic_mut()
                         .history_entries
                         .insert(entry.entry_ref.clone(), entry.clone());
                 }
                 Fact::Declare {
                     object: TraceObject::Operation(operation),
                 } => {
-                    archive.semantic_mut()
+                    archive
+                        .semantic_mut()
                         .operations
                         .insert(operation.operation_ref.clone(), operation.clone());
+                }
+                Fact::HistoryContentObserved { observation } => {
+                    archive
+                        .semantic_mut()
+                        .history_contents
+                        .entry(observation.entry.clone())
+                        .or_default()
+                        .push(ArchiveHistoryContent {
+                            claim_ref: claim.claim_ref.clone(),
+                            observation: observation.clone(),
+                            evidence: claim.evidence.clone(),
+                        });
                 }
                 _ => {}
             }
@@ -159,6 +173,81 @@ fn native_tree_keeps_nonmessage_predecessors_and_unknown_outer_execution() {
         .histories
         .values()
         .all(|history| history.selected_entries.is_none()));
+}
+
+#[test]
+fn native_and_snapshot_admissions_keep_both_revisions_and_leave_idless_live_independent() {
+    let message = serde_json::json!({"role":"user","content":"retained admission bytes"});
+    let entry = serde_json::json!({"type":"message","id":"admitted-entry","parentId":null,"message":message});
+    let mut output = run(&[header(), entry.clone()], false);
+    output.extend(run(
+        &[
+            state(),
+            serde_json::json!({"type":"message_start","message":message}),
+            serde_json::json!({"type":"message_end","message":message}),
+            serde_json::json!({"type":"response","command":"get_entries","success":true,"data":{"entries":[entry],"leafId":"admitted-entry"}}),
+        ],
+        true,
+    ));
+    let deliveries: Vec<_> = objects(&output)
+        .filter_map(|object| match object {
+            TraceObject::Delivery(delivery) => Some(delivery),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(deliveries.len(), 3);
+    assert_eq!(deliveries[0], deliveries[2]);
+    assert_ne!(deliveries[0].delivery_ref, deliveries[1].delivery_ref);
+    assert!(
+        matches!(deliveries[0].delivery_ref.address(), ObjectAddress::Native { namespace, key, .. } if namespace == "pi.entry-admission" && key == &["admitted-entry"])
+    );
+    assert!(matches!(
+        deliveries[1].delivery_ref.address(),
+        ObjectAddress::Occurrence { .. }
+    ));
+
+    let bindings: Vec<_> = output
+        .iter()
+        .flat_map(|output| &output.claims)
+        .filter_map(|claim| match &claim.fact {
+            Fact::DeliveryRevisionObserved { delivery, revision } => Some((delivery, revision)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(bindings.len(), 3);
+    for (binding, delivery) in bindings.iter().zip(&deliveries) {
+        assert_eq!(binding.0, &delivery.delivery_ref);
+    }
+    assert_ne!(bindings[0].1, bindings[2].1);
+    assert_ne!(bindings[0].1, bindings[1].1);
+    assert_ne!(bindings[1].1, bindings[2].1);
+    let admissions: Vec<_> = output
+        .iter()
+        .flat_map(|output| &output.claims)
+        .filter_map(|claim| match &claim.fact {
+            Fact::DeliveryStage {
+                delivery,
+                stage: DeliveryStage::Admitted { entry },
+            } => Some((delivery, entry)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(admissions.len(), 3);
+    assert_eq!(admissions[0], admissions[2]);
+    assert!(admissions[0].1.is_some());
+    assert!(admissions[1].1.is_none());
+    assert_eq!(
+        output
+            .iter()
+            .flat_map(|output| &output.payloads)
+            .filter(|payload| payload.bytes == b"retained admission bytes")
+            .count(),
+        3
+    );
+    assert!(!output
+        .iter()
+        .flat_map(|output| &output.claims)
+        .any(|claim| matches!(claim.fact, Fact::Equivalence { .. })));
 }
 
 #[test]
@@ -435,6 +524,94 @@ fn accepted_rpc_input_and_missing_leaf_do_not_invent_execution_or_history_select
             }
         }
     )));
+}
+
+#[test]
+fn rpc_history_snapshots_bind_only_the_entry_observations_they_carry() {
+    for command in ["get_entries", "get_tree"] {
+        let response = |entries: Vec<Value>, leaf: &str| {
+            let data = if command == "get_tree" {
+                serde_json::json!({
+                    "tree": entries.into_iter().map(|entry| serde_json::json!({
+                        "entry": entry,
+                        "children": [],
+                    })).collect::<Vec<_>>(),
+                    "leafId": leaf,
+                })
+            } else {
+                serde_json::json!({"entries": entries, "leafId": leaf})
+            };
+            serde_json::json!({"type":"response","command":command,"success":true,"data":data})
+        };
+        let output = run(
+            &[
+                state(),
+                response(
+                    vec![
+                        serde_json::json!({"type":"message","id":"ancestor","parentId":null,"message":{"role":"user","content":"prior snapshot"}}),
+                    ],
+                    "ancestor",
+                ),
+                response(
+                    vec![
+                        serde_json::json!({"type":"message","id":"current","parentId":"ancestor","message":{"role":"assistant","content":"current snapshot"}}),
+                    ],
+                    "current",
+                ),
+                response(vec![], "current"),
+            ],
+            true,
+        );
+        let mut previous = BTreeSet::new();
+        for (index, expected_entry) in [(1, Some("ancestor")), (2, Some("current")), (3, None)] {
+            let selection = output[index]
+                .claims
+                .iter()
+                .find_map(|claim| match &claim.fact {
+                    Fact::Declare {
+                        object: TraceObject::HistorySelection(selection),
+                    } => Some(selection),
+                    _ => None,
+                })
+                .unwrap();
+            let HistoryContentScope::ObservationSet { observations } = &selection.content_scope
+            else {
+                panic!("RPC snapshots must retain their explicit content scope");
+            };
+            assert_eq!(observations.len(), usize::from(expected_entry.is_some()));
+            for reference in observations {
+                assert!(!previous.contains(reference));
+                let observation = output[index]
+                    .claims
+                    .iter()
+                    .find_map(|claim| match &claim.fact {
+                        Fact::HistoryContentObserved { observation }
+                            if claim.claim_ref == *reference =>
+                        {
+                            Some(observation)
+                        }
+                        _ => None,
+                    })
+                    .expect("selection content belongs to this response");
+                assert!(
+                    matches!(observation.entry.address(), ObjectAddress::Native { key, .. } if key == &[expected_entry.unwrap()])
+                );
+                assert_eq!(observation.mapping_rule, "pi/rpc-entry-history");
+                assert_eq!(
+                    observation.position,
+                    capture(index as u64, true).source_position
+                );
+                assert!(observation.complete);
+                assert_eq!(observation.slots.len(), 1);
+                assert_eq!(observation.slots[0].slot, 0);
+                assert!(matches!(
+                    observation.slots[0].content,
+                    HistoryContent::Message(_)
+                ));
+                previous.insert(reference.clone());
+            }
+        }
+    }
 }
 
 #[test]

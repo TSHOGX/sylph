@@ -99,7 +99,6 @@ fn normalized_object(
             v.delivery_ref = resolved_ref!(registry, Delivery, v.delivery_ref);
             v.sender = normalized_author(registry, &v.sender);
             v.recipient = normalized_recipient(registry, &v.recipient);
-            v.message_revision = resolved_ref!(registry, MessageRevision, v.message_revision);
         }
         TraceObject::Operation(v) => {
             v.operation_ref = resolved_ref!(registry, Operation, v.operation_ref);
@@ -147,11 +146,6 @@ fn normalized_object(
         TraceObject::HistoryEntry(v) => {
             v.entry_ref = resolved_ref!(registry, HistoryEntry, v.entry_ref);
             v.containing_agent = resolved_ref!(registry, Agent, v.containing_agent);
-            v.content = v
-                .content
-                .iter()
-                .map(|r| normalized_history_content(registry, r))
-                .collect();
             v.predecessor = v
                 .predecessor
                 .as_ref()
@@ -326,6 +320,10 @@ pub(super) fn normalized_claim(
                 _ => {}
             }
         }
+        Fact::DeliveryRevisionObserved { delivery, revision } => {
+            *delivery = resolved_ref!(registry, Delivery, delivery);
+            *revision = resolved_ref!(registry, MessageRevision, revision);
+        }
         Fact::Execution { execution, .. } => {
             *execution = match execution {
                 ExecutionRef::Activation(v) => {
@@ -351,6 +349,12 @@ pub(super) fn normalized_claim(
         }
         Fact::HistoryPosition { entry, .. } => {
             *entry = resolved_ref!(registry, HistoryEntry, entry)
+        }
+        Fact::HistoryContentObserved { observation } => {
+            observation.entry = resolved_ref!(registry, HistoryEntry, observation.entry);
+            for slot in &mut observation.slots {
+                slot.content = normalized_history_content(registry, &slot.content);
+            }
         }
         Fact::HistoryMappingComplete { extent } => {
             extent.original_owner = extent

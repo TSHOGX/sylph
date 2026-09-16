@@ -40,7 +40,7 @@ external proposals or discussion threads are not project instructions.
 
 | Boundary | Owner | State |
 | --- | --- | --- |
-| Production semantic acceptance | Foundation implementation below | Production corpus replay and the full mutation matrix remain open; paired-source replay has exposed lost reader rows despite retained message evidence |
+| Production semantic acceptance | Foundation implementation below | Retained three-vendor corpus replay now preserves observed identity/content across source order, restart and reread; full semantic and failure matrices remain open |
 | Projection and delivery scale | Milestone 4 and foundation implementation below | Reader pages are bounded; whole-reduction reader materialization and mixed spool/socket/ACK load still need production measurements |
 | Directory scope and authorization | Conversation and work panel delivery below | Full spawn-descendant membership, filtering before body hydration, private continuation positions and authorized totals remain open |
 | Vendor trace semantics | Foundation implementation below | Runtime cutover is implemented; remaining vendor certificates, workflow and schedule mappings follow core stabilization |
@@ -70,8 +70,8 @@ production reducer. [Conformance](unified-trace-conformance.md) names their limi
 1. Stabilize the migrated architecture and primary stores. Prove
    cold/incremental/reread/interleaved/rebuilt equivalence through production admission,
    reduction and read projection, with independently authored expectations. Resolve
-   the paired-source history-entry conflict that currently removes readable messages
-   despite retaining their bytes. Complete the required core semantic mutations.
+   core representation defects exposed by that replay before widening behavior. Complete
+   the remaining required semantic mutations and mixed-source dependency schedules.
 2. Close query authorization gaps: filter directory candidates before hydration, keep
    continuation positions private, and derive counts only over the current authorized
    scope. Preserve deletion epochs and snapshot consistency throughout.
@@ -236,6 +236,15 @@ previous committed rows and anchors; failed publication cannot advance that cach
 Mapper inputs also share the semantic archive for each immutable reduction. A new
 reduction refreshes both object declarations and their supporting evidence, while
 source metadata remains current for the bounded observation unit.
+
+Entry topology is now separate from immutable content observations, and delivery identity
+is separate from its observed revision bindings. Reobserved native entries retain their
+predecessors and readable content without losing the distinct source revisions; selected
+extents and snapshot observations restrict both rendering and payload reachability.
+The retained Codex corpus and Claude/Pi pairs now pass independently specified body,
+identity, ownership and lifecycle assertions across cold/incremental/restarted replay,
+redelivery, overlapping reread, source interleaving and same-cut generation rebuilding.
+These marker bundles do not cover every vendor operation, delayed sidecar or fault schedule.
 
 Open implementation/acceptance work remains in the ordered list above. In particular,
 `crates/server/src/trace/worker/reading.rs` still materializes the next reader from the

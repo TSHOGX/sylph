@@ -34,7 +34,7 @@ struct LiveStream {
 
 impl SemanticMapper for ClaudeMapper {
     fn build(&self) -> &'static str {
-        "claude-1"
+        "claude-2"
     }
     fn map(&self, input: MapInput<'_>) -> MapOutput {
         let mut output = MapOutput {
@@ -105,7 +105,7 @@ impl Context<'_, '_> {
     fn add(&mut self, owner: &AgentRef, slot: &str, fact: Fact) {
         self.output
             .claims
-            .push(claim(self.input, owner, slot, "claude-1", fact));
+            .push(claim(self.input, owner, slot, "claude-2", fact));
     }
     fn object(&mut self, owner: &AgentRef, slot: &str, object: TraceObject) {
         self.add(owner, slot, Fact::Declare { object });
@@ -454,9 +454,16 @@ impl Context<'_, '_> {
                             agent: containing.clone(),
                         },
                     },
-                    message_revision: revision.clone(),
                     route: DeliveryRoute::NativeHistory,
                 }),
+            );
+            self.add(
+                containing,
+                "claude/native-delivery-revision",
+                Fact::DeliveryRevisionObserved {
+                    delivery: delivery.clone(),
+                    revision: revision.clone(),
+                },
             );
             self.add(
                 containing,
@@ -632,10 +639,25 @@ impl Context<'_, '_> {
             TraceObject::HistoryEntry(HistoryEntry {
                 entry_ref: reference.clone(),
                 containing_agent: owner.clone(),
-                content,
                 predecessor: predecessor.clone(),
                 original_owner,
             }),
+        );
+        self.add(
+            owner,
+            "claude/history-content",
+            Fact::HistoryContentObserved {
+                observation: HistoryContentObservation::complete(
+                    reference.clone(),
+                    self.input.capture.source_position.clone(),
+                    if self.input.capture.transport_kind == TransportKind::NativeJsonl {
+                        "claude/native-history"
+                    } else {
+                        "claude/live-history"
+                    },
+                    content,
+                ),
+            },
         );
         if let Some(predecessor) = predecessor {
             self.add(
@@ -797,6 +819,7 @@ impl Context<'_, '_> {
                     selection_ref: selection.clone(),
                     agent: owner.clone(),
                     membership: SelectionMembership::EntrySet { entries },
+                    content_scope: HistoryContentScope::AllObservedAtCut,
                     excluded_heads: vec![],
                 }),
             );
@@ -1426,10 +1449,21 @@ impl Context<'_, '_> {
             TraceObject::HistoryEntry(HistoryEntry {
                 entry_ref: entry.clone(),
                 containing_agent: owner.clone(),
-                content: vec![HistoryContent::Message(revision.clone())],
                 predecessor: stream.previous_entry.clone(),
                 original_owner: None,
             }),
+        );
+        self.add(
+            owner,
+            "claude/live-history-content",
+            Fact::HistoryContentObserved {
+                observation: HistoryContentObservation::complete(
+                    entry.clone(),
+                    self.input.capture.source_position.clone(),
+                    "claude/live-history",
+                    vec![HistoryContent::Message(revision.clone())],
+                ),
+            },
         );
         for claim in &mut self.output.claims {
             claim.evidence.extend(evidence.iter().cloned());

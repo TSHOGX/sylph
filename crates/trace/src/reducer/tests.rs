@@ -355,7 +355,6 @@ fn history(index: u64, key: &str, parent: Option<&str>) -> Claim {
             object: TraceObject::HistoryEntry(HistoryEntry {
                 entry_ref: entry(key),
                 containing_agent: agent("root"),
-                content: vec![],
                 predecessor: parent.map(entry),
                 original_owner: None,
             }),
@@ -384,6 +383,7 @@ fn selected_history_follows_predecessors_and_preserves_other_branches() {
                 selection_ref: selection.clone(),
                 agent: agent("root"),
                 membership: SelectionMembership::EntryPath { head: entry("b2") },
+                content_scope: HistoryContentScope::AllObservedAtCut,
                 excluded_heads: vec![entry("a2")],
             }),
         },
@@ -628,6 +628,7 @@ fn conflicting_predecessors_cannot_silently_select_a_different_branch() {
                 selection_ref: selection.clone(),
                 agent: agent("root"),
                 membership: SelectionMembership::EntryPath { head: entry("c") },
+                content_scope: HistoryContentScope::AllObservedAtCut,
                 excluded_heads: vec![],
             }),
         },
@@ -683,6 +684,7 @@ fn vendor_ordinal_extents_are_not_physical_lines_or_child_authorship() {
                 object: TraceObject::HistorySelection(HistorySelection {
                     selection_ref: selection.clone(),
                     agent: child.clone(),
+                    content_scope: HistoryContentScope::AllObservedAtCut,
                     membership: SelectionMembership::SourceExtents {
                         extents: vec![SourceExtent {
                             source: source(),

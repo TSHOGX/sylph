@@ -162,6 +162,10 @@ pub fn project(
             }
         }
     }
+    for deliveries in index.deliveries.values_mut() {
+        deliveries.sort();
+        deliveries.dedup();
+    }
     for (coverage, _) in &reduction.coverage {
         index
             .coverage_by_agent
@@ -251,9 +255,7 @@ pub fn project(
                 .get(agent)
                 .into_iter()
                 .flatten()
-                .map(|reference| {
-                    index.execution(&AnyObjectRef::Activation(reference.clone()))
-                })
+                .map(|reference| index.execution(&AnyObjectRef::Activation(reference.clone())))
                 .collect(),
         );
         let directory = index
@@ -430,6 +432,42 @@ fn unknown_count(scope: &str) -> ReadCount {
 }
 
 impl Index<'_> {
+    fn slot_content(&self, alternatives: &[HistoryContent]) -> Option<HistoryContent> {
+        let first = alternatives.first()?;
+        // A streamed message can have many entry prefixes. Do not rescan its
+        // entire revision history to choose each single-reference slot.
+        if alternatives.len() == 1 {
+            return Some(first.clone());
+        }
+        let HistoryContent::Message(reference) = first else {
+            return alternatives
+                .iter()
+                .all(|value| value == first)
+                .then(|| first.clone());
+        };
+        let TraceObject::MessageRevision(revision) =
+            self.object(&AnyObjectRef::MessageRevision(reference.clone()))?
+        else {
+            return None;
+        };
+        let mut included = BTreeSet::new();
+        for content in alternatives {
+            let HistoryContent::Message(reference) = content else {
+                return None;
+            };
+            if !matches!(self.object(&AnyObjectRef::MessageRevision(reference.clone())), Some(TraceObject::MessageRevision(other)) if other.message == revision.message)
+            {
+                return None;
+            }
+            included.insert(reference.clone());
+        }
+        self.reduction
+            .select_message_in(&revision.message, &included)
+            .known()
+            .cloned()
+            .map(HistoryContent::Message)
+    }
+
     fn content_parts<'a>(&'a self, revision: &'a MessageRevision) -> &'a [ContentPart] {
         self.composed_parts
             .get(&revision.revision_ref)
@@ -457,9 +495,19 @@ impl Index<'_> {
             }
             match self.object(&reference) {
                 Some(TraceObject::HistoryEntry(entry)) => {
-                    for content in &entry.content {
+                    let contents = self
+                        .reduction
+                        .entry_contents(&entry.entry_ref, scope.selection.as_ref());
+                    let mut revisions = BTreeSet::new();
+                    for content in contents
+                        .slots
+                        .values()
+                        .filter_map(Resolved::known)
+                        .flatten()
+                    {
                         match content {
                             HistoryContent::Message(revision) => {
+                                revisions.insert(revision.clone());
                                 pending.push(AnyObjectRef::MessageRevision(revision.clone()))
                             }
                             HistoryContent::Operation(operation) => {
@@ -472,7 +520,13 @@ impl Index<'_> {
                         }
                     }
                     for delivery in self.deliveries.get(&entry.entry_ref).into_iter().flatten() {
-                        pending.push(AnyObjectRef::Delivery(delivery.clone()));
+                        if !matches!(
+                            self.reduction
+                                .select_delivery_revision(delivery, Some(&revisions)),
+                            Resolved::Unknown
+                        ) {
+                            pending.push(AnyObjectRef::Delivery(delivery.clone()));
+                        }
                     }
                 }
                 Some(TraceObject::MessageRevision(revision)) => {
@@ -856,7 +910,7 @@ impl Index<'_> {
         if let Some(history) = self.reduction.histories.get(agent).filter(|history| {
             history.selected_entries.is_some() || history.candidate_heads.len() == 1
         }) {
-            for entry_ref in history
+            'history: for entry_ref in history
                 .selected_entries
                 .as_ref()
                 .unwrap_or(&history.archive_order)
@@ -868,13 +922,20 @@ impl Index<'_> {
                 {
                     continue;
                 }
-                let Some(TraceObject::HistoryEntry(entry)) =
-                    self.object(&AnyObjectRef::HistoryEntry(entry_ref.clone()))
-                else {
-                    continue;
-                };
-                for content in entry.content.iter().rev() {
-                    let activation=match content {
+                let contents = self
+                    .reduction
+                    .entry_contents(entry_ref, history.selection.known());
+                if !contents.complete {
+                    break;
+                }
+                for alternatives in contents.slots.values().rev() {
+                    let Some(content) = alternatives
+                        .known()
+                        .and_then(|alternatives| self.slot_content(alternatives))
+                    else {
+                        break 'history;
+                    };
+                    let activation=match &content {
                         HistoryContent::Message(revision)=>match self.object(&AnyObjectRef::MessageRevision(revision.clone())) {Some(TraceObject::MessageRevision(revision))=>match self.object(&AnyObjectRef::Message(revision.message.clone())) {Some(TraceObject::Message(message))=>message.production.as_ref().filter(|scope|matches!(&scope.owner,OwnerRef::Agent {agent:owner} if owner==agent)).and_then(|scope|scope.activation.as_ref()),_=>None},_=>None},
                         HistoryContent::Operation(operation)=>match self.object(&AnyObjectRef::Operation(operation.clone())) {Some(TraceObject::Operation(operation)) if matches!(&operation.owner,OwnerRef::Agent {agent:owner} if owner==agent)=>operation.activation.as_ref(),_=>None},
                         _=>None,
@@ -1076,14 +1137,21 @@ impl Index<'_> {
         let mut units = Vec::new();
         let mut seen_deliveries = BTreeSet::new();
         let mut represented_messages = BTreeSet::new();
-        let included_revisions: BTreeSet<_> = entries
+        let contents: BTreeMap<_, _> = entries
             .iter()
-            .filter_map(|entry| self.object(&AnyObjectRef::HistoryEntry(entry.clone())))
-            .filter_map(|object| match object {
-                TraceObject::HistoryEntry(entry) => Some(entry),
-                _ => None,
+            .map(|entry| {
+                (
+                    entry.clone(),
+                    self.reduction
+                        .entry_contents(entry, scope.selection.as_ref()),
+                )
             })
-            .flat_map(|entry| entry.content.iter())
+            .collect();
+        let included_revisions: BTreeSet<_> = contents
+            .values()
+            .flat_map(|contents| contents.slots.values())
+            .filter_map(Resolved::known)
+            .flatten()
             .filter_map(|content| match content {
                 HistoryContent::Message(revision) => Some(revision.clone()),
                 _ => None,
@@ -1106,9 +1174,35 @@ impl Index<'_> {
                 Some(ReadingOrderBasis::ExplicitOrder) => ReadOrderBasis::ExplicitOrder,
                 _ => ReadOrderBasis::PresentationTiebreak,
             };
-            for (slot, content) in entry.content.iter().enumerate() {
+            if !contents[entry_ref].complete {
+                units.push(self.unknown(
+                    format!("{}:unobserved-content", TraceAddress::of(&anchor).as_str()),
+                    anchor.clone(),
+                    order_basis,
+                    "This entry's content has not been completely observed in the selected history",
+                ));
+            }
+            for (slot, resolved) in &contents[entry_ref].slots {
                 let address = format!("{}:{slot}", TraceAddress::of(&anchor).as_str());
-                match content {
+                let Some(alternatives) = resolved.known() else {
+                    units.push(self.unknown(
+                        address,
+                        anchor.clone(),
+                        order_basis,
+                        "The selected entry content is unresolved or conflicting",
+                    ));
+                    continue;
+                };
+                let Some(content) = self.slot_content(alternatives) else {
+                    units.push(self.unknown(
+                        address,
+                        anchor.clone(),
+                        order_basis,
+                        "The selected content slot has conflicting or unavailable observations",
+                    ));
+                    continue;
+                };
+                match &content {
                     HistoryContent::Message(revision_ref) => {
                         let Some(TraceObject::MessageRevision(revision)) =
                             self.object(&AnyObjectRef::MessageRevision(revision_ref.clone()))
@@ -1121,18 +1215,40 @@ impl Index<'_> {
                             ));
                             continue;
                         };
-                        let revision = if self.deliveries.get(entry_ref).is_none_or(Vec::is_empty) {
+                        let eligible: BTreeSet<_> = alternatives
+                            .iter()
+                            .filter_map(|content| match content {
+                                HistoryContent::Message(reference) => Some(reference.clone()),
+                                _ => None,
+                            })
+                            .collect();
+                        let associated = self
+                            .deliveries
+                            .get(entry_ref)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|delivery| {
+                                match self.object(&AnyObjectRef::Delivery(delivery.clone())) {
+                                    Some(TraceObject::Delivery(value)) => {
+                                        let revision = self
+                                            .reduction
+                                            .select_delivery_revision(delivery, Some(&eligible));
+                                        (!matches!(revision, Resolved::Unknown))
+                                            .then_some((delivery, value, revision))
+                                    }
+                                    _ => None,
+                                }
+                            })
+                            .collect::<Vec<_>>();
+                        let revision = if associated.is_empty() {
                             if !represented_messages.insert(revision.message.clone()) {
                                 continue;
                             }
                             let selected = self
                                 .reduction
-                                .message(&revision.message)
-                                .map(|history| history.select_in(&included_revisions));
-                            let Some(TraceObject::MessageRevision(selected)) = selected
-                                .as_ref()
-                                .and_then(Resolved::known)
-                                .and_then(|reference| {
+                                .select_message_in(&revision.message, &included_revisions);
+                            let Some(TraceObject::MessageRevision(selected)) =
+                                selected.known().and_then(|reference| {
                                     self.object(&AnyObjectRef::MessageRevision(reference.clone()))
                                 })
                             else {
@@ -1154,21 +1270,6 @@ impl Index<'_> {
                             ));
                             continue;
                         };
-                        let deliveries =
-                            self.deliveries.get(entry_ref).cloned().unwrap_or_default();
-                        let associated = deliveries
-                            .into_iter()
-                            .filter_map(|delivery| {
-                                match self.object(&AnyObjectRef::Delivery(delivery.clone())) {
-                                    Some(TraceObject::Delivery(value))
-                                        if value.message_revision == *revision_ref =>
-                                    {
-                                        Some((delivery, value))
-                                    }
-                                    _ => None,
-                                }
-                            })
-                            .collect::<Vec<_>>();
                         if associated.is_empty() {
                             units.push(self.message_unit(
                                 scope,
@@ -1181,15 +1282,27 @@ impl Index<'_> {
                                 Some(entry),
                             ));
                         } else {
-                            for (delivery, value) in associated {
+                            for (delivery, value, selected) in associated {
                                 seen_deliveries.insert(delivery.clone());
+                                let address = format!("{address}:{}", delivery.encode());
+                                let Some(TraceObject::MessageRevision(delivered)) =
+                                    selected.known().and_then(|revision| {
+                                        self.object(&AnyObjectRef::MessageRevision(
+                                            revision.clone(),
+                                        ))
+                                    })
+                                else {
+                                    units.push(self.unknown(address, anchor.clone(), order_basis,
+                                        "The delivery's observed content is unavailable or conflicting"));
+                                    continue;
+                                };
                                 units.push(self.message_unit(
                                     scope,
-                                    format!("{address}:{}", delivery.encode()),
+                                    address,
                                     anchor.clone(),
                                     order_basis,
                                     message,
-                                    revision,
+                                    delivered,
                                     Some(value),
                                     Some(entry),
                                 ));
@@ -1298,9 +1411,20 @@ impl Index<'_> {
             if scope.selection.is_some() || seen_deliveries.contains(&delivery.delivery_ref) {
                 continue;
             }
-            let Some(TraceObject::MessageRevision(revision)) = self.object(
-                &AnyObjectRef::MessageRevision(delivery.message_revision.clone()),
-            ) else {
+            let anchor = AnyObjectRef::Delivery(delivery.delivery_ref.clone());
+            let selected = self
+                .reduction
+                .select_delivery_revision(&delivery.delivery_ref, None);
+            let Some(TraceObject::MessageRevision(revision)) = selected
+                .known()
+                .and_then(|revision| self.object(&AnyObjectRef::MessageRevision(revision.clone())))
+            else {
+                units.push(self.unknown(
+                    TraceAddress::of(&anchor).as_str().into(),
+                    anchor,
+                    ReadOrderBasis::PresentationTiebreak,
+                    "The submitted delivery's observed content is unavailable or conflicting",
+                ));
                 continue;
             };
             let Some(TraceObject::Message(message)) =
@@ -1308,7 +1432,6 @@ impl Index<'_> {
             else {
                 continue;
             };
-            let anchor = AnyObjectRef::Delivery(delivery.delivery_ref.clone());
             units.push(self.message_unit(
                 scope,
                 TraceAddress::of(&anchor).as_str().into(),

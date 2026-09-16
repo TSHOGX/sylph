@@ -591,6 +591,38 @@ pub(super) fn map_selection(input: MapInput<'_>, snapshot: NativeDatabaseSnapsho
             ));
         }
         let end = (expansion.next_entry + ALIAS_PAGE).min(entries.len());
+        // Check the entire page before emitting aliases so a delayed content
+        // binding retries this page without publishing a topology-only prefix.
+        for (segment_index, local, entry) in &entries[expansion.next_entry..end] {
+            let segment = &segments[*segment_index];
+            let position = &records(&input, &segment.source, segment.generation)?
+                .get(local)
+                .unwrap()
+                .position;
+            if !input
+                .archive
+                .semantic
+                .history_contents
+                .get(&entry.entry_ref)
+                .into_iter()
+                .flatten()
+                .any(|content| {
+                    content.observation.position == *position
+                        && content.observation.mapping_rule == "codex/native-history"
+                })
+            {
+                return Err(HistoryFailure {
+                    code: DiagnosticCode::MissingSource,
+                    message: "Frozen history awaits the physical record's content observation"
+                        .into(),
+                    request: Some(Box::new(ArchiveRequest::HistoryContent {
+                        entry: entry.entry_ref.clone(),
+                        position: position.clone(),
+                        mapping_rule: "codex/native-history".into(),
+                    })),
+                });
+            }
+        }
         for (segment_index, local, entry) in &entries[expansion.next_entry.min(entries.len())..end]
         {
             let segment = &segments[*segment_index];
@@ -626,12 +658,11 @@ pub(super) fn map_selection(input: MapInput<'_>, snapshot: NativeDatabaseSnapsho
                     "codex/history-alias/{}",
                     blake3::hash(entry.entry_ref.encode().as_bytes()).to_hex()
                 ),
-                "codex-1",
+                "codex-2",
                 Fact::Declare {
                     object: TraceObject::HistoryEntry(HistoryEntry {
                         entry_ref: alias.clone(),
                         containing_agent: agent.clone(),
-                        content: entry.content.clone(),
                         predecessor: expansion.prior.clone(),
                         original_owner: Some(original),
                     }),
@@ -640,7 +671,8 @@ pub(super) fn map_selection(input: MapInput<'_>, snapshot: NativeDatabaseSnapsho
             declared.evidence.extend(
                 input
                     .archive
-                    .semantic.object_evidence
+                    .semantic
+                    .object_evidence
                     .get(&AnyObjectRef::HistoryEntry(entry.entry_ref.clone()))
                     .into_iter()
                     .flatten()
@@ -651,6 +683,45 @@ pub(super) fn map_selection(input: MapInput<'_>, snapshot: NativeDatabaseSnapsho
                 .get(local)
                 .unwrap()
                 .position;
+            // A frozen alias imports content witnessed at this physical record,
+            // not later observations of the same native entry from another surface.
+            for content in input
+                .archive
+                .semantic
+                .history_contents
+                .get(&entry.entry_ref)
+                .into_iter()
+                .flatten()
+                .filter(|content| {
+                    content.observation.position == *position
+                        && content.observation.mapping_rule == "codex/native-history"
+                })
+            {
+                let mut observed = claim(
+                    &input,
+                    &agent,
+                    &format!(
+                        "codex/history-alias-content/{}/{}",
+                        blake3::hash(entry.entry_ref.encode().as_bytes()).to_hex(),
+                        blake3::hash(content.claim_ref.encode().as_bytes()).to_hex()
+                    ),
+                    "codex-2",
+                    Fact::HistoryContentObserved {
+                        observation: HistoryContentObservation {
+                            entry: alias.clone(),
+                            position: position.clone(),
+                            mapping_rule: rule.clone(),
+                            slots: content.observation.slots.clone(),
+                            complete: content.observation.complete,
+                        },
+                    },
+                );
+                observed.evidence.extend(content.evidence.iter().cloned());
+                observed.evidence.extend(evidence.iter().cloned());
+                observed.evidence.sort();
+                observed.evidence.dedup();
+                output.claims.push(observed);
+            }
             output.claims.push(claim(
                 &input,
                 &agent,
@@ -658,7 +729,7 @@ pub(super) fn map_selection(input: MapInput<'_>, snapshot: NativeDatabaseSnapsho
                     "codex/history-alias-position/{}",
                     blake3::hash(entry.entry_ref.encode().as_bytes()).to_hex()
                 ),
-                "codex-1",
+                "codex-2",
                 Fact::HistoryPosition {
                     entry: alias.clone(),
                     position: position.clone(),
@@ -718,7 +789,7 @@ pub(super) fn map_selection(input: MapInput<'_>, snapshot: NativeDatabaseSnapsho
                     &input,
                     &agent,
                     &format!("codex/history-alias-complete/{index}"),
-                    "codex-1",
+                    "codex-2",
                     Fact::HistoryMappingComplete {
                         extent: extent.clone(),
                     },
@@ -732,7 +803,7 @@ pub(super) fn map_selection(input: MapInput<'_>, snapshot: NativeDatabaseSnapsho
             &input,
             &agent,
             "codex/database-selection",
-            "codex-1",
+            "codex-2",
             Fact::Declare {
                 object: TraceObject::HistorySelection(HistorySelection {
                     selection_ref: selected.clone(),
@@ -741,6 +812,7 @@ pub(super) fn map_selection(input: MapInput<'_>, snapshot: NativeDatabaseSnapsho
                         extents,
                         inherited_selections: vec![],
                     },
+                    content_scope: HistoryContentScope::AllObservedAtCut,
                     excluded_heads: vec![],
                 }),
             },
@@ -751,7 +823,7 @@ pub(super) fn map_selection(input: MapInput<'_>, snapshot: NativeDatabaseSnapsho
             &input,
             &agent,
             "codex/database-selected",
-            "codex-1",
+            "codex-2",
             Fact::SelectHistory {
                 agent: agent.clone(),
                 selection: selected,

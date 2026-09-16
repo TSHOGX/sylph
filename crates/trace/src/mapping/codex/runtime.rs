@@ -1219,7 +1219,7 @@ pub(super) fn map_goal_database(
         &input,
         &owner,
         "codex/goal-resource",
-        "codex-1",
+        "codex-2",
         Fact::Declare {
             object: TraceObject::Resource(Resource {
                 resource_ref: resource.clone(),
@@ -1239,7 +1239,7 @@ pub(super) fn map_goal_database(
         &input,
         &owner,
         "codex/goal-state",
-        "codex-1",
+        "codex-2",
         Fact::ResourceState {
             resource: resource.clone(),
             state: ResourceState::GoalUpdated {

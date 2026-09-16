@@ -87,7 +87,12 @@ pub enum CoverageDimension {
     rename_all_fields = "camelCase"
 )]
 pub enum CoverageInterval {
-    CapturedPrefix {source:SourceRef,generation:u64,complete_records:u64,complete_bytes:u64},
+    CapturedPrefix {
+        source: SourceRef,
+        generation: u64,
+        complete_records: u64,
+        complete_bytes: u64,
+    },
     Source {
         first: SourcePosition,
         through: SourcePosition,
@@ -214,6 +219,13 @@ pub enum Fact {
         value: u64,
         mapping_rule: String,
     },
+    HistoryContentObserved {
+        observation: HistoryContentObservation,
+    },
+    DeliveryRevisionObserved {
+        delivery: DeliveryRef,
+        revision: MessageRevisionRef,
+    },
     /// The mapper considered every source record in this bounded coordinate range.
     /// This proves that an empty history-member result is known empty, not missing.
     HistoryMappingComplete {
@@ -243,6 +255,8 @@ pub enum TraceFactKind {
     Relation,
     HistorySelection,
     HistoryPosition,
+    HistoryContentObserved,
+    DeliveryRevisionObserved,
     HistoryMappingComplete,
     Equivalence,
     Coverage,
@@ -260,6 +274,8 @@ impl TraceFactKind {
             Self::Relation => "relation",
             Self::HistorySelection => "history_selection",
             Self::HistoryPosition => "history_position",
+            Self::HistoryContentObserved => "history_content_observed",
+            Self::DeliveryRevisionObserved => "delivery_revision_observed",
             Self::HistoryMappingComplete => "history_mapping_complete",
             Self::Equivalence => "equivalence",
             Self::Coverage => "coverage",
@@ -272,6 +288,14 @@ impl Fact {
     pub fn payload_refs(&self) -> Vec<&super::PayloadRef> {
         match self {
             Self::Declare { object } => object.payload_refs(),
+            Self::HistoryContentObserved { observation } => observation
+                .slots
+                .iter()
+                .filter_map(|slot| match &slot.content {
+                    HistoryContent::Opaque(payload) => Some(payload),
+                    _ => None,
+                })
+                .collect(),
             Self::Execution {
                 boundary: ExecutionBoundary::Outcome { detail, .. },
                 ..
@@ -313,6 +337,8 @@ impl Fact {
             Self::Relation { .. } => TraceFactKind::Relation,
             Self::SelectHistory { .. } => TraceFactKind::HistorySelection,
             Self::HistoryPosition { .. } => TraceFactKind::HistoryPosition,
+            Self::HistoryContentObserved { .. } => TraceFactKind::HistoryContentObserved,
+            Self::DeliveryRevisionObserved { .. } => TraceFactKind::DeliveryRevisionObserved,
             Self::HistoryMappingComplete { .. } => TraceFactKind::HistoryMappingComplete,
             Self::Equivalence { .. } => TraceFactKind::Equivalence,
             Self::Coverage { .. } => TraceFactKind::Coverage,
@@ -329,10 +355,35 @@ impl Fact {
                 vec![AnyObjectRef::Agent(agent.clone())]
             }
             Self::DeliveryStage { delivery, .. } => vec![AnyObjectRef::Delivery(delivery.clone())],
+            Self::DeliveryRevisionObserved { delivery, revision } => vec![
+                AnyObjectRef::Delivery(delivery.clone()),
+                AnyObjectRef::MessageRevision(revision.clone()),
+            ],
             Self::Execution { execution, .. } => vec![execution.object_ref()],
             Self::ResourceState { resource, .. } => vec![AnyObjectRef::Resource(resource.clone())],
             Self::Relation { relation } => relation.subject_refs(),
             Self::HistoryPosition { entry, .. } => vec![AnyObjectRef::HistoryEntry(entry.clone())],
+            Self::HistoryContentObserved { observation } => {
+                let mut subjects = vec![AnyObjectRef::HistoryEntry(observation.entry.clone())];
+                subjects.extend(
+                    observation
+                        .slots
+                        .iter()
+                        .filter_map(|slot| match &slot.content {
+                            HistoryContent::Message(reference) => {
+                                Some(AnyObjectRef::MessageRevision(reference.clone()))
+                            }
+                            HistoryContent::Operation(reference) => {
+                                Some(AnyObjectRef::Operation(reference.clone()))
+                            }
+                            HistoryContent::Checkpoint(reference) => {
+                                Some(AnyObjectRef::ContextCheckpoint(reference.clone()))
+                            }
+                            HistoryContent::Opaque(_) => None,
+                        }),
+                );
+                subjects
+            }
             Self::HistoryMappingComplete { extent } => match &extent.original_owner {
                 Some(OwnerRef::Agent { agent }) => vec![AnyObjectRef::Agent(agent.clone())],
                 _ => vec![],
@@ -452,6 +503,10 @@ pub enum ClaimError {
     DifferentKinds,
     #[error("a history selection extent must have ordered bounds and a mapping rule")]
     InvalidExtent,
+    #[error(
+        "a history content observation needs a source, rule and strictly ordered unique slots"
+    )]
+    InvalidHistoryContent,
     #[error("a monetary measurement must name its currency and pricing basis")]
     UnpricedCost,
     #[error("a cumulative sample must name its counter and reset domains")]
@@ -478,6 +533,18 @@ impl Claim {
             return Err(ClaimError::SelfCorrection);
         }
         match &self.fact {
+            Fact::HistoryContentObserved { observation } => {
+                if observation.mapping_rule.trim().is_empty()
+                    || observation.position.validate().is_err()
+                    || observation
+                        .slots
+                        .windows(2)
+                        .any(|slots| slots[0].slot >= slots[1].slot)
+                {
+                    return Err(ClaimError::InvalidHistoryContent);
+                }
+                Ok(())
+            }
             Fact::HistoryMappingComplete { extent } => {
                 if extent.start_inclusive >= extent.end_exclusive
                     || extent.mapping_rule.trim().is_empty()
@@ -673,6 +740,7 @@ mod tests {
                 selection_ref: SelectionRef::native(agent(), "history", vec!["selected".into()])
                     .unwrap(),
                 agent: agent(),
+                content_scope: HistoryContentScope::AllObservedAtCut,
                 membership: SelectionMembership::SourceExtents {
                     extents: vec![SourceExtent {
                         source: source.clone(),
@@ -689,6 +757,46 @@ mod tests {
             }),
         });
         assert_eq!(value.validate(), Err(ClaimError::InvalidExtent));
+    }
+
+    #[test]
+    fn content_observations_refuse_ambiguous_slot_coordinates() {
+        let entry = EntryRef::native(agent(), "entry", vec!["one".into()]).unwrap();
+        let position = SourcePosition {
+            source: SourceRef {
+                issuer: Issuer::Server("fixture".into()),
+                instance: "native".into(),
+            },
+            generation: 0,
+            locator: SourceLocator::Frame { ordinal: 1 },
+        };
+        let slot = HistorySlot {
+            slot: 0,
+            content: HistoryContent::Opaque(crate::trace::PayloadRef::bytes("a".repeat(64)).unwrap()),
+        };
+        let observation = HistoryContentObservation {
+            entry,
+            position,
+            mapping_rule: "native/entry".into(),
+            slots: vec![slot.clone(), slot],
+            complete: true,
+        };
+        let value = claim(Fact::HistoryContentObserved {
+            observation: observation.clone(),
+        });
+        assert_eq!(value.validate(), Err(ClaimError::InvalidHistoryContent));
+        let mut empty = observation;
+        empty.slots.clear();
+        assert!(claim(Fact::HistoryContentObserved {
+            observation: empty.clone()
+        })
+        .validate()
+        .is_ok());
+        empty.mapping_rule.clear();
+        assert_eq!(
+            claim(Fact::HistoryContentObserved { observation: empty }).validate(),
+            Err(ClaimError::InvalidHistoryContent)
+        );
     }
 
     #[test]

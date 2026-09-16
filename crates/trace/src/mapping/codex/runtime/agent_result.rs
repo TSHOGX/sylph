@@ -166,12 +166,19 @@ impl Context<'_, '_> {
                         agent: parent.clone(),
                     },
                 },
-                message_revision: revision,
                 route: DeliveryRoute::VendorMailbox {
                     namespace: "codex.agent-result".into(),
                     occurrence: vec![rollout.into(), edge.into(), turn.into()],
                 },
             }),
+        );
+        self.add(
+            &parent,
+            "codex/agent-result-delivery-revision",
+            Fact::DeliveryRevisionObserved {
+                delivery: delivery.clone(),
+                revision,
+            },
         );
         // Pinned core/session/mod.rs records this only after send_op succeeds.
         // Success proves harness submission, not history admission or inference.

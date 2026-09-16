@@ -363,6 +363,41 @@ fn queued_edits_keep_the_original_input_and_dispatch_correlates_the_exact_revisi
     let first=run(&accepted(CommandKind::Queue),&capture(1),&ArchiveContext::default());
     let revised=OperationalFact::Revised {command_id:"command-a".into(),previous_revision:"original-v1".into(),input:SubmittedRevision {revision:"edited-v2".into(),media_type:"text/plain".into(),bytes:b"edited request".to_vec()},authorization:AuthorizationReceipt {subject:"human-a".into(),decision_ref:"grant-2".into(),lease_ref:None,evaluated_at_ms:2}};
     let second=run(&revised,&capture(2),&ArchiveContext::default());
+    for (output, input_revision, sequence) in [
+        (&first, "original-v1", 1),
+        (&second, "edited-v2", 2),
+    ] {
+        let bindings = output
+            .claims
+            .iter()
+            .filter_map(|claim| match &claim.fact {
+                Fact::DeliveryRevisionObserved { delivery, revision } => {
+                    Some((delivery, revision, &claim.evidence))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(
+            bindings[0].0,
+            &DeliveryRef::native(
+                agent(),
+                "sylph.command.delivery",
+                vec!["command-a".into(), input_revision.into()],
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            bindings[0].1,
+            &MessageRevisionRef::native(
+                agent(),
+                "sylph.command.revision",
+                vec!["command-a".into(), input_revision.into()],
+            )
+            .unwrap()
+        );
+        assert_eq!(bindings[0].2, &[capture(sequence).observation_ref]);
+    }
     assert!(second.claims.iter().any(|claim|matches!(&claim.fact,Fact::DeliveryStage {stage:DeliveryStage::Cancelled {..},delivery} if matches!(delivery.address(),ObjectAddress::Native {key,..} if key==&vec!["command-a".to_owned(),"original-v1".to_owned()]))));
     let mut archive=ArchiveContext {correlations:first.correlations.clone(),..ArchiveContext::default()};archive.correlations.extend(second.correlations.clone());
     let delivered=run(&OperationalFact::Delivery {command_id:"command-a".into(),input_revision:"edited-v2".into(),fact:DeliveryFact::Consumed {revision:"edited-v2".into(),receipt:b"{}".to_vec()}},&capture(3),&archive);

@@ -24,7 +24,7 @@ fn source_issue(input: &MapInput<'_>, output: &mut MapOutput, code: DiagnosticCo
             input,
             scope,
             "server/source-diagnostic",
-            "sylph-control-1",
+            "sylph-control-2",
             diagnostic(scope, code, message),
         ));
     } else {
@@ -105,7 +105,7 @@ fn control_scope(
 
 impl SemanticMapper for ServerMapper {
     fn build(&self) -> &'static str {
-        "sylph-control-1"
+        "sylph-control-2"
     }
 
     fn map(&self, input: MapInput<'_>) -> MapOutput {
@@ -361,11 +361,17 @@ impl SemanticMapper for ServerMapper {
                                     agent: scope.clone(),
                                 },
                             },
-                            message_revision: revision,
                             route: DeliveryRoute::ServerCommand {
                                 command_id: command.command_id,
                             },
                         }),
+                    },
+                );
+                add(
+                    "server/requested-delivery-revision",
+                    Fact::DeliveryRevisionObserved {
+                        delivery: delivery.clone(),
+                        revision,
                     },
                 );
                 add(
@@ -395,7 +401,8 @@ impl SemanticMapper for ServerMapper {
                 add("server/submitted-revision",Fact::Declare {object:TraceObject::MessageRevision(MessageRevision {revision_ref:revision_ref.clone(),message,representation:Representation::Submitted,form:RevisionForm::Correction {replaces:MessageRevisionRef::native(scope.clone(),"sylph.command.revision",vec![command_id.clone(),previous_revision.clone()]).unwrap()},parts})});
                 let delivery=delivery(scope,&command_id,&revision.revision);
                 add("server/previous-queue-cancelled",Fact::DeliveryStage {delivery:self::delivery(scope,&command_id,&previous_revision),stage:DeliveryStage::Cancelled {reason:Some("Queued input was revised before dispatch".into())}});
-                add("server/revised-delivery",Fact::Declare {object:TraceObject::Delivery(Delivery {delivery_ref:delivery.clone(),sender:author,recipient:Recipient::Agent {agent:OwnerRef::Agent {agent:scope.clone()}},message_revision:revision_ref,route:DeliveryRoute::ServerCommand {command_id:command_id.clone()}})});
+                add("server/revised-delivery",Fact::Declare {object:TraceObject::Delivery(Delivery {delivery_ref:delivery.clone(),sender:author,recipient:Recipient::Agent {agent:OwnerRef::Agent {agent:scope.clone()}},route:DeliveryRoute::ServerCommand {command_id:command_id.clone()}})});
+                add("server/revised-delivery-revision",Fact::DeliveryRevisionObserved {delivery:delivery.clone(),revision:revision_ref});
                 add("server/revised-queue",Fact::DeliveryStage {delivery:delivery.clone(),stage:DeliveryStage::Queued});
                 let key=correlation_key(scope,"sylph.command.revision",&[command_id,revision.revision]);
                 output.correlations.insert(key.clone(),AnyObjectRef::Delivery(delivery));output.correlation_evidence.insert(key,vec![input.canonical_observation.clone()]);

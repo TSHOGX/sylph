@@ -9,6 +9,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use petgraph::{algo::kosaraju_scc, graph::DiGraph};
 use serde::{Deserialize, Serialize};
 use sylph_protocol::trace::*;
+mod content;
+pub use content::ResolvedEntryContents;
 
 macro_rules! resolved_ref {
     ($registry:expr,$kind:ident,$reference:expr) => {{
@@ -209,11 +211,14 @@ pub struct Reduction {
     pub representatives: BTreeMap<AnyObjectRef, AnyObjectRef>,
     pub executions: BTreeMap<AnyObjectRef, ExecutionState>,
     pub delivery_stages: BTreeMap<DeliveryRef, Vec<(DeliveryStage, ClaimRef)>>,
+    pub delivery_revisions: BTreeMap<DeliveryRef, BTreeMap<ClaimRef, MessageRevisionRef>>,
     pub resource_states: BTreeMap<ResourceRef, Vec<(ResourceState, ClaimRef)>>,
     pub agent_states: BTreeMap<AgentRef, Vec<(AgentState, ClaimRef)>>,
     pub relations: Vec<ResolvedRelation>,
     pub histories: BTreeMap<AgentRef, HistoryView>,
     pub selection_memberships: BTreeMap<SelectionRef, Option<Vec<EntryRef>>>,
+    pub history_contents: BTreeMap<EntryRef, BTreeMap<ClaimRef, HistoryContentObservation>>,
+    pub selection_content_observations: BTreeMap<SelectionRef, Option<BTreeSet<ClaimRef>>>,
     pub messages: BTreeMap<MessageRef, MessageHistory>,
     pub coverage: Vec<(Coverage, ClaimRef)>,
     pub diagnostics: Vec<ReductionDiagnostic>,
@@ -307,6 +312,12 @@ impl Reducer {
         let active: Vec<_> = normalized.iter().collect();
         let declarations = declarations(&active, &mut result);
         resolve_objects(&declarations, &mut result);
+        for claim in &active {
+            if let Fact::HistoryContentObserved { observation } = &claim.fact {
+                result.history_contents.entry(observation.entry.clone()).or_default()
+                    .insert(claim.claim_ref.clone(), observation.clone());
+            }
+        }
         resolve_messages(&active, &mut result);
         resolve_execution(&active, &mut result);
         resolve_relations(&active, &mut result);
@@ -323,6 +334,10 @@ impl Reducer {
                     .entry(delivery.clone())
                     .or_default()
                     .push((stage.clone(), claim.claim_ref.clone())),
+                Fact::DeliveryRevisionObserved { delivery, revision } => {
+                    result.delivery_revisions.entry(delivery.clone()).or_default()
+                        .insert(claim.claim_ref.clone(), revision.clone());
+                }
                 Fact::ResourceState { resource, state } => result
                     .resource_states
                     .entry(resource.clone())
@@ -407,6 +422,7 @@ fn field_key(fact: &Fact) -> String {
         Fact::DeliveryStage { delivery, stage } => {
             serde_json::json!(["delivery", delivery, variant_name(stage)])
         }
+        Fact::DeliveryRevisionObserved { delivery, .. } => serde_json::json!(["delivery_revision", delivery]),
         Fact::Execution {
             execution,
             boundary,
@@ -429,6 +445,9 @@ fn field_key(fact: &Fact) -> String {
         Fact::HistoryMappingComplete { extent } => {
             serde_json::json!(["history_mapping_complete", extent])
         }
+        Fact::HistoryContentObserved { observation } => serde_json::json!([
+            "history_content", observation.entry, observation.position, observation.mapping_rule
+        ]),
         Fact::Equivalence { left, right, .. } => {
             let (a, b) = if left <= right {
                 (left, right)
@@ -735,13 +754,11 @@ fn refine_declaration(a: &TraceObject, b: &TraceObject) -> Option<TraceObject> {
         }
         (TraceObject::HistoryEntry(a), TraceObject::HistoryEntry(b))
             if a.entry_ref == b.entry_ref
-                && a.containing_agent == b.containing_agent
-                && a.content == b.content =>
+                && a.containing_agent == b.containing_agent =>
         {
             Some(TraceObject::HistoryEntry(HistoryEntry {
                 entry_ref: a.entry_ref.clone(),
                 containing_agent: a.containing_agent.clone(),
-                content: a.content.clone(),
                 predecessor: merge_optional(&a.predecessor, &b.predecessor)?,
                 original_owner: merge_optional(&a.original_owner, &b.original_owner)?,
             }))
@@ -1162,6 +1179,9 @@ use history::resolve_histories;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod content_tests;
 
 #[cfg(test)]
 #[path = "reducer/history_tests.rs"]
