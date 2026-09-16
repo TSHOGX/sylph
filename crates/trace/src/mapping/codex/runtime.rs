@@ -166,6 +166,7 @@ impl Context<'_, '_> {
                             ),
                         });
                         if !captured.limited {
+                            self.output.blocks_source = true;
                             self.output.requests.push(ArchiveRequest::CapturedPayload {
                                 parent: self.input.canonical_observation.clone(),
                                 slot,
@@ -189,6 +190,7 @@ impl Context<'_, '_> {
             }
         }
         if !self.output.requests.is_empty() {
+            self.output.blocks_source = true;
             return;
         }
         let first_claim = self.output.claims.len();

@@ -73,7 +73,13 @@ fn streamed_answer_is_one_reading_unit_and_retains_the_complete_final_body() {
             previews.insert(
                 payload.reference,
                 PayloadPreview {
-                    preview: String::from_utf8(payload.bytes).unwrap(),
+                    chunks: payload
+                        .manifest
+                        .as_ref()
+                        .map(|manifest| manifest.chunks.clone()),
+                    preview_limit: 2048,
+                    preview: String::from_utf8(payload.bytes.clone()).unwrap(),
+                    total_bytes: Some(payload.bytes.len() as u64),
                     availability: Some(ReadAvailability::Available),
                     ..PayloadPreview::default()
                 },
@@ -351,4 +357,64 @@ fn inherited_content_keeps_original_authorship_without_a_recipient_activation() 
     };
     assert_eq!(author.address.agent(), agent());
     assert_eq!(original.address.agent(), agent());
+}
+
+#[test]
+fn an_unfinished_stream_retains_both_identical_append_occurrences_in_the_reader() {
+    let frames = [
+        serde_json::json!({"method":"thread/started","params":{"thread":{"id":"reader"}}}),
+        serde_json::json!({"method":"item/agentMessage/delta","params":{"threadId":"reader","turnId":"turn-a","itemId":"message-a","delta":"A"}}),
+        serde_json::json!({"method":"item/agentMessage/delta","params":{"threadId":"reader","turnId":"turn-a","itemId":"message-a","delta":"A"}}),
+    ];
+    let mut state = MapperState::default();
+    let mut reducer = Reducer::default();
+    let mut previews = BTreeMap::new();
+    for (index, frame) in frames.iter().enumerate() {
+        let capture = capture(index as u64 + 1);
+        let raw = serde_json::to_vec(frame).unwrap();
+        let output = crate::mapping::codex::CodexMapper.map(MapInput {
+            capture: &capture,
+            canonical_observation: &capture.observation_ref,
+            raw: &raw,
+            state: &state,
+            archive: &ArchiveContext::default(),
+        });
+        let evidence = output
+            .claims
+            .iter()
+            .flat_map(|claim| claim.evidence.clone())
+            .collect();
+        reducer.apply(&output.claims, &evidence, 100).unwrap();
+        state = output.state;
+        for payload in output.payloads {
+            previews.insert(
+                payload.reference,
+                PayloadPreview {
+                    chunks: payload
+                        .manifest
+                        .as_ref()
+                        .map(|manifest| manifest.chunks.clone()),
+                    preview_limit: 2048,
+                    preview: String::from_utf8(payload.bytes.clone()).unwrap(),
+                    total_bytes: Some(payload.bytes.len() as u64),
+                    availability: Some(ReadAvailability::Available),
+                    ..PayloadPreview::default()
+                },
+            );
+        }
+    }
+    let projection = project(&reducer.resolve(), &previews, 32);
+    let window = &projection.windows[&ReadingScope {
+        agent: agent(),
+        selection: None,
+    }];
+    let messages: Vec<_> = window
+        .iter()
+        .filter_map(|unit| match &unit.content {
+            ReadingContent::Message { parts, purpose, .. } => Some((parts, purpose)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].0[0].preview, "AA");
 }

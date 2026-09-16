@@ -82,6 +82,10 @@ impl Fixture {
                 ),
                 ("pi".into(), mapping::pi::PiMapper.build().into()),
                 (
+                    "attachment".into(),
+                    mapping::attachment::AttachmentMapper.build().into(),
+                ),
+                (
                     "inventory".into(),
                     mapping::inventory::InventoryMapper.build().into(),
                 ),
@@ -1225,4 +1229,7 @@ async fn retained_companion_inventory_resolves_metadata_owner_after_restart_with
     assert_eq!(agent.name.as_deref(), Some("delegate-name"));
 }
 
+mod delayed_source;
 mod frozen_history;
+
+mod streaming;

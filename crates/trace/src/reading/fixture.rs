@@ -68,6 +68,11 @@ pub(super) fn fixture() -> serde_json::Value {
             previews.insert(
                 payload.reference,
                 PayloadPreview {
+                    chunks: payload
+                        .manifest
+                        .as_ref()
+                        .map(|manifest| manifest.chunks.clone()),
+                    preview_limit: 2048,
                     preview: text,
                     preview_truncated: false,
                     total_bytes: Some(payload.bytes.len() as u64),

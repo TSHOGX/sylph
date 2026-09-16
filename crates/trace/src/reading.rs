@@ -7,9 +7,13 @@ use crate::reducer::{ReadingOrderBasis, Reduction, Resolved};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use sylph_protocol::trace::*;
+mod content;
+pub use content::ComposedPayload;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PayloadPreview {
+    pub chunks: Option<Vec<PayloadChunk>>,
+    pub preview_limit: usize,
     pub preview: String,
     pub preview_truncated: bool,
     pub total_bytes: Option<u64>,
@@ -25,6 +29,7 @@ pub struct ReadingScope {
 
 #[derive(Debug, Clone, Default)]
 pub struct ReadingProjection {
+    pub composed_payloads: BTreeMap<PayloadRef, ComposedPayload>,
     pub headers: BTreeMap<AgentRef, AgentHeader>,
     pub windows: BTreeMap<ReadingScope, Vec<ReadingUnit>>,
     pub directories: BTreeMap<AgentRef, Vec<AgentDirectoryRow>>,
@@ -39,6 +44,8 @@ pub struct ReadingProjection {
 struct Index<'a> {
     reduction: &'a Reduction,
     payloads: &'a BTreeMap<PayloadRef, PayloadPreview>,
+    composed_parts: BTreeMap<MessageRevisionRef, Vec<ContentPart>>,
+    content_errors: BTreeMap<MessageRevisionRef, String>,
     max_parts: usize,
     agents: BTreeMap<AgentRef, AgentThread>,
     activation_agents: BTreeMap<AgentRef, Vec<ActivationRef>>,
@@ -60,9 +67,14 @@ pub fn project(
     payloads: &BTreeMap<PayloadRef, PayloadPreview>,
     max_parts: usize,
 ) -> ReadingProjection {
+    let mut payloads = payloads.clone();
+    let (composed_parts, composed_payloads, content_errors) =
+        content::resolve(reduction, &mut payloads);
     let mut index = Index {
         reduction,
-        payloads,
+        payloads: &payloads,
+        composed_parts,
+        content_errors,
         max_parts: max_parts.max(1),
         agents: BTreeMap::new(),
         activation_agents: BTreeMap::new(),
@@ -221,7 +233,10 @@ pub fn project(
                 .collect(),
         );
     }
-    let mut result = ReadingProjection::default();
+    let mut result = ReadingProjection {
+        composed_payloads,
+        ..ReadingProjection::default()
+    };
     for (agent, declaration) in &index.agents {
         result
             .headers
@@ -361,8 +376,8 @@ pub fn project(
                     );
                     result.parts.insert(
                         key,
-                        revision
-                            .parts
+                        index
+                            .content_parts(revision)
                             .iter()
                             .map(|part| index.part(scope, &unit.anchor.object(), revision, part))
                             .collect(),
@@ -400,6 +415,12 @@ fn unknown_count(scope: &str) -> ReadCount {
 }
 
 impl Index<'_> {
+    fn content_parts<'a>(&'a self, revision: &'a MessageRevision) -> &'a [ContentPart] {
+        self.composed_parts
+            .get(&revision.revision_ref)
+            .map_or(&revision.parts, Vec::as_slice)
+    }
+
     fn selected_objects(
         &self,
         scope: &ReadingScope,
@@ -1013,20 +1034,26 @@ impl Index<'_> {
         part: &ContentPart,
     ) -> PartSummary {
         let preview = self.payloads.get(&part.payload);
+        let mut access = self.access(
+            scope,
+            anchor,
+            &revision.revision_ref.encode(),
+            &part.payload,
+            revision.representation,
+            part.media_type.clone(),
+            part.encoding,
+        );
+        if let Some(reason) = self.content_errors.get(&revision.revision_ref) {
+            access.availability = ReadAvailability::Partial {
+                reason: reason.clone(),
+            };
+        }
         PartSummary {
             part_ref: part.part_ref.clone(),
             kind: part.kind,
             preview: preview.map_or_else(String::new, |preview| preview.preview.clone()),
             preview_truncated: preview.is_some_and(|preview| preview.preview_truncated),
-            payload: self.access(
-                scope,
-                anchor,
-                &revision.revision_ref.encode(),
-                &part.payload,
-                revision.representation,
-                part.media_type.clone(),
-                part.encoding,
-            ),
+            payload: access,
         }
     }
 
@@ -1373,14 +1400,12 @@ impl Index<'_> {
                         .collect(),
                     availability: ReadAvailability::Available,
                 }),
-                parts: revision
-                    .parts
-                    .iter()
+                parts: self.content_parts(revision).iter()
                     .take(self.max_parts)
                     .map(|part| self.part(scope, &anchor, revision, part))
                     .collect(),
-                parts_total: revision.parts.len(),
-                parts_complete: revision.parts.len() <= self.max_parts,
+                parts_total: self.content_parts(revision).len(),
+                parts_complete: self.content_parts(revision).len() <= self.max_parts,
                 parts_cursor: None,
                 original_owner: entry
                     .and_then(|entry| entry.original_owner.as_ref())

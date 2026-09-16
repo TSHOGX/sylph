@@ -6,6 +6,29 @@ use crate::trace::{
 use sylph_trace::reading::{PayloadPreview, ReadingProjection};
 
 impl ProjectionWorker {
+    pub(super) async fn stage_composed_reading(
+        &self,
+        generation: &GenerationStore,
+        unit: &ProjectionUnit,
+    ) -> Result<()> {
+        for (epoch, reference, manifest) in &unit.composed_payloads {
+            let ticket = self
+                .catalogue
+                .begin_upload(
+                    PinOwnerKind::Generation,
+                    &generation.manifest().generation,
+                    reference.clone(),
+                    epoch.clone(),
+                    crate::models::now_ms(),
+                )
+                .await?;
+            if self.evidence.stage_manifest(manifest).await? != *reference {
+                return Err(WorkerError::Task("composed payload digest mismatch".into()));
+            }
+            self.catalogue.finish_upload(&ticket).await?;
+        }
+        Ok(())
+    }
     pub(super) async fn materialize_reading(
         &self,
         generation: &GenerationStore,
@@ -27,6 +50,11 @@ impl ProjectionWorker {
                 }
             }
             let preview = PayloadPreview {
+                chunks: payload
+                    .manifest
+                    .as_ref()
+                    .map(|manifest| manifest.chunks.clone()),
+                preview_limit: limit,
                 preview: text.map_or_else(String::new, |text| text[..end].into()),
                 preview_truncated: text.is_some_and(|text| text.len() > end),
                 total_bytes: Some(length as u64),
@@ -102,6 +130,8 @@ impl ProjectionWorker {
                     ),
                 };
             let preview = PayloadPreview {
+                chunks: manifest.as_ref().map(|manifest| manifest.chunks.clone()),
+                preview_limit: generation.limits().max_preview_bytes,
                 total_bytes: length,
                 ranges,
                 availability: Some(availability),
@@ -115,6 +145,60 @@ impl ProjectionWorker {
         }
         let before = sylph_trace::reading::project(old, &unit.next.previews, 32);
         let after = sylph_trace::reading::project(&unit.next.reduction, &unit.next.previews, 32);
+        for (reference, composed) in &after.composed_payloads {
+            if before.composed_payloads.contains_key(reference) {
+                continue;
+            }
+            let epochs: BTreeSet<_> = composed
+                .revisions
+                .iter()
+                .map(|revision| {
+                    unit.next
+                        .object_epochs
+                        .get(&AnyObjectRef::MessageRevision(revision.clone()))
+                        .cloned()
+                        .ok_or_else(|| {
+                            WorkerError::Task("composed content lacks its revision epoch".into())
+                        })
+                })
+                .collect::<Result<_>>()?;
+            let claims: BTreeSet<_> = composed
+                .revisions
+                .iter()
+                .filter_map(|revision| {
+                    unit.next
+                        .reduction
+                        .object(&AnyObjectRef::MessageRevision(revision.clone()))
+                })
+                .filter_map(|object| match &object.declaration {
+                    sylph_trace::reducer::Resolved::Known { claims, .. } => Some(claims),
+                    _ => None,
+                })
+                .flatten()
+                .cloned()
+                .collect();
+            let evidence = unit
+                .next
+                .reducer
+                .claims()
+                .filter(|claim| claims.contains(&claim.claim_ref))
+                .flat_map(|claim| claim.evidence.iter().cloned())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            unit.batch.payload_derivations.push(PayloadDerivation {
+                payload: reference.clone(),
+                evidence,
+                selector: serde_json::to_string(&composed.revisions)?,
+                rule: "trace/append-chain".into(),
+                media_type: composed.manifest.media_type.clone(),
+                encoding: composed.manifest.encoding,
+            });
+            for epoch in epochs {
+                unit.composed_payloads
+                    .push((epoch, reference.clone(), composed.manifest.clone()));
+            }
+        }
         let old_rows = rows(&before, &unit.next.object_epochs)?;
         let new_rows = rows(&after, &unit.next.object_epochs)?;
         for (key, row) in &new_rows {

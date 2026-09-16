@@ -128,6 +128,9 @@ pub struct MapInput<'a> {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MapOutput {
+    /// The current record cannot advance this source's semantic state until its
+    /// payload dependencies resolve. Independent archive joins do not set this.
+    pub blocks_source: bool,
     pub capture_payload_bindings:Vec<CapturedPayloadBinding>,
     pub claims: Vec<Claim>,
     pub payloads: Vec<DerivedPayload>,

@@ -14,8 +14,8 @@ use super::{
 pub mod history;
 
 pub struct CodexMapper;
-mod runtime;
 mod collaboration;
+mod runtime;
 
 /// Checkpointed source knowledge. A copied parent header cannot replace the first
 /// governing header, and a parent connection does not own forwarded child frames.
@@ -32,7 +32,7 @@ struct CodexState {
     active_by_agent: BTreeMap<String, ActivationRef>,
     revision_by_message: BTreeMap<String, MessageRevisionRef>,
     entry_by_agent: BTreeMap<String, EntryRef>,
-    rpc_requests:BTreeMap<String,(String,ObservationRef)>,
+    rpc_requests: BTreeMap<String, (String, ObservationRef)>,
     runtime: runtime::RuntimeState,
 }
 
@@ -42,7 +42,9 @@ impl SemanticMapper for CodexMapper {
     }
 
     fn map(&self, input: MapInput<'_>) -> MapOutput {
-        if input.capture.transport_kind==TransportKind::NativeDatabase {return map_database(input);}
+        if input.capture.transport_kind == TransportKind::NativeDatabase {
+            return map_database(input);
+        }
         let mut output = MapOutput {
             state: input.state.clone(),
             ..MapOutput::default()
@@ -104,7 +106,10 @@ impl SemanticMapper for CodexMapper {
             },
             None => CodexState::default(),
         };
-        let is_live = matches!(input.capture.transport_kind, TransportKind::LiveStdout|TransportKind::LiveStdin);
+        let is_live = matches!(
+            input.capture.transport_kind,
+            TransportKind::LiveStdout | TransportKind::LiveStdin
+        );
         let mut context = Context {
             input: &input,
             output: &mut output,
@@ -127,15 +132,50 @@ impl SemanticMapper for CodexMapper {
     }
 }
 
-fn map_database(input:MapInput<'_>)->MapOutput {
-    use sylph_protocol::{NativeDatabaseSnapshot,NativeDatabaseStatus};
-    let mut output=MapOutput {state:input.state.clone(),..MapOutput::default()};
-    let snapshot:NativeDatabaseSnapshot=match serde_json::from_slice(input.raw) {Ok(value)=>value,Err(error)=>{output.diagnostics.push(MappingDiagnostic {evidence:vec![input.canonical_observation.clone()],code:DiagnosticCode::DecodeFailure,message:error.to_string()});return output;}};
-    let issue=|output:&mut MapOutput,code,message:&str|output.diagnostics.push(MappingDiagnostic {evidence:vec![input.canonical_observation.clone()],code,message:message.into()});
-    if snapshot.table=="thread_goals" {return runtime::map_goal_database(input,snapshot);}
-    if snapshot.status!=NativeDatabaseStatus::Available {issue(&mut output,DiagnosticCode::UnknownSelection,"Native selected-rollout metadata is unavailable");return output;}
-    if snapshot.table!="threads" {issue(&mut output,DiagnosticCode::UnsupportedKind,"Unknown Codex native database table");return output;}
-    history::map_selection(input,snapshot)
+fn map_database(input: MapInput<'_>) -> MapOutput {
+    use sylph_protocol::{NativeDatabaseSnapshot, NativeDatabaseStatus};
+    let mut output = MapOutput {
+        state: input.state.clone(),
+        ..MapOutput::default()
+    };
+    let snapshot: NativeDatabaseSnapshot = match serde_json::from_slice(input.raw) {
+        Ok(value) => value,
+        Err(error) => {
+            output.diagnostics.push(MappingDiagnostic {
+                evidence: vec![input.canonical_observation.clone()],
+                code: DiagnosticCode::DecodeFailure,
+                message: error.to_string(),
+            });
+            return output;
+        }
+    };
+    let issue = |output: &mut MapOutput, code, message: &str| {
+        output.diagnostics.push(MappingDiagnostic {
+            evidence: vec![input.canonical_observation.clone()],
+            code,
+            message: message.into(),
+        })
+    };
+    if snapshot.table == "thread_goals" {
+        return runtime::map_goal_database(input, snapshot);
+    }
+    if snapshot.status != NativeDatabaseStatus::Available {
+        issue(
+            &mut output,
+            DiagnosticCode::UnknownSelection,
+            "Native selected-rollout metadata is unavailable",
+        );
+        return output;
+    }
+    if snapshot.table != "threads" {
+        issue(
+            &mut output,
+            DiagnosticCode::UnsupportedKind,
+            "Unknown Codex native database table",
+        );
+        return output;
+    }
+    history::map_selection(input, snapshot)
 }
 
 struct Context<'a, 'b> {
@@ -402,9 +442,14 @@ impl Context<'_, '_> {
             outer
         };
         match kind {
-            "exec_command_begin" | "exec_command_end" | "exec_command_output_delta" | "terminal_interaction" => self.core_runtime(&containing,kind,payload),
-            "thread_goal_updated" => self.goal_update(&containing,payload),
-            kind if kind.starts_with("collab_") => self.collaboration_event(&containing,kind,payload),
+            "exec_command_begin"
+            | "exec_command_end"
+            | "exec_command_output_delta"
+            | "terminal_interaction" => self.core_runtime(&containing, kind, payload),
+            "thread_goal_updated" => self.goal_update(&containing, payload),
+            kind if kind.starts_with("collab_") => {
+                self.collaboration_event(&containing, kind, payload)
+            }
             "task_started" | "task_complete" | "turn_aborted" => {
                 self.native_boundary(&containing, kind, payload)
             }
@@ -591,25 +636,36 @@ impl Context<'_, '_> {
     }
 
     fn live(&mut self, value: &Value) {
-        if self.input.capture.transport_kind==TransportKind::LiveStdin {
-            if let (Some(id),Some(method))=(value.get("id"),string(value,"method")) {
-                self.state.rpc_requests.insert(id.to_string(),(method.into(),self.input.canonical_observation.clone()));
+        if self.input.capture.transport_kind == TransportKind::LiveStdin {
+            if let (Some(id), Some(method)) = (value.get("id"), string(value, "method")) {
+                self.state.rpc_requests.insert(
+                    id.to_string(),
+                    (method.into(), self.input.canonical_observation.clone()),
+                );
             }
             return;
         }
         if value.get("method").is_none() {
-            if let Some(id)=value.get("id") {
-                if let Some((method,request))=self.state.rpc_requests.remove(&id.to_string()) {
-                    if matches!(method.as_str(),"thread/start"|"thread/resume") {
-                        let thread=&value["result"]["thread"];
-                        if let Some(agent)=string(thread,"id").and_then(|id|self.agent(id)) {
-                            let start=self.output.claims.len();self.announce_agent(&agent,thread,true);
-                            self.output.state.governing_agent=Some(agent);
-                            for claim in &mut self.output.claims[start..] {claim.evidence.push(request.clone());}
+            if let Some(id) = value.get("id") {
+                if let Some((method, request)) = self.state.rpc_requests.remove(&id.to_string()) {
+                    if matches!(method.as_str(), "thread/start" | "thread/resume") {
+                        let thread = &value["result"]["thread"];
+                        if let Some(agent) = string(thread, "id").and_then(|id| self.agent(id)) {
+                            let start = self.output.claims.len();
+                            self.announce_agent(&agent, thread, true);
+                            self.output.state.governing_agent = Some(agent);
+                            for claim in &mut self.output.claims[start..] {
+                                claim.evidence.push(request.clone());
+                            }
                         }
                     }
                 } else {
-                    self.output.diagnostics.push(MappingDiagnostic {evidence:vec![self.input.canonical_observation.clone()],code:DiagnosticCode::MissingSource,message:"RPC reply has no retained request in this source incarnation".into()});
+                    self.output.diagnostics.push(MappingDiagnostic {
+                        evidence: vec![self.input.canonical_observation.clone()],
+                        code: DiagnosticCode::MissingSource,
+                        message: "RPC reply has no retained request in this source incarnation"
+                            .into(),
+                    });
                 }
             }
             return;
@@ -735,15 +791,17 @@ impl Context<'_, '_> {
                     .revision_by_message
                     .get(&message.encode())
                     .cloned();
-                self.message(
+                if let Some(revision) = self.message(
                     &owner,
                     &synthetic,
                     "/params/delta",
                     activation,
                     RevisionForm::Append { predecessor },
-                );
+                ) {
+                    self.history(&owner, vec![HistoryContent::Message(revision)], None);
+                }
             }
-            "thread/goal/updated" => self.goal_update(&owner,params),
+            "thread/goal/updated" => self.goal_update(&owner, params),
             "thread/tokenUsage/updated" => self.token_count(&owner, &params["tokenUsage"], true),
             _ => self.issue(
                 &owner,
@@ -806,12 +864,12 @@ impl Context<'_, '_> {
                     activation,
                     form,
                 ) {
-                    if !started {
-                        self.history(owner, vec![HistoryContent::Message(revision)], None);
-                    }
+                    self.history(owner, vec![HistoryContent::Message(revision)], None);
                 }
             }
-            "collabAgentToolCall"|"CollabAgentToolCall"=>self.collaboration_item(owner,item,live,started,activation),
+            "collabAgentToolCall" | "CollabAgentToolCall" => {
+                self.collaboration_item(owner, item, live, started, activation)
+            }
             "subAgentActivity" | "SubAgentActivity" => {
                 let child = string(
                     item,
@@ -1012,12 +1070,21 @@ impl Context<'_, '_> {
                         .into(),
                     ),
                     encoding: PayloadEncoding::Utf8,
-                    part_ref: MessagePartRef::occurrence(
-                        owner.clone(),
-                        self.input.capture.source_position.clone(),
-                        vec![selector.into(), index.to_string()],
-                    )
-                    .unwrap(),
+                    part_ref: if let Some(id) = string(value, "id") {
+                        MessagePartRef::native(
+                            owner.clone(),
+                            "codex.message-part",
+                            vec![id.into(), index.to_string()],
+                        )
+                        .unwrap()
+                    } else {
+                        MessagePartRef::occurrence(
+                            owner.clone(),
+                            self.input.capture.source_position.clone(),
+                            vec![selector.into(), index.to_string()],
+                        )
+                        .unwrap()
+                    },
                     kind,
                     payload,
                 });
@@ -1296,8 +1363,15 @@ impl Context<'_, '_> {
                 "Model invocation input is missing or not a lexical string",
             );
         }
-        if kind=="function_call" && string(value,key).is_some_and(|input|serde_json::from_str::<Value>(input).is_err()) {
-            self.issue(owner,"codex/call-arguments-undecodable",DiagnosticCode::DecodeFailure,"Function arguments are retained exactly but are not valid JSON");
+        if kind == "function_call"
+            && string(value, key).is_some_and(|input| serde_json::from_str::<Value>(input).is_err())
+        {
+            self.issue(
+                owner,
+                "codex/call-arguments-undecodable",
+                DiagnosticCode::DecodeFailure,
+                "Function arguments are retained exactly but are not valid JSON",
+            );
         }
         let namespace = string(value, "namespace");
         let Some(name) = string(value, "name") else {
