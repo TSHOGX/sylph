@@ -14,6 +14,7 @@ import { rememberTraceNavigation, traceCacheKey } from "@/lib/trace-cache";
 import { retainTraceView } from "@/lib/trace-leases";
 import { subscribeTrace } from "@/lib/trace-subscriptions";
 import { useTraceResource } from "@/lib/use-trace-resource";
+import { useTracePage } from "@/lib/use-trace-page";
 import { useWorkspaceUI } from "@/lib/workspace-ui";
 import { useDialog } from "@/lib/use-dialog";
 import {
@@ -27,7 +28,7 @@ import {
   type Representation,
   type TraceView,
 } from "@/lib/trace-types";
-import { describeCount, tracePageButtonDisabled } from "@/lib/trace-window";
+import { describeCount } from "@/lib/trace-window";
 import { TracePayload } from "./trace-payload";
 import { ArtifactsPane } from "./artifacts-pane";
 const Companion = dynamic(() =>
@@ -61,7 +62,8 @@ export type ObjectInspectionTarget = {
   scope: InspectionScope;
 };
 export type Inspection =
-  Exclude<InspectionRequest, { kind: "object" }> | ObjectInspectionTarget;
+  | Exclude<InspectionRequest, { kind: "object" }>
+  | ObjectInspectionTarget;
 interface DirectoryLocation {
   query: string;
   filter: string;
@@ -1225,11 +1227,11 @@ function RelationPages({
   onInspect: (value: InspectionRequest) => void;
 }) {
   const t = useT();
-  const [next, setNext] = useState<string | null>(null);
-  const result = useTraceResource(
-    next ? traceCacheKey(view, [reference, history, kind, next]) : null,
-    (signal) =>
-      traceAPI.relations(reference, view, history, kind, next!, signal),
+  const result = useTracePage(
+    traceCacheKey(view, [reference, history, kind]),
+    cursor,
+    (next, signal) =>
+      traceAPI.relations(reference, view, history, kind, next, signal),
   );
   return (
     <div>
@@ -1250,15 +1252,12 @@ function RelationPages({
       </ul>
       <button
         className={button}
-        disabled={tracePageButtonDisabled(
-          result.pending,
-          Boolean(result.error),
-          result.data?.hasAfter,
-          next !== null,
-        )}
-        onClick={() => setNext(result.data?.afterCursor ?? cursor)}
+        disabled={result.disabled}
+        onClick={result.load}
       >
-        {t("trace.moreSearch")} · {kind}
+        {result.error
+          ? t("trace.queryRetry")
+          : `${t("trace.moreSearch")} · ${kind}`}
       </button>
     </div>
   );
@@ -1278,10 +1277,10 @@ function ResultPages({
   maximum: number;
 }) {
   const t = useT();
-  const [next, setNext] = useState<string | null>(null);
-  const result = useTraceResource(
-    next ? traceCacheKey(view, [reference, history, "results", next]) : null,
-    (signal) => traceAPI.results(reference, view, history, next!, signal),
+  const result = useTracePage(
+    traceCacheKey(view, [reference, history, "results"]),
+    cursor,
+    (next, signal) => traceAPI.results(reference, view, history, next, signal),
   );
   return (
     <div>
@@ -1313,15 +1312,10 @@ function ResultPages({
       ))}
       <button
         className={button}
-        disabled={tracePageButtonDisabled(
-          result.pending,
-          Boolean(result.error),
-          result.data?.hasAfter,
-          next !== null,
-        )}
-        onClick={() => setNext(result.data?.afterCursor ?? cursor)}
+        disabled={result.disabled}
+        onClick={result.load}
       >
-        {t("trace.moreResults")}
+        {result.error ? t("trace.queryRetry") : t("trace.moreResults")}
       </button>
     </div>
   );

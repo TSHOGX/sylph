@@ -24,10 +24,10 @@ import { subscribeTrace } from "@/lib/trace-subscriptions";
 import {
   describeCount,
   extendTraceWindow,
-  tracePageButtonDisabled,
   type TraceWindow,
 } from "@/lib/trace-window";
 import { useTraceResource } from "@/lib/use-trace-resource";
+import { useTracePage } from "@/lib/use-trace-page";
 import { useWorkspaceUI } from "@/lib/workspace-ui";
 import {
   agentName,
@@ -846,10 +846,11 @@ function MessageParts({
   total: number;
 }) {
   const t = useT();
-  const [next, setNext] = useState<string | null>(null);
-  const result = useTraceResource(
-    next ? traceCacheKey(view, ["parts", revision, next]) : null,
-    (signal) => traceAPI.parts(revision, view, next!, via, selection, signal),
+  const result = useTracePage(
+    traceCacheKey(view, ["parts", revision, via, selection]),
+    cursor,
+    (next, signal) =>
+      traceAPI.parts(revision, view, next, via, selection, signal),
   );
   return (
     <div>
@@ -866,15 +867,12 @@ function MessageParts({
       {result.error && <p role="alert">{result.error.message}</p>}
       <button
         className={traceButton}
-        disabled={tracePageButtonDisabled(
-          result.pending,
-          Boolean(result.error),
-          result.data?.hasAfter,
-          next !== null,
-        )}
-        onClick={() => setNext(result.data?.afterCursor ?? cursor)}
+        disabled={result.disabled}
+        onClick={result.load}
       >
-        {t("trace.moreParts", { count: total })}
+        {result.error
+          ? t("trace.queryRetry")
+          : t("trace.moreParts", { count: total })}
       </button>
     </div>
   );
