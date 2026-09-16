@@ -247,7 +247,7 @@ impl Reduction {
 /// Checkpointable claim state. Batching and redelivery never affect resolved value.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Reducer {
-    claims: BTreeMap<ClaimRef, Claim>,
+    claims: imbl::OrdMap<ClaimRef, Claim>,
 }
 
 impl Reducer {
@@ -262,7 +262,7 @@ impl Reducer {
     pub fn apply(
         &mut self,
         claims: &[Claim],
-        available_evidence: &BTreeSet<ObservationRef>,
+        available_evidence: &imbl::OrdSet<ObservationRef>,
         max_claims: usize,
     ) -> Result<(), ReductionError> {
         if claims.len() > max_claims {
@@ -296,6 +296,11 @@ impl Reducer {
 
     pub fn claims(&self) -> impl Iterator<Item = &Claim> {
         self.claims.values()
+    }
+
+    /// An immutable input snapshot shares retained claims with the next candidate.
+    pub fn claim_snapshot(&self) -> imbl::OrdMap<ClaimRef, Claim> {
+        self.claims.clone()
     }
 
     /// Rebuilding is pure. Incremental workers may resolve bounded affected scopes;

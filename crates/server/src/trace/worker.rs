@@ -157,16 +157,17 @@ struct WorkerState {
     reducer: Reducer,
     reduction: Arc<Reduction>,
     source_states: BTreeMap<String, MapperState>,
-    correlations: BTreeMap<String, CorrelationBinding>,
+    correlations: imbl::OrdMap<String, AnyObjectRef>,
+    correlation_evidence: imbl::OrdMap<String, Vec<ObservationRef>>,
     pending: BTreeMap<String, PendingMapping>,
     source_replays: BTreeMap<String, SourceReplayCursor>,
-    available_evidence: BTreeSet<ObservationRef>,
+    available_evidence: imbl::OrdSet<ObservationRef>,
     gaps: BTreeMap<String, SourceGap>,
-    source_owners: BTreeMap<String, mapping::SourceOwnership>,
-    source_definitions: BTreeMap<String, mapping::codex::history::RecordedSource>,
-    history_records: BTreeMap<String, mapping::codex::history::HistoryRecord>,
+    source_owners: imbl::OrdMap<(SourceRef, u64), mapping::SourceOwner>,
+    source_definitions: imbl::OrdMap<(SourceRef, u64), mapping::codex::history::RecordedSource>,
+    history_records: mapping::codex::history::HistoryRecords,
     captured_payloads: BTreeMap<String, Vec<mapping::CapturedPayloadBinding>>,
-    observation_sources: BTreeMap<ObservationRef, SourcePosition>,
+    observation_sources: imbl::OrdMap<ObservationRef, SourcePosition>,
     previews: BTreeMap<PayloadRef, sylph_trace::reading::PayloadPreview>,
     object_epochs: BTreeMap<AnyObjectRef, IngestionEpoch>,
     reading: Option<Arc<reading::MaterializedReading>>,
@@ -617,6 +618,7 @@ impl ProjectionWorker {
             let before = (
                 unit.next.pending.keys().cloned().collect::<Vec<_>>(),
                 unit.next.correlations.clone(),
+                unit.next.correlation_evidence.clone(),
                 unit.next.reducer.len(),
                 unit.next.source_owners.clone(),
             );
@@ -721,6 +723,7 @@ impl ProjectionWorker {
             let after = (
                 unit.next.pending.keys().cloned().collect::<Vec<_>>(),
                 unit.next.correlations.clone(),
+                unit.next.correlation_evidence.clone(),
                 unit.next.reducer.len(),
                 unit.next.source_owners.clone(),
             );
@@ -861,9 +864,9 @@ impl ProjectionWorker {
                     .source_states
                     .insert(key.into(), serde_json::from_value(value)?);
             } else if let Some(key) = key.strip_prefix("correlation:") {
-                state
-                    .correlations
-                    .insert(key.into(), serde_json::from_value(value)?);
+                let binding: CorrelationBinding = serde_json::from_value(value)?;
+                state.correlations.insert(key.into(), binding.reference);
+                state.correlation_evidence.insert(key.into(), binding.evidence);
             } else if let Some(key) = key.strip_prefix("source_replay:") {
                 state
                     .source_replays
@@ -880,18 +883,22 @@ impl ProjectionWorker {
                 state
                     .captured_payloads
                     .insert(key.into(), serde_json::from_value(value)?);
-            } else if let Some(key) = key.strip_prefix("source_definition:") {
-                state
-                    .source_definitions
-                    .insert(key.into(), serde_json::from_value(value)?);
-            } else if let Some(key) = key.strip_prefix("history_record:") {
-                state
-                    .history_records
-                    .insert(key.into(), serde_json::from_value(value)?);
-            } else if let Some(key) = key.strip_prefix("owner:") {
-                state
-                    .source_owners
-                    .insert(key.into(), serde_json::from_value(value)?);
+            } else if key.starts_with("source_definition:") {
+                let definition: mapping::codex::history::RecordedSource =
+                    serde_json::from_value(value)?;
+                state.source_definitions.insert(
+                    (definition.definition.source.clone(), definition.definition.generation),
+                    definition,
+                );
+            } else if key.starts_with("history_record:") {
+                index_history_record(&mut state.history_records, serde_json::from_value(value)?)?;
+            } else if key.starts_with("owner:") {
+                let ownership: mapping::SourceOwnership = serde_json::from_value(value)?;
+                state.available_evidence.extend(ownership.owner.evidence.iter().cloned());
+                state.source_owners.insert(
+                    (ownership.source, ownership.generation),
+                    ownership.owner,
+                );
             } else if let Some(key) = key.strip_prefix("read_epoch:") {
                 let reference = AnyObjectRef::decode(key)
                     .map_err(|error| WorkerError::Task(error.to_string()))?;
@@ -931,7 +938,7 @@ impl ProjectionWorker {
             Err(EvidenceError::Limit(_))=>return Ok(RecordMapping{output:MapOutput::default(),gap:Some((DiagnosticCode::ResourceLimit,"Retained observation exceeds semantic decode bytes; source requires reprojection".into()))}),
             Err(error)=>return Err(error.into()),
         };
-        let mut captured_payloads = BTreeMap::new();
+        let mut captured_payloads = imbl::OrdMap::new();
         let mut payload_bytes = 0usize;
         for _ in 0..self.limits.max_resolution_passes {
             let mut archive = archive_context(state);
@@ -1007,7 +1014,7 @@ impl ProjectionWorker {
                 if let ArchiveRequest::Observation { observation } = request {
                     let retained=self.evidence.receipt(observation).await?.is_some_and(|receipt|matches!(receipt.disposition,ReceiptDisposition::Retained{admission_seq}if admission_seq<=through_cut));
                     if retained {
-                        resolved |= state.available_evidence.insert(observation.clone());
+                        resolved |= state.available_evidence.insert(observation.clone()).is_none();
                         if !state.observation_sources.contains_key(observation) {
                             if let Some(position) =
                                 self.evidence.observation_source(observation).await?
@@ -1100,23 +1107,27 @@ impl ProjectionWorker {
         )?;
         unit.batch.claims.extend(output.claims);
         for definition in output.source_definitions {
-            let key = serde_json::to_string(&(
+            let key = (
                 &definition.definition.source,
                 definition.definition.generation,
-            ))?;
+            );
+            let index_key = (
+                definition.definition.source.clone(),
+                definition.definition.generation,
+            );
             if unit
                 .next
                 .source_definitions
-                .get(&key)
+                .get(&index_key)
                 .is_some_and(|prior| prior.definition != definition.definition)
             {
                 return Err(WorkerError::CorrelationConflict);
             }
             unit.batch.mapper_states.insert(
-                format!("source_definition:{key}"),
+                format!("source_definition:{}", serde_json::to_string(&key)?),
                 serde_json::to_value(&definition)?,
             );
-            unit.next.source_definitions.insert(key, definition);
+            unit.next.source_definitions.insert(index_key, definition);
         }
         for record in output.history_records {
             let key = record.observation.encode();
@@ -1124,12 +1135,13 @@ impl ProjectionWorker {
                 format!("history_record:{key}"),
                 serde_json::to_value(&record)?,
             );
-            unit.next.history_records.insert(key, record);
+            index_history_record(&mut unit.next.history_records, record)?;
         }
         for ownership in output.source_owners {
             let key = serde_json::to_string(&(&ownership.source, ownership.generation))?;
-            if let Some(prior) = unit.next.source_owners.get(&key) {
-                if prior.owner.agent != ownership.owner.agent {
+            let index_key = (ownership.source.clone(), ownership.generation);
+            if let Some(prior) = unit.next.source_owners.get(&index_key) {
+                if prior.agent != ownership.owner.agent {
                     return Err(WorkerError::CorrelationConflict);
                 }
             }
@@ -1139,14 +1151,14 @@ impl ProjectionWorker {
             unit.batch
                 .mapper_states
                 .insert(format!("owner:{key}"), serde_json::to_value(&ownership)?);
-            unit.next.source_owners.insert(key, ownership);
+            unit.next.source_owners.insert(index_key, ownership.owner);
         }
         for (key, reference) in output.correlations {
             if unit
                 .next
                 .correlations
                 .get(&key)
-                .is_some_and(|prior| prior.reference != reference)
+                .is_some_and(|prior| prior != &reference)
             {
                 return Err(WorkerError::CorrelationConflict);
             }
@@ -1162,7 +1174,8 @@ impl ProjectionWorker {
                 format!("correlation:{key}"),
                 serde_json::to_value(&binding)?,
             );
-            unit.next.correlations.insert(key, binding);
+            unit.next.correlations.insert(key.clone(), binding.reference);
+            unit.next.correlation_evidence.insert(key, binding.evidence);
         }
         let id = admitted.canonical_observation.encode();
         if output.requests.is_empty() {
@@ -1529,18 +1542,15 @@ fn source_key(admitted: &AdmittedMapping, build: &str) -> Result<String> {
 fn archive_context(state: &mut WorkerState) -> ArchiveContext {
     let mut archive = ArchiveContext {
         observations: state.available_evidence.clone(),
+        observation_sources: state.observation_sources.clone(),
+        source_owners: state.source_owners.clone(),
+        source_definitions: state.source_definitions.clone(),
+        history_records: state.history_records.clone(),
+        correlations: state.correlations.clone(),
+        correlation_evidence: state.correlation_evidence.clone(),
+        claims: state.reducer.claim_snapshot(),
         ..ArchiveContext::default()
     };
-    archive.observation_sources = state.observation_sources.clone();
-    for ownership in state.source_owners.values() {
-        archive.source_owners.insert(
-            (ownership.source.clone(), ownership.generation),
-            ownership.owner.clone(),
-        );
-        archive
-            .observations
-            .extend(ownership.owner.evidence.iter().cloned());
-    }
     // Reduced object declarations are unchanged while an observation unit maps
     // its source records. Share that immutable proof graph; refreshing it from
     // receipt count would repeatedly clone all history despite identical facts.
@@ -1617,56 +1627,39 @@ fn archive_context(state: &mut WorkerState) -> ArchiveContext {
         state.archive_semantic = Some((Arc::downgrade(&state.reduction), semantic.clone()));
         semantic
     };
-    for (key, binding) in &state.correlations {
-        archive
-            .correlations
-            .insert(key.clone(), binding.reference.clone());
-        archive
-            .correlation_evidence
-            .insert(key.clone(), binding.evidence.clone());
-    }
-    for definition in state.source_definitions.values() {
-        archive.source_definitions.insert(
-            (
-                definition.definition.source.clone(),
-                definition.definition.generation,
-            ),
-            definition.clone(),
-        );
-    }
-    for record in state.history_records.values() {
-        if let SourceLocator::Jsonl { record_ordinal, .. } = record.position.locator {
-            archive
-                .history_records
-                .entry((record.position.source.clone(), record.position.generation))
-                .or_default()
-                .insert(record_ordinal, record.clone());
-        }
-    }
-    for claim in state.reducer.claims() {
-        if let Fact::HistoryPosition {
-            entry,
-            position,
-            coordinate: HistoryCoordinate::LocalRecordIndex,
-            mapping_rule,
-            ..
-        } = &claim.fact
-        {
-            if mapping_rule == "codex/native-history" {
-                archive
-                    .native_history_positions
-                    .insert(entry.clone(), position.clone());
-            }
-        }
-        if let Fact::HistoryMappingComplete { extent } = &claim.fact {
-            archive
-                .source_prefixes
-                .entry(extent.source.clone())
-                .or_default()
-                .push(extent.clone());
-        }
-    }
     archive
+}
+
+fn index_history_record(
+    records: &mut mapping::codex::history::HistoryRecords,
+    record: mapping::codex::history::HistoryRecord,
+) -> Result<()> {
+    let SourceLocator::Jsonl { record_ordinal, .. } = record.position.locator else {
+        return Err(WorkerError::Task(
+            "Native history witness lacks a JSONL coordinate".into(),
+        ));
+    };
+    let source = records
+        .entry((record.position.source.clone(), record.position.generation))
+        .or_default();
+    if source.get(&record_ordinal).is_some_and(|prior| {
+        prior.position != record.position
+            || prior.vendor_ordinal != record.vendor_ordinal
+            || prior.header != record.header
+    }) {
+        return Err(WorkerError::Task(
+            "Conflicting retained witnesses for a native history coordinate".into(),
+        ));
+    }
+    // Only agreeing lexical witnesses may share a coordinate. Proof selection
+    // remains deterministic across admission and restart without choosing one
+    // plausible byte range or header from contradictory source evidence.
+    if source.get(&record_ordinal).is_none_or(|prior| {
+        prior.observation.encode() <= record.observation.encode()
+    }) {
+        source.insert(record_ordinal, record);
+    }
+    Ok(())
 }
 
 fn save_source_state(unit: &mut ProjectionUnit, key: &str, state: &MapperState) -> Result<()> {
@@ -1693,7 +1686,7 @@ fn requests_may_resolve(requests: &[ArchiveRequest], state: &WorkerState) -> boo
         ArchiveRequest::CapturedPayload {parent,slot}=>state.captured_payloads.contains_key(&mapping::captured_payload_key(parent,slot)),
         ArchiveRequest::ContinueHistory=>true,
         ArchiveRequest::HistoryLocator {issuer,physical_id}=>state.source_definitions.values().any(|source|&source.definition.source.issuer==issuer&&mapping::codex::history::physical_id(&source.definition.locator)==Some(physical_id.as_str())),
-        ArchiveRequest::HistorySource {source,generation}=>state.history_records.values().any(|record|&record.position.source==source&&record.position.generation==*generation),
+        ArchiveRequest::HistorySource {source,generation}=>state.history_records.contains_key(&(source.clone(), *generation)),
         ArchiveRequest::AttachmentTarget {parent,slot,locator}=>state.correlations.contains_key(&mapping::attachment_key(parent,slot,locator)),
         ArchiveRequest::Object {object_ref}=>state.reduction.object(object_ref).is_some(),
         ArchiveRequest::HistoryContent { entry, position, mapping_rule } => state.reduction.history_contents.get(entry)
@@ -1702,7 +1695,7 @@ fn requests_may_resolve(requests: &[ArchiveRequest], state: &WorkerState) -> boo
         ArchiveRequest::CommandIdentity {issuer,command_id}=>state.correlations.contains_key(&mapping::command_identity_key(issuer,command_id)),
         ArchiveRequest::Correlation {agent,namespace,key}=>state.correlations.contains_key(&mapping::correlation_key(agent,namespace,key)),
         ArchiveRequest::Agent {agent}=>state.reduction.object(&AnyObjectRef::Agent(agent.clone())).is_some(),
-        ArchiveRequest::Source {source,generation}=>state.source_owners.values().any(|owner|&owner.source==source&&owner.generation==*generation)||state.reducer.claims().any(|claim|matches!(&claim.fact,Fact::HistoryMappingComplete {extent} if &extent.source==source && extent.generation==*generation)),
+        ArchiveRequest::Source {source,generation}=>state.source_owners.contains_key(&(source.clone(), *generation))||state.reducer.claims().any(|claim|matches!(&claim.fact,Fact::HistoryMappingComplete {extent} if &extent.source==source && extent.generation==*generation)),
     })
 }
 

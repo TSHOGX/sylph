@@ -52,7 +52,7 @@ fn capture(id: &str, seq: u64, locator: SourceLocator, kind: TransportKind) -> C
 struct Fixture {
     archive: ArchiveContext,
     claims: Vec<Claim>,
-    evidence: BTreeSet<ObservationRef>,
+    evidence: imbl::OrdSet<ObservationRef>,
     offsets: BTreeMap<String, Vec<u64>>,
 }
 impl Fixture {
@@ -74,6 +74,9 @@ impl Fixture {
         }
         for claim in &output.claims {
             self.evidence.extend(claim.evidence.iter().cloned());
+            self.archive
+                .claims
+                .insert(claim.claim_ref.clone(), claim.clone());
             match &claim.fact {
                 Fact::Declare {
                     object: TraceObject::HistoryEntry(entry),
@@ -87,17 +90,6 @@ impl Fixture {
                         claim.evidence.clone(),
                     );
                 }
-                Fact::HistoryPosition {
-                    entry,
-                    position,
-                    coordinate: HistoryCoordinate::LocalRecordIndex,
-                    mapping_rule,
-                    ..
-                } if mapping_rule == "codex/native-history" => {
-                    self.archive
-                        .native_history_positions
-                        .insert(entry.clone(), position.clone());
-                }
                 Fact::HistoryContentObserved { observation } => {
                     self.archive
                         .semantic_mut()
@@ -110,12 +102,6 @@ impl Fixture {
                             evidence: claim.evidence.clone(),
                         });
                 }
-                Fact::HistoryMappingComplete { extent } => self
-                    .archive
-                    .source_prefixes
-                    .entry(extent.source.clone())
-                    .or_default()
-                    .push(extent.clone()),
                 _ => {}
             }
         }
@@ -511,18 +497,50 @@ fn an_unmapped_prefix_never_becomes_a_complete_inherited_selection() {
     fixture.native(ROOT, "parent", None, 0, 2);
     let base = fixture.base(ROOT, 3);
     fixture.native(CHILD, "child", Some(base), 3, 1);
-    fixture
+    let missing: Vec<_> = fixture
         .archive
-        .source_prefixes
-        .get_mut(&source(ROOT))
-        .unwrap()
-        .retain(|extent| {
-            extent.coordinate != HistoryCoordinate::LocalRecordIndex || extent.start_inclusive != 1
-        });
+        .claims
+        .values()
+        .filter(|claim| matches!(
+            &claim.fact,
+            Fact::HistoryMappingComplete { extent }
+                if extent.source == source(ROOT)
+                    && extent.coordinate == HistoryCoordinate::LocalRecordIndex
+                    && extent.start_inclusive == 1
+        ))
+        .map(|claim| claim.claim_ref.clone())
+        .collect();
+    assert!(!missing.is_empty());
+    for claim in missing {
+        fixture.archive.claims.remove(&claim);
+    }
     let output = fixture.map(CHILD, "child", &MapperState::default());
     assert!(output.claims.is_empty());
     assert_eq!(output.diagnostics[0].code, DiagnosticCode::CaptureGap);
     assert!(!output.requests.is_empty());
+}
+
+#[test]
+fn frozen_archive_claims_keep_their_prefix_and_entry_positions_after_later_capture() {
+    let mut fixture = Fixture::default();
+    fixture.native(ROOT, "parent", None, 0, 2);
+    let retained = fixture.archive.clone();
+    let retained_positions = retained.native_history_positions();
+    let retained_prefixes = retained.source_prefixes();
+    assert!(!retained_positions.is_empty());
+    assert!(!retained_prefixes.is_empty());
+    fixture.native(CHILD, "child", None, 0, 1);
+    assert_eq!(retained.native_history_positions(), retained_positions);
+    assert_eq!(
+        retained.source_prefixes(),
+        retained_prefixes
+    );
+    assert!(!retained.source_prefixes().contains_key(&source(CHILD)));
+    assert!(fixture
+        .archive
+        .source_prefixes()
+        .contains_key(&source(CHILD)));
+    assert!(fixture.archive.native_history_positions().len() > retained_positions.len());
 }
 
 #[test]

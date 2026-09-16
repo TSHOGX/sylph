@@ -4,7 +4,7 @@ use crate::mapping::{ArchiveContext,MapperState,SourceOwner};
 fn fixture()->(Capture,ArchiveContext,AgentRef,SourceRef) {
     let agent=AgentRef::Session(sylph_protocol::SessionId::decode("env:codex:root").unwrap());let source=SourceRef {issuer:Issuer::Environment(agent.environment().clone()),instance:"runtime:process/rpc".into()};let proof=ObservationRef {issuer:source.issuer.clone(),producer_id:"capture".into(),producer_epoch:"one".into(),producer_seq:1};
     let capture=Capture {observation_ref:ObservationRef {producer_seq:2,..proof.clone()},source_position:SourcePosition {source:SourceRef {instance:"runtime:process/lifecycle".into(),..source.clone()},generation:0,locator:SourceLocator::Frame {ordinal:1}},ingestion_authorization_epoch:IngestionEpoch::new("epoch").unwrap(),declared_subject_refs:vec![],captured_at:TimeEvidence {domain:"envclock".into(),value:100,unit:TimeUnit::Milliseconds,precision:None,basis:TimeBasis::SourceWall},source_clock:None,transport_kind:TransportKind::Supervisor,vendor_build:None,schema_fingerprint:None,payload_ref:PayloadRef::bytes("a".repeat(64)).unwrap(),attachments:vec![],capture_diagnostics:vec![]};
-    let archive=ArchiveContext {source_owners:[((source.clone(),0),SourceOwner {agent:agent.clone(),evidence:vec![proof],rule:"native binding".into()})].into(),..ArchiveContext::default()};(capture,archive,agent,source)
+    let archive=ArchiveContext {source_owners:[((source.clone(),0),SourceOwner {agent:agent.clone(),evidence:vec![proof],rule:"native binding".into()})].into_iter().collect(),..ArchiveContext::default()};(capture,archive,agent,source)
 }
 
 #[test]

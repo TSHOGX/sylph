@@ -111,16 +111,15 @@ pub fn captured_payload_key(parent: &ObservationRef, slot: &str) -> String {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ArchiveContext {
     pub semantic: std::sync::Arc<ArchiveSemantic>,
-    pub captured_payloads: BTreeMap<String, CapturedPayload>,
-    pub correlations: BTreeMap<String, AnyObjectRef>,
-    pub source_prefixes: BTreeMap<SourceRef, Vec<SourceExtent>>,
-    pub source_definitions: BTreeMap<(SourceRef, u64), codex::history::RecordedSource>,
+    pub captured_payloads: imbl::OrdMap<String, CapturedPayload>,
+    pub correlations: imbl::OrdMap<String, AnyObjectRef>,
+    pub source_definitions: imbl::OrdMap<(SourceRef, u64), codex::history::RecordedSource>,
     pub history_records: codex::history::HistoryRecords,
-    pub native_history_positions: BTreeMap<EntryRef, SourcePosition>,
-    pub observations: std::collections::BTreeSet<ObservationRef>,
-    pub correlation_evidence: BTreeMap<String, Vec<ObservationRef>>,
-    pub source_owners: BTreeMap<(SourceRef, u64), SourceOwner>,
-    pub observation_sources: BTreeMap<ObservationRef, SourcePosition>,
+    pub observations: imbl::OrdSet<ObservationRef>,
+    pub correlation_evidence: imbl::OrdMap<String, Vec<ObservationRef>>,
+    pub source_owners: imbl::OrdMap<(SourceRef, u64), SourceOwner>,
+    pub observation_sources: imbl::OrdMap<ObservationRef, SourcePosition>,
+    pub claims: imbl::OrdMap<ClaimRef, Claim>,
 }
 
 /// One immutable reduction supplies these facts to many source observations.
@@ -144,6 +143,26 @@ pub struct ArchiveHistoryContent {
 impl ArchiveContext {
     pub fn semantic_mut(&mut self) -> &mut ArchiveSemantic {
         std::sync::Arc::make_mut(&mut self.semantic)
+    }
+
+    /// Frozen-history resolution asks for these witnesses explicitly. Ordinary
+    /// records share the claim snapshot without traversing historical claims.
+    pub fn source_prefixes(&self) -> BTreeMap<SourceRef, Vec<&SourceExtent>> {
+        let mut prefixes = BTreeMap::<_, Vec<_>>::new();
+        for claim in self.claims.values() {
+            if let Fact::HistoryMappingComplete { extent } = &claim.fact {
+                prefixes.entry(extent.source.clone()).or_default().push(extent);
+            }
+        }
+        prefixes
+    }
+
+    pub fn native_history_positions(&self) -> BTreeMap<EntryRef, SourcePosition> {
+        self.claims.values().filter_map(|claim| match &claim.fact {
+            Fact::HistoryPosition { entry, position, coordinate: HistoryCoordinate::LocalRecordIndex, mapping_rule, .. }
+                if mapping_rule == "codex/native-history" => Some((entry.clone(), position.clone())),
+            _ => None,
+        }).collect()
     }
 }
 

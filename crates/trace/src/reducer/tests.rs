@@ -77,7 +77,7 @@ fn execution(index: u64, name: &str, key: &str, boundary: ExecutionBoundary) -> 
     )
 }
 
-fn evidence(claims: &[Claim]) -> BTreeSet<ObservationRef> {
+fn evidence(claims: &[Claim]) -> imbl::OrdSet<ObservationRef> {
     claims
         .iter()
         .flat_map(|claim| claim.evidence.clone())
@@ -541,6 +541,81 @@ fn invalid_claim_batches_are_atomic_and_cannot_reuse_a_receipt_as_proof() {
         Err(ReductionError::ClaimCollision)
     );
     assert_eq!(reducer.claims().count(), 1);
+}
+
+#[test]
+fn retained_claim_snapshots_are_isolated_from_later_batches_and_external_edits() {
+    let first = declared_agent(1, "root");
+    let second = declared_agent(2, "child");
+    let available = evidence(&[first.clone(), second.clone()]);
+    let mut reducer = Reducer::default();
+    reducer
+        .apply(std::slice::from_ref(&first), &available, 1)
+        .unwrap();
+    let mut snapshot = reducer.claim_snapshot();
+    reducer
+        .apply(std::slice::from_ref(&second), &available, 1)
+        .unwrap();
+    assert_eq!(snapshot.values().collect::<Vec<_>>(), vec![&first]);
+    assert_eq!(reducer.claim_snapshot().len(), 2);
+    snapshot.remove(&first.claim_ref);
+    snapshot.insert(second.claim_ref.clone(), second.clone());
+    assert_eq!(reducer.claim_snapshot()[&first.claim_ref], first);
+    assert_eq!(reducer.claim_snapshot()[&second.claim_ref], second);
+}
+
+#[test]
+fn a_failing_batch_changes_neither_the_committed_claims_nor_shared_snapshots() {
+    let first = declared_agent(1, "root");
+    let second = declared_agent(2, "child");
+    let missing = declared_agent(3, "unretained");
+    let available = evidence(&[first.clone(), second.clone()]);
+    let mut reducer = Reducer::default();
+    reducer
+        .apply(std::slice::from_ref(&first), &available, 1)
+        .unwrap();
+    let snapshot = reducer.claim_snapshot();
+    assert_eq!(
+        reducer.apply(&[second.clone(), missing], &available, 2),
+        Err(ReductionError::MissingEvidence)
+    );
+    assert_eq!(reducer.claim_snapshot(), snapshot);
+    let mut collision = first.clone();
+    collision.rule_id = "different-proof".into();
+    assert_eq!(
+        reducer.apply(&[second, collision], &available, 2),
+        Err(ReductionError::ClaimCollision)
+    );
+    assert_eq!(reducer.claim_snapshot(), snapshot);
+    assert_eq!(snapshot.values().collect::<Vec<_>>(), vec![&first]);
+}
+
+#[test]
+fn a_frozen_evidence_snapshot_rejects_later_proofs_and_replays_in_canonical_order() {
+    let first = declared_agent(1, "root");
+    let second = declared_agent(2, "child");
+    let mut available = evidence(std::slice::from_ref(&first));
+    let frozen = available.clone();
+    available.extend(second.evidence.iter().cloned());
+    let mut reducer = Reducer::default();
+    assert_eq!(
+        reducer.apply(std::slice::from_ref(&second), &frozen, 1),
+        Err(ReductionError::MissingEvidence)
+    );
+    assert!(reducer.is_empty());
+    reducer
+        .apply(&[second.clone(), first.clone()], &available, 2)
+        .unwrap();
+    let claims = reducer.claim_snapshot();
+    let mut replay = Reducer::default();
+    let serialized = serde_json::to_vec(&available).unwrap();
+    let restored: imbl::OrdSet<ObservationRef> = serde_json::from_slice(&serialized).unwrap();
+    replay
+        .apply(&[first.clone(), second], &restored, 2)
+        .unwrap();
+    assert_eq!(replay.claim_snapshot(), claims);
+    assert_eq!(replay.resolve(), reducer.resolve());
+    assert_eq!(frozen.iter().cloned().collect::<Vec<_>>(), first.evidence);
 }
 
 #[test]

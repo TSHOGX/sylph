@@ -29,7 +29,7 @@ pub struct RecordedSource {
     pub observation: ObservationRef,
 }
 
-pub type HistoryRecords = BTreeMap<(SourceRef, u64), BTreeMap<u64, HistoryRecord>>;
+pub type HistoryRecords = imbl::OrdMap<(SourceRef, u64), imbl::OrdMap<u64, HistoryRecord>>;
 
 pub(super) fn record_source(input: &MapInput<'_>, value: &Value, output: &mut MapOutput) {
     if input.capture.transport_kind != TransportKind::NativeJsonl {
@@ -147,7 +147,7 @@ fn records<'a>(
     input: &'a MapInput<'_>,
     source: &SourceRef,
     generation: u64,
-) -> Result<&'a BTreeMap<u64, HistoryRecord>, HistoryFailure> {
+) -> Result<&'a imbl::OrdMap<u64, HistoryRecord>, HistoryFailure> {
     input
         .archive
         .history_records
@@ -396,10 +396,11 @@ fn chain(
     Ok(())
 }
 
-fn require_complete(input: &MapInput<'_>, segment: &Segment) -> Result<(), HistoryFailure> {
-    let mut intervals: Vec<_> = input
-        .archive
-        .source_prefixes
+fn require_complete(
+    prefixes: &BTreeMap<SourceRef, Vec<&SourceExtent>>,
+    segment: &Segment,
+) -> Result<(), HistoryFailure> {
+    let mut intervals: Vec<_> = prefixes
         .get(&segment.source)
         .into_iter()
         .flatten()
@@ -515,12 +516,14 @@ pub(super) fn map_selection(input: MapInput<'_>, snapshot: NativeDatabaseSnapsho
             source.encode()
         );
         let mut entries = Vec::new();
+        let native_positions = input.archive.native_history_positions();
+        let prefixes = input.archive.source_prefixes();
         for (segment_index, segment) in segments.iter().enumerate() {
             // A header listed among an entry's provenance is not that entry's
             // coordinate. Read the occurrence address itself, then verify its
             // record witness and complete semantic mapping for the frozen range.
-            require_complete(&input, segment)?;
-            for (entry, position) in &input.archive.native_history_positions {
+            require_complete(&prefixes, segment)?;
+            for (entry, position) in &native_positions {
                 if position.source == segment.source
                     && position.generation == segment.generation
                     && matches!(position.locator,SourceLocator::Jsonl {record_ordinal,..} if record_ordinal<segment.local_end)
@@ -535,7 +538,7 @@ pub(super) fn map_selection(input: MapInput<'_>, snapshot: NativeDatabaseSnapsho
                     });
                 }
             }
-            for (entry_ref, position) in &input.archive.native_history_positions {
+            for (entry_ref, position) in &native_positions {
                 // Derived context aliases can be addressed at a native header,
                 // but only the native mapper's position witness establishes a
                 // physical record. Reimporting aliases duplicates ancestors and

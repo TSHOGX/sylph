@@ -15,7 +15,7 @@ pub(super) fn fixture() -> serde_json::Value {
     let mut reducer = Reducer::default();
     let mut previews = BTreeMap::new();
     let mut payloads = serde_json::Map::new();
-    let mut available = BTreeSet::new();
+    let mut available = imbl::OrdSet::new();
     let mut offset = 0;
     for (index, line) in raw.split_inclusive(|byte| *byte == b'\n').enumerate() {
         let capture = Capture {

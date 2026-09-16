@@ -15,7 +15,7 @@ fn sample() -> (Reduction, Reduction, BTreeMap<PayloadRef, PayloadPreview>) {
     ];
     let mut state = MapperState::default();
     let mut reducer = Reducer::default();
-    let mut evidence = BTreeSet::new();
+    let mut evidence = imbl::OrdSet::new();
     let mut before = Reduction::default();
     let mut previews = BTreeMap::new();
     let mut offset = 0;

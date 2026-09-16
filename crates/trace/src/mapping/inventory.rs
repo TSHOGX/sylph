@@ -213,8 +213,9 @@ mod tests {
                     rule: "claude/native-identity".into(),
                 },
             )]
-            .into(),
-            observation_sources: [(proof, position)].into(),
+            .into_iter()
+            .collect(),
+            observation_sources: [(proof, position)].into_iter().collect(),
             ..ArchiveContext::default()
         };
         (capture, definition, archive)

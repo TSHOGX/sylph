@@ -12,6 +12,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 blake3 = "1.5"
 petgraph = "0.8"
+imbl = { version = "7.0.2", features = ["serde"] }
 
 [lib]
 name = "sylph_trace"

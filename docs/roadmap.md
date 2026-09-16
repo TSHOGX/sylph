@@ -280,6 +280,14 @@ membership, counts, payload anchors and retained active payload bytes/manifests/
 Same-archive replay preserves exact epochs; separate corpus archives normalize only
 verified scope identities, rejecting distinct epochs for one scope.
 
+Mapper inputs now share immutable claim, evidence, correlation and physical source indexes.
+Ordinary source records no longer rebuild history metadata by scanning every retained claim.
+Source coordinates are indexed once during acquisition and reconstructed on restart;
+contradictory lexical witnesses fail instead of replacing a prior coordinate. Frozen-history
+operations derive their witnesses from the exact retained claim snapshot when needed.
+This removes a repeated mapping-input cost while full semantic reduction and general
+reconciliation remain open.
+
 Open implementation/acceptance work remains in the ordered list above. In particular,
 `crates/server/src/trace/worker/reading.rs` still materializes general reconciliation from
 the whole reduction. Tail proof evaluation also scans semantic metadata; constant row

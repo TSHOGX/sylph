@@ -121,7 +121,8 @@ fn selected_rollout_metadata_requires_matching_source_identity_and_a_complete_ex
                 rule: "codex/governing-native-header".into(),
             },
         )]
-        .into(),
+        .into_iter()
+        .collect(),
         ..ArchiveContext::default()
     };
     let map = |snapshot: &NativeDatabaseSnapshot| {
@@ -182,11 +183,12 @@ fn reverted_rollout_selection_stays_unknown_until_its_frozen_base_is_resolved() 
                 rule: "codex/governing-native-header".into(),
             },
         )]
-        .into(),
+        .into_iter()
+        .collect(),
         history_records: [(
             source,
             [(
-                0,
+                0u64,
                 history::HistoryRecord {
                     position: native.source_position.clone(),
                     observation: native.observation_ref.clone(),
@@ -204,9 +206,11 @@ fn reverted_rollout_selection_stays_unknown_until_its_frozen_base_is_resolved() 
                     }),
                 },
             )]
-            .into(),
+            .into_iter()
+            .collect::<imbl::OrdMap<u64, history::HistoryRecord>>(),
         )]
-        .into(),
+        .into_iter()
+        .collect(),
         ..ArchiveContext::default()
     };
     let output = CodexMapper.map(MapInput {

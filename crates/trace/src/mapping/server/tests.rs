@@ -195,7 +195,7 @@ fn receipt_before_command_requests_retained_correlation_instead_of_fabricating_i
         &ArchiveContext::default(),
     );
     let archive = ArchiveContext {
-        correlations: accepted.correlations,
+        correlations: accepted.correlations.into_iter().collect(),
         ..ArchiveContext::default()
     };
     let output = run(&fact, &capture(2), &archive);
@@ -229,7 +229,7 @@ fn non_message_control_and_its_rejection_do_not_create_human_input() {
         } | Fact::Execution { .. }
     )));
     let archive = ArchiveContext {
-        correlations: output.correlations,
+        correlations: output.correlations.into_iter().collect(),
         ..ArchiveContext::default()
     };
     let rejection = run(
@@ -345,8 +345,8 @@ fn identity_binding_requires_a_proof_that_names_the_actual_agent() {
         source_evidence: vec![observation.clone()],
     };
     let mut archive = ArchiveContext {
-        observations: [observation.clone()].into(),
-        observation_sources:[(observation.clone(),SourcePosition {source:SourceRef {issuer:observation.issuer.clone(),instance:"runtime:fixture".into()},generation:0,locator:SourceLocator::Frame {ordinal:1}})].into(),
+        observations: [observation.clone()].into_iter().collect(),
+        observation_sources:[(observation.clone(),SourcePosition {source:SourceRef {issuer:observation.issuer.clone(),instance:"runtime:fixture".into()},generation:0,locator:SourceLocator::Frame {ordinal:1}})].into_iter().collect(),
         ..ArchiveContext::default()
     };
     let unproved = run(&fact, &capture, &archive);
@@ -399,7 +399,7 @@ fn queued_edits_keep_the_original_input_and_dispatch_correlates_the_exact_revisi
         assert_eq!(bindings[0].2, &[capture(sequence).observation_ref]);
     }
     assert!(second.claims.iter().any(|claim|matches!(&claim.fact,Fact::DeliveryStage {stage:DeliveryStage::Cancelled {..},delivery} if matches!(delivery.address(),ObjectAddress::Native {key,..} if key==&vec!["command-a".to_owned(),"original-v1".to_owned()]))));
-    let mut archive=ArchiveContext {correlations:first.correlations.clone(),..ArchiveContext::default()};archive.correlations.extend(second.correlations.clone());
+    let mut archive=ArchiveContext {correlations:first.correlations.clone().into_iter().collect(),..ArchiveContext::default()};archive.correlations.extend(second.correlations.clone());
     let delivered=run(&OperationalFact::Delivery {command_id:"command-a".into(),input_revision:"edited-v2".into(),fact:DeliveryFact::Consumed {revision:"edited-v2".into(),receipt:b"{}".to_vec()}},&capture(3),&archive);
     assert!(delivered.claims.iter().any(|claim|matches!(&claim.fact,Fact::DeliveryStage {delivery,stage:DeliveryStage::Admitted {..}} if matches!(delivery.address(),ObjectAddress::Native {key,..} if key==&vec!["command-a".to_owned(),"edited-v2".to_owned()]))));
     assert_eq!(first.payloads[0].bytes,b"Human \0\xff\r\n");assert_eq!(second.payloads[0].bytes,b"edited request");

@@ -340,6 +340,15 @@ transaction. A stale restore fails instead of combining older claims with newer 
 state. The worker installs the checkpoint returned by a successful commit, never one
 predicted before the transaction.
 
+Mapper input snapshots share immutable ordered claim, evidence, correlation and source
+indexes with the candidate worker state. Later captures cannot mutate a mapper's frozen
+input, and constructing an ordinary input does not scan the retained claims or rebuild
+physical history tables. Source records are indexed at acquisition and restored by source,
+generation and local ordinal. Conflicting byte coordinates, vendor ordinals or headers
+at one native coordinate fail explicitly while raw captures remain retained. Frozen-history
+resolution derives its completeness and entry-position witnesses from the retained claim
+snapshot when that operation needs them.
+
 A stateful source awaiting an external payload retains one blocked head and a replay
 cursor over its admitted tail. Successor envelopes stay in evidence instead of consuming
 one pending slot per record. The replay index binds source, generation and ingestion epoch,
