@@ -266,6 +266,16 @@ mapping, and publication validates a fixed baseline before its bounded tail. Det
 regressions cover independent writers, same-cut cache refresh, zero-cut restoration and
 persisted rollback; these do not establish bounded incremental reduction cost.
 
+Typed reduction differences now retain changes and removals across every semantic family,
+with old/new dependency endpoints. Object materialization consumes this delta, and a warm
+receipt with no semantic, payload or epoch change reuses the committed reader with zero
+rows materialized. The worker reports constructed reader rows as actual work. The full
+comparison still scans both reductions; changed content still reconstructs the reader.
+The production replay oracle now also compares row order, authorization metadata,
+membership, counts, payload anchors and retained active payload bytes/manifests/roots.
+Same-archive replay preserves exact epochs; separate corpus archives normalize only
+verified scope identities, rejecting distinct epochs for one scope.
+
 Open implementation/acceptance work remains in the ordered list above. In particular,
 `crates/server/src/trace/worker/reading.rs` still materializes the next reader from the
 whole reduction for a projection unit, although the prior view is cached. Bounded HTTP

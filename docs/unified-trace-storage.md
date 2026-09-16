@@ -359,6 +359,14 @@ incrementally, while a larger relabel/reconciliation rebuild runs as unpublished
 This keeps admission and already-published pages available without pretending that
 arbitrary graph updates have an O(1) algorithm.
 
+Reader invalidation consumes typed changes in every resolved semantic family, including
+old and new endpoints and removed values. Object declarations alone cannot invalidate
+execution, delivery bindings, content observations, selected membership, equivalence or
+coverage. Payload availability and source/target epoch bindings are independent inputs.
+A unit with none of these changes reuses its committed reader materialization. Work
+measurements count rows actually constructed, including any baseline restoration, rather
+than counting only rows whose final serialized bytes differ.
+
 ## Generation publication
 
 A bounded interpretation continuation can advance `view_revision` while preserving

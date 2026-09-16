@@ -19,7 +19,7 @@ use sylph_trace::{
         self, ArchiveContext, ArchiveRequest, DerivedPayload, MapInput, MapOutput, MapperState,
         MappingDiagnostic, SemanticMapper,
     },
-    reducer::{Reducer, Reduction},
+    reducer::{Reducer, Reduction, ReductionChanges},
 };
 use tokio::sync::{Mutex, Semaphore};
 
@@ -101,6 +101,8 @@ pub struct WorkerProgress {
     pub diagnostics: Vec<MappingDiagnostic>,
     pub suspended_sources: usize,
     pub unmapped_observations: usize,
+    /// Rows constructed by reader materialization during this worker pass.
+    pub reader_rows_materialized: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -205,6 +207,7 @@ struct ProjectionUnit {
     composed_payloads: Vec<(IngestionEpoch, PayloadRef, PayloadManifest)>,
     bindings: Vec<(IngestionEpoch, ObservationRef, AgentRef)>,
     pins: BTreeSet<(PayloadRef, IngestionEpoch)>,
+    reader_rows_materialized: usize,
 }
 
 impl ProjectionUnit {
@@ -222,6 +225,7 @@ impl ProjectionUnit {
             composed_payloads: vec![],
             bindings: vec![],
             pins: BTreeSet::new(),
+            reader_rows_materialized: 0,
         }
     }
     fn gap(
@@ -453,6 +457,8 @@ impl ProjectionWorker {
                 let prepared = self
                     .prepare_unit(generation, &state, &captures, unit_cut)
                     .await?;
+                // Oversized candidates still spent this work before batch splitting.
+                progress.reader_rows_materialized += prepared.reader_rows_materialized;
                 match generation.validate_batch(&prepared.batch) {
                     Ok(()) => break prepared,
                     Err(GenerationError::Limit(_)) if captures.len() > 1 => {
@@ -1413,11 +1419,28 @@ impl ProjectionWorker {
         unit: &mut ProjectionUnit,
     ) -> Result<()> {
         let new = &unit.next.reduction;
+        let changes = if std::ptr::eq(old, new.as_ref()) {
+            ReductionChanges::default()
+        } else {
+            ReductionChanges::between(old, new)
+        };
+        // Redelivery and acquisition-only metadata do not change a reader. Keep
+        // the exact committed materialization; payload availability and new epoch
+        // bindings remain independent inputs even when semantic values agree.
+        if changes.is_empty()
+            && unit.payloads.is_empty()
+            && !unit
+                .batch
+                .mapper_states
+                .keys()
+                .any(|key| key.starts_with("read_epoch:"))
+            && unit.next.reading.is_some()
+        {
+            return Ok(());
+        }
         let batch = &mut unit.batch;
-        for (reference, resolved) in &new.objects {
-            if old.objects.get(reference) == Some(resolved) {
-                continue;
-            }
+        for (reference, change) in &changes.objects.changed {
+            let resolved = &change.after;
             if let Some(object) = resolved.declaration.known() {
                 let (preview, preview_truncated) = object_preview(
                     &self.evidence,
@@ -1438,11 +1461,7 @@ impl ProjectionWorker {
                 });
             }
         }
-        for reference in old
-            .objects
-            .keys()
-            .filter(|reference| !new.objects.contains_key(*reference))
-        {
+        for reference in changes.objects.removed.keys() {
             batch.objects.push(ObjectUpdate::Withdraw {
                 object_ref: reference.clone(),
                 reason: "Resolved to another issued reference".into(),

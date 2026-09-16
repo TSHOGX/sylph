@@ -60,10 +60,14 @@ impl ProjectionWorker {
         // "before" with new metadata masks a late payload correction as unchanged.
         let before = match &unit.next.reading {
             Some(previous) => previous.clone(),
-            None => Arc::new(MaterializedReading::from_projection(
-                &sylph_trace::reading::project(old, &unit.next.previews, 32),
-                &unit.next.object_epochs,
-            )?),
+            None => {
+                let previous = MaterializedReading::from_projection(
+                    &sylph_trace::reading::project(old, &unit.next.previews, 32),
+                    &unit.next.object_epochs,
+                )?;
+                unit.reader_rows_materialized += previous.rows.len();
+                Arc::new(previous)
+            }
         };
         for (_, payload) in &unit.payloads {
             let length = payload.bytes.len();
@@ -233,6 +237,7 @@ impl ProjectionWorker {
             }
         }
         let after = MaterializedReading::from_projection(&after, &unit.next.object_epochs)?;
+        unit.reader_rows_materialized += after.rows.len();
         for (key, row) in &after.rows {
             if before.rows.get(key).is_none_or(|old| {
                 old.body != row.body

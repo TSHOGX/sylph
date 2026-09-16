@@ -1177,6 +1177,9 @@ fn resolve_relations(active: &[&Claim], result: &mut Reduction) {
 mod history;
 use history::resolve_histories;
 
+mod changes;
+pub use changes::{ChangedValue, MapChanges, ReductionChanges, SetChanges};
+
 #[cfg(test)]
 mod tests;
 

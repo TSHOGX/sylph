@@ -295,16 +295,107 @@ async fn claims(store: &GenerationStore) -> Vec<Claim> {
     }
     result
 }
-/// Every reader row visible at the current snapshot, keyed by its served scope and
-/// address. Claim equality alone cannot catch a reader-materialization defect: the
-/// rows are a separate derived surface, and incremental scheduling must not change
-/// which ones a page returns or what body each carries.
-async fn reader_rows(store: &GenerationStore) -> BTreeMap<(String, String), serde_json::Value> {
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum OracleEpoch {
+    Exact(IngestionEpoch),
+    Scope(IngestionScope),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OracleRow {
+    body: serde_json::Value,
+    order_key: Vec<u8>,
+    anchor: Option<String>,
+    source_epoch: OracleEpoch,
+    target_epochs: BTreeSet<OracleEpoch>,
+    required_environments: BTreeSet<String>,
+    body_bytes: i64,
+    search_text: String,
+    directory_state: String,
+    needs_input: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OracleAnchor {
+    via_ref: String,
+    containing_agent: String,
+    selection: Option<String>,
+    payload: PayloadRef,
+    body_revision: String,
+    representation: String,
+    ranges: Vec<PayloadRange>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OraclePayload {
+    manifest: Option<PayloadManifest>,
+    bytes: Option<Vec<u8>>,
+    root_epochs: BTreeSet<OracleEpoch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReaderProjection {
+    rows: BTreeMap<(String, String), OracleRow>,
+    memberships: BTreeMap<(String, String), Vec<u8>>,
+    anchors: BTreeMap<String, OracleAnchor>,
+    read_counts: BTreeMap<String, i64>,
+    membership_counts: BTreeMap<String, i64>,
+    payloads: BTreeMap<PayloadRef, OraclePayload>,
+}
+
+impl ReaderProjection {
+    async fn normalize_separate_archive_epochs(mut self, catalogue: &EvidenceCatalogue) -> Self {
+        let epochs: BTreeSet<_> = self
+            .rows
+            .values()
+            .flat_map(|row| std::iter::once(&row.source_epoch).chain(&row.target_epochs))
+            .chain(
+                self.payloads
+                    .values()
+                    .flat_map(|payload| &payload.root_epochs),
+            )
+            .map(|epoch| match epoch {
+                OracleEpoch::Exact(epoch) => epoch.clone(),
+                OracleEpoch::Scope(_) => panic!("archive epochs were already normalized"),
+            })
+            .collect();
+        let mut scopes = BTreeMap::new();
+        let mut epochs_by_scope = BTreeMap::new();
+        for epoch in epochs {
+            let proof = catalogue.scope_proof(&epoch).await.unwrap();
+            assert!(
+                epochs_by_scope
+                    .insert(proof.scope.clone(), epoch.clone())
+                    .is_none(),
+                "scope normalization must not collapse distinct re-adoption epochs"
+            );
+            scopes.insert(epoch, proof.scope);
+        }
+        let normalized = |epoch: &OracleEpoch| {
+            let OracleEpoch::Exact(epoch) = epoch else {
+                unreachable!()
+            };
+            OracleEpoch::Scope(scopes[epoch].clone())
+        };
+        for row in self.rows.values_mut() {
+            row.source_epoch = normalized(&row.source_epoch);
+            row.target_epochs = row.target_epochs.iter().map(&normalized).collect();
+        }
+        for payload in self.payloads.values_mut() {
+            payload.root_epochs = payload.root_epochs.iter().map(&normalized).collect();
+        }
+        self
+    }
+}
+
+/// Compare the served projection, not its schedule-dependent temporal revisions.
+/// Epochs remain exact until an explicitly separate archive comparison normalizes them.
+async fn reader_projection(fixture: &Fixture, store: &GenerationStore) -> ReaderProjection {
     let snapshot = store.checkpoint().await.unwrap().snapshot;
     let (mut conn, _) = store.read_connection(&snapshot).await.unwrap();
     let revision = snapshot.view_revision as i64;
-    sqlx::query(
-        "SELECT scope_key,address,body_json FROM read_rows \
+    let rows = sqlx::query(
+        "SELECT scope_key,address,body_json,order_key,anchor_ref,scope_epoch,target_epochs_json,required_environments_json,body_bytes,search_text,directory_state,needs_input FROM read_rows \
          WHERE present=1 AND valid_from<=? AND (valid_to IS NULL OR valid_to>?) \
          ORDER BY scope_key,address",
     )
@@ -315,12 +406,88 @@ async fn reader_rows(store: &GenerationStore) -> BTreeMap<(String, String), serd
     .unwrap()
     .into_iter()
     .map(|row| {
+        let targets: BTreeSet<IngestionEpoch> = serde_json::from_str(&row.get::<String, _>("target_epochs_json")).unwrap();
         (
             (row.get("scope_key"), row.get("address")),
-            serde_json::from_str(&row.get::<String, _>("body_json")).unwrap(),
+            OracleRow {
+                body: serde_json::from_str(&row.get::<String, _>("body_json")).unwrap(),
+                order_key: row.get("order_key"),
+                anchor: row.get("anchor_ref"),
+                source_epoch: OracleEpoch::Exact(IngestionEpoch::new(row.get::<String, _>("scope_epoch")).unwrap()),
+                target_epochs: targets.into_iter().map(OracleEpoch::Exact).collect(),
+                required_environments: serde_json::from_str(&row.get::<String, _>("required_environments_json")).unwrap(),
+                body_bytes: row.get("body_bytes"),
+                search_text: row.get("search_text"),
+                directory_state: row.get("directory_state"),
+                needs_input: row.get("needs_input"),
+            },
         )
     })
-    .collect()
+    .collect();
+    let memberships = sqlx::query("SELECT scope_key,object_ref,order_key FROM memberships WHERE valid_from<=? AND (valid_to IS NULL OR valid_to>?) ORDER BY scope_key,object_ref")
+        .bind(revision).bind(revision).fetch_all(&mut *conn).await.unwrap().into_iter()
+        .map(|row| ((row.get("scope_key"), row.get("object_ref")), row.get("order_key"))).collect();
+    let anchors: BTreeMap<String, OracleAnchor> = sqlx::query("SELECT anchor_key,via_ref,containing_agent,selection_ref,payload_ref,body_revision,representation,ranges_json FROM payload_anchor_versions WHERE valid_from<=? AND (valid_to IS NULL OR valid_to>?) ORDER BY anchor_key")
+        .bind(revision).bind(revision).fetch_all(&mut *conn).await.unwrap().into_iter()
+        .map(|row| (row.get("anchor_key"), OracleAnchor {
+            via_ref: row.get("via_ref"), containing_agent: row.get("containing_agent"),
+            selection: row.get("selection_ref"), payload: PayloadRef::parse(row.get::<String, _>("payload_ref")).unwrap(),
+            body_revision: row.get("body_revision"), representation: row.get("representation"),
+            ranges: serde_json::from_str(&row.get::<String, _>("ranges_json")).unwrap(),
+        })).collect();
+    // An absent count serves zero; obsolete empty scopes are not observable additions.
+    let read_counts = sqlx::query("SELECT scope_key,count FROM read_counts c WHERE valid_from=(SELECT MAX(valid_from) FROM read_counts p WHERE p.scope_key=c.scope_key AND p.valid_from<=?) AND count<>0")
+        .bind(revision).fetch_all(&mut *conn).await.unwrap().into_iter()
+        .map(|row| (row.get("scope_key"), row.get("count"))).collect();
+    let membership_counts = sqlx::query("SELECT scope_key,member_count FROM scope_counts c WHERE valid_from=(SELECT MAX(valid_from) FROM scope_counts p WHERE p.scope_key=c.scope_key AND p.valid_from<=?) AND member_count<>0")
+        .bind(revision).fetch_all(&mut *conn).await.unwrap().into_iter()
+        .map(|row| (row.get("scope_key"), row.get("member_count"))).collect();
+    drop(conn);
+    let mut evidence = sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(fixture.directory.path().join("evidence.db"))
+            .read_only(true),
+    )
+    .await
+    .unwrap();
+    let mut pins = BTreeMap::<PayloadRef, BTreeSet<OracleEpoch>>::new();
+    for row in sqlx::query("SELECT payload_ref,scope_epoch FROM trace_payload_pins WHERE owner_kind='generation' AND owner_id=?")
+        .bind(&snapshot.generation).fetch_all(&mut evidence).await.unwrap() {
+        pins.entry(PayloadRef::parse(row.get::<String, _>("payload_ref")).unwrap()).or_default()
+            .insert(OracleEpoch::Exact(IngestionEpoch::new(row.get::<String, _>("scope_epoch")).unwrap()));
+    }
+    let mut payloads = BTreeMap::new();
+    for payload in anchors
+        .values()
+        .map(|anchor| anchor.payload.clone())
+        .collect::<BTreeSet<_>>()
+    {
+        let bytes = match fixture
+            .evidence
+            .payload_bytes(&payload, fixture.evidence.limits().max_read_bytes)
+            .await
+        {
+            Ok(bytes) => Some(bytes),
+            Err(crate::trace::evidence::EvidenceError::UnavailableRange) => None,
+            Err(error) => panic!("active payload {payload} is not retained: {error}"),
+        };
+        payloads.insert(
+            payload.clone(),
+            OraclePayload {
+                manifest: fixture.evidence.payload_manifest(&payload).await.unwrap(),
+                bytes,
+                root_epochs: pins.remove(&payload).unwrap_or_default(),
+            },
+        );
+    }
+    ReaderProjection {
+        rows,
+        memberships,
+        anchors,
+        read_counts,
+        membership_counts,
+        payloads,
+    }
 }
 async fn revision_bytes(
     fixture: &Fixture,
@@ -415,7 +582,10 @@ async fn cold_and_restarted_incremental_projection_preserve_fixture_owner_and_ex
     fixture.worker().catch_up(&incremental, 1, 5).await.unwrap();
     assert_native_values(&fixture, &incremental).await;
     assert_eq!(claims(&cold).await, claims(&incremental).await);
-    assert_eq!(reader_rows(&cold).await, reader_rows(&incremental).await);
+    assert_eq!(
+        reader_projection(&fixture, &cold).await,
+        reader_projection(&fixture, &incremental).await,
+    );
     assert_eq!(
         incremental
             .page(&old, &QueryScope::archive(agent()), None, 10)
@@ -428,12 +598,102 @@ async fn cold_and_restarted_incremental_projection_preserve_fixture_owner_and_ex
 }
 
 #[tokio::test]
+async fn reader_oracle_detects_order_authorization_and_payload_anchor_changes_without_body_changes()
+{
+    let fixture = Fixture::new().await;
+    fixture.native_fixture().await;
+    let (store, _) = fixture.generation("oracle-sensitivity").await;
+    fixture
+        .worker()
+        .catch_up(&store, 1, fixture.evidence.evidence_cut().await.unwrap())
+        .await
+        .unwrap();
+    let baseline = reader_projection(&fixture, &store).await;
+    let (key, original) = baseline
+        .rows
+        .iter()
+        .find(|(_, row)| row.anchor.is_some())
+        .unwrap();
+    let OracleEpoch::Exact(source_epoch) = &original.source_epoch else {
+        unreachable!()
+    };
+    let targets = original
+        .target_epochs
+        .iter()
+        .map(|epoch| match epoch {
+            OracleEpoch::Exact(epoch) => epoch,
+            OracleEpoch::Scope(_) => unreachable!(),
+        })
+        .collect::<Vec<_>>();
+    let mut connection = sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new().filename(store.path()),
+    )
+    .await
+    .unwrap();
+    for mutation in [
+        "order_key=X'ff'",
+        "anchor_ref=NULL",
+        "scope_epoch='oracle-other-source'",
+        "target_epochs_json='[\"oracle-other-target\"]'",
+        "required_environments_json='[\"private\"]'",
+    ] {
+        let updated = sqlx::query(&format!(
+            "UPDATE read_rows SET {mutation} WHERE scope_key=? AND address=? AND valid_to IS NULL"
+        ))
+        .bind(&key.0)
+        .bind(&key.1)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+        assert_eq!(updated.rows_affected(), 1);
+        let changed = reader_projection(&fixture, &store).await;
+        assert_eq!(changed.rows[key].body, original.body);
+        assert_ne!(changed, baseline, "reader oracle omitted {mutation}");
+        sqlx::query("UPDATE read_rows SET order_key=?,anchor_ref=?,scope_epoch=?,target_epochs_json=?,required_environments_json=? WHERE scope_key=? AND address=? AND valid_to IS NULL")
+            .bind(&original.order_key).bind(&original.anchor).bind(source_epoch.as_str())
+            .bind(serde_json::to_string(&targets).unwrap()).bind(serde_json::to_string(&original.required_environments).unwrap())
+            .bind(&key.0).bind(&key.1).execute(&mut connection).await.unwrap();
+    }
+    let (anchor_key, anchor) = baseline
+        .anchors
+        .iter()
+        .find(|(_, anchor)| !anchor.ranges.is_empty())
+        .unwrap();
+    assert_eq!(sqlx::query("UPDATE payload_anchor_versions SET ranges_json='[]' WHERE anchor_key=? AND valid_to IS NULL")
+        .bind(anchor_key).execute(&mut connection).await.unwrap().rows_affected(), 1);
+    let changed = reader_projection(&fixture, &store).await;
+    assert_eq!(changed.rows, baseline.rows);
+    assert_ne!(
+        changed, baseline,
+        "reader oracle omitted payload range reachability"
+    );
+    sqlx::query(
+        "UPDATE payload_anchor_versions SET ranges_json=? WHERE anchor_key=? AND valid_to IS NULL",
+    )
+    .bind(serde_json::to_string(&anchor.ranges).unwrap())
+    .bind(anchor_key)
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    let (membership, order) = baseline.memberships.iter().next().unwrap();
+    assert_eq!(sqlx::query("UPDATE memberships SET order_key=X'ff' WHERE scope_key=? AND object_ref=? AND valid_to IS NULL")
+        .bind(&membership.0).bind(&membership.1).execute(&mut connection).await.unwrap().rows_affected(), 1);
+    let changed = reader_projection(&fixture, &store).await;
+    assert_eq!(changed.rows, baseline.rows);
+    assert_ne!(changed, baseline, "reader oracle omitted membership order");
+    sqlx::query("UPDATE memberships SET order_key=? WHERE scope_key=? AND object_ref=? AND valid_to IS NULL")
+        .bind(order).bind(&membership.0).bind(&membership.1).execute(&mut connection).await.unwrap();
+    assert_eq!(reader_projection(&fixture, &store).await, baseline);
+}
+
+#[tokio::test]
 async fn new_receipt_for_a_retained_source_occurrence_does_not_duplicate_projection() {
     let fixture = Fixture::new().await;
     let captures = fixture.native_fixture().await;
     let (generation, _) = fixture.generation("reread").await;
     let worker = fixture.worker();
-    worker.catch_up(&generation, 1, 5).await.unwrap();
+    let initial = worker.catch_up(&generation, 1, 5).await.unwrap();
+    assert!(initial.reader_rows_materialized > 0);
     let before = claims(&generation).await;
     let original = &captures[2];
     let mut repeated = original.clone();
@@ -447,7 +707,8 @@ async fn new_receipt_for_a_retained_source_occurrence_does_not_duplicate_project
         )
         .await
         .unwrap();
-    worker.catch_up(&generation, 1, 6).await.unwrap();
+    let repeated = worker.catch_up(&generation, 1, 6).await.unwrap();
+    assert_eq!(repeated.reader_rows_materialized, 0);
     assert_eq!(claims(&generation).await, before);
     assert_native_values(&fixture, &generation).await;
     assert_eq!(
@@ -866,9 +1127,9 @@ async fn worker_projection_scaling_probe() {
     }
     let admission_ms = admission.elapsed().as_millis();
     let (generation, _) = fixture.generation("scaling").await;
+    let worker = fixture.worker();
     let started = std::time::Instant::now();
-    fixture
-        .worker()
+    let cold = worker
         .catch_up(&generation, 1, records as u64 + 1)
         .await
         .unwrap();
@@ -893,7 +1154,19 @@ async fn worker_projection_scaling_probe() {
         cursor = page.next_cursor;
     }
     assert_eq!(count, records);
-    eprintln!("worker scaling: records={records} admission_ms={admission_ms} projection_ms={projection_ms} revision={}",snapshot.view_revision);
+    let mut appended = serde_json::to_vec(&serde_json::json!({
+        "type": "response_item",
+        "payload": {"type": "message", "id": "warm-append", "role": "assistant",
+            "content": [{"type": "output_text", "text": "measured warm append"}]}
+    })).unwrap();
+    appended.push(b'\n');
+    fixture.native(records as u64 + 2, offset, &appended).await;
+    let started = std::time::Instant::now();
+    let warm = worker.catch_up(&generation, 1, records as u64 + 2).await.unwrap();
+    let warm_ms = started.elapsed().as_millis();
+    assert_eq!(revision_bytes(&fixture, &generation, &message("warm-append")).await,
+        vec![b"measured warm append".to_vec()]);
+    eprintln!("worker scaling: records={records} admission_ms={admission_ms} projection_ms={projection_ms} cold_rows={} warm_append_ms={warm_ms} warm_rows={} revision={}",cold.reader_rows_materialized,warm.reader_rows_materialized,snapshot.view_revision);
 }
 
 #[tokio::test]

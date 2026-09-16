@@ -151,17 +151,17 @@ async fn admit_record(fixture: &Fixture, record: &Record) -> Capture {
 #[derive(Debug, PartialEq, Eq)]
 struct Projection {
     claims: BTreeMap<ClaimRef, Claim>,
-    rows: BTreeMap<(String, String), serde_json::Value>,
+    reader: ReaderProjection,
 }
 
-async fn projection(store: &GenerationStore) -> Projection {
+async fn projection(fixture: &Fixture, store: &GenerationStore) -> Projection {
     Projection {
         claims: claims(store)
             .await
             .into_iter()
             .map(|claim| (claim.claim_ref.clone(), claim))
             .collect(),
-        rows: reader_rows(store).await,
+        reader: reader_projection(fixture, store).await,
     }
 }
 
@@ -419,7 +419,7 @@ async fn run(corpus: &Corpus, order: SourceOrder, incremental: bool, repeated: b
     let cut = fixture.evidence.evidence_cut().await.unwrap();
     worker.catch_up(&store, 1, cut).await.unwrap();
     assert_expected(corpus, &fixture, &store).await;
-    let before = projection(&store).await;
+    let before = projection(&fixture, &store).await;
     if repeated {
         for mut capture in captures {
             if capture.transport_kind != TransportKind::NativeJsonl {
@@ -440,14 +440,20 @@ async fn run(corpus: &Corpus, order: SourceOrder, incremental: bool, repeated: b
             .await
             .unwrap();
         assert_expected(corpus, &fixture, &store).await;
-        assert_eq!(projection(&store).await, before);
+        assert_eq!(projection(&fixture, &store).await, before);
     }
     let (fresh, _) = fixture.generation("same-cut-rebuild").await;
     fixture.worker().catch_up(&fresh, 1, cut).await.unwrap();
     assert_expected(corpus, &fixture, &fresh).await;
     assert_eq!(fresh.checkpoint().await.unwrap().snapshot.evidence_cut, cut);
-    assert_eq!(projection(&fresh).await, before);
-    before
+    assert_eq!(projection(&fixture, &fresh).await, before);
+    Projection {
+        claims: before.claims,
+        reader: before
+            .reader
+            .normalize_separate_archive_epochs(&fixture.catalogue)
+            .await,
+    }
 }
 
 async fn replay(corpus: &Corpus) {
