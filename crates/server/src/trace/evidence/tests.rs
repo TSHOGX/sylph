@@ -1193,3 +1193,113 @@ async fn current_scope_epoch_returns_live_authorization_and_omits_deleted_scope(
         None
     );
 }
+
+#[tokio::test]
+async fn source_replay_is_indexed_and_excludes_rereads_other_sources_generations_and_epochs() {
+    let fixture = Fixture::new().await;
+    let first = fixture.capture(1, 1, RAW).await;
+    let mut reread = first.clone();
+    reread.observation_ref.producer_seq = 2;
+    let mut other_source = fixture.capture(3, 2, RAW).await;
+    other_source.source_position.source.instance = "other-source".into();
+    let mut other_generation = fixture.capture(4, 2, RAW).await;
+    other_generation.source_position.generation = 2;
+    let next = fixture.capture(5, 3, b"second exact record").await;
+    let issuer = &first.observation_ref.issuer;
+    fixture
+        .store
+        .admit_batch(
+            issuer,
+            &[
+                first.clone(),
+                reread,
+                other_source,
+                other_generation,
+                next.clone(),
+            ],
+        )
+        .await
+        .unwrap();
+    let source = &first.source_position.source;
+    let record = fixture
+        .store
+        .source_record_after(source, 1, &fixture.epoch, 0, 5)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.admission_seq, 1);
+    assert_eq!(record.capture.observation_ref, first.observation_ref);
+    let record = fixture
+        .store
+        .source_record_after(source, 1, &fixture.epoch, 1, 5)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.admission_seq, 5);
+    assert_eq!(record.capture.observation_ref, next.observation_ref);
+    assert_eq!(
+        fixture
+            .store
+            .payload_bytes(&record.capture.payload_ref, 128)
+            .await
+            .unwrap(),
+        b"second exact record"
+    );
+    assert!(fixture
+        .store
+        .source_record_after(source, 1, &fixture.epoch, 1, 4)
+        .await
+        .unwrap()
+        .is_none());
+    let other_agent = AgentRef::Session(SessionId::decode("env7fk2:codex:another-epoch").unwrap());
+    let other_scope = IngestionScope::Agent(other_agent.clone());
+    let other_epoch = fixture
+        .store
+        .authorize_scope(&other_scope, std::slice::from_ref(&other_agent))
+        .await
+        .unwrap();
+    let mut foreign = make_capture(&other_agent, &other_epoch, 1, 4, next.payload_ref.clone());
+    foreign.observation_ref.producer_id = "another-epoch-producer".into();
+    foreign.source_position.source = source.clone();
+    fixture.store.admit_batch(issuer, &[foreign]).await.unwrap();
+    assert!(fixture
+        .store
+        .source_record_after(source, 1, &fixture.epoch, 5, 6)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        fixture
+            .store
+            .source_record_after(source, 1, &other_epoch, 0, 6)
+            .await
+            .unwrap()
+            .unwrap()
+            .admission_seq,
+        6
+    );
+    fixture
+        .store
+        .delete_scope(&IngestionScope::Agent(fixture.agent.clone()))
+        .await
+        .unwrap();
+    assert!(fixture
+        .store
+        .source_record_after(source, 1, &fixture.epoch, 0, 6)
+        .await
+        .unwrap()
+        .is_none());
+    let plan:Vec<String>=sqlx::query("EXPLAIN QUERY PLAN SELECT admission_seq FROM source_replay_records WHERE ingestion_epoch=? AND source_ref=? AND generation=? AND admission_seq>? AND admission_seq<=? ORDER BY admission_seq LIMIT 1")
+        .bind(fixture.epoch.as_str()).bind(source.encode()).bind(1i64).bind(0i64).bind(6i64).fetch_all(&fixture.store.readers).await.unwrap().iter().map(|row|row.get("detail")).collect();
+    assert!(
+        plan.iter()
+            .any(|line| line.contains("SEARCH source_replay_records USING PRIMARY KEY")),
+        "{plan:?}"
+    );
+    assert!(
+        plan.iter()
+            .all(|line| !line.contains("SCAN source_replay_records")
+                && !line.contains("TEMP B-TREE")),
+        "{plan:?}"
+    );
+}

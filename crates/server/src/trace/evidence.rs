@@ -731,6 +731,8 @@ impl EvidenceStore {
                 let envelope_bytes = envelope.len() as i64;
                 let admission_seq = sqlx::query("INSERT INTO observations (observation_ref, occurrence_id, envelope_json, envelope_bytes, admitted_at_ms) VALUES (?, ?, ?, ?, ?)")
                     .bind(&observation_key).bind(occurrence_id).bind(envelope).bind(envelope_bytes).bind(now_ms()).execute(&mut *tx).await?.last_insert_rowid();
+                sqlx::query("INSERT INTO source_replay_records VALUES(?,?,?,?,?) ON CONFLICT(occurrence_id) DO NOTHING")
+                    .bind(epoch).bind(&source_key).bind(generation).bind(admission_seq).bind(occurrence_id).execute(&mut *tx).await?;
                 for payload in capture_payload_refs(capture) {
                     sqlx::query("INSERT INTO observation_payload_roots (admission_seq, payload_ref) VALUES (?, ?)")
                         .bind(admission_seq).bind(payload.as_str()).execute(&mut *tx).await?;
@@ -845,6 +847,43 @@ impl EvidenceStore {
     /// deleted rows without mistaking them for an empty completed archive.
     pub async fn admissions_after(&self, after: u64, limit: usize) -> Result<AdmissionPage> {
         self.admissions_page(after, limit, None).await
+    }
+
+    /// One canonical record at a fixed admitted cut. The composite key bounds
+    /// work independently of unrelated captures and duplicate reread receipts.
+    pub(crate) async fn source_record_after(
+        &self,
+        source: &sylph_protocol::trace::SourceRef,
+        generation: u64,
+        epoch: &IngestionEpoch,
+        after: u64,
+        through: u64,
+    ) -> Result<Option<AdmittedCapture>> {
+        let mut tx = self.readers.begin().await?;
+        if epoch_tombstone(&mut tx, epoch.as_str()).await?.is_some() {
+            return Ok(None);
+        }
+        let candidate = sqlx::query("SELECT r.admission_seq,r.occurrence_id,o.envelope_bytes FROM source_replay_records r JOIN observations o ON o.admission_seq=r.admission_seq WHERE r.ingestion_epoch=? AND r.source_ref=? AND r.generation=? AND r.admission_seq>? AND r.admission_seq<=? ORDER BY r.admission_seq LIMIT 1")
+            .bind(epoch.as_str()).bind(source.encode()).bind(signed(generation)?).bind(signed(after)?).bind(signed(through)?).fetch_optional(&mut *tx).await?;
+        let Some(row) = candidate else {
+            return Ok(None);
+        };
+        if unsigned(row.try_get("envelope_bytes")?)? > self.limits.max_read_bytes as u64 {
+            return Err(EvidenceError::Limit("source replay envelope bytes"));
+        }
+        let sequence = row.try_get::<i64, _>("admission_seq")?;
+        let envelope: String =
+            sqlx::query_scalar("SELECT envelope_json FROM observations WHERE admission_seq=?")
+                .bind(sequence)
+                .fetch_one(&mut *tx)
+                .await?;
+        let capture: Capture = serde_json::from_str(&envelope)?;
+        Ok(Some(AdmittedCapture {
+            admission_seq: unsigned(sequence)?,
+            occurrence_id: unsigned(row.try_get("occurrence_id")?)?,
+            canonical_observation_ref: capture.observation_ref.clone(),
+            capture,
+        }))
     }
 
     async fn admissions_page(

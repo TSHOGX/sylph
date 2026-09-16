@@ -306,6 +306,14 @@ advances only after the complete observation is resolved or explicitly quarantin
 Parser failure retains a diagnostic and coverage gap at the cut; it does not publish
 guessed values. Dependent unresolved claims are indexed for reevaluation on later evidence.
 
+A stateful source awaiting an external payload retains one blocked head and a replay
+cursor over its admitted tail. Successor envelopes stay in evidence instead of consuming
+one pending slot per record. The replay index binds source, generation and ingestion epoch,
+contains canonical occurrences only, and seeks within the fixed evidence cut. Resolving
+the dependency resumes bounded pages from the last committed mapper state; a long blocked
+tail cannot prevent the projection from reaching the later attachment that releases it.
+Independent correlation joins do not impose this source-order barrier.
+
 Current projection may lag evidence admission. Serve both cuts, worker status, affected
 source gaps and diagnostics. Do not turn projection failure into an agent failure.
 Full replay is deterministic over the complete cut. Incremental scheduling can change

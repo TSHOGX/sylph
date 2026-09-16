@@ -98,6 +98,17 @@ CREATE TABLE observations (
 );
 CREATE INDEX observations_by_occurrence ON observations(occurrence_id, admission_seq);
 
+-- One canonical occurrence per exact source incarnation and authorization epoch.
+-- Replay keysets skip unrelated sources and duplicate reread receipts directly.
+CREATE TABLE source_replay_records (
+  ingestion_epoch TEXT NOT NULL REFERENCES ingestion_epochs(epoch),
+  source_ref TEXT NOT NULL,
+  generation INTEGER NOT NULL,
+  admission_seq INTEGER NOT NULL REFERENCES observations(admission_seq),
+  occurrence_id INTEGER NOT NULL UNIQUE REFERENCES occurrences(occurrence_id),
+  PRIMARY KEY(ingestion_epoch,source_ref,generation,admission_seq)
+) WITHOUT ROWID;
+
 CREATE TABLE observation_payload_roots (
   admission_seq INTEGER NOT NULL REFERENCES observations(admission_seq),
   payload_ref TEXT NOT NULL REFERENCES payloads(payload_ref),

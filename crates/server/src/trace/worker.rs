@@ -120,6 +120,15 @@ struct PendingMapping {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct SourceReplayCursor {
+    source: SourceRef,
+    generation: u64,
+    epoch: IngestionEpoch,
+    after: u64,
+    through: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct AdmittedMapping {
     admission_seq: u64,
     occurrence_id: u64,
@@ -146,6 +155,7 @@ struct WorkerState {
     source_states: BTreeMap<String, MapperState>,
     correlations: BTreeMap<String, CorrelationBinding>,
     pending: BTreeMap<String, PendingMapping>,
+    source_replays: BTreeMap<String, SourceReplayCursor>,
     available_evidence: BTreeSet<ObservationRef>,
     gaps: BTreeMap<String, SourceGap>,
     source_owners: BTreeMap<String, mapping::SourceOwnership>,
@@ -325,19 +335,25 @@ impl ProjectionWorker {
         if let Some(state) = state {
             let state = state.lock().await;
             if state.cut == generation.checkpoint().await?.snapshot.evidence_cut {
-                return Ok(has_ready_continuations(&state.pending));
+                return Ok(has_ready_continuations(
+                    &state.pending,
+                    &state.source_replays,
+                ));
             }
         }
-        let pending = generation
-            .mapper_states()
-            .await?
-            .into_iter()
-            .filter(|(key, value)| key.starts_with("pending:") && !value.is_null())
-            .map(|(key, value)| {
-                serde_json::from_value::<PendingMapping>(value).map(|pending| (key, pending))
-            })
-            .collect::<std::result::Result<BTreeMap<_, _>, _>>()?;
-        Ok(has_ready_continuations(&pending))
+        let mut pending = BTreeMap::new();
+        let mut replays = BTreeMap::new();
+        for (key, value) in generation.mapper_states().await? {
+            if value.is_null() {
+                continue;
+            }
+            if key.starts_with("pending:") {
+                pending.insert(key, serde_json::from_value(value)?);
+            } else if let Some(key) = key.strip_prefix("source_replay:") {
+                replays.insert(key.into(), serde_json::from_value(value)?);
+            }
+        }
+        Ok(has_ready_continuations(&pending, &replays))
     }
 
     pub async fn catch_up(
@@ -369,7 +385,9 @@ impl ProjectionWorker {
             suspended_sources: state.gaps.len(),
             ..WorkerProgress::default()
         };
-        while state.cut < through_cut || has_ready_continuations(&state.pending) {
+        while state.cut < through_cut
+            || has_ready_continuations(&state.pending, &state.source_replays)
+        {
             let page = if state.cut < through_cut {
                 let limit = self
                     .limits
@@ -521,21 +539,12 @@ impl ProjectionWorker {
             ));
             // Only this source generation waits; raw admission and independent
             // attachment/inventory mappings continue under their existing bounds.
-            if unit
-                .next
-                .pending
-                .values()
-                .any(|pending| pending.source_order.as_deref() == Some(&key))
-            {
-                self.save_pending(
-                    &mut unit,
-                    PendingMapping {
-                        admitted: admitted.clone(),
-                        state: MapperState::default(),
-                        requests: vec![],
-                        source_order: Some(key.clone()),
-                    },
-                )?;
+            if let Some(cursor) = unit.next.source_replays.get_mut(&key) {
+                cursor.through = cursor.through.max(admitted.admission_seq);
+                unit.batch.mapper_states.insert(
+                    format!("source_replay:{key}"),
+                    serde_json::to_value(cursor)?,
+                );
             } else if let Some(gap) = unit.next.gaps.get(&key).cloned() {
                 unit.gap(&key, &admitted, gap.code, gap.reason)?;
             } else {
@@ -585,9 +594,7 @@ impl ProjectionWorker {
             pending_records.sort_by_key(|pending| pending.admitted.admission_seq);
             for pending in pending_records {
                 if let Some(key) = &pending.source_order {
-                    if ordered_applied >= self.limits.max_unit_observations
-                        || !source_head(&pending, &unit.next.pending)
-                    {
+                    if ordered_applied >= self.limits.max_unit_observations {
                         continue;
                     }
                     if !pending.requests.is_empty()
@@ -701,6 +708,7 @@ impl ProjectionWorker {
                 return Err(WorkerError::Limit("pending dependency closure"));
             }
         }
+        self.replay_source_tails(&mut unit, through).await?;
         if unit.next.reducer.len() > self.limits.max_reducer_claims {
             return Err(WorkerError::Limit("retained reducer claims"));
         }
@@ -822,6 +830,10 @@ impl ProjectionWorker {
             } else if let Some(key) = key.strip_prefix("correlation:") {
                 state
                     .correlations
+                    .insert(key.into(), serde_json::from_value(value)?);
+            } else if let Some(key) = key.strip_prefix("source_replay:") {
+                state
+                    .source_replays
                     .insert(key.into(), serde_json::from_value(value)?);
             } else if let Some(key) = key.strip_prefix("pending:") {
                 state
@@ -1145,6 +1157,23 @@ impl ProjectionWorker {
                     None
                 },
             };
+            if let Some(key) = &pending.source_order {
+                let cursor = unit
+                    .next
+                    .source_replays
+                    .entry(key.clone())
+                    .or_insert_with(|| SourceReplayCursor {
+                        source: admitted.capture.source_position.source.clone(),
+                        generation: admitted.capture.source_position.generation,
+                        epoch: admitted.capture.ingestion_authorization_epoch.clone(),
+                        after: admitted.admission_seq,
+                        through: admitted.admission_seq,
+                    });
+                unit.batch.mapper_states.insert(
+                    format!("source_replay:{key}"),
+                    serde_json::to_value(cursor)?,
+                );
+            }
             self.save_pending(unit, pending)?;
         }
         if !output.diagnostics.is_empty() {
@@ -1179,6 +1208,126 @@ impl ProjectionWorker {
         unit.next.pending.insert(id, pending);
         if unit.next.pending.len() > self.limits.max_pending {
             return Err(WorkerError::Limit("pending mappings"));
+        }
+        Ok(())
+    }
+
+    async fn replay_source_tails(&self, unit: &mut ProjectionUnit, through: u64) -> Result<()> {
+        let keys: Vec<_> = unit.next.source_replays.keys().cloned().collect();
+        let mut replayed = 0usize;
+        let mut input_bytes = 0usize;
+        for key in keys {
+            if unit
+                .next
+                .pending
+                .values()
+                .any(|pending| pending.source_order.as_ref() == Some(&key))
+            {
+                continue;
+            }
+            if unit.next.gaps.contains_key(&key) {
+                unit.next.source_replays.remove(&key);
+                unit.batch
+                    .mapper_states
+                    .insert(format!("source_replay:{key}"), serde_json::Value::Null);
+                continue;
+            }
+            loop {
+                if replayed >= self.limits.max_unit_observations
+                    || input_bytes >= self.limits.max_unit_input_bytes
+                {
+                    break;
+                }
+                let cursor = unit.next.source_replays[&key].clone();
+                let record = self
+                    .evidence
+                    .source_record_after(
+                        &cursor.source,
+                        cursor.generation,
+                        &cursor.epoch,
+                        cursor.after,
+                        cursor.through.min(through),
+                    )
+                    .await?;
+                let Some(record) = record else {
+                    unit.next.source_replays.remove(&key);
+                    unit.batch
+                        .mapper_states
+                        .insert(format!("source_replay:{key}"), serde_json::Value::Null);
+                    break;
+                };
+                let length = self
+                    .evidence
+                    .payload_length(&record.capture.payload_ref)
+                    .await?
+                    .unwrap_or(self.limits.max_decode_bytes as u64)
+                    as usize;
+                if replayed > 0
+                    && input_bytes.saturating_add(length) > self.limits.max_unit_input_bytes
+                {
+                    break;
+                }
+                let admitted = AdmittedMapping::from(record);
+                let proof = self
+                    .catalogue
+                    .scope_proof(&admitted.capture.ingestion_authorization_epoch)
+                    .await?;
+                let vendor = mapper_vendor(&admitted.capture, &proof.scope);
+                if source_key(&admitted, mapper(vendor)?.build())? != key {
+                    return Err(WorkerError::CorrelationConflict);
+                }
+                let original = unit
+                    .next
+                    .source_states
+                    .get(&key)
+                    .cloned()
+                    .unwrap_or_default();
+                let mapped = self
+                    .map_record(&admitted, &original, &mut unit.next, through, vendor)
+                    .await?;
+                let blocked = mapped.output.blocks_source;
+                if let Some((code, reason)) = mapped.gap {
+                    unit.gap(&key, &admitted, code, reason)?;
+                    unit.next.source_replays.remove(&key);
+                    unit.batch
+                        .mapper_states
+                        .insert(format!("source_replay:{key}"), serde_json::Value::Null);
+                    break;
+                }
+                unit.scopes
+                    .push((cursor.epoch.clone(), admitted.admission_seq));
+                if !blocked {
+                    save_source_state(unit, &key, &mapped.output.state)?;
+                }
+                self.apply_output(
+                    OutputContext {
+                        admitted: &admitted,
+                        original_state: &original,
+                    },
+                    mapped.output,
+                    unit,
+                )
+                .await?;
+                let cursor = unit.next.source_replays.get_mut(&key).unwrap();
+                cursor.after = admitted.admission_seq;
+                unit.batch.mapper_states.insert(
+                    format!("source_replay:{key}"),
+                    serde_json::to_value(cursor)?,
+                );
+                replayed += 1;
+                input_bytes = input_bytes.saturating_add(length);
+                if blocked {
+                    break;
+                }
+            }
+            if replayed >= self.limits.max_unit_observations
+                || input_bytes >= self.limits.max_unit_input_bytes
+            {
+                break;
+            }
+        }
+        if replayed > 0 {
+            unit.next.reduction = self.reduce(&mut unit.next.reducer).await?;
         }
         Ok(())
     }
@@ -1455,19 +1604,16 @@ fn save_source_state(unit: &mut ProjectionUnit, key: &str, state: &MapperState) 
         .insert(format!("source:{key}"), serde_json::to_value(state)?);
     Ok(())
 }
-fn source_head(pending: &PendingMapping, all: &BTreeMap<String, PendingMapping>) -> bool {
-    !all.values().any(|prior| {
-        prior.source_order == pending.source_order
-            && prior.admitted.admission_seq < pending.admitted.admission_seq
-    })
-}
-fn has_ready_continuations(all: &BTreeMap<String, PendingMapping>) -> bool {
-    all.values().any(|pending| {
-        pending.requests.contains(&ArchiveRequest::ContinueHistory)
-            || (pending.source_order.is_some()
-                && pending.requests.is_empty()
-                && source_head(pending, all))
-    })
+fn has_ready_continuations(
+    all: &BTreeMap<String, PendingMapping>,
+    replays: &BTreeMap<String, SourceReplayCursor>,
+) -> bool {
+    all.values()
+        .any(|pending| pending.requests.contains(&ArchiveRequest::ContinueHistory))
+        || replays.keys().any(|key| {
+            !all.values()
+                .any(|pending| pending.source_order.as_ref() == Some(key))
+        })
 }
 
 fn requests_may_resolve(requests: &[ArchiveRequest], state: &WorkerState) -> bool {

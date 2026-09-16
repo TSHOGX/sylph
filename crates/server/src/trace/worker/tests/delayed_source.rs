@@ -218,6 +218,7 @@ async fn ordered_successors_resume_in_bounded_same_cut_pages_after_restart() {
     let (generation, _) = fixture.generation("bounded-source-tail").await;
     let limits = WorkerLimits {
         max_unit_observations: 2,
+        max_pending: 2,
         ..Default::default()
     };
     let worker = fixture.worker_with(limits.clone());
@@ -225,7 +226,7 @@ async fn ordered_successors_resume_in_bounded_same_cut_pages_after_restart() {
     let start = frame(&fixture, 2, &runtime("tool_call_runtime_started", "start")).await;
     step(&fixture, &worker, &generation).await;
     let mut tails = Vec::new();
-    for index in 0..7 {
+    for index in 0..32 {
         let slot = format!("tail-{index}");
         tails.push((
             frame(
@@ -263,15 +264,11 @@ async fn ordered_successors_resume_in_bounded_same_cut_pages_after_restart() {
         .prepare_unit(&generation, &state, &captured, through)
         .await
         .unwrap();
-    let advanced = unit
-        .next
-        .pending
-        .values()
-        .filter(|pending| pending.source_order.is_some())
-        .count();
-    assert!(
-        advanced >= tails.len() - limits.max_unit_observations,
-        "one projection unit must preserve the remaining bounded tail"
+    assert!(unit.next.pending.len() <= limits.max_pending);
+    assert_eq!(
+        unit.next.source_replays.len(),
+        1,
+        "a long source tail is one durable cursor"
     );
     worker.commit_effects(&generation, &unit).await.unwrap();
     generation.apply(1, before, &unit.batch).await.unwrap();
@@ -297,23 +294,171 @@ async fn ordered_successors_resume_in_bounded_same_cut_pages_after_restart() {
 }
 
 #[tokio::test]
-async fn blocked_source_pressure_stops_projection_without_losing_admitted_bytes() {
+async fn blocked_source_tail_cannot_hide_a_later_dependency_or_unrelated_capture() {
     let fixture = Fixture::new().await;
     let (generation, _) = fixture.generation("blocked-source-pressure").await;
     let worker = fixture.worker_with(WorkerLimits {
         max_pending: 2,
         ..Default::default()
     });
-    frame(&fixture, 1, &runtime("tool_call_runtime_started", "start")).await;
+    let start = frame(&fixture, 1, &runtime("tool_call_runtime_started", "start")).await;
     step(&fixture, &worker, &generation).await;
-    let checkpoint = generation.checkpoint().await.unwrap().snapshot;
-    frame(&fixture, 2, &runtime("tool_call_runtime_ended", "end-a")).await;
-    frame(&fixture, 3, &runtime("tool_call_runtime_ended", "end-b")).await;
+    let mut tails = vec![];
+    for index in 0..24 {
+        let slot = format!("large-tail-{index}");
+        tails.push((
+            frame(
+                &fixture,
+                index + 2,
+                &runtime("tool_call_runtime_ended", &slot),
+            )
+            .await,
+            slot,
+        ));
+    }
     let evidence_cut = fixture.evidence.evidence_cut().await.unwrap();
-    assert!(matches!(
-        worker.catch_up(&generation, 1, evidence_cut).await,
-        Err(WorkerError::Limit("pending mappings"))
-    ));
-    assert_eq!(generation.checkpoint().await.unwrap().snapshot, checkpoint);
-    assert_eq!(fixture.evidence.evidence_cut().await.unwrap(), evidence_cut);
+    worker.catch_up(&generation, 1, evidence_cut).await.unwrap();
+    assert_eq!(
+        generation.checkpoint().await.unwrap().snapshot.evidence_cut,
+        evidence_cut
+    );
+    let held = worker
+        .states
+        .lock()
+        .await
+        .get("blocked-source-pressure")
+        .unwrap()
+        .clone();
+    assert_eq!(held.lock().await.pending.len(), 1);
+    fixture
+        .admit(
+            observation("long-tail-peer", 1),
+            SourcePosition {
+                source: source("long-tail-peer"),
+                generation: 0,
+                locator: SourceLocator::Jsonl {
+                    byte_start: 0,
+                    byte_end: 80,
+                    record_ordinal: 0,
+                },
+            },
+            br#"{"type":"session_meta","payload":{"id":"independent-peer"}}"#,
+            TransportKind::NativeJsonl,
+        )
+        .await;
+    step(&fixture, &worker, &generation).await;
+    assert!(worker
+        .projected_snapshot(&generation)
+        .await
+        .unwrap()
+        .1
+        .object(&AnyObjectRef::Agent(AgentRef::Session(
+            SessionId::decode("env7fk2:codex:independent-peer").unwrap()
+        )))
+        .is_some());
+    drop(held);
+    drop(worker);
+    for (tail, slot) in &tails {
+        attachment(&fixture, tail, slot, &end()).await;
+    }
+    attachment(&fixture, &start, "start", &begin()).await;
+    let final_cut = fixture.evidence.evidence_cut().await.unwrap();
+    let worker = fixture.worker_with(WorkerLimits {
+        max_pending: 2,
+        ..Default::default()
+    });
+    step(&fixture, &worker, &generation).await;
+    let (_, reduction, _) = worker.projected_snapshot(&generation).await.unwrap();
+    let reference = OperationRef::native(
+        owner(),
+        "codex.exec-runtime",
+        vec![format!("{}:0", source("runtime").encode()), "exec-a".into()],
+    )
+    .unwrap();
+    let TraceObject::Operation(operation) = reduction
+        .object(&AnyObjectRef::Operation(reference.clone()))
+        .unwrap()
+        .declaration
+        .known()
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(
+        fixture
+            .evidence
+            .payload_bytes(operation.input_revision.as_ref().unwrap(), 4096)
+            .await
+            .unwrap(),
+        serde_json::to_vec(&begin()).unwrap()
+    );
+    assert_eq!(
+        reduction
+            .execution(&AnyObjectRef::Operation(reference))
+            .unwrap()
+            .outcome
+            .known(),
+        Some(&TerminalOutcome::Succeeded)
+    );
+    assert_eq!(
+        worker
+            .states
+            .lock()
+            .await
+            .get("blocked-source-pressure")
+            .unwrap()
+            .lock()
+            .await
+            .pending
+            .len(),
+        0
+    );
+    assert_eq!(fixture.evidence.evidence_cut().await.unwrap(), final_cut);
+    let immediate = Fixture::new().await;
+    let (immediate_generation, _) = immediate.generation("immediate-source-tail").await;
+    let immediate_worker = immediate.worker_with(WorkerLimits {
+        max_pending: 2,
+        ..Default::default()
+    });
+    let head = frame(
+        &immediate,
+        1,
+        &runtime("tool_call_runtime_started", "start"),
+    )
+    .await;
+    attachment(&immediate, &head, "start", &begin()).await;
+    step(&immediate, &immediate_worker, &immediate_generation).await;
+    for index in 0..24 {
+        let slot = format!("large-tail-{index}");
+        let tail = frame(
+            &immediate,
+            index + 2,
+            &runtime("tool_call_runtime_ended", &slot),
+        )
+        .await;
+        attachment(&immediate, &tail, &slot, &end()).await;
+        step(&immediate, &immediate_worker, &immediate_generation).await;
+    }
+    let (_, expected, _) = immediate_worker
+        .projected_snapshot(&immediate_generation)
+        .await
+        .unwrap();
+    let own_objects = |reduction: &Reduction| {
+        reduction
+            .objects
+            .iter()
+            .filter(|(reference, _)| reference.scope() == &owner())
+            .map(|(reference, object)| (reference.clone(), object.clone()))
+            .collect::<BTreeMap<_, _>>()
+    };
+    let own_executions = |reduction: &Reduction| {
+        reduction
+            .executions
+            .iter()
+            .filter(|(reference, _)| reference.scope() == &owner())
+            .map(|(reference, state)| (reference.clone(), state.clone()))
+            .collect::<BTreeMap<_, _>>()
+    };
+    assert_eq!(own_objects(&reduction), own_objects(&expected));
+    assert_eq!(own_executions(&reduction), own_executions(&expected));
 }
