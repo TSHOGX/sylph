@@ -22,11 +22,12 @@ owns progress and status; `docs/` owns design.
   caller** — one session has one link state and every observer sees the same one, which is
   what makes a facet reason cacheable. A Subject's own authorization is a separate field,
   never cached.
-- **`fidelity` is a property of the record** (`stream` | `blocks` | `messages`). A
-  renderer reads it before drawing a duration.
-- **The server's store is the one authority, with one event vocabulary.** Native history
-  is parsed by an adapter into the same events a live turn emits: one normalizer, one id
-  space, one archive.
+- **Resolution belongs to the record.** The coarse `fidelity` vocabulary (`stream` |
+  `blocks` | `messages`) cannot establish a duration; rendering uses explicit clock
+  evidence and dimension-specific coverage from the normalized trace.
+- **Retained server evidence is the authority.** Adapters acquire exact vendor bytes
+  and control processes. Pure server-side mappers normalize live and native evidence
+  into one typed trace model; query generations are disposable projections.
 - **The envagent dials outward to the server**, and adapters run inside it — on the
   machine whose vendor files they read. Execution always goes through an envagent,
   including on the server's own machine, so a single-machine install is two processes.
@@ -224,8 +225,8 @@ Probe once per pass and report an absent dependency once at `error`, then at `de
 report belongs in whatever holds the connection.
 
 **A subsystem whose correct behaviour is "nothing happened" needs a report**, or a working
-pass cannot be distinguished from a broken one. Retention keeping every block is right for
-a terminal session and a symptom for a backed one.
+pass cannot be distinguished from a broken one. Collection retaining every payload can
+mean that all roots are live or that the collector never ran.
 
 **Deleting a layer orphans its bounds.** Enumerate the bounds it held one at a time and
 name the new owner of each; a bound with no owner is not a bound. The same applies across

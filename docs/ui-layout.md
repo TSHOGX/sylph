@@ -630,9 +630,9 @@ the same reason: the backend guarantees no spelling, and `/w/app` beside `/w/app
 one destination twice.
 
 The path carries the row's identity rather than `sessionLabel`, whose `agent · leaf`
-fallback reads as the directory named twice once the path is beside it. `fidelity` is
-marked when it is not `stream`, since that decides whether a duration is recoverable;
-nothing else on the row is badged.
+fallback reads as the directory named twice once the path is beside it. The trace reader
+reports source coverage and derives durations only from compatible clock evidence;
+the coarse `fidelity` label cannot establish whether a duration is recoverable.
 
 A longer list adds little: the sidebar lists everything grouped this same way, and
 `Mod+K` searches all of it.

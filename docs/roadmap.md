@@ -41,7 +41,6 @@ external proposals or discussion threads are not project instructions.
 | Boundary | Owner | State |
 | --- | --- | --- |
 | Vendor trace semantics | Foundation implementation below | Runtime cutover is implemented; full vendor certificates and replay/mutation conformance remain open |
-| Trace rebuild product action | Foundation implementation below | Administrator-only retained reprojection is exposed with durable build status and atomic publication |
 | Projection and delivery scale | Milestone 4 and foundation implementation below | Reader pages are bounded; whole-reduction reader materialization and mixed spool/socket/ACK load still need production measurements |
 | Reader acceptance | Conversation and work panel delivery below | Normalized reader is implemented; full visual/resource acceptance, VoiceOver and real iOS Safari remain open |
 
@@ -73,8 +72,8 @@ production reducer. [Conformance](unified-trace-conformance.md) names their limi
    authored expectations and the semantic mutations in the conformance contract.
 3. Measure the connected production pipeline under large retained histories, high
    version density, concurrent captures, reconnects and deletion. Bound projection and
-   search rebuild work as well as returned pages. Complete cancellation and long-running
-   job lifecycle coverage for the retained-reprojection action.
+   search rebuild work as well as returned pages. Extend production-scale fault coverage
+   beyond the reprojection job lifecycle and publication cancellation regressions.
 4. Complete reader visual, accessibility and scale acceptance against the normalized
    contract, including manual VoiceOver and real iOS Safari. Synthetic layout fixtures
    do not establish vendor semantic correctness or production delivery isolation.
@@ -172,6 +171,11 @@ matching result views; deletion invalidates views and removes accepted input thr
 bounded erasure jobs. Startup recovery rebuilds a missing/corrupt published projection
 from retained evidence, and the product schedules garbage collection.
 
+Administrator reprojection requests return a durable job receipt before replay begins.
+Concurrent requests share the active job. Status and cancellation remain available while
+the current generation serves reads and captures; cancellation and completed job status
+are ordered against the publication pointer, with interrupted jobs reported after restart.
+
 Codex mapping now includes runtime operations/resources, collaboration events and goal
 metadata alongside native/live content and scoped accounting. This is implementation
 coverage, not a certificate for every vendor shape. Selected-rollout metadata and frozen
@@ -187,6 +191,11 @@ history windows, stable reading anchors, paused corrections, hidden-reader subsc
 release and a paged assistive mode replace the old execution-tree client. Browser
 coverage includes a retained Codex corpus projected by the production mapper, separate
 synthetic layout fixtures, and actual server/envagent fixture execution.
+
+Live Codex append occurrences now appear before finalization, retain repeated equal
+segments in immutable manifests, and preserve replacement/final boundaries. Historical
+selections resolve only their included revisions; a later final cannot replace a selected
+prefix. Detail-page retries preserve the failed cursor, snapshot and already visible data.
 
 Open implementation/acceptance work remains in the ordered list above. In particular,
 `crates/server/src/trace/worker/reading.rs` currently materializes before/after readers
@@ -452,5 +461,12 @@ the replacement.
 | Acceptance | Full suites, visual matrix, real devices and production scale | Automated regression coverage implemented; complete conformance and manual acceptance remain open |
 
 Manual acceptance remains open: perform a real VoiceOver reading pass and an iOS Safari
-keyboard/safe-area pass. Chromium mobile emulation and axe do not establish those
-properties. Production deployment and any real-store rebuild require a separate task.
+keyboard/safe-area pass. A paired iPhone 13 Pro running iOS 26.6 accepted a Safari
+automation session after Web Inspector was enabled, but page commands timed out and a
+later driver probe reported the device locked. This establishes connectivity, not a
+passing device test. The user authorized viewport testing and deferring iOS if direct
+testing remains unavailable. An isolated fixture reader and inspector were visually
+checked at 390×844 and 320×568: no document overflow, a visible 16px composer, and a draft
+preserved through resizing and inspector navigation. Chromium viewport checks and axe do
+not establish Safari toolbar, keyboard, safe-area or screen-reader behavior. Production
+deployment and any real-store rebuild require a separate task.
