@@ -406,29 +406,35 @@ async fn changes(
     let mut updates = state.trace.subscribe();
     let views: Vec<InterestView> =
         serde_json::from_str(&query.views).map_err(|error| invalid(error.to_string()))?;
-    if views.len() != interests.len() {
-        return Err(invalid("Each visible interest requires its retained view"));
+    if views.is_empty() || views.len() > state.trace.limits().max_visible_interests {
+        return Err(invalid("Too many visible trace views"));
+    }
+    if interests
+        .iter()
+        .any(|interest| !views.iter().any(|view| &view.agent == interest))
+        || views.iter().any(|view| !interests.contains(&view.agent))
+    {
+        return Err(invalid(
+            "Each visible interest requires its own retained view",
+        ));
     }
     let mut scope_proofs = Vec::new();
-    for interest in &interests {
-        let view = views
-            .iter()
-            .find(|view| &view.agent == interest)
-            .ok_or_else(|| invalid("Missing visible view"))?;
-        let view = lease(&state, &subject.0, Some(&view.at_snapshot)).await?;
+    for view in &views {
+        let lease = lease(&state, &subject.0, Some(&view.at_snapshot)).await?;
         let source_generation = state
             .trace
-            .generation(&view.snapshot.generation)
+            .generation(&lease.snapshot.generation)
             .await
             .map_err(internal)?;
         let row = source_generation
             .read_row(
-                &view.snapshot,
-                &read_scope(&interest.agent(), None, "header"),
-                &interest.agent().encode(),
+                &lease.snapshot,
+                &read_scope(&view.agent.agent(), None, "header"),
+                &view.agent.agent().encode(),
             )
             .await
             .map_err(storage)?;
+        check_row(&state, &subject.0, &lease, &row).await?;
         scope_proofs.push(
             state
                 .trace
@@ -438,9 +444,17 @@ async fn changes(
                 .map_err(internal)?,
         );
     }
-    let initial = query.cursor;
+    let (initial_generation, initial_revision) = query
+        .cursor
+        .rsplit_once(':')
+        .filter(|(generation, _)| !generation.is_empty())
+        .ok_or_else(|| invalid("Malformed trace change cursor"))?;
+    let initial_revision = initial_revision
+        .parse::<u64>()
+        .map_err(|_| invalid("Malformed trace change revision"))?;
+    let initial = (initial_generation.to_owned(), initial_revision);
     let stream = async_stream::stream! {
-        let mut previous=initial;let mut first=true;
+        let (previous_generation,mut previous_revision)=initial;let mut first=true;
         loop {
             if !first {tokio::select!{result=updates.changed()=>if result.is_err(){break;},_=tokio::time::sleep(std::time::Duration::from_secs(10))=>{}}}first=false;
             let mut authorized=true;
@@ -452,9 +466,24 @@ async fn changes(
             }
             let generation=match state.trace.active().await {Ok(generation)=>generation,Err(_)=>{yield Ok(axum::response::sse::Event::default().json_data(TraceChange::ResetRequired {reason:"Trace generation unavailable".into()}).unwrap());break;}};
             let checkpoint=match generation.checkpoint().await {Ok(checkpoint)=>checkpoint,Err(_)=>break};
-            let cursor=format!("{}:{}",checkpoint.snapshot.generation,checkpoint.snapshot.view_revision);
-            if cursor==previous {continue;}previous=cursor.clone();
-            let change=TraceChange::Revision {cursor:cursor.clone(),generation:checkpoint.snapshot.generation,evidence_cut:checkpoint.snapshot.evidence_cut,view_revision:checkpoint.snapshot.view_revision,agents:interests.clone(),changed:vec![],removed:vec![],moved:vec![]};
+            // A cursor certifies a complete retained prefix, not just a number
+            // to compare with the latest revision. Missing generations, floors
+            // and oversized catch-up batches require an explicit fresh window.
+            let reset_reason=if checkpoint.snapshot.generation!=previous_generation {
+                Some("Trace generation changed")
+            } else if previous_revision<checkpoint.revision_floor || previous_revision>checkpoint.snapshot.view_revision {
+                Some("Trace change cursor is outside the retained revision range")
+            } else {None};
+            if let Some(reason)=reset_reason {
+                yield Ok(axum::response::sse::Event::default().json_data(TraceChange::ResetRequired {reason:reason.into()}).unwrap());break;
+            }
+            if previous_revision==checkpoint.snapshot.view_revision {continue;}
+            let change=match replay_change(&generation,&checkpoint,previous_revision,&interests,state.trace.limits()).await {
+                Ok(change)=>change,
+                Err(reason)=>{yield Ok(axum::response::sse::Event::default().json_data(TraceChange::ResetRequired {reason}).unwrap());break;}
+            };
+            previous_revision=checkpoint.snapshot.view_revision;
+            let cursor=format!("{}:{}",checkpoint.snapshot.generation,previous_revision);
             yield Ok(axum::response::sse::Event::default().id(cursor).json_data(change).unwrap());
         }
     };
@@ -472,6 +501,73 @@ async fn changes(
         axum::http::HeaderValue::from_static("no"),
     );
     Ok(response)
+}
+
+async fn replay_change(
+    generation: &crate::trace::generation::GenerationStore,
+    checkpoint: &crate::trace::generation::Checkpoint,
+    previous: u64,
+    interests: &[AgentAddress],
+    limits: &ReadLimits,
+) -> std::result::Result<TraceChange, String> {
+    let batches = generation
+        .changes_after(previous, generation.limits().max_items)
+        .await
+        .map_err(|_| "Trace change backlog exceeds its retained bound".to_owned())?;
+    let mut next = previous + 1;
+    let mut changed = std::collections::BTreeSet::new();
+    let mut removed = std::collections::BTreeSet::new();
+    let mut moved = std::collections::BTreeSet::new();
+    for batch in batches
+        .into_iter()
+        .take_while(|batch| batch.snapshot.view_revision <= checkpoint.snapshot.view_revision)
+    {
+        if batch.snapshot.view_revision != next {
+            return Err("Trace change prefix is no longer retained".into());
+        }
+        next += 1;
+        for (references, output) in [
+            (&batch.changed, &mut changed),
+            (&batch.removed, &mut removed),
+            (&batch.moved, &mut moved),
+        ] {
+            for reference in references {
+                if interests
+                    .iter()
+                    .any(|interest| &interest.agent() == reference.scope())
+                {
+                    output.insert(TraceAddress::of(reference));
+                }
+            }
+        }
+        if changed.len() + removed.len() + moved.len() > limits.max_change_items {
+            return Err("Trace change item bound requires a fresh window".into());
+        }
+    }
+    if next != checkpoint.snapshot.view_revision + 1 {
+        return Err("Trace change backlog requires a fresh window".into());
+    }
+    let change = TraceChange::Revision {
+        cursor: format!(
+            "{}:{}",
+            checkpoint.snapshot.generation, checkpoint.snapshot.view_revision
+        ),
+        generation: checkpoint.snapshot.generation.clone(),
+        evidence_cut: checkpoint.snapshot.evidence_cut,
+        view_revision: checkpoint.snapshot.view_revision,
+        agents: interests.to_vec(),
+        changed: changed.into_iter().collect(),
+        removed: removed.into_iter().collect(),
+        moved: moved.into_iter().collect(),
+    };
+    if serde_json::to_vec(&change)
+        .map_err(|error| error.to_string())?
+        .len()
+        > limits.max_summary_bytes
+    {
+        return Err("Trace change byte bound requires a fresh window".into());
+    }
+    Ok(change)
 }
 
 #[derive(Default, Deserialize)]

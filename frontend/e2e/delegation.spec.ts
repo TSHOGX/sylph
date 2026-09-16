@@ -351,11 +351,9 @@ test("returning from a companion restores the filtered directory page and origin
   await inspector
     .getByRole("button", { name: "Next page", exact: true })
     .click();
-  const row = inspector
-    .getByRole("listitem")
-    .filter({
-      has: page.getByRole("link", { name: "Branch agent 55", exact: true }),
-    });
+  const row = inspector.getByRole("listitem").filter({
+    has: page.getByRole("link", { name: "Branch agent 55", exact: true }),
+  });
   const open = row.getByRole("button", { name: "Open alongside", exact: true });
   await open.scrollIntoViewIfNeeded();
   await open.focus();
@@ -383,4 +381,69 @@ test("returning from a companion restores the filtered directory page and origin
   expect(params.get("q")).toBe("Branch");
   expect(params.get("filter")).toBe("unknown");
   expect(params.get("after")).toBe("40");
+});
+
+test("a pinned companion detail stays in the shared observation scope after its reader closes", async ({
+  page,
+}) => {
+  const state = await directory(page);
+  const child = state.childRows[0];
+  state.details.set(child.anchor, {
+    view: traceView(),
+    reference: child.anchor,
+    title: "Pinned child evidence",
+    owner: agentLink(CHILD_AGENT),
+    execution: null,
+    availability: { kind: "available" },
+    content: { kind: "generic", label: "Child evidence", payloads: [] },
+    relations: [],
+    relationsCursor: null,
+    coverage: [],
+  });
+  await openTrace(page);
+  await page.getByRole("button", { name: "Agents", exact: true }).click();
+  await page.getByLabel("Find agents").fill("Needle");
+  await page
+    .getByRole("button", { name: "Open alongside", exact: true })
+    .click();
+  const inspector = page.getByLabel("Trace inspector", { exact: true });
+  await inspector
+    .getByRole("button", { name: "Evidence and details", exact: true })
+    .click();
+  await expect(
+    inspector.getByRole("heading", {
+      name: "Pinned child evidence",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await inspector
+    .getByRole("button", { name: "Pin detail", exact: true })
+    .click();
+  await expect
+    .poll(() => {
+      const read = state.reads
+        .filter((read) => read.includes("/changes?"))
+        .at(-1);
+      return read
+        ? JSON.parse(
+            new URL(read.slice(4), "http://fixture").searchParams.get(
+              "interests",
+            )!,
+          )
+        : [];
+    })
+    .toEqual(expect.arrayContaining([MAIN_AGENT, CHILD_AGENT]));
+  await page.route("**/api/v1/trace/changes?*", (route) =>
+    route.fulfill({
+      contentType: "text/event-stream",
+      body: `data: ${JSON.stringify({ kind: "access_changed", authorizationScope: "child-revoked" })}\n\n`,
+    }),
+  );
+  await expect(
+    inspector.getByText("Pinned child evidence", { exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByText(/Access changed\. Open this conversation/),
+  ).toBeVisible();
+  expect(state.commands).toHaveLength(0);
 });

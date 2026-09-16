@@ -450,6 +450,11 @@ references and the resulting cut. Batch framing is atomic. The client applies a 
 batch or invalidates/reacquires the affected scope; it cannot overlay new values onto
 an old snapshot and still claim that page is consistent. A missing change prefix yields
 `reset_required`; no unbounded catch-up downloads a whole session by accident.
+A multiplexed stream may name multiple retained views of one agent. Every named view
+is authorized independently. The replay cursor must fall within the current generation
+and retained revision floor; future cursors and generation replacements require restart.
+The server returns bounded committed reference invalidations, or restarts when their
+complete prefix cannot fit the configured item and byte limits.
 
 At the live tail the client can advance to a new snapshot and preserve its logical
 anchor. While reading history, it may hold the old snapshot and show new-work availability.

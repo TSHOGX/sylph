@@ -348,6 +348,7 @@ export function AgentReader({
               agent: data.header.agent.address,
               history: data.header.history.selection,
               view: data.view,
+              changeCursor: data.changeCursor,
               maximumPayloadBytes: data.window.limits.maxPayloadBytes,
               anchor: location.anchor,
               offset: location.offset,

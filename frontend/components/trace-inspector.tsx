@@ -2,10 +2,17 @@
 import { useT } from "@/lib/i18n";
 import dynamic from "next/dynamic";
 import Link from "next/link";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  useEffect,
+  useEffectEvent,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { traceAPI } from "@/lib/trace-api";
 import { rememberTraceNavigation, traceCacheKey } from "@/lib/trace-cache";
 import { retainTraceView } from "@/lib/trace-leases";
+import { subscribeTrace } from "@/lib/trace-subscriptions";
 import { useTraceResource } from "@/lib/use-trace-resource";
 import { useWorkspaceUI } from "@/lib/workspace-ui";
 import { useDialog } from "@/lib/use-dialog";
@@ -32,6 +39,7 @@ export interface InspectionScope {
   agent: string;
   history: string | null;
   view: TraceView;
+  changeCursor: string;
   maximumPayloadBytes: number;
   anchor: string | null;
   offset: number;
@@ -111,6 +119,45 @@ export function TraceInspector({
     return () => releases.forEach((release) => release());
   }, [inspection, trail, pinned, directory.view]);
   const visible = ui.isMobile ? ui.drawer === "files" : ui.rightOpen;
+  const [observationReset, setObservationReset] = useState<string | null>(null);
+  const resetInspection = useEffectEvent((reason: string) =>
+    setObservationReset(reason),
+  );
+  const subscribeInspection = useEffectEvent((scope: InspectionScope) =>
+    subscribeTrace(
+      scope.agent,
+      scope.view,
+      scope.changeCursor,
+      bootstrap.window.limits,
+      (change) => {
+        if (change.kind === "reset_required") resetInspection(change.reason);
+      },
+    ),
+  );
+  const { maxVisibleInterests, maxSummaryBytes, maxChangeItems } =
+    bootstrap.window.limits;
+  useEffect(() => {
+    if (!visible) return;
+    const scopes = new Map<string, InspectionScope>();
+    for (const target of [inspection, ...pinned.map((item) => item.target)]) {
+      if (target.kind === "object")
+        scopes.set(
+          JSON.stringify([target.scope.agent, target.scope.view.token]),
+          target.scope,
+        );
+    }
+    // Detail snapshots remain protected after their companion unmounts. They join
+    // the same bounded connection so a revoked child never leaves a cached preview.
+    const releases = [...scopes.values()].map(subscribeInspection);
+    return () => releases.forEach((release) => release());
+  }, [
+    visible,
+    inspection,
+    pinned,
+    maxVisibleInterests,
+    maxSummaryBytes,
+    maxChangeItems,
+  ]);
   const full = available < 940;
   const close = () => {
     if (ui.isMobile) ui.closeDrawer();
@@ -158,6 +205,7 @@ export function TraceInspector({
             agent: bootstrap.header.agent.address,
             history: bootstrap.header.history.selection,
             view: bootstrap.view,
+            changeCursor: bootstrap.changeCursor,
             maximumPayloadBytes: bootstrap.window.limits.maxPayloadBytes,
             anchor: null,
             offset: 0,
@@ -222,6 +270,14 @@ export function TraceInspector({
           {full ? t("trace.backConversation") : t("trace.close")}
         </button>
       </header>
+      {observationReset && (
+        <p
+          role="status"
+          className="shrink-0 border-b border-line px-3 py-2 text-sm"
+        >
+          {observationReset}
+        </p>
+      )}
       <div
         ref={tabs}
         role="tablist"

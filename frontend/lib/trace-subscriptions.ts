@@ -12,6 +12,7 @@ let controller: AbortController | null = null;
 let timer: ReturnType<typeof setTimeout> | undefined;
 let cursor: string | null = null;
 let checkpoint: Pick<TraceView, "generation" | "viewRevision"> | null = null;
+let resetViews = new Set<string>();
 let attempts = 0;
 let maximum = 0;
 let maximumBytes = 0;
@@ -32,9 +33,25 @@ function proofs() {
   return [...unique.values()];
 }
 function publish(change: TraceChange) {
+  const listeners: Listener[] = [];
   for (const [agent, readers] of interests)
     if (change.kind !== "revision" || change.agents.includes(agent))
-      readers.forEach((_, listener) => listener(change));
+      listeners.push(...readers.keys());
+  // A listener can replace itself synchronously. That new reader has a bootstrap
+  // after this notification, and must not receive the old reader's reset again.
+  listeners.forEach((listener) => listener(change));
+}
+function requireBootstrap(
+  change: Extract<TraceChange, { kind: "reset_required" }>,
+) {
+  resetViews = new Set(proofs().map((proof) => proof.atSnapshot));
+  cursor = null;
+  checkpoint = null;
+  attempts = 0;
+  // Stop the rejected stream before delivering callbacks: a callback may install
+  // a fresh bootstrap immediately, and its connection belongs to that new view.
+  stop();
+  publish(change);
 }
 function connect() {
   stop();
@@ -94,8 +111,7 @@ function connect() {
               return;
             }
             if (change.kind === "reset_required") {
-              publish(change);
-              stop();
+              requireBootstrap(change);
               return;
             }
             if (change.kind === "revision") {
@@ -138,6 +154,16 @@ export function subscribeTrace(
   maximum = limits.maxVisibleInterests;
   maximumBytes = limits.maxSummaryBytes;
   maximumChanges = limits.maxChangeItems;
+  if (
+    checkpoint &&
+    checkpoint.generation !== view.generation &&
+    !resetViews.has(view.token)
+  ) {
+    requireBootstrap({
+      kind: "reset_required",
+      reason: "Trace generation changed; refresh this retained view.",
+    });
+  }
   const readers = interests.get(agent) ?? new Map<Listener, TraceView>();
   readers.set(listener, view);
   interests.set(agent, readers);
@@ -149,9 +175,10 @@ export function subscribeTrace(
   // A newer bootstrap must not skip changes still owed to an existing reader.
   // A reader with an older checkpoint rewinds replay; duplicate changes are harmless.
   if (
-    !cursor ||
-    (checkpoint?.generation === view.generation &&
-      view.viewRevision < checkpoint.viewRevision)
+    !resetViews.has(view.token) &&
+    (!cursor ||
+      (checkpoint?.generation === view.generation &&
+        view.viewRevision < checkpoint.viewRevision))
   ) {
     cursor = after;
     checkpoint = view;
@@ -173,4 +200,6 @@ onTraceAccessCleared(() => {
   interests.clear();
   cursor = null;
   checkpoint = null;
+  resetViews.clear();
+  attempts = 0;
 });
