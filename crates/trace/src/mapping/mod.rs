@@ -22,6 +22,7 @@ pub mod server;
 )]
 pub enum ArchiveRequest {
     ContinueHistory,
+    HistoryLocator { issuer: Issuer, physical_id: String },
     HistorySource { source:SourceRef, generation:u64 },
     CapturedPayload {parent:ObservationRef,slot:String},
     AttachmentTarget {parent:ObservationRef,slot:String,locator:String},
@@ -91,6 +92,7 @@ pub struct ArchiveContext {
     pub source_prefixes: BTreeMap<SourceRef, Vec<SourceExtent>>,
     pub source_definitions: BTreeMap<(SourceRef,u64), codex::history::RecordedSource>,
     pub history_records: codex::history::HistoryRecords,
+    pub native_history_positions: BTreeMap<EntryRef, SourcePosition>,
     pub observations: std::collections::BTreeSet<ObservationRef>,
     pub correlation_evidence: BTreeMap<String, Vec<ObservationRef>>,
     pub history_entries: BTreeMap<EntryRef, HistoryEntry>,

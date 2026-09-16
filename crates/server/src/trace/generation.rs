@@ -951,7 +951,7 @@ impl GenerationStore {
             if next != revision + 1
                 || unsigned(row.try_get("previous_revision")?)? != revision
                 || unsigned(row.try_get("previous_cut")?)? != cut
-                || next_cut <= cut
+                || next_cut < cut
                 || digest.len() != 64
                 || !digest.bytes().all(|b| b.is_ascii_hexdigit())
             {

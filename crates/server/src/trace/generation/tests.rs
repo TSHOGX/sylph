@@ -1186,3 +1186,63 @@ async fn foreground_work_stays_bounded_when_history_and_invalid_version_density_
         );
     }
 }
+
+#[tokio::test]
+async fn same_cut_interpretation_continuations_advance_view_without_claiming_new_admissions() {
+    let fixture = Fixture::new().await;
+    let prior = fixture.store.checkpoint().await.unwrap();
+    let baseline = fixture.store.validate_for_publication().await.unwrap();
+    let snapshot = fixture
+        .store
+        .apply(
+            prior.fence_token,
+            0,
+            &ProjectionBatch {
+                through_cut: 0,
+                continuation: true,
+                mapper_states: BTreeMap::from([("continuation".into(), serde_json::json!(1))]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .snapshot;
+    assert_eq!(snapshot.evidence_cut, 0);
+    assert_eq!(snapshot.view_revision, 1);
+    assert!(fixture
+        .store
+        .apply(
+            prior.fence_token,
+            0,
+            &ProjectionBatch {
+                through_cut: 0,
+                continuation: true,
+                processed_occurrences: vec![1],
+                ..Default::default()
+            }
+        )
+        .await
+        .is_err());
+    let next = fixture
+        .store
+        .apply(
+            prior.fence_token,
+            0,
+            &ProjectionBatch {
+                through_cut: 0,
+                continuation: true,
+                mapper_states: BTreeMap::from([("continuation".into(), serde_json::json!(2))]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .snapshot;
+    assert_eq!(next.view_revision, 2);
+    let fence = fixture.store.fence(prior.fence_token).await.unwrap();
+    fixture
+        .store
+        .validate_tail(&baseline, &fence, 2)
+        .await
+        .unwrap();
+}

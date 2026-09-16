@@ -40,7 +40,7 @@ external proposals or discussion threads are not project instructions.
 
 | Boundary | Owner | State |
 | --- | --- | --- |
-| Vendor trace semantics | Foundation implementation below | Runtime cutover is implemented; full vendor certificates, frozen Codex history-base expansion, and replay/mutation conformance remain open |
+| Vendor trace semantics | Foundation implementation below | Runtime cutover is implemented; full vendor certificates and replay/mutation conformance remain open |
 | Trace rebuild product action | Foundation implementation below | Startup recovery and atomic publication are connected; no explicit retained-reprojection HTTP action is exposed |
 | Projection and delivery scale | Milestone 4 and foundation implementation below | Reader pages are bounded; whole-reduction reader materialization and mixed spool/socket/ACK load still need production measurements |
 | Reader acceptance | Conversation and work panel delivery below | Normalized reader is implemented; full visual/resource acceptance, VoiceOver and real iOS Safari remain open |
@@ -66,9 +66,8 @@ production reducer. [Conformance](unified-trace-conformance.md) names their limi
 
 **Next implementation, in dependency order:**
 
-1. Finish vendor evidence and mapping conformance: frozen Codex history bases and
-   source-coordinate witnesses, complete runtime/delegation/accounting cases, remaining
-   source certificates and workflow/schedule coverage. Preserve unavailable Pi/Claude
+1. Finish vendor evidence and mapping conformance: complete runtime/delegation/accounting
+   cases, remaining source certificates and workflow/schedule coverage. Preserve unavailable Pi/Claude
    joins and selected-head evidence as unknown.
 2. Prove cold/incremental/reread/interleaved/rebuilt equivalence with independently
    authored expectations and the semantic mutations in the conformance contract.
@@ -175,10 +174,10 @@ from retained evidence, and the product schedules garbage collection.
 
 Codex mapping now includes runtime operations/resources, collaboration events and goal
 metadata alongside native/live content and scoped accounting. This is implementation
-coverage, not a certificate for every vendor shape. Selected-rollout metadata establishes
-the current physical source extent; frozen multi-file history-base expansion is still
-unfinished. A reverted suffix must remain an unknown selection until its base is proved.
-The unused history-chain draft is excluded from this completed cutover checkpoint.
+coverage, not a certificate for every vendor shape. Selected-rollout metadata and frozen
+multi-file history bases resolve physical rollout IDs, verify recorded ordinal and byte
+boundaries, preserve inherited ownership in child-scoped aliases, and resume bounded
+pages after restart. A reverted suffix remains unknown until its base is proved.
 
 The frontend now reads opaque agent references and normalized reading units at
 `frontend/app/agents/[ref]/page.tsx`. It provides agent/history/search inspection,

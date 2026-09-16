@@ -71,13 +71,14 @@ fn selected_rollout_metadata_requires_matching_source_identity_and_a_complete_ex
     let mut snapshot=NativeDatabaseSnapshot {database_locator:"/native/state_5.sqlite".into(),table:"threads".into(),columns:vec![],status:NativeDatabaseStatus::Available,row:[("id".into(),NativeDatabaseValue::Text("root".into())),("rollout_path".into(),NativeDatabaseValue::Text("/native/selected.jsonl".into()))].into(),selected_source:Some(native.source_position.source.clone()),selected_generation:Some(0),selected_record_count:Some(17),selected_pending_bytes:Some(0)};
     let archive=ArchiveContext {source_owners:[((native.source_position.source.clone(),0),crate::mapping::SourceOwner {agent:agent("root"),evidence:vec![native.observation_ref],rule:"codex/governing-native-header".into()})].into(),..ArchiveContext::default()};
     let map=|snapshot:&NativeDatabaseSnapshot|CodexMapper.map(MapInput {capture:&metadata,canonical_observation:&metadata.observation_ref,raw:&serde_json::to_vec(snapshot).unwrap(),state:&MapperState::default(),archive:&archive});
-    let selected=map(&snapshot);assert!(selected.claims.iter().any(|claim|matches!(&claim.fact,Fact::Declare {object:TraceObject::HistorySelection(selection)} if matches!(&selection.membership,SelectionMembership::SourceExtents {extents,..} if extents[0].end_exclusive==17))));
+    let selected=map(&snapshot);assert!(selected.claims.is_empty());assert!(selected.requests.iter().any(|request|matches!(request,ArchiveRequest::HistorySource {..})),"a declared count cannot replace actual retained coordinate witnesses");
     snapshot.row.insert("id".into(),NativeDatabaseValue::Text("another-agent".into()));let wrong=map(&snapshot);assert!(wrong.claims.is_empty());assert_eq!(wrong.diagnostics[0].code,DiagnosticCode::ConflictingOwner);
 }
 #[test]
 fn reverted_rollout_selection_stays_unknown_until_its_frozen_base_is_resolved() {
     use sylph_protocol::{NativeDatabaseSnapshot, NativeDatabaseStatus, NativeDatabaseValue};
-    let native = capture(1, false);
+    let mut native = capture(1, false);
+    native.source_position.locator=SourceLocator::Jsonl {byte_start:0,byte_end:100,record_ordinal:0};
     let mut metadata = capture(2, false);
     metadata.transport_kind = TransportKind::NativeDatabase;
     let snapshot = NativeDatabaseSnapshot {
@@ -107,7 +108,7 @@ fn reverted_rollout_selection_stays_unknown_until_its_frozen_base_is_resolved() 
                 history_base: Some(serde_json::json!({
                     "thread_id": "prior-physical-rollout",
                     "end_ordinal_exclusive": 214,
-                    "end_byte_offset_exclusive": 4200,
+                    "end_byte_offset": 4200,
                 })),
                 inherited_before: None,
                 inherited_from: None,
@@ -123,7 +124,7 @@ fn reverted_rollout_selection_stays_unknown_until_its_frozen_base_is_resolved() 
         archive: &archive,
     });
     assert!(output.claims.is_empty(), "a physical suffix is not the selected logical history");
-    assert!(output.diagnostics.iter().any(|issue| issue.code == DiagnosticCode::UnknownSelection));
+    assert!(output.diagnostics.iter().any(|issue| issue.code == DiagnosticCode::MissingSource));
 }
 
 fn run(values: &[Value], live: bool) -> Vec<MapOutput> {

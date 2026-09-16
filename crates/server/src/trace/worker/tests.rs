@@ -1224,3 +1224,5 @@ async fn retained_companion_inventory_resolves_metadata_owner_after_restart_with
     };
     assert_eq!(agent.name.as_deref(), Some("delegate-name"));
 }
+
+mod frozen_history;

@@ -16,7 +16,7 @@ INSERT INTO projection_state VALUES (1, 0, 0, 0, 1, 'running');
 
 CREATE TABLE projection_revisions (
   view_revision INTEGER PRIMARY KEY,
-  evidence_cut INTEGER NOT NULL UNIQUE CHECK (evidence_cut >= 0)
+  evidence_cut INTEGER NOT NULL CHECK (evidence_cut >= 0)
 );
 INSERT INTO projection_revisions VALUES (0, 0);
 

@@ -319,6 +319,11 @@ arbitrary graph updates have an O(1) algorithm.
 
 ## Generation publication
 
+A bounded interpretation continuation can advance `view_revision` while preserving
+`evidence_cut`; it cannot mark a new source occurrence processed. Its mapper checkpoint
+and aliases commit atomically. Publication validates the complete sequence of revisions,
+including equal-cut refinements, and finishes pending continuations before sealing.
+
 Publication switches a complete semantic generation, not one session's events followed
 later by its directory and bodies. All agents and edges used in a graph read resolve
 inside the same generation. Partial rebuilds still publish a complete generation

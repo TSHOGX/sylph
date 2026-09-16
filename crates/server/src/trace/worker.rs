@@ -309,6 +309,34 @@ impl ProjectionWorker {
         })
     }
 
+    pub async fn has_continuations(&self, generation: &GenerationStore) -> Result<bool> {
+        let state = {
+            self.states
+                .lock()
+                .await
+                .get(&generation.manifest().generation)
+                .cloned()
+        };
+        if let Some(state) = state {
+            let state = state.lock().await;
+            if state.cut == generation.checkpoint().await?.snapshot.evidence_cut {
+                return Ok(state
+                    .pending
+                    .values()
+                    .any(|pending| pending.requests.contains(&ArchiveRequest::ContinueHistory)));
+            }
+        }
+        Ok(generation
+            .mapper_states()
+            .await?
+            .into_iter()
+            .filter(|(key, value)| key.starts_with("pending:") && !value.is_null())
+            .map(|(_, value)| serde_json::from_value::<PendingMapping>(value))
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .iter()
+            .any(|pending| pending.requests.contains(&ArchiveRequest::ContinueHistory)))
+    }
+
     pub async fn catch_up(
         &self,
         generation: &GenerationStore,
@@ -1214,6 +1242,20 @@ fn archive_context(state: &WorkerState) -> ArchiveContext {
         }
     }
     for claim in state.reducer.claims() {
+        if let Fact::HistoryPosition {
+            entry,
+            position,
+            coordinate: HistoryCoordinate::LocalRecordIndex,
+            mapping_rule,
+            ..
+        } = &claim.fact
+        {
+            if mapping_rule == "codex/native-history" {
+                archive
+                    .native_history_positions
+                    .insert(entry.clone(), position.clone());
+            }
+        }
         if let Fact::HistoryMappingComplete { extent } = &claim.fact {
             archive
                 .source_prefixes
@@ -1229,6 +1271,7 @@ fn requests_may_resolve(requests: &[ArchiveRequest], state: &WorkerState) -> boo
     requests.iter().any(|request|match request {
         ArchiveRequest::CapturedPayload {parent,slot}=>state.captured_payloads.contains_key(&mapping::captured_payload_key(parent,slot)),
         ArchiveRequest::ContinueHistory=>true,
+        ArchiveRequest::HistoryLocator {issuer,physical_id}=>state.source_definitions.values().any(|source|&source.definition.source.issuer==issuer&&mapping::codex::history::physical_id(&source.definition.locator)==Some(physical_id.as_str())),
         ArchiveRequest::HistorySource {source,generation}=>state.history_records.values().any(|record|&record.position.source==source&&record.position.generation==*generation),
         ArchiveRequest::AttachmentTarget {parent,slot,locator}=>state.correlations.contains_key(&mapping::attachment_key(parent,slot,locator)),
         ArchiveRequest::Object {object_ref}=>state.reduction.object(object_ref).is_some(),

@@ -384,7 +384,7 @@ impl TraceService {
         let generation = self.active().await?;
         let checkpoint = generation.checkpoint().await?;
         let cut = self.evidence.evidence_cut().await?;
-        if cut > checkpoint.snapshot.evidence_cut {
+        if cut > checkpoint.snapshot.evidence_cut || self.worker.has_continuations(&generation).await? {
             let worker = self
                 .worker
                 .catch_up(&generation, checkpoint.fence_token, cut)

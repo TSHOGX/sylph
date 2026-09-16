@@ -128,36 +128,14 @@ impl SemanticMapper for CodexMapper {
 }
 
 fn map_database(input:MapInput<'_>)->MapOutput {
-    use sylph_protocol::{NativeDatabaseSnapshot,NativeDatabaseStatus,NativeDatabaseValue};
+    use sylph_protocol::{NativeDatabaseSnapshot,NativeDatabaseStatus};
     let mut output=MapOutput {state:input.state.clone(),..MapOutput::default()};
     let snapshot:NativeDatabaseSnapshot=match serde_json::from_slice(input.raw) {Ok(value)=>value,Err(error)=>{output.diagnostics.push(MappingDiagnostic {evidence:vec![input.canonical_observation.clone()],code:DiagnosticCode::DecodeFailure,message:error.to_string()});return output;}};
     let issue=|output:&mut MapOutput,code,message:&str|output.diagnostics.push(MappingDiagnostic {evidence:vec![input.canonical_observation.clone()],code,message:message.into()});
     if snapshot.table=="thread_goals" {return runtime::map_goal_database(input,snapshot);}
     if snapshot.status!=NativeDatabaseStatus::Available {issue(&mut output,DiagnosticCode::UnknownSelection,"Native selected-rollout metadata is unavailable");return output;}
     if snapshot.table!="threads" {issue(&mut output,DiagnosticCode::UnsupportedKind,"Unknown Codex native database table");return output;}
-    let Some(NativeDatabaseValue::Text(id))=snapshot.row.get("id") else {issue(&mut output,DiagnosticCode::MissingOwner,"Selected-rollout row does not name its native thread");return output;};
-    let Issuer::Environment(environment)=&input.capture.observation_ref.issuer else {issue(&mut output,DiagnosticCode::ConflictingOwner,"Native selected-rollout metadata requires an environment issuer");return output;};
-    let agent=AgentRef::Session(SessionId::new(environment.clone(),AgentName::parse("codex").unwrap(),NativeId::new(id)));
-    let Some((source,generation))=snapshot.selected_source.zip(snapshot.selected_generation) else {issue(&mut output,DiagnosticCode::MissingSource,"Selected rollout has no retained source inventory binding");return output;};
-    let Some(owner)=input.archive.source_owners.get(&(source.clone(),generation)) else {output.requests.push(ArchiveRequest::Source {source,generation});return output;};
-    if owner.agent!=agent {issue(&mut output,DiagnosticCode::ConflictingOwner,"Selected source header and metadata thread identity disagree");return output;}
-    // A reverted rollout contains only a suffix. Until frozen base expansion is
-    // connected, selecting that suffix would silently omit retained history.
-    if input.archive.history_records.get(&(source.clone(), generation))
-        .and_then(|records| records.get(&0))
-        .and_then(|record| record.header.as_ref())
-        .is_some_and(|header| header.history_base.is_some())
-    {
-        issue(&mut output, DiagnosticCode::UnknownSelection, "Selected rollout requires unresolved frozen history bases");
-        return output;
-    }
-    let Some(count)=snapshot.selected_record_count else {issue(&mut output,DiagnosticCode::UnknownSelection,"Selected source complete-record extent is unknown");return output;};
-    let selection=SelectionRef::occurrence(agent.clone(),input.capture.source_position.clone(),vec!["selected-rollout".into()]).unwrap();
-    let mut declaration=claim(&input,&agent,"codex/database-selection","codex-1",Fact::Declare {object:TraceObject::HistorySelection(HistorySelection {selection_ref:selection.clone(),agent:agent.clone(),membership:SelectionMembership::SourceExtents {extents:vec![SourceExtent {source,generation,coordinate:HistoryCoordinate::LocalRecordIndex,start_inclusive:0,end_exclusive:count,mapping_rule:"codex/native-history".into(),original_owner:None}],inherited_selections:vec![]},excluded_heads:vec![]})});
-    declaration.evidence.extend(owner.evidence.iter().cloned());output.claims.push(declaration);
-    let mut selected=claim(&input,&agent,"codex/database-selected","codex-1",Fact::SelectHistory {agent:agent.clone(),selection,selected_at:input.capture.source_position.clone()});selected.evidence.extend(owner.evidence.iter().cloned());output.claims.push(selected);
-    if snapshot.selected_pending_bytes.is_some_and(|bytes|bytes>0) {issue(&mut output,DiagnosticCode::CaptureGap,"Selected source has an incomplete pending lexical record");}
-    output
+    history::map_selection(input,snapshot)
 }
 
 struct Context<'a, 'b> {

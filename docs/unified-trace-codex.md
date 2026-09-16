@@ -302,12 +302,17 @@ scope and replacement coverage; it does not erase the earlier historical reading
 entries. Repeated logical content in a replacement is a new context occurrence without
 being another execution of the original work.
 
-`history_base` freezes a prefix using a physical rollout ID, exclusive ordinal, and
-exclusive byte offset. Its lineage can span several files. Resolve those explicit
+`history_base` freezes a prefix using `thread_id` as the physical rollout ID,
+`end_ordinal_exclusive` as the exclusive native ordinal, and `end_byte_offset` as the
+exclusive physical byte offset. Its lineage can span several files. Resolve those explicit
 segments before interpreting child-local boundaries; verify byte/ordinal extents and
 diagnose missing, cyclic, or contradictory references. A copied-prefix source and a
 referenced-prefix source preserve the same ownership distinction without sharing a
-made-up physical identity.
+made-up physical identity. A referenced parent entry becomes a child-scoped context
+occurrence retaining the original revision and owner; a same-agent reverted prefix
+keeps its original entries. Large inherited prefixes expand in bounded, checkpointed
+pages, and selection is declared only after the complete prefix has been verified.
+A restart resumes unfinished pages without requiring another admitted capture.
 
 Revert changes selected history under the same AgentThread. The native
 [rollout resolver](https://github.com/openai/codex/blob/968835997714baaff199cfed5f89a2c65d8ca77d/codex-rs/thread-store/src/local/thread_rollout_resolver.rs)
