@@ -418,3 +418,102 @@ fn an_unfinished_stream_retains_both_identical_append_occurrences_in_the_reader(
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].0[0].preview, "AA");
 }
+
+#[test]
+fn a_selected_stream_prefix_assembles_its_latest_included_revision_after_a_later_final() {
+    let frames = [
+        serde_json::json!({"method":"thread/started","params":{"thread":{"id":"reader"}}}),
+        serde_json::json!({"method":"item/agentMessage/delta","params":{"threadId":"reader","turnId":"turn-a","itemId":"message-a","delta":"A"}}),
+        serde_json::json!({"method":"item/agentMessage/delta","params":{"threadId":"reader","turnId":"turn-a","itemId":"message-a","delta":"A"}}),
+        serde_json::json!({"method":"item/completed","params":{"threadId":"reader","turnId":"turn-a","item":{"type":"agentMessage","id":"message-a","text":"Later final"}}}),
+    ];
+    let mut state = MapperState::default();
+    let mut reducer = Reducer::default();
+    let mut previews = BTreeMap::new();
+    let mut prefix = vec![];
+    for (index, frame) in frames.iter().enumerate() {
+        let capture = capture(index as u64 + 1);
+        let raw = serde_json::to_vec(frame).unwrap();
+        let output = crate::mapping::codex::CodexMapper.map(MapInput {
+            capture: &capture,
+            canonical_observation: &capture.observation_ref,
+            raw: &raw,
+            state: &state,
+            archive: &ArchiveContext::default(),
+        });
+        if index < 3 {
+            prefix.extend(output.claims.iter().filter_map(|claim| match &claim.fact {
+                Fact::Declare {
+                    object: TraceObject::HistoryEntry(entry),
+                } => Some(entry.entry_ref.clone()),
+                _ => None,
+            }));
+        }
+        reducer
+            .apply(
+                &output.claims,
+                &output
+                    .claims
+                    .iter()
+                    .flat_map(|claim| claim.evidence.clone())
+                    .collect(),
+                100,
+            )
+            .unwrap();
+        state = output.state;
+        for payload in output.payloads {
+            previews.insert(
+                payload.reference,
+                PayloadPreview {
+                    preview: String::from_utf8(payload.bytes.clone()).unwrap(),
+                    total_bytes: Some(payload.bytes.len() as u64),
+                    availability: Some(ReadAvailability::Available),
+                    preview_limit: 128,
+                    ..PayloadPreview::default()
+                },
+            );
+        }
+    }
+    let selection = SelectionRef::native(agent(), "selection", vec!["prefix".into()]).unwrap();
+    let capture = capture(5);
+    let claim = crate::mapping::claim(
+        &MapInput {
+            capture: &capture,
+            canonical_observation: &capture.observation_ref,
+            raw: b"{}",
+            state: &state,
+            archive: &ArchiveContext::default(),
+        },
+        &agent(),
+        "fixture-selection",
+        "test",
+        Fact::Declare {
+            object: TraceObject::HistorySelection(HistorySelection {
+                selection_ref: selection.clone(),
+                agent: agent(),
+                membership: SelectionMembership::EntrySet { entries: prefix },
+                excluded_heads: vec![],
+            }),
+        },
+    );
+    reducer
+        .apply(
+            std::slice::from_ref(&claim),
+            &claim.evidence.iter().cloned().collect(),
+            100,
+        )
+        .unwrap();
+    let projection = project(&reducer.resolve(), &previews, 32);
+    let units = &projection.windows[&ReadingScope {
+        agent: agent(),
+        selection: Some(selection),
+    }];
+    assert_eq!(units.len(), 1);
+    let ReadingContent::Message { parts, .. } = &units[0].content else {
+        panic!("selected answer unavailable")
+    };
+    assert_eq!(parts[0].preview, "AA");
+    assert!(projection
+        .composed_payloads
+        .contains_key(&parts[0].payload.payload_ref));
+}

@@ -19,10 +19,60 @@ pub(super) fn resolve(
     let mut parts = BTreeMap::new();
     let mut composed = BTreeMap::new();
     let mut unavailable = BTreeMap::new();
-    for history in reduction.messages.values() {
-        let Some(selected) = history.selected.known() else {
-            continue;
-        };
+    let mut requested: BTreeSet<_> = reduction
+        .objects
+        .values()
+        .filter_map(|object| object.declaration.known())
+        .filter_map(|object| match object {
+            TraceObject::Delivery(delivery) => Some(delivery.message_revision.clone()),
+            _ => None,
+        })
+        .collect();
+    for entries in reduction
+        .histories
+        .values()
+        .map(|history| history.archive_order.as_slice())
+        .chain(
+            reduction
+                .selection_memberships
+                .values()
+                .filter_map(|members| members.as_deref()),
+        )
+    {
+        let mut messages = BTreeMap::<MessageRef, BTreeSet<MessageRevisionRef>>::new();
+        for entry in entries {
+            let Some(TraceObject::HistoryEntry(entry)) = reduction
+                .object(&AnyObjectRef::HistoryEntry(entry.clone()))
+                .and_then(|object| object.declaration.known())
+            else {
+                continue;
+            };
+            for content in &entry.content {
+                let HistoryContent::Message(reference) = content else {
+                    continue;
+                };
+                let Some(TraceObject::MessageRevision(revision)) = reduction
+                    .object(&AnyObjectRef::MessageRevision(reference.clone()))
+                    .and_then(|object| object.declaration.known())
+                else {
+                    continue;
+                };
+                messages
+                    .entry(revision.message.clone())
+                    .or_default()
+                    .insert(reference.clone());
+            }
+        }
+        for (message, included) in messages {
+            if let Some(reference) = reduction
+                .message(&message)
+                .and_then(|history| history.select_in(&included).known().cloned())
+            {
+                requested.insert(reference);
+            }
+        }
+    }
+    for selected in &requested {
         let Some(chain) = chain(reduction, selected) else {
             unavailable.insert(
                 selected.clone(),

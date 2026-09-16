@@ -1110,18 +1110,21 @@ impl Index<'_> {
                             if !represented_messages.insert(revision.message.clone()) {
                                 continue;
                             }
-                            self.reduction
+                            let selected = self
+                                .reduction
                                 .message(&revision.message)
-                                .and_then(|history| history.selected.known())
-                                .filter(|selected| included_revisions.contains(*selected))
-                                .and_then(|selected| {
-                                    self.object(&AnyObjectRef::MessageRevision(selected.clone()))
+                                .map(|history| history.select_in(&included_revisions));
+                            let Some(TraceObject::MessageRevision(selected)) = selected
+                                .as_ref()
+                                .and_then(Resolved::known)
+                                .and_then(|reference| {
+                                    self.object(&AnyObjectRef::MessageRevision(reference.clone()))
                                 })
-                                .and_then(|object| match object {
-                                    TraceObject::MessageRevision(revision) => Some(revision),
-                                    _ => None,
-                                })
-                                .unwrap_or(revision)
+                            else {
+                                units.push(self.unknown(address,anchor.clone(),order_basis,"The selected history has conflicting or unordered message revisions"));
+                                continue;
+                            };
+                            selected
                         } else {
                             revision
                         };

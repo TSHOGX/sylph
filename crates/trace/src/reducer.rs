@@ -126,6 +126,81 @@ pub struct MessageHistory {
     pub sealed: bool,
     pub late_segments: Vec<MessageRevisionRef>,
     pub conflicted_revisions: Vec<MessageRevisionRef>,
+    candidates: Vec<RevisionCandidate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RevisionCandidate {
+    reference: MessageRevisionRef,
+    form: RevisionForm,
+    position: Option<SourcePosition>,
+    claim: ClaimRef,
+}
+impl MessageHistory {
+    /// Selection applies the same sealing and ordering rules to exactly its
+    /// included revisions. A final elsewhere cannot choose this history's body.
+    pub fn select_in(
+        &self,
+        included: &BTreeSet<MessageRevisionRef>,
+    ) -> Resolved<MessageRevisionRef> {
+        if self
+            .conflicted_revisions
+            .iter()
+            .any(|reference| included.contains(reference))
+        {
+            return Resolved::Unknown;
+        }
+        select_revision(
+            &self
+                .candidates
+                .iter()
+                .filter(|value| included.contains(&value.reference))
+                .collect::<Vec<_>>(),
+        )
+    }
+}
+fn select_revision(values: &[&RevisionCandidate]) -> Resolved<MessageRevisionRef> {
+    let replaced: BTreeSet<_> = values
+        .iter()
+        .filter_map(|value| match &value.form {
+            RevisionForm::Correction { replaces } => Some(replaces),
+            _ => None,
+        })
+        .collect();
+    let finals: Vec<_> = values
+        .iter()
+        .copied()
+        .filter(|value| {
+            !replaced.contains(&value.reference)
+                && matches!(
+                    value.form,
+                    RevisionForm::Complete
+                        | RevisionForm::Final { .. }
+                        | RevisionForm::Correction { .. }
+                )
+        })
+        .collect();
+    let selected = if finals.is_empty() {
+        values
+            .iter()
+            .copied()
+            .filter(|a| {
+                !values.iter().any(|b| {
+                    a.position
+                        .as_ref()
+                        .zip(b.position.as_ref())
+                        .is_some_and(|(a, b)| source_order(a, b) == Some(std::cmp::Ordering::Less))
+                })
+            })
+            .collect()
+    } else {
+        finals
+    };
+    resolve_values(
+        selected
+            .into_iter()
+            .map(|value| (value.reference.clone(), value.claim.clone())),
+    )
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -138,7 +213,7 @@ pub struct Reduction {
     pub agent_states: BTreeMap<AgentRef, Vec<(AgentState, ClaimRef)>>,
     pub relations: Vec<ResolvedRelation>,
     pub histories: BTreeMap<AgentRef, HistoryView>,
-    pub selection_memberships:BTreeMap<SelectionRef,Option<Vec<EntryRef>>>,
+    pub selection_memberships: BTreeMap<SelectionRef, Option<Vec<EntryRef>>>,
     pub messages: BTreeMap<MessageRef, MessageHistory>,
     pub coverage: Vec<(Coverage, ClaimRef)>,
     pub diagnostics: Vec<ReductionDiagnostic>,
@@ -811,30 +886,20 @@ fn resolve_messages(active: &[&Claim], result: &mut Reduction) {
                 );
             }
         }
-        let selected =
-            if !conflicted_revisions.is_empty() {
-                Resolved::Unknown
-            } else if finals.is_empty() {
-                let tips: Vec<_> = values
-                    .iter()
-                    .filter(|(_, a)| {
-                        !values.iter().any(|(_, b)| {
-                            claim_position(a)
-                                .zip(claim_position(b))
-                                .is_some_and(|(a, b)| {
-                                    source_order(a, b) == Some(std::cmp::Ordering::Less)
-                                })
-                        })
-                    })
-                    .collect();
-                resolve_values(tips.iter().map(|(revision, claim)| {
-                    (revision.revision_ref.clone(), claim.claim_ref.clone())
-                }))
-            } else {
-                resolve_values(finals.iter().map(|(revision, claim)| {
-                    (revision.revision_ref.clone(), claim.claim_ref.clone())
-                }))
-            };
+        let candidates: Vec<_> = values
+            .iter()
+            .map(|(revision, claim)| RevisionCandidate {
+                reference: revision.revision_ref.clone(),
+                form: revision.form.clone(),
+                position: claim_position(claim).cloned(),
+                claim: claim.claim_ref.clone(),
+            })
+            .collect();
+        let selected = if conflicted_revisions.is_empty() {
+            select_revision(&candidates.iter().collect::<Vec<_>>())
+        } else {
+            Resolved::Unknown
+        };
         result.messages.insert(
             message,
             MessageHistory {
@@ -846,6 +911,7 @@ fn resolve_messages(active: &[&Claim], result: &mut Reduction) {
                 sealed: !finals.is_empty(),
                 late_segments,
                 conflicted_revisions,
+                candidates,
             },
         );
     }
