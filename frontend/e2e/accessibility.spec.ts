@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./fixtures/test";
 import { createSession, gotoReady } from "./fixtures/session";
 import { agentLink, CHILD_AGENT, installTraceFixture, openTrace, unavailableExecution } from "./fixtures/trace";
 

@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures/test";
 
 test("draft remains usable while opening files and changing config", async ({ page }) => {
   const bootstrap = await page.request.get("/api/v1/auth/token");

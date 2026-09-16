@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./fixtures/test";
 import { installTraceFixture, message, openTrace } from "./fixtures/trace";
 
 test("execution boundary availability is independent of retained prose", async ({

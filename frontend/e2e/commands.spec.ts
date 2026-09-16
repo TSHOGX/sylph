@@ -17,7 +17,7 @@
  * config instead of becoming a turn.
  */
 
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./fixtures/test";
 import { createSession } from "./fixtures/session";
 
 test("the slash menu still opens after a completed turn", async ({ page }) => {

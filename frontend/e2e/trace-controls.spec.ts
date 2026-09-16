@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./fixtures/test";
 import { installTraceFixture, MAIN_AGENT, openTrace } from "./fixtures/trace";
 
 function available(

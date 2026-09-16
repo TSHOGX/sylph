@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./fixtures/test";
 import { installTraceFixture, message, openTrace } from "./fixtures/trace";
 
 test("transport EOF does not terminate an observed activation", async ({

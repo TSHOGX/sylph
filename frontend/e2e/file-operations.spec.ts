@@ -1,4 +1,4 @@
-import { expect, test, type Locator, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "./fixtures/test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -42,7 +42,7 @@ async function openPane(page: Page, dir: string) {
 
 /** A row's activating button, matched by `title` — see `file-viewer.spec.ts`. */
 function treeRow(pane: Locator, relative: string): Locator {
-  return pane.getByTitle(relative, { exact: true });
+  return pane.getByRole("tree").getByRole("button").and(pane.getByTitle(relative, { exact: true }));
 }
 
 /** Open one row's action menu through its overflow button, not right-click. */
@@ -242,6 +242,8 @@ test("deleting the previewed file returns to the tree instead of erroring", asyn
   await expect(pane.getByRole("tree")).toBeVisible();
   await expect(pane.getByRole("alert")).toBeHidden();
   await expect(treeRow(pane, "doomed.md")).toBeHidden();
+  await expect(pane.getByRole("region", { name: /preview of doomed\.md/i })).toBeHidden();
+  expect(fs.existsSync(path.join(dir, "doomed.md"))).toBe(false);
 });
 
 /**

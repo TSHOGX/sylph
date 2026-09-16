@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page } from "./fixtures/test";
 import type { Session } from "../lib/api-types";
 import type { ImportJob } from "../lib/imports-api";
 import { CHILD_AGENT, installTraceFixture, MAIN_AGENT, message } from "./fixtures/trace";

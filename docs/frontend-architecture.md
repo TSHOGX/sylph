@@ -81,6 +81,13 @@ readers release subscriptions and requests, retaining bounded anchors and local 
 choices. Draft text and staged attachments are separate from the evictable history
 cache. Snapshot expiry preserves them; changing Subject clears protected state.
 
+View ownership is shared across mounted readers and bounded inspection/navigation
+entries. The last owner releases a view after one task, allowing Strict Mode and
+navigation handoffs. Document `pagehide` and protected-cache clearing flush releases
+immediately through keepalive requests; they cannot rely on React unmounting or a
+later timer. Restoring a cached document invalidates those released views and
+reacquires them around retained anchors. Server expiry covers abrupt process loss.
+
 Scroll restoration uses a stable object anchor and pixel offset. Programmatic scroll
 events cannot replace that anchor while row measurements settle. Resize compensation
 and virtualization use the same anchor, and native CSS scroll anchoring is disabled
@@ -328,6 +335,12 @@ Each browser case owns its fixture state and intercepted responses. Real filesys
 cases create unique temporary directories and clean them up. A session-list cap is not
 an assertion about a particular session; match the returned identity instead of assuming
 shared counts increase forever.
+
+Specs import the shared `frontend/e2e/fixtures/test.ts` fixture. It navigates away
+before disposing the browser context so the real document lifecycle can release
+server view leases. Playwright context disposal kills the document without `pagehide`;
+repeating that abrupt shutdown is a process-loss experiment, not ordinary navigation.
+Lease regressions verify server-side invalidation before the advertised expiry.
 
 The two browser projects are desktop Chromium and a Chromium phone profile. Tests of
 one breakpoint do not establish the behavior of another. Wait for hydration before

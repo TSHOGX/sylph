@@ -1,6 +1,6 @@
 import { mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./fixtures/test";
 import { createSession, gotoReady } from "./fixtures/session";
 
 /**
