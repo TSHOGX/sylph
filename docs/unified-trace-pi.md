@@ -39,6 +39,16 @@ missing stop reasons, mixed vendor field spellings, and cross-file fork pointers
 Historical vendor spellings remain legitimate external contracts. This does not permit
 compatibility aliases for Sylph's replaced internal model.
 
+The controlled Pi 0.85.1 success pair in
+[`fixtures/unified-trace/manifest.json`](../fixtures/unified-trace/manifest.json) was
+captured from the installed CLI by `scripts/capture-pi-trace.mjs`. A loopback provider
+emits deterministic marker chunks, including two separate equal text deltas; Pi emits
+its own RPC events and writes its own native session. Tools, extensions, context files,
+personal configuration and startup network operations are disabled. This proves the
+observed Pi framing, streaming and persistence slice, not remote provider behavior or
+a live/native message identity certificate. The provider's content is synthetic and
+the fixture metadata labels it accordingly.
+
 ## Acquisition and source generations
 
 Managed live execution captures raw stdout frames, exact RPC writes and responses,

@@ -1,8 +1,37 @@
 {
   "captured_on": "2026-09-16",
   "purpose": "Controlled harmless marker prompts with all vendor tools and customizations disabled. Historical fixture tools were not executed.",
-  "sanitization": "Parse complete JSON records and serialize compact UTF-8 JSONL. Replace temporary working-directory prefixes with /workspace/capture and the local home prefix with /home/capture. All keys, identities, message bodies, missing/null values, arrays, counts, and lifecycle fields are retained. No source bytes are claimed identical after path substitution/JSON serialization.",
+  "sanitization": "Parse complete JSON records and serialize compact UTF-8 JSONL. The Claude 2.1.272 and Pi 0.84.3 captures replace temporary working-directory prefixes with /workspace/capture and the local home prefix with /home/capture. The Pi 0.85.1 success captures replace only their temporary root with /workspace/pi-capture. All keys, identities, message bodies, missing/null values, arrays, counts, and lifecycle fields are retained. No source bytes are claimed identical after path substitution/JSON serialization.",
   "captures": [
+    {
+      "vendor": "pi",
+      "cli_version": "0.85.1",
+      "path": "pi/rpc-success.jsonl",
+      "source_sha256": "a629836bf081fc7faacaebed52d1c8138683145fae0b5c969a4cf8272f885320",
+      "retained_sha256": "90dc6fcab84d386f71ff2491c06149b439a4543ef4785bc48011e43f74b04c44",
+      "records": 25,
+      "result": "successful real Pi outer settlement using a deterministic loopback provider; repeated equal text deltas preserved",
+      "method": "scripts/capture-pi-trace.mjs; no remote model, tools, extensions or personal configuration; direction wrappers are recorder metadata",
+      "sanitization": "Only temporary capture paths become /workspace/pi-capture; compact JSON reserialization retains IDs, keys, values and order. Provider content is deliberately synthetic; emitted Pi RPC and native records are observed process output."
+    },
+    {
+      "vendor": "pi",
+      "cli_version": "0.85.1",
+      "path": "pi/stdout-success.jsonl",
+      "source_sha256": "89a8c91f49f09c43b5556ea90f2012f48034653f74a3bc75ea1e11f115276fd3",
+      "retained_sha256": "2184f70e0b1efabbdf1559a88119ad07c62786d3b16950bec86bda4847f19042",
+      "records": 20,
+      "result": "independently captured stdout bytes from the same controlled Pi process, then path-substituted and reserialized"
+    },
+    {
+      "vendor": "pi",
+      "cli_version": "0.85.1",
+      "path": "pi/native-success.jsonl",
+      "source_sha256": "ec86d273a9ea31af38369dff26df12a2e40255ebb6826566f64641fb5b57612c",
+      "retained_sha256": "67e835c6cb0cfde16bd917dcb76eab20ba4cf86221b7988b619ec2881512210c",
+      "records": 5,
+      "result": "native session, model/thinking entries, user message and successful assistant marker from the same controlled Pi process"
+    },
     {
       "vendor": "claude",
       "cli_version": "2.1.272",

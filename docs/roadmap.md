@@ -148,9 +148,10 @@ capture stays retained. Immutable derived payloads preserve selector, rule, evid
 MIME and encoding. Source-owner definitions require retained vendor identity proof;
 capture routing hints never establish ownership. Claude and Pi mappers now cover their
 recorded native/live slices, branching, media, task/outer-run outcomes, preserved context
-membership and reported usage. Controlled real captures establish a Claude success pair
-and Pi failed settlement; successful Pi live capture remains unavailable from the tested
-provider, and no live/native certificate is invented.
+membership and reported usage. Controlled real captures establish a Claude success pair,
+Pi failed settlement, and a Pi 0.85.1 success pair against a deterministic loopback
+provider. The latter establishes actual Pi streaming/persistence while clearly labeling
+the provider's synthetic marker bytes; it supplies no missing live/native certificate.
 
 ### Runtime and reader cutover checkpoint
 

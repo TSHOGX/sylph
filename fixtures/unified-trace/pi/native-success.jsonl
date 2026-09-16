@@ -1,0 +1,5 @@
+{"type":"session","version":3,"id":"01a0aac9-147d-70a3-9396-67f57c6d424d","timestamp":"2026-09-16T15:14:59.838Z","cwd":"/workspace/pi-capture"}
+{"type":"model_change","id":"14d8566d","parentId":null,"timestamp":"2026-09-16T15:14:59.868Z","provider":"sylph-capture","modelId":"trace-marker"}
+{"type":"thinking_level_change","id":"e499d53c","parentId":"14d8566d","timestamp":"2026-09-16T15:14:59.868Z","thinkingLevel":"off"}
+{"type":"message","id":"77f57e95","parentId":"e499d53c","timestamp":"2026-09-16T15:14:59.875Z","message":{"role":"user","content":[{"type":"text","text":"Reply with exactly SYLPH_PI_AA_OK."}],"timestamp":1789571699874}}
+{"type":"message","id":"11f59730","parentId":"77f57e95","timestamp":"2026-09-16T15:14:59.909Z","message":{"role":"assistant","content":[{"type":"text","text":"SYLPH_PI_AA_OK"}],"api":"openai-completions","provider":"sylph-capture","model":"trace-marker","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":1789571699884,"responseId":"controlled-pi-response","rawStopReason":"stop"}}

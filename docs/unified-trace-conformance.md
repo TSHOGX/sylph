@@ -45,6 +45,11 @@ The retained material is:
   with source/retained digests and explicit path substitution/JSON reserialization.
   These preserve semantic bodies and identity relationships; they do not claim the
   sanitized bytes reproduce original lexical encoding or establish unobserved Pi joins.
+- The Pi 0.85.1 success pair in that same manifest uses the real CLI with a deterministic
+  loopback provider. `scripts/capture-pi-trace.mjs` preserves independent stdout, RPC
+  direction records and native output. Its repeated equal text deltas and settled outer
+  run establish Pi's emitted shapes; the synthetic provider response establishes neither
+  a remote model's behavior nor a missing live/native identity join.
 
 Sanitization preserves equality relationships, key scope, missing-versus-empty values,
 ordering and branch structure. Replacing two distinct IDs with one placeholder would
