@@ -40,8 +40,10 @@ external proposals or discussion threads are not project instructions.
 
 | Boundary | Owner | State |
 | --- | --- | --- |
-| Vendor trace semantics | Foundation implementation below | Runtime cutover is implemented; full vendor certificates and replay/mutation conformance remain open |
+| Production semantic acceptance | Foundation implementation below | Production corpus replay and the full mutation matrix remain open; paired-source replay has exposed lost reader rows despite retained message evidence |
 | Projection and delivery scale | Milestone 4 and foundation implementation below | Reader pages are bounded; whole-reduction reader materialization and mixed spool/socket/ACK load still need production measurements |
+| Directory scope and authorization | Conversation and work panel delivery below | Full spawn-descendant membership, filtering before body hydration, private continuation positions and authorized totals remain open |
+| Vendor trace semantics | Foundation implementation below | Runtime cutover is implemented; remaining vendor certificates, workflow and schedule mappings follow core stabilization |
 | Reader acceptance | Conversation and work panel delivery below | Normalized reader is implemented; full visual/resource acceptance and VoiceOver remain open; Safari testing was excluded by the user |
 
 ## Unified trace foundation review
@@ -65,18 +67,30 @@ production reducer. [Conformance](unified-trace-conformance.md) names their limi
 
 **Next implementation, in dependency order:**
 
-1. Finish vendor evidence and mapping conformance: complete runtime/delegation/accounting
-   cases, remaining source certificates and workflow/schedule coverage. Preserve unavailable Pi/Claude
-   joins and selected-head evidence as unknown.
-2. Prove cold/incremental/reread/interleaved/rebuilt equivalence with independently
-   authored expectations and the semantic mutations in the conformance contract.
+1. Stabilize the migrated architecture and primary stores. Prove
+   cold/incremental/reread/interleaved/rebuilt equivalence through production admission,
+   reduction and read projection, with independently authored expectations. Resolve
+   the paired-source history-entry conflict that currently removes readable messages
+   despite retaining their bytes. Complete the required core semantic mutations.
+2. Close query authorization gaps: filter directory candidates before hydration, keep
+   continuation positions private, and derive counts only over the current authorized
+   scope. Preserve deletion epochs and snapshot consistency throughout.
 3. Measure the connected production pipeline under large retained histories, high
-   version density, concurrent captures, reconnects and deletion. Bound projection and
-   search rebuild work as well as returned pages. Extend production-scale fault coverage
-   beyond the reprojection job lifecycle and publication cancellation regressions.
-4. Complete reader visual, accessibility and scale acceptance against the normalized
-   contract, including manual VoiceOver. The user excluded Safari testing from this
-   delivery. Synthetic layout fixtures do not establish vendor semantic correctness or production delivery isolation.
+   version density, concurrent captures, reconnects and deletion. Replace full reduction
+   and whole-reader materialization on routine updates with bounded incremental work;
+   bound search indexing as well as returned pages. Extend fault coverage beyond job
+   lifecycle and publication cancellation to the production storage and delivery matrix.
+4. After these core gates stabilize, finish adapter evidence and mapping conformance:
+   remaining runtime/delegation/accounting cases, source certificates and workflow/schedule
+   coverage. Unavailable joins and selected-head evidence stay unknown.
+5. Refine reader surfaces last: complete descendant navigation, structured-value
+   exploration, observed-content transfer and separately budgeted export/playback, then
+   visual, accessibility and scale acceptance including manual VoiceOver. The user
+   excluded Safari testing. Synthetic layout fixtures do not establish vendor semantic
+   correctness or production delivery isolation.
+
+Each stage includes correctness, architecture, performance and authorization review,
+followed by a bounded commit before another implementation stage expands the diff.
 
 **Exit gate:** production cold/incremental/mixed-source conformance, demonstrated semantic
 mutations, storage failure/performance experiments, and complete affected runtime/frontend
@@ -203,6 +217,16 @@ Live Codex append occurrences now appear before finalization, retain repeated eq
 segments in immutable manifests, and preserve replacement/final boundaries. Historical
 selections resolve only their included revisions; a later final cannot replace a selected
 prefix. Detail-page retries preserve the failed cursor, snapshot and already visible data.
+Claude live parts and Pi compact RPC deltas also retain readable unfinished prefixes,
+stable part identity and independent outer settlement. Raw Codex protocol boundaries
+preserve exact failure/interruption evidence, and child-result observations establish
+accepted deliveries without inventing history admission or child execution.
+
+Document departure and cache invalidation release retained views; cancelled server reads
+keep ownership until response assembly completes. Writer pools discard the orphaned
+transaction state reproduced by cancellation during SQLx custom-BEGIN setup while
+reusing healthy rolled-back connections. These regressions do not replace the broader
+crash and mixed-load acceptance matrix.
 
 Stateful source waits checkpoint one blocked head and an indexed replay cursor, so a
 long admitted tail no longer fills the pending envelope queue before its releasing payload
