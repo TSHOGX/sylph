@@ -1257,6 +1257,7 @@ async fn retained_companion_inventory_resolves_metadata_owner_after_restart_with
     assert_eq!(agent.name.as_deref(), Some("delegate-name"));
 }
 
+mod corpus;
 mod delayed_source;
 mod frozen_history;
 
