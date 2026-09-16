@@ -148,3 +148,53 @@ async fn live_append_payloads_remain_snapshot_readable_across_replacement_final_
         "A中A中".as_bytes()
     );
 }
+
+#[tokio::test]
+async fn failed_publication_keeps_the_previous_reader_cache_until_retry_commits() {
+    let fixture = Fixture::new().await;
+    let (store, _) = fixture.generation("reading-rollback").await;
+    let worker = fixture.worker();
+    frame(
+        &fixture,
+        1,
+        json!({"method":"thread/started","params":{"thread":{"id":"streamed"}}}),
+    )
+    .await;
+    frame(&fixture,2,json!({"method":"item/agentMessage/delta","params":{"threadId":"streamed","itemId":"answer","delta":"Before"}})).await;
+    worker.catch_up(&store, 1, 2).await.unwrap();
+    let before = store.checkpoint().await.unwrap().snapshot;
+    let (old, _) = window(&store, &before).await;
+    let mut connection = sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new().filename(store.path()),
+    )
+    .await
+    .unwrap();
+    sqlx::raw_sql("CREATE TRIGGER reject_reader BEFORE INSERT ON mapper_states BEGIN SELECT RAISE(ABORT,'reading publication failure'); END;").execute(&mut connection).await.unwrap();
+    frame(&fixture,3,json!({"method":"item/completed","params":{"threadId":"streamed","item":{"type":"agentMessage","id":"answer","text":"After"}}})).await;
+    assert!(worker.catch_up(&store, 1, 3).await.is_err());
+    assert_eq!(store.checkpoint().await.unwrap().snapshot, before);
+    assert_eq!(window(&store, &before).await.0, old);
+    sqlx::query("DROP TRIGGER reject_reader")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    worker.catch_up(&store, 1, 3).await.unwrap();
+    let latest = store.checkpoint().await.unwrap().snapshot;
+    let (current, _) = window(&store, &latest).await;
+    let ReadingContent::Message { parts, .. } = &current.content else {
+        panic!("message row")
+    };
+    assert_eq!(parts[0].preview, "After");
+    assert_eq!(window(&store, &before).await.0, old);
+    drop(worker);
+    let restored = fixture.worker();
+    frame(
+        &fixture,
+        4,
+        json!({"method":"thread/started","params":{"thread":{"id":"streamed","name":"Renamed"}}}),
+    )
+    .await;
+    restored.catch_up(&store, 1, 4).await.unwrap();
+    let restored_snapshot = store.checkpoint().await.unwrap().snapshot;
+    assert_eq!(window(&store, &restored_snapshot).await.0, current);
+}

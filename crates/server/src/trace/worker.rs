@@ -165,6 +165,7 @@ struct WorkerState {
     observation_sources: BTreeMap<ObservationRef, SourcePosition>,
     previews: BTreeMap<PayloadRef, sylph_trace::reading::PayloadPreview>,
     object_epochs: BTreeMap<AnyObjectRef, IngestionEpoch>,
+    reading: Option<Arc<reading::MaterializedReading>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

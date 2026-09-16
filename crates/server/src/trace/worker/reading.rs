@@ -5,6 +5,27 @@ use crate::trace::{
 };
 use sylph_trace::reading::{PayloadPreview, ReadingProjection};
 
+/// Immutable cache of exactly the previous committed reader rows. Cloning a
+/// candidate unit shares these bytes; failed or cancelled units cannot mutate it.
+#[derive(Default)]
+pub(super) struct MaterializedReading {
+    rows: BTreeMap<(String, String), ReadRowChange>,
+    anchors: BTreeMap<String, PayloadAnchor>,
+    composed: BTreeMap<PayloadRef, sylph_trace::reading::ComposedPayload>,
+}
+impl MaterializedReading {
+    fn from_projection(
+        projection: &ReadingProjection,
+        epochs: &BTreeMap<AnyObjectRef, IngestionEpoch>,
+    ) -> Result<Self> {
+        Ok(Self {
+            rows: rows(projection, epochs)?,
+            anchors: anchors(projection)?,
+            composed: projection.composed_payloads.clone(),
+        })
+    }
+}
+
 impl ProjectionWorker {
     pub(super) async fn stage_composed_reading(
         &self,
@@ -35,6 +56,15 @@ impl ProjectionWorker {
         old: &Reduction,
         unit: &mut ProjectionUnit,
     ) -> Result<()> {
+        // Reconstruct after restart before changing preview metadata. Recomputing
+        // "before" with new metadata masks a late payload correction as unchanged.
+        let before = match &unit.next.reading {
+            Some(previous) => previous.clone(),
+            None => Arc::new(MaterializedReading::from_projection(
+                &sylph_trace::reading::project(old, &unit.next.previews, 32),
+                &unit.next.object_epochs,
+            )?),
+        };
         for (_, payload) in &unit.payloads {
             let length = payload.bytes.len();
             let limit = generation.limits().max_preview_bytes;
@@ -143,10 +173,13 @@ impl ProjectionWorker {
             );
             unit.next.previews.insert(payload, preview);
         }
-        let before = sylph_trace::reading::project(old, &unit.next.previews, 32);
         let after = sylph_trace::reading::project(&unit.next.reduction, &unit.next.previews, 32);
         for (reference, composed) in &after.composed_payloads {
-            if before.composed_payloads.contains_key(reference) {
+            if before
+                .composed
+                .get(reference)
+                .is_some_and(|previous| previous.revisions == composed.revisions)
+            {
                 continue;
             }
             let epochs: BTreeSet<_> = composed
@@ -199,41 +232,41 @@ impl ProjectionWorker {
                     .push((epoch, reference.clone(), composed.manifest.clone()));
             }
         }
-        let old_rows = rows(&before, &unit.next.object_epochs)?;
-        let new_rows = rows(&after, &unit.next.object_epochs)?;
-        for (key, row) in &new_rows {
-            if old_rows
-                .get(key)
-                .is_none_or(|old| old.body != row.body || old.order_key != row.order_key)
-            {
+        let after = MaterializedReading::from_projection(&after, &unit.next.object_epochs)?;
+        for (key, row) in &after.rows {
+            if before.rows.get(key).is_none_or(|old| {
+                old.body != row.body
+                    || old.order_key != row.order_key
+                    || old.scope_epoch != row.scope_epoch
+            }) {
                 unit.batch.read_rows.push(row.clone());
             }
         }
-        for (key, row) in old_rows {
-            if !new_rows.contains_key(&key) {
-                unit.batch
-                    .read_rows
-                    .push(ReadRowChange { body: None, ..row });
+        for (key, row) in &before.rows {
+            if !after.rows.contains_key(key) {
+                unit.batch.read_rows.push(ReadRowChange {
+                    body: None,
+                    ..row.clone()
+                });
             }
         }
-        let old_anchors = anchors(&before)?;
-        let new_anchors = anchors(&after)?;
-        for (key, anchor) in &new_anchors {
-            if !old_anchors.contains_key(key) {
+        for (key, anchor) in &after.anchors {
+            if !before.anchors.contains_key(key) {
                 unit.batch.payload_anchors.push(PayloadAnchorChange {
                     anchor: anchor.clone(),
                     present: true,
                 });
             }
         }
-        for (key, anchor) in old_anchors {
-            if !new_anchors.contains_key(&key) {
+        for (key, anchor) in &before.anchors {
+            if !after.anchors.contains_key(key) {
                 unit.batch.payload_anchors.push(PayloadAnchorChange {
-                    anchor,
+                    anchor: anchor.clone(),
                     present: false,
                 });
             }
         }
+        unit.next.reading = Some(Arc::new(after));
         Ok(())
     }
 }

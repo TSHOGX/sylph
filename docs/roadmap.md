@@ -197,10 +197,19 @@ segments in immutable manifests, and preserve replacement/final boundaries. Hist
 selections resolve only their included revisions; a later final cannot replace a selected
 prefix. Detail-page retries preserve the failed cursor, snapshot and already visible data.
 
+Stateful source waits checkpoint one blocked head and an indexed replay cursor, so a
+long admitted tail no longer fills the pending envelope queue before its releasing payload
+can be mapped. Replay remains scoped to its source incarnation, authorization epoch and
+evidence cut, and resumes bounded pages after restart. Reader materialization reuses its
+previous committed rows and anchors; failed publication cannot advance that cache.
+
 Open implementation/acceptance work remains in the ordered list above. In particular,
-`crates/server/src/trace/worker/reading.rs` currently materializes before/after readers
-from the whole reduction for a projection unit; bounded HTTP pages do not prove bounded
-incremental projection cost. Existing deletion/recovery tests also do not substitute for
+`crates/server/src/trace/worker/reading.rs` still materializes the next reader from the
+whole reduction for a projection unit, although the prior view is cached. Bounded HTTP
+pages do not prove bounded incremental projection cost. The ignored
+`worker_projection_scaling_probe` measures this production path under
+`SYLPH_WORKER_BENCH_RECORDS`; cold replay and repeated live updates still need the full
+scale matrix. Existing deletion/recovery tests also do not substitute for
 the full in-flight cancellation and crash matrix. A complete new production conformance
 run and semantic negative controls are required before declaring the replacement done.
 
