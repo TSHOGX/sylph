@@ -36,30 +36,44 @@ import {
   type TraceView,
 } from "@/lib/trace-types";
 import { TracePayload } from "./trace-payload";
-import { TraceInspector, type Inspection } from "./trace-inspector";
+import {
+  TraceInspector,
+  type Inspection,
+  type InspectionRequest,
+  type ObjectInspectionTarget,
+} from "./trace-inspector";
 import { TraceComposer } from "./trace-composer";
 
 export const traceButton =
   "min-h-11 rounded px-3 text-sm hover:bg-hover focus-ring disabled:opacity-50";
+
+type AgentReaderProps = {
+  agent: string;
+  history?: string | null;
+  anchor?: string | null;
+  initialView?: TraceView;
+  anchorOffset?: number;
+} & (
+  | { companion: true; onInspect: (target: ObjectInspectionTarget) => void }
+  | { companion?: false; onInspect?: never }
+);
 
 export function AgentReader({
   agent,
   history = null,
   anchor = null,
   companion = false,
-}: {
-  agent: string;
-  history?: string | null;
-  anchor?: string | null;
-  companion?: boolean;
-}) {
+  initialView,
+  anchorOffset = 0,
+  onInspect,
+}: AgentReaderProps) {
   const t = useT();
   const ui = useWorkspaceUI();
   const [location] = useState(() => {
     const location = readerLocation(agent, history);
     if (anchor) {
       location.anchor = anchor;
-      location.offset = 0;
+      location.offset = anchorOffset;
       location.following = false;
     }
     return location;
@@ -91,7 +105,7 @@ export function AgentReader({
         history,
         location.anchor,
         signal,
-        refresh === 0 ? navigationView : null,
+        refresh === 0 ? (initialView ?? navigationView) : null,
       ),
     refresh,
     false,
@@ -222,15 +236,19 @@ export function AgentReader({
           Boolean(selection && !selection.isCollapsed) ||
           Boolean(pane?.contains(document.activeElement));
         if (location.following && !interacting) {
-          if (queued === null) queued = setTimeout(() => {
-            queued = null;
-            remember();
-            setRefresh((value) => value + 1);
-          }, 100);
+          if (queued === null)
+            queued = setTimeout(() => {
+              queued = null;
+              remember();
+              setRefresh((value) => value + 1);
+            }, 100);
         } else setUpdate(message);
       },
     );
-    return () => { unsubscribe(); if (queued !== null) clearTimeout(queued); };
+    return () => {
+      unsubscribe();
+      if (queued !== null) clearTimeout(queued);
+    };
   }, [agent, data, location, remember, t]);
   useLayoutEffect(() => {
     if (!page) return;
@@ -319,9 +337,28 @@ export function AgentReader({
       if (!controller.signal.aborted) setPaging(false);
     }
   };
-  const inspect = (next: Inspection) => {
+  const inspect = (next: InspectionRequest) => {
+    if (!data) return;
     remember();
-    setInspection(next);
+    const target: Inspection =
+      next.kind === "object"
+        ? {
+            ...next,
+            scope: {
+              agent: data.header.agent.address,
+              history: data.header.history.selection,
+              view: data.view,
+              maximumPayloadBytes: data.window.limits.maxPayloadBytes,
+              anchor: location.anchor,
+              offset: location.offset,
+            },
+          }
+        : next;
+    if (companion && target.kind === "object") {
+      onInspect?.(target);
+      return;
+    }
+    setInspection(target);
     if (ui.isMobile) ui.openDrawer("files");
     else ui.setRightOpen(true);
   };
@@ -616,7 +653,7 @@ function TraceRow({
   row: ReadingUnit;
   view: TraceView;
   maximum: number;
-  inspect: (next: Inspection) => void;
+  inspect: (next: InspectionRequest) => void;
 }) {
   const t = useT();
   const content = row.content;

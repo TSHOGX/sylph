@@ -2,9 +2,10 @@
 import { useT } from "@/lib/i18n";
 import dynamic from "next/dynamic";
 import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { traceAPI } from "@/lib/trace-api";
 import { rememberTraceNavigation, traceCacheKey } from "@/lib/trace-cache";
+import { retainTraceView } from "@/lib/trace-leases";
 import { useTraceResource } from "@/lib/use-trace-resource";
 import { useWorkspaceUI } from "@/lib/workspace-ui";
 import { useDialog } from "@/lib/use-dialog";
@@ -27,10 +28,40 @@ const Companion = dynamic(() =>
 );
 const button =
   "min-h-11 rounded px-3 text-sm hover:bg-hover focus-ring disabled:opacity-50";
-export type Inspection =
+export interface InspectionScope {
+  agent: string;
+  history: string | null;
+  view: TraceView;
+  maximumPayloadBytes: number;
+  anchor: string | null;
+  offset: number;
+}
+export type InspectionRequest =
   | { kind: "agents" | "find" | "history" | "coverage" | "files" }
   | { kind: "object"; reference: string }
-  | { kind: "agent"; agent: string };
+  | {
+      kind: "agent";
+      agent: string;
+      history?: string | null;
+      view?: TraceView;
+      anchor?: string | null;
+      offset?: number;
+    };
+export type ObjectInspectionTarget = {
+  kind: "object";
+  reference: string;
+  scope: InspectionScope;
+};
+export type Inspection =
+  | Exclude<InspectionRequest, { kind: "object" }>
+  | ObjectInspectionTarget;
+interface DirectoryLocation {
+  query: string;
+  filter: string;
+  cursor: string | null;
+  view: TraceView | null;
+  position: { agent: string; offset: number } | null;
+}
 
 export function TraceInspector({
   bootstrap,
@@ -46,9 +77,39 @@ export function TraceInspector({
   const [available, setAvailable] = useState(0);
   const [trail, setTrail] = useState<Inspection[]>([]);
   const [pinned, setPinned] = useState<
-    Array<{ reference: string; label: string }>
+    Array<{ target: ObjectInspectionTarget; label: string }>
   >([]);
   const [width, setWidth] = useState(480);
+  const [directory, setDirectory] = useState<DirectoryLocation>({
+    query: "",
+    filter: "all",
+    cursor: null,
+    view: null,
+    position: null,
+  });
+
+  // A detail may replace the companion that acquired its lease. Keep the exact
+  // view alive across that handoff and bounded Back/pin entries; never substitute
+  // the main reader's view for a child's already-authorized selection.
+  useLayoutEffect(() => {
+    const views = new Map<string, TraceView>();
+    for (const target of [
+      inspection,
+      ...trail,
+      ...pinned.map((item) => item.target),
+    ]) {
+      const view =
+        target.kind === "object"
+          ? target.scope.view
+          : target.kind === "agent"
+            ? target.view
+            : null;
+      if (view) views.set(view.token, view);
+    }
+    if (directory.view) views.set(directory.view.token, directory.view);
+    const releases = [...views.values()].map(retainTraceView);
+    return () => releases.forEach((release) => release());
+  }, [inspection, trail, pinned, directory.view]);
   const visible = ui.isMobile ? ui.drawer === "files" : ui.rightOpen;
   const full = available < 940;
   const close = () => {
@@ -75,9 +136,33 @@ export function TraceInspector({
     observer.observe(parent);
     return () => observer.disconnect();
   }, []);
-  const inspect = (next: Inspection) => {
-    setTrail((previous) => [...previous, inspection].slice(-10));
+  const navigate = (next: Inspection) => {
+    const previous =
+      inspection.kind === "agent" && next.kind === "object"
+        ? {
+            ...inspection,
+            history: next.scope.history,
+            view: next.scope.view,
+            anchor: next.scope.anchor,
+            offset: next.scope.offset,
+          }
+        : inspection;
+    setTrail((entries) => [...entries, previous].slice(-10));
     onInspect(next);
+  };
+  const inspect = (next: InspectionRequest) => {
+    const scope =
+      inspection.kind === "object"
+        ? inspection.scope
+        : {
+            agent: bootstrap.header.agent.address,
+            history: bootstrap.header.history.selection,
+            view: bootstrap.view,
+            maximumPayloadBytes: bootstrap.window.limits.maxPayloadBytes,
+            anchor: null,
+            offset: 0,
+          };
+    navigate(next.kind === "object" ? { ...next, scope } : next);
   };
   const back = () => {
     const previous = trail.at(-1);
@@ -205,13 +290,18 @@ export function TraceInspector({
               className={button}
               disabled={
                 pinned.length >= 4 ||
-                pinned.some((item) => item.reference === inspection.reference)
+                pinned.some(
+                  (item) =>
+                    item.target.reference === inspection.reference &&
+                    item.target.scope.view.token ===
+                      inspection.scope.view.token,
+                )
               }
               onClick={() =>
                 setPinned((previous) => [
                   ...previous,
                   {
-                    reference: inspection.reference,
+                    target: inspection,
                     label: t("trace.pinnedLabel", {
                       count: previous.length + 1,
                     }),
@@ -223,13 +313,11 @@ export function TraceInspector({
             </button>
           )}
           {pinned.map((item) => (
-            <span key={item.reference} className="flex items-center">
-              <button
-                className={button}
-                onClick={() =>
-                  inspect({ kind: "object", reference: item.reference })
-                }
-              >
+            <span
+              key={`${item.target.reference}:${item.target.scope.view.token}`}
+              className="flex items-center"
+            >
+              <button className={button} onClick={() => navigate(item.target)}>
                 {item.label}
               </button>
               <button
@@ -237,9 +325,7 @@ export function TraceInspector({
                 aria-label={t("trace.unpin", { label: item.label })}
                 onClick={() =>
                   setPinned((previous) =>
-                    previous.filter(
-                      (value) => value.reference !== item.reference,
-                    ),
+                    previous.filter((value) => value !== item),
                   )
                 }
               >
@@ -259,16 +345,36 @@ export function TraceInspector({
           <>
             <button
               className={`${button} shrink-0 text-left`}
-              onClick={() => onInspect({ kind: "agents" })}
+              onClick={() => {
+                const directoryIndex = trail.findLastIndex(
+                  (entry) => entry.kind === "agents",
+                );
+                setTrail((entries) =>
+                  directoryIndex >= 0 ? entries.slice(0, directoryIndex) : [],
+                );
+                onInspect({ kind: "agents" });
+              }}
             >
               {t("trace.allAgents")}
             </button>
             <Companion
               key={inspection.agent}
               agent={inspection.agent}
+              history={inspection.history}
+              anchor={inspection.anchor}
+              anchorOffset={inspection.offset}
+              initialView={inspection.view}
+              onInspect={navigate}
               companion
             />
           </>
+        ) : inspection.kind === "agents" ? (
+          <AgentDirectory
+            bootstrap={bootstrap}
+            location={directory}
+            onLocation={setDirectory}
+            alongside={(agent) => inspect({ kind: "agent", agent })}
+          />
         ) : inspection.kind === "files" ? (
           bootstrap.header.fileContext ? (
             <ArtifactsPane />
@@ -277,12 +383,6 @@ export function TraceInspector({
           )
         ) : (
           <div className="min-h-0 flex-1 overflow-auto p-3">
-            {inspection.kind === "agents" && (
-              <AgentDirectory
-                bootstrap={bootstrap}
-                alongside={(agent) => inspect({ kind: "agent", agent })}
-              />
-            )}
             {inspection.kind === "find" && (
               <AgentSearch bootstrap={bootstrap} />
             )}
@@ -294,11 +394,11 @@ export function TraceInspector({
             )}
             {inspection.kind === "object" && (
               <ObjectInspection
-                key={inspection.reference}
+                key={`${inspection.reference}:${inspection.scope.view.token}:${inspection.scope.history ?? ""}`}
                 reference={inspection.reference}
-                history={bootstrap.header.history.selection}
-                view={bootstrap.view}
-                maximum={bootstrap.window.limits.maxPayloadBytes}
+                history={inspection.scope.history}
+                view={inspection.scope.view}
+                maximum={inspection.scope.maximumPayloadBytes}
                 onInspect={inspect}
               />
             )}
@@ -311,31 +411,80 @@ export function TraceInspector({
 
 function AgentDirectory({
   bootstrap,
+  location,
+  onLocation,
   alongside,
 }: {
   bootstrap: ReaderBootstrap;
+  location: DirectoryLocation;
+  onLocation: (value: DirectoryLocation) => void;
   alongside: (agent: string) => void;
 }) {
   const t = useT();
-  const [query, setQuery] = useState("");
-  const [filter, setFilter] = useState("all");
-  const [cursor, setCursor] = useState<string | null>(null);
+  const scroller = useRef<HTMLDivElement>(null);
+  const restored = useRef(false);
+  const { query, filter, cursor } = location;
+  const view = location.view ?? bootstrap.view;
   const address = bootstrap.header.agent.address;
   const result = useTraceResource(
-    traceCacheKey(bootstrap.view, ["agents", address, query, filter, cursor]),
-    (signal) =>
-      traceAPI.agents(address, bootstrap.view, query, filter, cursor, signal),
+    traceCacheKey(view, ["agents", address, query, filter, cursor]),
+    (signal) => traceAPI.agents(address, view, query, filter, cursor, signal),
   );
+  useLayoutEffect(() => {
+    if (
+      restored.current ||
+      result.pending ||
+      !result.data ||
+      !location.position ||
+      !scroller.current
+    )
+      return;
+    const pane = scroller.current;
+    const row = [
+      ...pane.querySelectorAll<HTMLElement>("[data-directory-agent]"),
+    ].find((item) => item.dataset.directoryAgent === location.position!.agent);
+    if (!row) return;
+    const offset = location.position.offset;
+    row
+      .querySelector<HTMLButtonElement>("[data-open-alongside]")
+      ?.focus({ preventScroll: true });
+    pane.scrollTop +=
+      row.getBoundingClientRect().top -
+      pane.getBoundingClientRect().top -
+      offset;
+    restored.current = true;
+  }, [result.data, result.pending, location.position]);
+  const update = (patch: Partial<DirectoryLocation>) =>
+    onLocation({ ...location, view, position: null, ...patch });
+  const open = (agent: string, row: HTMLElement) => {
+    const pane = scroller.current;
+    onLocation({
+      ...location,
+      view,
+      position: pane
+        ? {
+            agent,
+            offset:
+              row.getBoundingClientRect().top -
+              pane.getBoundingClientRect().top,
+          }
+        : null,
+    });
+    alongside(agent);
+  };
   return (
-    <div className="space-y-3">
+    <div
+      ref={scroller}
+      data-agent-directory
+      className="min-h-0 flex-1 space-y-3 overflow-auto p-3 [overflow-anchor:none]"
+    >
       <label className="block text-sm">
         {t("trace.findAgents")}
         <input
           className="mt-1 min-h-11 w-full rounded border border-line bg-canvas px-3 text-base"
           value={query}
           onChange={(event) => {
-            setQuery(event.target.value);
-            setCursor(null);
+            update({ query: event.target.value, cursor: null });
           }}
         />
       </label>
@@ -345,8 +494,7 @@ function AgentDirectory({
           className="ml-2 min-h-11 rounded border border-line bg-canvas px-2"
           value={filter}
           onChange={(event) => {
-            setFilter(event.target.value);
-            setCursor(null);
+            update({ filter: event.target.value, cursor: null });
           }}
         >
           {[
@@ -375,6 +523,7 @@ function AgentDirectory({
         {result.data?.items.map((row) => (
           <li
             key={row.agent.address}
+            data-directory-agent={row.agent.address}
             className="rounded border border-line p-3"
           >
             <Link
@@ -400,7 +549,15 @@ function AgentDirectory({
               ))}
             <button
               className={button}
-              onClick={() => alongside(row.agent.address)}
+              data-open-alongside
+              onClick={(event) =>
+                open(
+                  row.agent.address,
+                  event.currentTarget.closest<HTMLElement>(
+                    "[data-directory-agent]",
+                  )!,
+                )
+              }
             >
               {t("trace.alongside")}
             </button>
@@ -410,7 +567,7 @@ function AgentDirectory({
       <PageControls
         page={result.data}
         pending={result.pending}
-        setCursor={setCursor}
+        setCursor={(cursor) => update({ cursor })}
       />
     </div>
   );
@@ -653,7 +810,7 @@ function ObjectInspection({
   history: string | null;
   view: TraceView;
   maximum: number;
-  onInspect: (value: Inspection) => void;
+  onInspect: (value: InspectionRequest) => void;
 }) {
   const t = useT();
   const result = useTraceResource(
@@ -681,7 +838,7 @@ function ObjectContent({
   detail: ObjectDetail;
   history: string | null;
   maximum: number;
-  onInspect: (value: Inspection) => void;
+  onInspect: (value: InspectionRequest) => void;
 }) {
   const t = useT();
   const content = detail.content;
@@ -901,7 +1058,7 @@ function ObjectContent({
               {content.membershipsCursor && (
                 <RelationPages
                   reference={detail.reference}
-              history={history}
+                  history={history}
                   cursor={content.membershipsCursor}
                   view={detail.view}
                   kind="memberships"
@@ -921,7 +1078,7 @@ function ObjectContent({
               {content.operationsCursor && (
                 <RelationPages
                   reference={detail.reference}
-              history={history}
+                  history={history}
                   cursor={content.operationsCursor}
                   view={detail.view}
                   kind="relations"
@@ -943,7 +1100,7 @@ function ObjectContent({
       {detail.relationsCursor && (
         <RelationPages
           reference={detail.reference}
-              history={history}
+          history={history}
           cursor={detail.relationsCursor}
           view={detail.view}
           kind="relations"
@@ -1010,13 +1167,14 @@ function RelationPages({
   cursor: string;
   view: TraceView;
   kind: "resources" | "memberships" | "relations";
-  onInspect: (value: Inspection) => void;
+  onInspect: (value: InspectionRequest) => void;
 }) {
   const t = useT();
   const [next, setNext] = useState<string | null>(null);
   const result = useTraceResource(
     next ? traceCacheKey(view, [reference, history, kind, next]) : null,
-    (signal) => traceAPI.relations(reference, view, history, kind, next!, signal),
+    (signal) =>
+      traceAPI.relations(reference, view, history, kind, next!, signal),
   );
   return (
     <div>
