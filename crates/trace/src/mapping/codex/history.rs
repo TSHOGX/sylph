@@ -18,6 +18,7 @@ pub struct HistoryRecord {
 pub struct HistoryHeader {
     pub agent: AgentRef,
     pub history_base: Option<Value>,
+    pub history_mode: Option<String>,
     pub inherited_before: Option<u64>,
     pub inherited_from: Option<AgentRef>,
 }
@@ -55,6 +56,10 @@ pub(super) fn record_source(input: &MapInput<'_>, value: &Value, output: &mut Ma
             .and_then(agent)
             .map(|owner| HistoryHeader {
                 agent: owner,
+                history_mode: payload
+                    .get("history_mode")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
                 history_base: payload
                     .get("history_base")
                     .filter(|base| !base.is_null())
@@ -184,6 +189,17 @@ fn segment(
         ));
     }
     let mut previous_bytes = 0u64;
+    if first.vendor_ordinal.is_none()
+        && (header.history_mode.as_deref() == Some("paginated")
+            || records
+                .values()
+                .any(|record| record.vendor_ordinal.is_some()))
+    {
+        return Err(failure(
+            DiagnosticCode::InvalidRelation,
+            "Paginated history requires a recorded header ordinal",
+        ));
+    }
     let start = first.vendor_ordinal.unwrap_or(0);
     let mut evidence = vec![first.observation.clone()];
     for local in 0..end_local {
@@ -519,13 +535,17 @@ pub(super) fn map_selection(input: MapInput<'_>, snapshot: NativeDatabaseSnapsho
                     });
                 }
             }
-            for entry in input.archive.history_entries.values() {
+            for (entry_ref, position) in &input.archive.native_history_positions {
+                // Derived context aliases can be addressed at a native header,
+                // but only the native mapper's position witness establishes a
+                // physical record. Reimporting aliases duplicates ancestors and
+                // changes a continuation's candidate order after another selection.
+                let Some(entry) = input.archive.history_entries.get(entry_ref) else {
+                    continue;
+                };
                 if entry.containing_agent == agent {
                     continue;
                 }
-                let ObjectAddress::Occurrence { position, .. } = entry.entry_ref.address() else {
-                    continue;
-                };
                 if position.source != segment.source || position.generation != segment.generation {
                     continue;
                 }

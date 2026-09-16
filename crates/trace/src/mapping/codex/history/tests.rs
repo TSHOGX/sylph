@@ -86,6 +86,17 @@ impl Fixture {
                         claim.evidence.clone(),
                     );
                 }
+                Fact::HistoryPosition {
+                    entry,
+                    position,
+                    coordinate: HistoryCoordinate::LocalRecordIndex,
+                    mapping_rule,
+                    ..
+                } if mapping_rule == "codex/native-history" => {
+                    self.archive
+                        .native_history_positions
+                        .insert(entry.clone(), position.clone());
+                }
                 Fact::HistoryMappingComplete { extent } => self
                     .archive
                     .source_prefixes
@@ -105,6 +116,17 @@ impl Fixture {
         start: u64,
         messages: usize,
     ) {
+        self.native_with(physical, logical, base, start, messages, |_, _| {});
+    }
+    fn native_with(
+        &mut self,
+        physical: &str,
+        logical: &str,
+        base: Option<Value>,
+        start: u64,
+        messages: usize,
+        mut transform: impl FnMut(usize, &mut Value),
+    ) {
         let mut values = vec![
             serde_json::json!({"type":"session_meta","ordinal":start,"payload":{"id":logical,"history_mode":"paginated","history_base":base}}),
         ];
@@ -112,7 +134,8 @@ impl Fixture {
         let mut state = MapperState::default();
         let mut offset = 0;
         let mut ends = vec![];
-        for (index, value) in values.iter().enumerate() {
+        for (index, value) in values.iter_mut().enumerate() {
+            transform(index, value);
             let mut raw = serde_json::to_vec(value).unwrap();
             raw.push(b'\n');
             let capture = capture(
@@ -161,7 +184,7 @@ impl Fixture {
     }
     fn map(&self, physical: &str, logical: &str, state: &MapperState) -> MapOutput {
         let capture = capture(
-            "database",
+            &format!("database-{physical}"),
             1,
             SourceLocator::Occurrence {
                 key: "selected".into(),
@@ -408,16 +431,12 @@ fn an_unmapped_prefix_never_becomes_a_complete_inherited_selection() {
 #[test]
 fn standalone_legacy_history_uses_lexical_coordinates_without_inventing_vendor_ordinals() {
     let mut fixture = Fixture::default();
-    fixture.native(ROOT, "parent", None, 0, 2);
-    for record in fixture
-        .archive
-        .history_records
-        .get_mut(&(source(ROOT), 0))
-        .unwrap()
-        .values_mut()
-    {
-        record.vendor_ordinal = None;
-    }
+    fixture.native_with(ROOT, "parent", None, 0, 2, |index, value| {
+        value.as_object_mut().unwrap().remove("ordinal");
+        if index == 0 {
+            value["payload"]["history_mode"] = serde_json::json!("legacy");
+        }
+    });
     fixture.select(ROOT, "parent");
     let selected = fixture.selected("parent");
     assert_eq!(selected.len(), 2);
@@ -431,4 +450,88 @@ fn history_base_requires_its_declared_rollout_filename_contract() {
     .is_some());
     assert!(physical_id("/vendor/random-11111111-1111-4111-8111-111111111111.jsonl").is_none());
     assert!(physical_id("/vendor/rollout-2026-09-16T00-00-00-not-a-uuid.jsonl").is_none());
+}
+
+#[test]
+fn selected_grandchild_does_not_reimport_its_parents_derived_context() {
+    let mut fixture = Fixture::default();
+    fixture.native(ROOT, "a", None, 0, 2);
+    let base = fixture.base(ROOT, 3);
+    fixture.native(CHILD, "b", Some(base), 3, 1);
+    fixture.select(CHILD, "b");
+    let base = fixture.base(CHILD, 2);
+    fixture.native(REVERT, "c", Some(base), 5, 1);
+    fixture.select(REVERT, "c");
+    let selected = fixture.selected("c");
+    let references: Vec<_> = selected
+        .iter()
+        .flat_map(|entry| entry.content.iter())
+        .filter_map(|content| match content {
+            HistoryContent::Message(revision) => Some(revision.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        references.len(),
+        4,
+        "three physical segments contain exactly four messages"
+    );
+    assert_eq!(references.iter().collect::<BTreeSet<_>>().len(), 4);
+    assert_eq!(
+        selected
+            .iter()
+            .filter(|entry| entry.original_owner == Some(OwnerRef::Agent { agent: agent("a") }))
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn completing_a_parent_selection_cannot_shift_a_childs_continuation() {
+    let mut fixture = Fixture::default();
+    fixture.native(ROOT, "a", None, 0, 2);
+    let base = fixture.base(ROOT, 3);
+    fixture.native(CHILD, "b", Some(base), 3, 55);
+    let base = fixture.base(CHILD, 56);
+    fixture.native(REVERT, "c", Some(base), 59, 1);
+    let first = fixture.map(REVERT, "c", &MapperState::default());
+    let continuation = first.continuation_state.clone().unwrap();
+    fixture.apply(first);
+    fixture.select(CHILD, "b");
+    let last = fixture.map(REVERT, "c", &continuation);
+    assert!(last.requests.is_empty());
+    fixture.apply(last);
+    let selected = fixture.selected("c");
+    assert_eq!(selected.len(), 58);
+    let references: BTreeSet<_> = selected
+        .iter()
+        .flat_map(|entry| entry.content.iter())
+        .map(|content| serde_json::to_string(content).unwrap())
+        .collect();
+    assert_eq!(references.len(), 58);
+}
+
+#[test]
+fn actual_paginated_bytes_without_a_header_ordinal_never_select_skipped_coordinates() {
+    let mut fixture = Fixture::default();
+    fixture.native_with(ROOT, "gap", None, 0, 2, |index, value| {
+        if index == 0 {
+            value.as_object_mut().unwrap().remove("ordinal");
+        }
+        if index == 2 {
+            value["ordinal"] = serde_json::json!(500);
+        }
+    });
+    let output = fixture.map(ROOT, "gap", &MapperState::default());
+    assert!(
+        !output
+            .claims
+            .iter()
+            .any(|claim| matches!(claim.fact, Fact::SelectHistory { .. })),
+        "paginated coordinate gaps cannot establish a selected history"
+    );
+    assert!(output
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == DiagnosticCode::InvalidRelation));
 }

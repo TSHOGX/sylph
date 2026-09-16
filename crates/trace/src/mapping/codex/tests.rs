@@ -104,6 +104,7 @@ fn reverted_rollout_selection_stays_unknown_until_its_frozen_base_is_resolved() 
             observation: native.observation_ref.clone(),
             vendor_ordinal: Some(214),
             header: Some(history::HistoryHeader {
+                history_mode:Some("paginated".into()),
                 agent: agent("root"),
                 history_base: Some(serde_json::json!({
                     "thread_id": "prior-physical-rollout",
