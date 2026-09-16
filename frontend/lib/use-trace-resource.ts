@@ -44,6 +44,8 @@ export function useTraceResource<T>(
       : undefined;
     const clear = onTraceAccessCleared((reason) => {
       controller.abort();
+      heldView.current?.();
+      heldView.current = null;
       setState({
         key,
         pending: false,

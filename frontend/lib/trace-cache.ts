@@ -235,3 +235,10 @@ onTraceAccessCleared((reason) => {
 onTraceViewReleased((token) =>
   traceMetadata.removeWhere((key) => key.includes(JSON.stringify(token))),
 );
+
+// BFCache restores the mounted tree after pagehide released its leases. The
+// existing view-expiration path reacquires around anchors and preserves drafts.
+if (typeof window !== "undefined")
+  window.addEventListener("pageshow", (event) => {
+    if (event.persisted) invalidateTraceView();
+  });
