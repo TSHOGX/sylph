@@ -298,6 +298,20 @@ The 20/200 tail oracle suite compares every reduction to the full resolver, incl
 restart and redelivery; full 2000-record production scaling and direct delta scheduling
 remain open.
 
+Search reconciliation now persists complete source fingerprints and reuses unchanged
+FTS text across process restarts. Bounded source writes and stale-source removal remain
+private until a fenced update publishes its exact snapshot; interruption and invalidation
+cannot publish partial text. Search body composition shares the reader's evidenced append
+logic, including retained prefix revisions and replacement boundaries. Source enumeration
+and append-chain composition metadata still need scaling work, and obsolete search payload
+pins currently remain until the search generation retires.
+
+The measurement sentence in commit `3ed5bf5` combined different runs: the 1000-record
+358 ms figure predates incremental reduction, while the measured incremental run used
+100 records and reported 47 ms, 9 rows, 7 resolved claims, one history entry and no full
+resolution. It is not evidence of 1000-record incremental performance. The recorded
+negative controls also do not establish that every new dependency guard was mutated.
+
 Open implementation/acceptance work remains in the ordered list above. In particular,
 `crates/server/src/trace/worker/reading.rs` still materializes general reconciliation from
 the whole reduction. Tail proof evaluation also scans semantic metadata; constant row

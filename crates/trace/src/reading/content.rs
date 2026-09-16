@@ -8,6 +8,28 @@ pub struct ComposedPayload {
     pub revisions: Vec<MessageRevisionRef>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ComposedRevisions {
+    pub parts: BTreeMap<MessageRevisionRef, Vec<ContentPart>>,
+    pub payloads: BTreeMap<PayloadRef, ComposedPayload>,
+    pub unavailable: BTreeMap<MessageRevisionRef, String>,
+}
+
+/// Payload metadata needed to compose the requested revisions. Unresolved chains
+/// are reported by compose_revisions and must not fall back to a trailing segment.
+pub fn composition_payloads(
+    reduction: &Reduction,
+    requested: &BTreeSet<MessageRevisionRef>,
+) -> BTreeSet<PayloadRef> {
+    requested
+        .iter()
+        .filter_map(|reference| chain(reduction, reference))
+        .flatten()
+        .flat_map(|revision| &revision.parts)
+        .map(|part| part.payload.clone())
+        .collect()
+}
+
 pub(super) fn resolve(
     reduction: &Reduction,
     payloads: &mut BTreeMap<PayloadRef, PayloadPreview>,
@@ -16,9 +38,6 @@ pub(super) fn resolve(
     BTreeMap<PayloadRef, ComposedPayload>,
     BTreeMap<MessageRevisionRef, String>,
 ) {
-    let mut parts = BTreeMap::new();
-    let mut composed = BTreeMap::new();
-    let mut unavailable = BTreeMap::new();
     let mut requested: BTreeSet<_> = reduction
         .objects
         .values()
@@ -75,7 +94,21 @@ pub(super) fn resolve(
             }
         }
     }
-    for selected in &requested {
+    let result = compose_revisions(reduction, &requested, payloads);
+    (result.parts, result.payloads, result.unavailable)
+}
+
+/// Compose explicitly requested immutable revisions without choosing a history or
+/// message identity. Readers and search share the same append/replacement rules.
+pub fn compose_revisions(
+    reduction: &Reduction,
+    requested: &BTreeSet<MessageRevisionRef>,
+    payloads: &mut BTreeMap<PayloadRef, PayloadPreview>,
+) -> ComposedRevisions {
+    let mut parts = BTreeMap::new();
+    let mut composed = BTreeMap::new();
+    let mut unavailable = BTreeMap::new();
+    for selected in requested {
         let Some(chain) = chain(reduction, selected) else {
             unavailable.insert(
                 selected.clone(),
@@ -150,7 +183,11 @@ pub(super) fn resolve(
             parts.insert(selected.clone(), resolved);
         }
     }
-    (parts, composed, unavailable)
+    ComposedRevisions {
+        parts,
+        payloads: composed,
+        unavailable,
+    }
 }
 
 fn chain<'a>(

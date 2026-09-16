@@ -80,6 +80,24 @@ pub enum SearchError {
 }
 type Result<T> = std::result::Result<T, SearchError>;
 
+/// An interrupted writer cannot resume after another update or invalidation.
+#[derive(Debug, Clone)]
+pub struct SearchUpdate {
+    snapshot: Snapshot,
+    serial: i64,
+}
+
+#[derive(Debug, Default)]
+pub struct SearchIndexWork {
+    pub sources_examined: u64,
+    pub sources_reused: u64,
+    /// Text range reads; source/manifest metadata enumeration is separate work.
+    pub payload_bytes_read: u64,
+    pub documents_written: u64,
+    /// Stale-source removals during publication, excluding interrupted-source cleanup.
+    pub documents_removed: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SearchHistoryMode {
@@ -220,15 +238,15 @@ impl SearchStore {
             sqlx::raw_sql(include_str!("search/schema.sql"))
                 .execute(&mut *tx)
                 .await?;
-            sqlx::query("INSERT INTO search_state VALUES(1,?,0,0,0)")
+            sqlx::query("INSERT INTO search_state VALUES(1,?,0,0,0,0,0,0)")
                 .bind(&generation)
                 .execute(&mut *tx)
                 .await?;
-            sqlx::query("PRAGMA user_version=1")
+            sqlx::query("PRAGMA user_version=2")
                 .execute(&mut *tx)
                 .await?;
             tx.commit().await?;
-        } else if version != 1 {
+        } else if version != 2 {
             return Err(SearchError::Invalid("unsupported search schema".into()));
         }
         let stored: String =
@@ -273,26 +291,67 @@ impl SearchStore {
         }))
     }
 
-    /// Complete projection units update document membership and index cut together.
-    pub async fn apply(
-        &self,
-        expected_revision: u64,
-        snapshot: &Snapshot,
-        documents: &[SearchDocument],
-        removed: &[String],
-        complete: bool,
-    ) -> Result<()> {
-        if snapshot.generation != self.generation
-            || snapshot.view_revision < expected_revision
-            || documents.len() + removed.len() > self.limits.max_documents_per_batch
-        {
-            return Err(SearchError::Invalid(
-                "index batch scope, order or count".into(),
-            ));
+    /// Hide the prior index before its catalogue root moves to this target.
+    /// Source reuse remains private until every source and stale removal completes.
+    pub async fn begin_update(&self, snapshot: &Snapshot) -> Result<SearchUpdate> {
+        if snapshot.generation != self.generation {
+            return Err(SearchError::Invalid("index generation".into()));
         }
-        // Count the complete submitted batch, including text and removal keys.
-        // Metadata-only accounting hid most FTS work behind a plausible small size.
-        let bytes = serde_json::to_vec(&(documents, removed))?.len();
+        let cut = i64::try_from(snapshot.evidence_cut)
+            .map_err(|_| SearchError::Invalid("index evidence cut".into()))?;
+        let revision = i64::try_from(snapshot.view_revision)
+            .map_err(|_| SearchError::Invalid("index view revision".into()))?;
+        let serial = sqlx::query_scalar("UPDATE search_state SET ready=0,update_serial=update_serial+1,target_cut=?,target_revision=? WHERE singleton=1 AND target_cut<=? AND target_revision<=? AND (target_revision<>? OR target_cut=?) RETURNING update_serial")
+            .bind(cut).bind(revision).bind(cut).bind(revision).bind(revision).bind(cut)
+            .fetch_optional(&self.writer).await?.ok_or(SearchError::Indexing)?;
+        Ok(SearchUpdate {
+            snapshot: snapshot.clone(),
+            serial,
+        })
+    }
+
+    async fn require_update(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        update: &SearchUpdate,
+    ) -> Result<()> {
+        let valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM search_state WHERE singleton=1 AND generation=? AND ready=0 AND update_serial=? AND target_cut=? AND target_revision=?)")
+            .bind(&update.snapshot.generation).bind(update.serial)
+            .bind(update.snapshot.evidence_cut as i64).bind(update.snapshot.view_revision as i64)
+            .fetch_one(&mut **tx).await?;
+        if !valid {
+            return Err(SearchError::Indexing);
+        }
+        Ok(())
+    }
+
+    /// Mark an immutable source as present, or discard its interrupted partial text.
+    /// The fingerprint includes body, scope, epoch and all result metadata.
+    pub async fn prepare_source(&self, update: &SearchUpdate, key: &str) -> Result<bool> {
+        if key.is_empty() || key.len() > self.limits.max_query_bytes {
+            return Err(SearchError::Limit("source key bytes"));
+        }
+        let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
+        self.require_update(&mut tx, update).await?;
+        let complete: i64 = sqlx::query_scalar("INSERT INTO search_sources VALUES(?,?,0) ON CONFLICT(source_key) DO UPDATE SET seen_update=excluded.seen_update RETURNING complete")
+            .bind(key).bind(update.serial).fetch_one(&mut *tx).await?;
+        tx.commit().await?;
+        if complete == 0 {
+            self.remove_source_documents(update, key).await?;
+        }
+        Ok(complete != 0)
+    }
+
+    pub async fn write_source_batch(
+        &self,
+        update: &SearchUpdate,
+        source: &str,
+        documents: &[SearchDocument],
+    ) -> Result<()> {
+        if documents.len() > self.limits.max_documents_per_batch {
+            return Err(SearchError::Limit("index batch count"));
+        }
+        let bytes = serde_json::to_vec(&(source, documents))?.len();
         if bytes > self.limits.max_batch_bytes {
             return Err(SearchError::Limit("index batch bytes"));
         }
@@ -322,52 +381,108 @@ impl SearchStore {
             prepared.push((document, json));
         }
         let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
-        let row =
-            sqlx::query("SELECT view_revision,evidence_cut FROM search_state WHERE singleton=1")
-                .fetch_one(&mut *tx)
-                .await?;
-        if row.get::<i64, _>("view_revision") as u64 != expected_revision
-            || snapshot.evidence_cut < row.get::<i64, _>("evidence_cut") as u64
-        {
+        self.require_update(&mut tx, update).await?;
+        let writable: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM search_sources WHERE source_key=? AND seen_update=? AND complete=0)")
+            .bind(source).bind(update.serial).fetch_one(&mut *tx).await?;
+        if !writable {
             return Err(SearchError::Indexing);
         }
-        for key in removed {
-            if let Some(rowid) = sqlx::query_scalar::<_, i64>(
-                "DELETE FROM search_documents WHERE document_key=? RETURNING id",
-            )
-            .bind(key)
-            .fetch_optional(&mut *tx)
-            .await?
-            {
-                sqlx::query("DELETE FROM search_fts WHERE rowid=?")
-                    .bind(rowid)
-                    .execute(&mut *tx)
-                    .await?;
-            }
-        }
         for (document, json) in prepared {
-            let id:i64=sqlx::query_scalar("INSERT INTO search_documents(document_key,environment,agent_ref,selection_ref,history_mode,representation,document_json) VALUES(?,?,?,?,?,?,?) ON CONFLICT(document_key) DO UPDATE SET environment=excluded.environment,agent_ref=excluded.agent_ref,selection_ref=excluded.selection_ref,history_mode=excluded.history_mode,representation=excluded.representation,document_json=excluded.document_json RETURNING id")
-                .bind(&document.key).bind(document.agent.environment().as_str()).bind(document.agent.encode()).bind(document.selection.as_ref().map(SelectionRef::encode)).bind(serde_json::to_string(&document.mode)?).bind(serde_json::to_string(&document.representation)?).bind(json).fetch_one(&mut *tx).await?;
-            sqlx::query("DELETE FROM search_fts WHERE rowid=?")
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
+            let id:i64=sqlx::query_scalar("INSERT INTO search_documents(document_key,source_key,environment,agent_ref,selection_ref,history_mode,representation,document_json) VALUES(?,?,?,?,?,?,?,?) RETURNING id")
+                .bind(&document.key).bind(source).bind(document.agent.environment().as_str()).bind(document.agent.encode()).bind(document.selection.as_ref().map(SelectionRef::encode)).bind(serde_json::to_string(&document.mode)?).bind(serde_json::to_string(&document.representation)?).bind(json).fetch_one(&mut *tx).await?;
             sqlx::query("INSERT INTO search_fts(rowid,text) VALUES(?,?)")
                 .bind(id)
                 .bind(&document.text)
                 .execute(&mut *tx)
                 .await?;
         }
-        sqlx::query(
-            "UPDATE search_state SET evidence_cut=?,view_revision=?,ready=? WHERE singleton=1",
-        )
-        .bind(snapshot.evidence_cut as i64)
-        .bind(snapshot.view_revision as i64)
-        .bind(i64::from(complete))
-        .execute(&mut *tx)
-        .await?;
         tx.commit().await?;
         Ok(())
+    }
+
+    pub async fn complete_source(&self, update: &SearchUpdate, key: &str) -> Result<()> {
+        let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
+        self.require_update(&mut tx, update).await?;
+        let result = sqlx::query(
+            "UPDATE search_sources SET complete=1 WHERE source_key=? AND seen_update=?",
+        )
+        .bind(key)
+        .bind(update.serial)
+        .execute(&mut *tx)
+        .await?;
+        if result.rows_affected() != 1 {
+            return Err(SearchError::Indexing);
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn remove_source_documents(&self, update: &SearchUpdate, key: &str) -> Result<u64> {
+        let mut removed = 0;
+        loop {
+            let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
+            self.require_update(&mut tx, update).await?;
+            // Fixed-width row IDs bound removal memory independently of document keys.
+            let ids: Vec<i64> = sqlx::query_scalar(
+                "SELECT id FROM search_documents WHERE source_key=? ORDER BY id LIMIT ?",
+            )
+            .bind(key)
+            .bind(self.limits.max_documents_per_batch as i64)
+            .fetch_all(&mut *tx)
+            .await?;
+            if ids.is_empty() {
+                return Ok(removed);
+            }
+            removed += ids.len() as u64;
+            for id in ids {
+                sqlx::query("DELETE FROM search_fts WHERE rowid=?")
+                    .bind(id)
+                    .execute(&mut *tx)
+                    .await?;
+                sqlx::query("DELETE FROM search_documents WHERE id=?")
+                    .bind(id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            tx.commit().await?;
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// Publish only after the complete source manifest has been reconciled.
+    pub async fn finish_update(&self, update: &SearchUpdate) -> Result<u64> {
+        let mut removed = 0;
+        loop {
+            let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
+            self.require_update(&mut tx, update).await?;
+            let stale: Option<String> = sqlx::query_scalar("SELECT source_key FROM search_sources WHERE seen_update<? ORDER BY seen_update,source_key LIMIT 1")
+                .bind(update.serial).fetch_optional(&mut *tx).await?;
+            if let Some(key) = stale {
+                tx.commit().await?;
+                removed += self.remove_source_documents(update, &key).await?;
+                let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
+                self.require_update(&mut tx, update).await?;
+                sqlx::query("DELETE FROM search_sources WHERE source_key=? AND seen_update<?")
+                    .bind(key)
+                    .bind(update.serial)
+                    .execute(&mut *tx)
+                    .await?;
+                tx.commit().await?;
+                tokio::task::yield_now().await;
+                continue;
+            }
+            let incomplete: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM search_sources WHERE complete=0)")
+                    .fetch_one(&mut *tx)
+                    .await?;
+            if incomplete {
+                return Err(SearchError::Indexing);
+            }
+            sqlx::query("UPDATE search_state SET evidence_cut=target_cut,view_revision=target_revision,ready=1 WHERE singleton=1")
+                .execute(&mut *tx).await?;
+            tx.commit().await?;
+            return Ok(removed);
+        }
     }
 
     /// `allowed_environments` is freshly evaluated by the caller for this Subject.
@@ -583,51 +698,16 @@ impl SearchStore {
 
     pub async fn invalidate(&self) -> Result<()> {
         let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
-        sqlx::query("UPDATE search_state SET ready=0 WHERE singleton=1")
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(
+            "UPDATE search_state SET ready=0,update_serial=update_serial+1 WHERE singleton=1",
+        )
+        .execute(&mut *tx)
+        .await?;
         sqlx::query("DELETE FROM search_jobs")
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
         Ok(())
-    }
-
-    pub async fn begin_reindex(&self) -> Result<()> {
-        sqlx::query("UPDATE search_state SET ready=0 WHERE singleton=1")
-            .execute(&self.writer)
-            .await?;
-        loop {
-            let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
-            let ids: Vec<i64> =
-                sqlx::query_scalar("SELECT id FROM search_documents ORDER BY id LIMIT ?")
-                    .bind(self.limits.max_documents_per_batch as i64)
-                    .fetch_all(&mut *tx)
-                    .await?;
-            if ids.is_empty() {
-                break;
-            }
-            for id in ids {
-                sqlx::query("DELETE FROM search_fts WHERE rowid=?")
-                    .bind(id)
-                    .execute(&mut *tx)
-                    .await?;
-                sqlx::query("DELETE FROM search_documents WHERE id=?")
-                    .bind(id)
-                    .execute(&mut *tx)
-                    .await?;
-            }
-            tx.commit().await?;
-            tokio::task::yield_now().await;
-        }
-        Ok(())
-    }
-    pub async fn revision(&self) -> Result<u64> {
-        Ok(
-            sqlx::query_scalar::<_, i64>("SELECT view_revision FROM search_state WHERE singleton=1")
-                .fetch_one(&self.readers)
-                .await? as u64,
-        )
     }
 }
 

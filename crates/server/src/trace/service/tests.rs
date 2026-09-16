@@ -235,6 +235,10 @@ async fn retained_incompatible_contract_cannot_acquire_a_snapshot_lease() {
 }
 
 pub(super) async fn admit_native(service: &TraceService) {
+    admit_native_from(service, NATIVE, 0, 0).await;
+}
+
+async fn admit_native_from(service: &TraceService, raw: &[u8], ordinal: u64, mut offset: u64) {
     let environment = EnvironmentId::parse("env7fk2").unwrap();
     let issuer = Issuer::Environment(environment.clone());
     let scope = IngestionScope::Inventory(InventoryRef {
@@ -243,14 +247,14 @@ pub(super) async fn admit_native(service: &TraceService) {
         instance: "recovery-fixture".into(),
     });
     let epoch = service.evidence.authorize_scope(&scope, &[]).await.unwrap();
-    let mut offset = 0;
-    for (index, bytes) in NATIVE.split_inclusive(|byte| *byte == b'\n').enumerate() {
+    for (index, bytes) in raw.split_inclusive(|byte| *byte == b'\n').enumerate() {
+        let index = ordinal + index as u64;
         let capture = Capture {
             observation_ref: ObservationRef {
                 issuer: issuer.clone(),
                 producer_id: "native".into(),
                 producer_epoch: "recovery".into(),
-                producer_seq: index as u64 + 1,
+                producer_seq: index + 1,
             },
             source_position: SourcePosition {
                 source: SourceRef {
@@ -261,7 +265,7 @@ pub(super) async fn admit_native(service: &TraceService) {
                 locator: SourceLocator::Jsonl {
                     byte_start: offset,
                     byte_end: offset + bytes.len() as u64,
-                    record_ordinal: index as u64,
+                    record_ordinal: index,
                 },
             },
             ingestion_authorization_epoch: epoch.clone(),
@@ -288,6 +292,105 @@ pub(super) async fn admit_native(service: &TraceService) {
             .unwrap();
         offset += bytes.len() as u64;
     }
+}
+
+async fn search_reuse_pipeline(records: usize) {
+    use crate::trace::search::{SearchHistoryMode, SearchQueryContext, SearchScope};
+    let directory = tempfile::tempdir().unwrap();
+    let service = TraceService::open(directory.path()).await.unwrap();
+    let mut raw = NATIVE
+        .split_inclusive(|byte| *byte == b'\n')
+        .next()
+        .unwrap()
+        .to_vec();
+    for index in 0..records {
+        raw.extend(serde_json::to_vec(&serde_json::json!({
+            "type":"response_item", "payload":{"type":"message", "id":format!("search-{index}"),
+                "role":"assistant", "content":[{"type":"output_text", "text":format!("retained searchable message {index}")}]}
+        })).unwrap());
+        raw.push(b'\n');
+    }
+    admit_native_from(&service, &raw, 0, 0).await;
+    service.project_pending().await.unwrap();
+    let started = std::time::Instant::now();
+    let cold = service.index_pending().await.unwrap();
+    let cold_ms = started.elapsed().as_millis();
+    assert_eq!(cold.sources_examined, records as u64);
+    assert_eq!(cold.sources_reused, 0);
+    assert!(cold.payload_bytes_read > 0);
+    let unchanged = service.index_pending().await.unwrap();
+    assert_eq!(unchanged.sources_examined, 0);
+    assert_eq!(unchanged.payload_bytes_read, 0);
+    close(service).await;
+
+    // The warm pass must reuse the durable manifest, not a process-local cache.
+    let service = TraceService::open(directory.path()).await.unwrap();
+    let text = "newly appended searchable message";
+    let mut appended = serde_json::to_vec(&serde_json::json!({
+        "type":"response_item", "payload":{"type":"message", "id":"search-new",
+            "role":"assistant", "content":[{"type":"output_text", "text":text}]}
+    }))
+    .unwrap();
+    appended.push(b'\n');
+    admit_native_from(&service, &appended, records as u64 + 1, raw.len() as u64).await;
+    service.project_pending().await.unwrap();
+    let started = std::time::Instant::now();
+    let warm = service.index_pending().await.unwrap();
+    let warm_ms = started.elapsed().as_millis();
+    assert_eq!(warm.sources_examined, records as u64 + 1);
+    assert_eq!(warm.sources_reused, records as u64);
+    assert_eq!(warm.payload_bytes_read, text.len() as u64);
+    assert_eq!(
+        warm.documents_written,
+        cold.documents_written / records as u64
+    );
+    assert_eq!(warm.documents_removed, 0);
+    let lease = service.lease_guard("reader", None).await.unwrap();
+    let index = service
+        .search_store(&lease.snapshot.generation)
+        .await
+        .unwrap();
+    let result = index
+        .start_query(
+            SearchQueryContext {
+                subject: "reader",
+                query: "newly",
+                scope: &SearchScope {
+                    agent: None,
+                    selection: None,
+                    mode: SearchHistoryMode::Authored,
+                    representation: None,
+                },
+                allowed_environments: &["env7fk2".into()].into(),
+            },
+            &lease.snapshot,
+            &lease.token,
+            crate::models::now_ms(),
+            8,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.hits.len(), 1);
+    assert_eq!(result.hits[0].snippet, text);
+    eprintln!("search scaling: records={records} cold_ms={cold_ms} cold={cold:?} warm_ms={warm_ms} warm={warm:?}");
+    drop(index);
+    drop(lease);
+    close(service).await;
+}
+
+#[tokio::test]
+async fn search_tail_after_restart_reuses_retained_text_and_indexes_only_new_sources() {
+    search_reuse_pipeline(20).await;
+}
+
+#[tokio::test]
+#[ignore = "manual real-pipeline search scaling measurement; run in its own process"]
+async fn search_source_scaling_probe() {
+    let records = std::env::var("SYLPH_SEARCH_BENCH_RECORDS")
+        .unwrap_or_else(|_| "2000".into())
+        .parse()
+        .unwrap();
+    search_reuse_pipeline(records).await;
 }
 
 pub(super) async fn close(service: TraceService) {

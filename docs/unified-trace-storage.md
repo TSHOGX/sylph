@@ -652,6 +652,13 @@ replacements and search checkpoint `(generation, view_revision, evidence_cut)` i
 transaction. Search responses identify that checkpoint, indexing status, and covered
 scopes. The worker pins the corresponding trace revision/body membership before
 advancing its checkpoint; temporal GC cannot overtake an index or its result jobs.
+Large replacements may commit bounded private batches while the index reports indexing;
+only the final transaction exposes the completed checkpoint. A fenced update binds every
+batch to the same full snapshot and prevents an interrupted or invalidated writer from
+publishing later. A durable source manifest fingerprints complete search membership,
+body revision, payload and authorization epoch, so unchanged sources reuse their indexed
+text. Source enumeration may be linear; payload reads and FTS replacements follow changed
+sources. Reader change notifications alone are not a complete search dependency log.
 If pressure requires releasing that pin, invalidate the search generation/jobs first
 and report indexing until rebuilt. Snapshot leases for
 search retain revisioned membership/snippets at that checkpoint; detail links either

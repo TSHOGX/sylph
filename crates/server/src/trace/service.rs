@@ -372,7 +372,7 @@ impl TraceService {
                 })
                 .await
                 {
-                    Ok(Ok(())) => {}
+                    Ok(Ok(work)) => tracing::debug!(?work, "trace search checkpoint reconciled"),
                     Ok(Err(error)) => tracing::debug!(%error,"trace search remains indexing"),
                     Err(error) => tracing::error!(%error,"trace search worker failed"),
                 }

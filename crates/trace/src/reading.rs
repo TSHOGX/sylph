@@ -11,7 +11,7 @@ mod append;
 mod content;
 mod window;
 pub use append::project_independent_append;
-pub use content::ComposedPayload;
+pub use content::{compose_revisions, composition_payloads, ComposedPayload, ComposedRevisions};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PayloadPreview {
