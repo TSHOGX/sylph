@@ -171,6 +171,10 @@ matching result views; deletion invalidates views and removes accepted input thr
 bounded erasure jobs. Startup recovery rebuilds a missing/corrupt published projection
 from retained evidence, and the product schedules garbage collection.
 
+The own-activation catalogue is now independently paged at a retained snapshot. It
+includes proven activations without readable history, keeps unresolved owners outside
+invented agent containers, and exposes each activation's own outcome and detail link.
+
 Administrator reprojection requests return a durable job receipt before replay begins.
 Concurrent requests share the active job. Status and cancellation remain available while
 the current generation serves reads and captures; cancellation and completed job status

@@ -33,6 +33,7 @@ pub struct ReadingProjection {
     pub headers: BTreeMap<AgentRef, AgentHeader>,
     pub windows: BTreeMap<ReadingScope, Vec<ReadingUnit>>,
     pub directories: BTreeMap<AgentRef, Vec<AgentDirectoryRow>>,
+    pub activations: BTreeMap<AgentRef, Vec<ExecutionSummary>>,
     pub histories: BTreeMap<AgentRef, Vec<HistoryChoice>>,
     pub operations: BTreeMap<AnyObjectRef, Vec<AnyObjectRef>>,
     pub objects: BTreeMap<AnyObjectRef, ReadObjectDetail>,
@@ -241,6 +242,20 @@ pub fn project(
         result
             .headers
             .insert(agent.clone(), index.header(declaration));
+        // Catalogue membership comes from proven ownership, independently of
+        // which activation happens to be represented in selected history.
+        result.activations.insert(
+            agent.clone(),
+            index
+                .activation_agents
+                .get(agent)
+                .into_iter()
+                .flatten()
+                .map(|reference| {
+                    index.execution(&AnyObjectRef::Activation(reference.clone()))
+                })
+                .collect(),
+        );
         let directory = index
             .children
             .get(agent)

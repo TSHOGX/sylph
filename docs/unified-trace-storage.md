@@ -414,6 +414,14 @@ origin and preserve environment-grant checks.
 | `GET /api/v1/trace/reprojection/{job_id}` | Administrator-only durable status of one reprojection job |
 | `DELETE /api/v1/trace/reprojection/{job_id}` | Administrator-only cancellation request; returns the resulting durable job status |
 
+The activation catalogue lists proven activations owned by the requested agent across
+its retained histories, including those without readable content. Each row has an
+activation reference, independent execution state and evidenced durations; its reference
+opens the ordinary object inspector. Counts are scoped to `own activations`. Stable
+reference order organizes the catalogue without claiming execution chronology. It uses
+the ordinary snapshot, cursor, item/byte and authorization bounds. A history `selection`
+is refused: selecting readable content cannot redefine activation ownership.
+
 ### Reprojection jobs
 
 Reprojection admits at most one active product job. Concurrent submissions coalesce onto

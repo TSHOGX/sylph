@@ -233,6 +233,68 @@ fn declared_agent(reference: AgentRef) -> TraceObject {
         model: None,
     })
 }
+
+#[test]
+fn activation_catalogues_require_own_proven_execution_even_without_history() {
+    let child = AgentRef::Session(sylph_protocol::SessionId::decode("env7:codex:child").unwrap());
+    let own = ActivationRef::native(agent(), "activation", vec!["own".into()]).unwrap();
+    let child_activation =
+        ActivationRef::native(child.clone(), "activation", vec!["child".into()]).unwrap();
+    let unknown = ActivationRef::native(agent(), "activation", vec!["unresolved".into()]).unwrap();
+    let projection = objects_projection(
+        vec![
+            declared_agent(agent()),
+            declared_agent(child.clone()),
+            TraceObject::Activation(Activation {
+                activation_ref: own.clone(),
+                owner: OwnerRef::Agent { agent: agent() },
+            }),
+            TraceObject::Activation(Activation {
+                activation_ref: child_activation.clone(),
+                owner: OwnerRef::Agent {
+                    agent: child.clone(),
+                },
+            }),
+            TraceObject::Activation(Activation {
+                activation_ref: unknown.clone(),
+                owner: OwnerRef::Unresolved {
+                    scope: agent(),
+                    namespace: "native-owner".into(),
+                    native_key: vec!["missing".into()],
+                    reason: "Owner is not established".into(),
+                },
+            }),
+        ],
+        vec![Relation::Spawn {
+            parent: agent(),
+            child: child.clone(),
+            operation: None,
+        }],
+    );
+    assert!(projection.windows.values().all(Vec::is_empty));
+    let parent_rows = &projection.activations[&agent()];
+    assert_eq!(parent_rows.len(), 1);
+    assert_eq!(
+        parent_rows[0].reference,
+        Some(TraceAddress::of(&AnyObjectRef::Activation(own)))
+    );
+    assert_eq!(parent_rows[0].state, ReadExecutionState::Unavailable);
+    let child_rows = &projection.activations[&child];
+    assert_eq!(child_rows.len(), 1);
+    assert_eq!(
+        child_rows[0].reference,
+        Some(TraceAddress::of(&AnyObjectRef::Activation(
+            child_activation
+        )))
+    );
+    assert!(
+        projection
+            .objects
+            .contains_key(&AnyObjectRef::Activation(unknown)),
+        "unresolved execution stays inspectable outside an invented owner catalogue"
+    );
+}
+
 fn declared_operation(key: &str) -> Operation {
     Operation {
         operation_ref: OperationRef::native(agent(), "operation", vec![key.into()]).unwrap(),

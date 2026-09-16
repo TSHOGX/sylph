@@ -18,6 +18,132 @@ async fn boot(backend: &TestBackend, id: &str) -> serde_json::Value {
 }
 
 #[tokio::test]
+async fn activation_pages_preserve_own_outcomes_and_snapshot_membership() {
+    let backend = TestBackend::start().await;
+    let id = backend.create_session("codex").await;
+    let bootstrap = boot(&backend, &id).await;
+    let agent = bootstrap["header"]["agent"]["address"].as_str().unwrap();
+    let token = bootstrap["view"]["token"].as_str().unwrap();
+    let path = format!("/api/v1/trace/agents/{agent}/activations");
+    let first = backend
+        .get_authed(&format!("{path}?at_snapshot={token}&limit=1"))
+        .await;
+    assert_eq!(first.status(), 200, "{}", body_string(first).await);
+    let first = json_body(
+        backend
+            .get_authed(&format!("{path}?at_snapshot={token}&limit=1"))
+            .await,
+    )
+    .await;
+    assert_eq!(first["items"].as_array().unwrap().len(), 1);
+    assert_eq!(first["total"]["scope"], "own activations");
+    assert_eq!(first["total"]["value"], 1);
+    assert_eq!(first["items"][0]["state"]["kind"], "terminated");
+    assert_eq!(first["items"][0]["state"]["outcome"], "succeeded");
+    let initial = first["items"][0]["reference"].as_str().unwrap();
+    let detail = json_body(
+        backend
+            .get_authed(&format!(
+                "/api/v1/trace/objects/{initial}?at_snapshot={token}"
+            ))
+            .await,
+    )
+    .await;
+    assert_eq!(detail["execution"], first["items"][0]);
+
+    for key in ["follow-up-one", "follow-up-two"] {
+        let response = backend
+            .post_authed(
+                "/api/v1/trace/commands",
+                json!({
+                    "target":{"kind":"session","agent":agent,"sessionId":id},
+                    "action":"send","idempotencyKey":key,"text":key,"attachments":[]
+                }),
+            )
+            .await;
+        assert_eq!(response.status(), 202, "{}", body_string(response).await);
+        backend.state.trace.project_pending().await.unwrap();
+    }
+    let latest = json_body(backend.get_authed(&format!("{path}?limit=1")).await).await;
+    assert_eq!(latest["total"]["value"], 3);
+    assert_eq!(latest["items"].as_array().unwrap().len(), 1);
+    assert_eq!(latest["hasAfter"], true);
+    let view = latest["view"]["token"].as_str().unwrap();
+    let mut references = std::collections::BTreeSet::from([latest["items"][0]["reference"]
+        .as_str()
+        .unwrap()
+        .to_owned()]);
+    let mut next = latest["afterCursor"].as_str().map(str::to_owned);
+    while let Some(cursor) = next {
+        let page = json_body(
+            backend
+                .get_authed(&format!("{path}?at_snapshot={view}&limit=1&after={cursor}"))
+                .await,
+        )
+        .await;
+        assert_eq!(page["view"], latest["view"]);
+        assert_eq!(page["items"].as_array().unwrap().len(), 1);
+        assert!(references.insert(page["items"][0]["reference"].as_str().unwrap().to_owned()));
+        next = page["afterCursor"]
+            .as_str()
+            .map(str::to_owned)
+            .filter(|_| page["hasAfter"] == true);
+    }
+    assert_eq!(references.len(), 3);
+    let retained = json_body(
+        backend
+            .get_authed(&format!("{path}?at_snapshot={token}&limit=1"))
+            .await,
+    )
+    .await;
+    assert_eq!(
+        retained["items"], first["items"],
+        "later activations cannot enter an old snapshot"
+    );
+    assert_eq!(retained["total"], first["total"]);
+    assert_eq!(retained["view"], first["view"]);
+    // New temporal rows may require another bounded candidate scan, but none
+    // may become visible through the original snapshot's continuation.
+    let mut continuation = retained;
+    for _ in 0..10 {
+        if continuation["hasAfter"] != true {
+            break;
+        }
+        let cursor = continuation["afterCursor"].as_str().unwrap();
+        continuation = json_body(
+            backend
+                .get_authed(&format!(
+                    "{path}?at_snapshot={token}&limit=1&after={cursor}"
+                ))
+                .await,
+        )
+        .await;
+        assert!(continuation["items"].as_array().unwrap().is_empty());
+    }
+    assert_eq!(continuation["hasAfter"], false);
+    let history_cursor = latest["afterCursor"].as_str().unwrap();
+    assert_eq!(
+        backend
+            .get_authed(&format!(
+                "/api/v1/trace/agents/{agent}/history?at_snapshot={view}&after={history_cursor}"
+            ))
+            .await
+            .status(),
+        400
+    );
+    backend
+        .delete_authed(&format!("/api/v1/sessions/{id}"))
+        .await;
+    assert_eq!(
+        backend
+            .get_authed(&format!("{path}?at_snapshot={token}"))
+            .await
+            .status(),
+        410
+    );
+}
+
+#[tokio::test]
 async fn reading_deliveries_keep_submitted_bytes_and_payload_access_is_snapshot_anchored() {
     let backend = TestBackend::start().await;
     let id = backend.create_session("codex").await;

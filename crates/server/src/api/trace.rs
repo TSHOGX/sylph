@@ -108,6 +108,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/trace/agents/{agent}", get(bootstrap))
         .route("/api/v1/trace/agents/{agent}/history", get(history))
         .route("/api/v1/trace/agents/{agent}/relations", get(relations))
+        .route("/api/v1/trace/agents/{agent}/activations", get(activations))
         .route("/api/v1/trace/agents/{agent}/histories", get(histories))
         .route("/api/v1/trace/agents/{agent}/control", get(control))
         .route("/api/v1/trace/agents/{agent}/commands", get(command_list))
@@ -1392,6 +1393,36 @@ async fn relations(
     lease.retain();
     Ok(Json(result))
 }
+async fn activations(
+    State(state): State<AppState>,
+    Extension(subject): Extension<SubjectId>,
+    Path(encoded): Path<String>,
+    Query(query): Query<ReadQuery>,
+) -> Result<Json<ReadPage<ExecutionSummary>>> {
+    let agent = agent(&encoded)?;
+    observe(&state, &subject.0, &agent).await?;
+    if query.selection.is_some() {
+        return Err(invalid(
+            "The activation catalogue covers all recorded own activations",
+        ));
+    }
+    let lease = lease(&state, &subject.0, query.at_snapshot.as_deref()).await?;
+    let mut result = page(
+        &state,
+        &subject.0,
+        &lease,
+        &agent,
+        None,
+        "activations",
+        &query,
+        false,
+    )
+    .await?;
+    result.total.scope = "own activations".into();
+    lease.retain();
+    Ok(Json(result))
+}
+
 async fn histories(
     State(state): State<AppState>,
     Extension(subject): Extension<SubjectId>,

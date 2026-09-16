@@ -338,6 +338,21 @@ fn rows(
             )?;
         }
     }
+    for (agent, activations) in &projection.activations {
+        for (index, row) in activations.iter().enumerate() {
+            let reference = row.reference.as_ref().ok_or_else(|| {
+                WorkerError::Task("activation catalogue row lacks its identity".into())
+            })?;
+            insert(
+                read_scope(agent, None, "activations"),
+                reference.as_str().into(),
+                Some(reference.clone()),
+                index,
+                serde_json::to_value(row)?,
+                &reference.object(),
+            )?;
+        }
+    }
     for (agent, histories) in &projection.histories {
         for (index, row) in histories.iter().enumerate() {
             insert(

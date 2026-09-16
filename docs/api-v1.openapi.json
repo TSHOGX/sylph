@@ -2548,6 +2548,80 @@
         }
       }
     },
+    "/api/v1/trace/agents/{agent}/activations": {
+      "get": {
+        "summary": "List proven own activations at a retained snapshot",
+        "parameters": [
+          {
+            "name": "agent",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "at_snapshot",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "around",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadPage"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request, authorization, state or storage error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "description": "Bounded execution summaries in stable reference order, independent of selected history. Each row includes an activation reference, own execution state and evidenced durations."
+      }
+    },
     "/api/v1/trace/agents/{agent}/histories": {
       "get": {
         "summary": "GET /api/v1/trace/agents/{agent}/histories",
