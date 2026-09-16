@@ -99,6 +99,28 @@ position of a record in a file. A native completed block records its observed co
 time when present. It does not acquire a measured start time by replaying invented
 start/stop events at the same instant.
 
+Live content revisions are readable as soon as a content block starts. Each observed
+revision has a history occurrence referencing the same live Message; those occurrences
+let a reader choose an included prefix without inventing conversation admission. A live
+Message remains scoped to its actual message-start occurrence, separately from SDK
+assistant records whose UUIDs identify recorded messages.
+
+The Agent SDK's `SDKPartialAssistantMessage.event` is the Anthropic SDK's
+`BetaRawMessageStreamEvent`. Its pinned dependency's
+[`BetaMessageStream` accumulator](https://unpkg.com/@anthropic-ai/sdk@0.81.0/src/lib/BetaMessageStream.ts)
+establishes the field rules: block-start text/thinking bytes precede deltas; text and
+thinking deltas append; `signature_delta.signature` replaces the signature; and
+`input_json_delta.partial_json` accumulates into tool input. A signature is a separate
+opaque part, not disclosed thinking. Stable live part identity includes the block index
+and field, so an opaque signature cannot change a reasoning part's kind.
+
+A signature update publishes a replacement snapshot of the observed message prefix.
+Tool JSON fragments remain exact opaque bytes while incomplete; block stop parses the
+complete accumulated JSON into the tool block's `input`. Invalid final JSON stays opaque
+with a decode diagnostic instead of keeping a plausible empty input. These content
+boundaries do not establish tool execution or delivery admission. A message-stop final
+preserves part identities and all accumulated content without closing the SDK loop.
+
 Per-source sequence and native history ancestry remain separate from server admission
 order. The same observed timestamp can label several blocks. Cross-source timestamps
 do not settle which child or operation caused a notification.

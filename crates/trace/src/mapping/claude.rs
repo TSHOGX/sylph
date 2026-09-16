@@ -27,6 +27,9 @@ struct LiveStream {
     start: SourcePosition,
     previous: Option<MessageRevisionRef>,
     parts: BTreeMap<u64, Value>,
+    input_json: BTreeMap<u64, String>,
+    previous_entry: Option<EntryRef>,
+    evidence: Vec<ObservationRef>,
 }
 
 impl SemanticMapper for ClaudeMapper {
@@ -1309,6 +1312,156 @@ impl Context<'_, '_> {
         }
     }
 
+    fn live_part_ref(
+        owner: &AgentRef,
+        stream: &LiveStream,
+        index: u64,
+        field: &str,
+    ) -> MessagePartRef {
+        MessagePartRef::occurrence(
+            owner.clone(),
+            stream.start.clone(),
+            vec!["live-part".into(), index.to_string(), field.into()],
+        )
+        .unwrap()
+    }
+
+    fn stream_parts(
+        &mut self,
+        owner: &AgentRef,
+        stream: &LiveStream,
+        only: Option<u64>,
+    ) -> Vec<ContentPart> {
+        let mut parts = Vec::new();
+        for (index, value) in stream
+            .parts
+            .iter()
+            .filter(|(index, _)| only.is_none_or(|only| only == **index))
+        {
+            let selector = format!("/stream/content/{index}");
+            let mut part = if let Some(raw) = stream.input_json.get(index) {
+                // The initial input object is a placeholder once JSON deltas begin.
+                // Never publish it as the final value when the accumulated input is invalid.
+                let mut incomplete = value.clone();
+                if let Some(object) = incomplete.as_object_mut() {
+                    object.remove("input");
+                    object.insert("partial_json".into(), Value::String(raw.clone()));
+                }
+                ContentPart {
+                    part_ref: Self::live_part_ref(owner, stream, *index, "content"),
+                    kind: ContentKind::Opaque,
+                    payload: self.json(&incomplete, &selector),
+                    media_type: Some("application/json".into()),
+                    encoding: PayloadEncoding::Utf8,
+                }
+            } else {
+                self.part(owner, &stream.message.encode(), *index, value, &selector)
+            };
+            part.part_ref = Self::live_part_ref(owner, stream, *index, "content");
+            parts.push(part);
+            if let Some(signature) = text(value, "signature") {
+                parts.push(ContentPart {
+                    part_ref: Self::live_part_ref(owner, stream, *index, "signature"),
+                    kind: ContentKind::Opaque,
+                    payload: self.payload(
+                        signature.as_bytes().to_vec(),
+                        &format!("{selector}/signature"),
+                        "text/plain",
+                        PayloadEncoding::Utf8,
+                    ),
+                    media_type: Some("text/plain".into()),
+                    encoding: PayloadEncoding::Utf8,
+                });
+            }
+        }
+        parts
+    }
+
+    fn stream_revision(
+        &mut self,
+        owner: &AgentRef,
+        stream: &mut LiveStream,
+        slot: &str,
+        form: RevisionForm,
+        parts: Vec<ContentPart>,
+    ) {
+        // Append payloads depend on this frame and the message identity. Only a
+        // replacement/final reconstructs prior bytes and needs the full prefix proof.
+        let evidence = if matches!(form, RevisionForm::Append { .. }) {
+            vec![
+                stream.evidence[0].clone(),
+                self.input.canonical_observation.clone(),
+            ]
+        } else {
+            stream.evidence.clone()
+        };
+        let revision = MessageRevisionRef::occurrence(
+            owner.clone(),
+            self.input.capture.source_position.clone(),
+            vec![slot.into()],
+        )
+        .unwrap();
+        self.object(
+            owner,
+            slot,
+            TraceObject::MessageRevision(MessageRevision {
+                revision_ref: revision.clone(),
+                message: stream.message.clone(),
+                representation: Representation::Conversation,
+                form,
+                parts,
+            }),
+        );
+        // Reading membership observes this live prefix; it does not claim vendor
+        // conversation admission or a selected native history head.
+        let entry = EntryRef::occurrence(
+            owner.clone(),
+            self.input.capture.source_position.clone(),
+            vec!["live-message-prefix".into()],
+        )
+        .unwrap();
+        self.object(
+            owner,
+            "claude/live-history",
+            TraceObject::HistoryEntry(HistoryEntry {
+                entry_ref: entry.clone(),
+                containing_agent: owner.clone(),
+                content: vec![HistoryContent::Message(revision.clone())],
+                predecessor: stream.previous_entry.clone(),
+                original_owner: None,
+            }),
+        );
+        for claim in &mut self.output.claims {
+            claim.evidence.extend(evidence.iter().cloned());
+            claim.evidence.sort();
+            claim.evidence.dedup();
+        }
+        for payload in &mut self.output.payloads {
+            payload.evidence.extend(evidence.iter().cloned());
+            payload.evidence.sort();
+            payload.evidence.dedup();
+        }
+        stream.previous = Some(revision);
+        stream.previous_entry = Some(entry);
+    }
+
+    fn seal_stream_input(&mut self, owner: &AgentRef, stream: &mut LiveStream, index: u64) {
+        let Some(raw) = stream.input_json.get(&index) else {
+            return;
+        };
+        match serde_json::from_str::<Value>(raw) {
+            Ok(input) if input.is_object() => {
+                stream.parts.get_mut(&index).unwrap()["input"] = input;
+                stream.input_json.remove(&index);
+            }
+            _ => self.issue(
+                Some(owner), &format!("claude/stream-input/{index}"),
+                DiagnosticCode::DecodeFailure,
+                "Stopped tool input is not a complete JSON object; retained fragments remain opaque",
+            ),
+        }
+    }
+
     fn stream(&mut self, owner: &AgentRef, event: &Value) {
         let kind = text(event, "type").unwrap_or("");
         let key = owner.encode();
@@ -1380,6 +1533,9 @@ impl Context<'_, '_> {
                     start: self.input.capture.source_position.clone(),
                     previous: None,
                     parts: BTreeMap::new(),
+                    input_json: BTreeMap::new(),
+                    previous_entry: None,
+                    evidence: vec![self.input.canonical_observation.clone()],
                 },
             );
             return;
@@ -1393,17 +1549,35 @@ impl Context<'_, '_> {
             );
             return;
         };
+        stream
+            .evidence
+            .push(self.input.canonical_observation.clone());
         match kind {
             "content_block_start" => {
-                if let Some(index) = event["index"].as_u64() {
-                    stream.parts.insert(index, event["content_block"].clone());
+                let Some(index) = event["index"].as_u64() else {
+                    return;
+                };
+                if stream.parts.contains_key(&index) {
+                    self.issue(
+                        Some(owner),
+                        "claude/part-repeated-start",
+                        DiagnosticCode::InvalidRelation,
+                        "Content block index was started twice in one model message",
+                    );
+                    return;
                 }
+                stream.parts.insert(index, event["content_block"].clone());
+                let parts = self.stream_parts(owner, &stream, Some(index));
+                let form = RevisionForm::Append {
+                    predecessor: stream.previous.clone(),
+                };
+                self.stream_revision(owner, &mut stream, "claude/live-part-start", form, parts);
             }
             "content_block_delta" => {
                 let Some(index) = event["index"].as_u64() else {
                     return;
                 };
-                let Some(part) = stream.parts.get_mut(&index) else {
+                let Some(part) = stream.parts.get(&index) else {
                     self.issue(
                         Some(owner),
                         "claude/part-start",
@@ -1414,16 +1588,25 @@ impl Context<'_, '_> {
                 };
                 let delta = &event["delta"];
                 let field = match text(delta, "type") {
-                    Some("text_delta") => "text",
-                    Some("thinking_delta") => "thinking",
-                    Some("input_json_delta") => "partial_json",
-                    Some("signature_delta") => "signature",
+                    Some("text_delta") if text(part, "type") == Some("text") => "text",
+                    Some("thinking_delta") if text(part, "type") == Some("thinking") => "thinking",
+                    Some("input_json_delta")
+                        if matches!(
+                            text(part, "type"),
+                            Some("tool_use" | "server_tool_use" | "mcp_tool_use")
+                        ) =>
+                    {
+                        "partial_json"
+                    }
+                    Some("signature_delta") if text(part, "type") == Some("thinking") => {
+                        "signature"
+                    }
                     _ => {
                         self.issue(
                             Some(owner),
                             "claude/delta-kind",
                             DiagnosticCode::UnsupportedKind,
-                            "Unknown delta remains retained",
+                            "Delta kind is unsupported or differs from its content block",
                         );
                         return;
                     }
@@ -1437,94 +1620,100 @@ impl Context<'_, '_> {
                     );
                     return;
                 };
-                if let Some(object) = part.as_object_mut() {
-                    let prior = object
-                        .get(field)
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_owned();
-                    object.insert(field.into(), Value::String(prior + segment));
+                if field == "partial_json" {
+                    stream
+                        .input_json
+                        .entry(index)
+                        .or_default()
+                        .push_str(segment);
+                } else if let Some(object) =
+                    stream.parts.get_mut(&index).and_then(Value::as_object_mut)
+                {
+                    // Anthropic SDK 0.81.0 replaces signature_delta.signature;
+                    // it appends text/thinking and accumulates input_json separately.
+                    let prior = if field == "signature" {
+                        ""
+                    } else {
+                        object.get(field).and_then(Value::as_str).unwrap_or("")
+                    };
+                    object.insert(field.into(), Value::String(prior.to_owned() + segment));
                 }
-                let payload = self.payload(
-                    segment.as_bytes().to_vec(),
-                    &format!("/event/delta/{field}"),
-                    "text/plain",
-                    PayloadEncoding::Utf8,
-                );
-                let revision = MessageRevisionRef::occurrence(
-                    owner.clone(),
-                    self.input.capture.source_position.clone(),
-                    vec!["live-delta".into(), index.to_string()],
-                )
-                .unwrap();
-                self.object(
-                    owner,
-                    "claude/live-delta",
-                    TraceObject::MessageRevision(MessageRevision {
-                        revision_ref: revision.clone(),
-                        message: stream.message.clone(),
-                        representation: Representation::Conversation,
-                        form: RevisionForm::Append {
-                            predecessor: stream.previous.clone(),
-                        },
-                        parts: vec![ContentPart {
-                            part_ref: MessagePartRef::occurrence(
-                                owner.clone(),
-                                stream.start.clone(),
-                                vec!["live-part".into(), index.to_string()],
-                            )
-                            .unwrap(),
-                            kind: if field == "text" {
-                                ContentKind::Text
-                            } else if field == "thinking" {
-                                ContentKind::DisclosedReasoning
+                if field == "signature" {
+                    let parts = self.stream_parts(owner, &stream, None);
+                    let form = RevisionForm::Replacement {
+                        covers: Some(SourcePrefix {
+                            through: self.input.capture.source_position.clone(),
+                        }),
+                    };
+                    self.stream_revision(owner, &mut stream, "claude/live-signature", form, parts);
+                } else {
+                    let part = ContentPart {
+                        part_ref: Self::live_part_ref(
+                            owner,
+                            &stream,
+                            index,
+                            if field == "partial_json" {
+                                "input_json"
                             } else {
-                                ContentKind::Opaque
+                                "content"
                             },
-                            payload,
-                            media_type: Some("text/plain".into()),
-                            encoding: PayloadEncoding::Utf8,
-                        }],
-                    }),
-                );
-                stream.previous = Some(revision);
+                        ),
+                        kind: match field {
+                            "text" => ContentKind::Text,
+                            "thinking" => ContentKind::DisclosedReasoning,
+                            _ => ContentKind::Opaque,
+                        },
+                        payload: self.payload(
+                            segment.as_bytes().to_vec(),
+                            &format!("/event/delta/{field}"),
+                            "text/plain",
+                            PayloadEncoding::Utf8,
+                        ),
+                        media_type: Some("text/plain".into()),
+                        encoding: PayloadEncoding::Utf8,
+                    };
+                    let form = RevisionForm::Append {
+                        predecessor: stream.previous.clone(),
+                    };
+                    self.stream_revision(owner, &mut stream, "claude/live-delta", form, vec![part]);
+                }
+            }
+            "content_block_stop" => {
+                if let Some(index) = event["index"]
+                    .as_u64()
+                    .filter(|index| stream.input_json.contains_key(index))
+                {
+                    self.seal_stream_input(owner, &mut stream, index);
+                    let parts = self.stream_parts(owner, &stream, None);
+                    let form = RevisionForm::Replacement {
+                        covers: Some(SourcePrefix {
+                            through: self.input.capture.source_position.clone(),
+                        }),
+                    };
+                    self.stream_revision(
+                        owner,
+                        &mut stream,
+                        "claude/live-part-sealed",
+                        form,
+                        parts,
+                    );
+                }
             }
             "message_stop" => {
-                let mut parts = vec![];
-                for (index, value) in &stream.parts {
-                    parts.push(self.part(
-                        owner,
-                        &stream.message.encode(),
-                        *index,
-                        value,
-                        &format!("/stream/content/{index}"),
-                    ));
+                for index in stream.input_json.keys().copied().collect::<Vec<_>>() {
+                    self.seal_stream_input(owner, &mut stream, index);
                 }
-                let revision = MessageRevisionRef::occurrence(
-                    owner.clone(),
-                    self.input.capture.source_position.clone(),
-                    vec!["live-final".into()],
-                )
-                .unwrap();
-                self.object(
-                    owner,
-                    "claude/live-final",
-                    TraceObject::MessageRevision(MessageRevision {
-                        revision_ref: revision,
-                        message: stream.message,
-                        representation: Representation::Conversation,
-                        form: RevisionForm::Final {
-                            covers: Some(SourcePrefix {
-                                through: self.input.capture.source_position.clone(),
-                            }),
-                        },
-                        parts,
+                let parts = self.stream_parts(owner, &stream, None);
+                let form = RevisionForm::Final {
+                    covers: Some(SourcePrefix {
+                        through: self.input.capture.source_position.clone(),
                     }),
-                );
+                };
+                self.stream_revision(owner, &mut stream, "claude/live-final", form, parts);
                 self.state.streams.remove(&key);
                 return;
             }
-            "content_block_stop" | "message_delta" => {}
+            "message_delta" => {}
             _ => self.issue(
                 Some(owner),
                 "claude/stream-kind",

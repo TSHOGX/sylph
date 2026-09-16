@@ -702,3 +702,263 @@ fn intrinsic_source_owner_comes_from_initial_native_fields_not_routing_hints() {
     );
     assert!(live[0].source_owners.is_empty());
 }
+
+fn stream_event(event: Value) -> Value {
+    serde_json::json!({"type":"stream_event","session_id":"root","parent_tool_use_id":null,"event":event})
+}
+fn part_bodies(parts: &[PartSummary]) -> Vec<(&MessagePartRef, ContentKind, &str)> {
+    parts
+        .iter()
+        .map(|part| (&part.part_ref, part.kind, part.preview.as_str()))
+        .collect()
+}
+fn stream_reading(outputs: &[MapOutput]) -> Vec<PartSummary> {
+    let mut previews = BTreeMap::new();
+    for payload in outputs.iter().flat_map(|output| &output.payloads) {
+        previews.insert(
+            payload.reference.clone(),
+            crate::reading::PayloadPreview {
+                chunks: payload
+                    .manifest
+                    .as_ref()
+                    .map(|manifest| manifest.chunks.clone()),
+                preview_limit: 4096,
+                preview: String::from_utf8_lossy(&payload.bytes).into_owned(),
+                total_bytes: Some(payload.bytes.len() as u64),
+                availability: Some(ReadAvailability::Available),
+                ..Default::default()
+            },
+        );
+    }
+    let projection = crate::reading::project(&reduce(outputs), &previews, 32);
+    let messages: Vec<_> = projection
+        .windows
+        .values()
+        .flatten()
+        .filter_map(|unit| match &unit.content {
+            ReadingContent::Message { parts, .. } => Some(parts.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        messages.len(),
+        1,
+        "one unfinished model message must be readable"
+    );
+    messages.into_iter().next().unwrap()
+}
+
+#[test]
+fn captured_claude_deltas_are_readable_before_the_sdk_assistant_record_arrives() {
+    let values: Vec<Value> =
+        include_str!("../../../../../fixtures/unified-trace/claude/live-basic.jsonl")
+            .lines()
+            .take(8)
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+    let outputs = run(&values, true);
+    let parts = stream_reading(&outputs);
+    assert_eq!(parts[0].preview, "SYLPH_CLAUDE_TRACE_OK");
+    assert!(!outputs
+        .iter()
+        .flat_map(|output| &output.claims)
+        .any(|claim| matches!(claim.fact, Fact::DeliveryStage { .. })));
+}
+
+#[test]
+fn live_initial_text_repeated_deltas_and_multiple_parts_survive_the_final_snapshot() {
+    let mut events = vec![
+        stream_event(
+            serde_json::json!({"type":"message_start","message":{"id":"msg-a","role":"assistant","content":[]}}),
+        ),
+        stream_event(
+            serde_json::json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":"seed "}}),
+        ),
+        stream_event(
+            serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"A"}}),
+        ),
+        stream_event(
+            serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"A"}}),
+        ),
+        stream_event(serde_json::json!({"type":"content_block_stop","index":0})),
+        stream_event(
+            serde_json::json!({"type":"content_block_start","index":1,"content_block":{"type":"text","text":"second"}}),
+        ),
+    ];
+    let partial = stream_reading(&run(&events, true));
+    assert_eq!(
+        partial
+            .iter()
+            .map(|part| part.preview.as_str())
+            .collect::<Vec<_>>(),
+        ["seed AA", "second"]
+    );
+    assert_ne!(partial[0].part_ref, partial[1].part_ref);
+    events.push(stream_event(serde_json::json!({"type":"message_stop"})));
+    let complete = stream_reading(&run(&events, true));
+    assert_eq!(part_bodies(&complete), part_bodies(&partial));
+}
+
+#[test]
+fn thinking_signatures_replace_opaque_metadata_without_appending_to_reasoning() {
+    let events = vec![
+        stream_event(
+            serde_json::json!({"type":"message_start","message":{"id":"msg-a","content":[]}}),
+        ),
+        stream_event(
+            serde_json::json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"initial ","signature":""}}),
+        ),
+        stream_event(
+            serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"thought"}}),
+        ),
+        stream_event(
+            serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"first-signature"}}),
+        ),
+        stream_event(
+            serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"replacement-signature"}}),
+        ),
+    ];
+    let outputs = run(&events, true);
+    let parts = stream_reading(&outputs);
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0].kind, ContentKind::DisclosedReasoning);
+    assert_eq!(parts[0].preview, "initial thought");
+    assert_eq!(parts[1].kind, ContentKind::Opaque);
+    assert_eq!(parts[1].preview, "replacement-signature");
+    assert_ne!(parts[0].part_ref, parts[1].part_ref);
+    let mut final_events = events;
+    final_events.push(stream_event(serde_json::json!({"type":"message_stop"})));
+    assert_eq!(
+        part_bodies(&stream_reading(&run(&final_events, true))),
+        part_bodies(&parts)
+    );
+    assert!(outputs
+        .iter()
+        .flat_map(|output| &output.payloads)
+        .any(|payload| payload.bytes == b"first-signature"));
+}
+
+#[test]
+fn streamed_tool_json_is_sealed_as_input_without_claiming_execution_or_admission() {
+    let mut events = vec![
+        stream_event(
+            serde_json::json!({"type":"message_start","message":{"id":"msg-a","content":[]}}),
+        ),
+        stream_event(
+            serde_json::json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tool-a","name":"Read","input":{}}}),
+        ),
+        stream_event(
+            serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\""}}),
+        ),
+        stream_event(
+            serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"file.txt\"}"}}),
+        ),
+        stream_event(serde_json::json!({"type":"content_block_stop","index":0})),
+    ];
+    let sealed = stream_reading(&run(&events, true));
+    let value: Value = serde_json::from_str(&sealed[0].preview).unwrap();
+    assert_eq!(value["input"], serde_json::json!({"path":"file.txt"}));
+    events.push(stream_event(serde_json::json!({"type":"message_stop"})));
+    let outputs = run(&events, true);
+    assert_eq!(part_bodies(&stream_reading(&outputs)), part_bodies(&sealed));
+    assert!(!outputs
+        .iter()
+        .skip(1)
+        .flat_map(|output| &output.claims)
+        .any(|claim| matches!(
+            claim.fact,
+            Fact::Execution { .. } | Fact::DeliveryStage { .. }
+        )));
+}
+
+#[test]
+fn invalid_final_tool_json_is_opaque_instead_of_a_plausible_empty_input() {
+    let outputs = run(
+        &[
+            stream_event(
+                serde_json::json!({"type":"message_start","message":{"id":"msg-a","content":[]}}),
+            ),
+            stream_event(
+                serde_json::json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tool-a","name":"Read","input":{}}}),
+            ),
+            stream_event(
+                serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\":"}}),
+            ),
+            stream_event(serde_json::json!({"type":"content_block_stop","index":0})),
+            stream_event(serde_json::json!({"type":"message_stop"})),
+        ],
+        true,
+    );
+    let parts = stream_reading(&outputs);
+    assert_eq!(parts[0].kind, ContentKind::Opaque);
+    let value: Value = serde_json::from_str(&parts[0].preview).unwrap();
+    assert!(value.get("input").is_none());
+    assert_eq!(value["partial_json"], "{\"path\":");
+    assert!(outputs.iter().flat_map(|output|&output.claims).any(|claim|matches!(&claim.fact,Fact::Diagnostic {diagnostic} if diagnostic.code==DiagnosticCode::DecodeFailure)));
+}
+
+#[test]
+fn interleaved_live_messages_keep_their_owners_and_same_index_parts_distinct() {
+    let envelope = |session: &str, event: Value| serde_json::json!({"type":"stream_event","session_id":session,"event":event});
+    let outputs = run(
+        &[
+            envelope(
+                "root-a",
+                serde_json::json!({"type":"message_start","message":{"id":"same-model-id","content":[]}}),
+            ),
+            envelope(
+                "root-b",
+                serde_json::json!({"type":"message_start","message":{"id":"same-model-id","content":[]}}),
+            ),
+            envelope(
+                "root-a",
+                serde_json::json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":"owner A"}}),
+            ),
+            envelope(
+                "root-b",
+                serde_json::json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":"owner B"}}),
+            ),
+            envelope("root-a", serde_json::json!({"type":"message_stop"})),
+            envelope("root-b", serde_json::json!({"type":"message_stop"})),
+        ],
+        true,
+    );
+    let messages: Vec<_> = objects(&outputs)
+        .filter_map(|object| match object {
+            TraceObject::Message(message) => Some(message),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(messages.len(), 2);
+    assert_ne!(messages[0].message_ref, messages[1].message_ref);
+    for (message, expected) in messages.iter().zip([owner("root-a"), owner("root-b")]) {
+        assert_eq!(
+            message.author,
+            Author::Agent {
+                agent: OwnerRef::Agent { agent: expected }
+            }
+        );
+    }
+    let final_parts: Vec<_> = objects(&outputs)
+        .filter_map(|object| match object {
+            TraceObject::MessageRevision(revision)
+                if matches!(revision.form, RevisionForm::Final { .. }) =>
+            {
+                Some(revision.parts[0].part_ref.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_ne!(final_parts[0], final_parts[1]);
+    let final_payload = &outputs[4].payloads[0];
+    assert!(final_payload
+        .evidence
+        .contains(&capture(0, true).observation_ref));
+    assert!(final_payload
+        .evidence
+        .contains(&capture(2, true).observation_ref));
+    assert!(!final_payload
+        .evidence
+        .contains(&capture(3, true).observation_ref));
+    assert_eq!(reduce(&outputs).histories.len(), 2);
+}
