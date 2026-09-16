@@ -56,3 +56,13 @@ export function describeCount(
     ? `${noun} count unknown`
     : `${count.value} ${noun}${count.complete ? "" : " · coverage incomplete"}`;
 }
+
+/** A failed boundary remains retryable even though it has no successful page metadata. */
+export function tracePageButtonDisabled(
+  pending: boolean,
+  failed: boolean,
+  hasNextPage: boolean | undefined,
+  hasRequestedPage: boolean,
+): boolean {
+  return pending || (hasRequestedPage && !failed && !hasNextPage);
+}

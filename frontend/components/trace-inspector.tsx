@@ -27,7 +27,7 @@ import {
   type Representation,
   type TraceView,
 } from "@/lib/trace-types";
-import { describeCount } from "@/lib/trace-window";
+import { describeCount, tracePageButtonDisabled } from "@/lib/trace-window";
 import { TracePayload } from "./trace-payload";
 import { ArtifactsPane } from "./artifacts-pane";
 const Companion = dynamic(() =>
@@ -61,8 +61,7 @@ export type ObjectInspectionTarget = {
   scope: InspectionScope;
 };
 export type Inspection =
-  | Exclude<InspectionRequest, { kind: "object" }>
-  | ObjectInspectionTarget;
+  Exclude<InspectionRequest, { kind: "object" }> | ObjectInspectionTarget;
 interface DirectoryLocation {
   query: string;
   filter: string;
@@ -1251,7 +1250,12 @@ function RelationPages({
       </ul>
       <button
         className={button}
-        disabled={result.pending || (next !== null && !result.data?.hasAfter)}
+        disabled={tracePageButtonDisabled(
+          result.pending,
+          Boolean(result.error),
+          result.data?.hasAfter,
+          next !== null,
+        )}
         onClick={() => setNext(result.data?.afterCursor ?? cursor)}
       >
         {t("trace.moreSearch")} · {kind}
@@ -1309,7 +1313,12 @@ function ResultPages({
       ))}
       <button
         className={button}
-        disabled={result.pending || (next !== null && !result.data?.hasAfter)}
+        disabled={tracePageButtonDisabled(
+          result.pending,
+          Boolean(result.error),
+          result.data?.hasAfter,
+          next !== null,
+        )}
         onClick={() => setNext(result.data?.afterCursor ?? cursor)}
       >
         {t("trace.moreResults")}

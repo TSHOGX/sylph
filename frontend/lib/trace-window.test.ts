@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { extendTraceWindow } from "./trace-window";
+import { extendTraceWindow, tracePageButtonDisabled } from "./trace-window";
 import type { ReadingUnit, TracePage } from "./trace-types";
 
 function page(start: number, end: number): TracePage<ReadingUnit> {
@@ -61,5 +61,10 @@ describe("consistent bounded reading windows", () => {
     ]);
     expect(next.beforeCursor).toBe("before-1");
     expect(next.afterCursor).toBe("after-4");
+  });
+  it("keeps a failed detail boundary retryable", () => {
+    expect(tracePageButtonDisabled(false, true, undefined, true)).toBe(false);
+    expect(tracePageButtonDisabled(false, false, false, true)).toBe(true);
+    expect(tracePageButtonDisabled(true, true, true, true)).toBe(true);
   });
 });

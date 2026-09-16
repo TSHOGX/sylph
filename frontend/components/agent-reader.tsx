@@ -24,6 +24,7 @@ import { subscribeTrace } from "@/lib/trace-subscriptions";
 import {
   describeCount,
   extendTraceWindow,
+  tracePageButtonDisabled,
   type TraceWindow,
 } from "@/lib/trace-window";
 import { useTraceResource } from "@/lib/use-trace-resource";
@@ -865,7 +866,12 @@ function MessageParts({
       {result.error && <p role="alert">{result.error.message}</p>}
       <button
         className={traceButton}
-        disabled={result.pending || (next !== null && !result.data?.hasAfter)}
+        disabled={tracePageButtonDisabled(
+          result.pending,
+          Boolean(result.error),
+          result.data?.hasAfter,
+          next !== null,
+        )}
         onClick={() => setNext(result.data?.afterCursor ?? cursor)}
       >
         {t("trace.moreParts", { count: total })}
