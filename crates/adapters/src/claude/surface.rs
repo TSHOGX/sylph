@@ -1,8 +1,8 @@
 //! `claude`'s `initialize` reply, projected onto a [`SessionCapabilities`].
 //!
 //! The capability surface: `commands_from`, `models_from`,
-//! `config_from` and `capabilities_from` (roughly :1546-1716). Pure functions over one
-//! payload, for the same reason [`super::translate`] is: **reading the wrong key off a
+//! `config_from` and `capabilities_from`. Pure functions over one
+//! payload: **reading the wrong key off a
 //! vendor payload fails silently**, so the projection has to be assertable against a
 //! payload that was printed rather than against a live CLI that may not produce the
 //! shape under test.

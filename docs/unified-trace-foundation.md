@@ -686,17 +686,10 @@ requires retained, sanitized fixtures with content digests and an explicit inven
 The structural extracts and remaining production conformance requirements are separated in
 [unified-trace-conformance.md](unified-trace-conformance.md).
 
-### Current Sylph model pressure
+### Boundaries the typed model protects
 
-The current protocol places block phase, stream identity, trajectory ownership, and
-vendor detail in one event envelope. Its `span` also participates in promoting tools
-into trajectory containers. The reading directory then interprets execution containers
-as agents. Input facts lack the identity and source distinctions required to protect a
-human request. These are model boundaries, not styling problems.
-
-The structural evidence is in `crates/protocol/src/event.rs`,
-`crates/protocol/src/semantic.rs`, `crates/server/src/db/timeline.rs`, and
-`crates/server/src/db/reading.rs`. The recurring failure families are:
+The trace types in `crates/protocol/src/trace/` and the pure reducer in
+`crates/trace/src/reducer.rs` separate the following failure families:
 
 | Conflation | Observable failure |
 | --- | --- |

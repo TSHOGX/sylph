@@ -386,6 +386,9 @@ impl Context<'_, '_> {
                 );
             }
             if text(part, "type") == Some("tool_result") {
+                for field in ["persistedOutputPath","outputFile"] {if let Some(path)=text(&value["toolUseResult"],field) {
+                    if let Some(id)=text(part,"tool_use_id") {let key=super::attachment_key(self.input.canonical_observation,&format!("/message/content/{index}"),path);self.output.correlations.insert(key.clone(),AnyObjectRef::Operation(operation(&owner,id)));self.output.correlation_evidence.insert(key,vec![self.input.canonical_observation.clone()]);}
+                }}
                 self.tool_result(
                     &owner,
                     &root_of(containing),

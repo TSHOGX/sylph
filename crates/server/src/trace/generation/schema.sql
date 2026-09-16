@@ -150,3 +150,23 @@ CREATE TABLE change_batches (
   batch_json TEXT NOT NULL,
   batch_bytes INTEGER NOT NULL CHECK (batch_bytes >= 0)
 );
+CREATE TABLE read_rows (
+  scope_key TEXT NOT NULL,
+  address TEXT NOT NULL,
+  anchor_ref TEXT,
+  order_key BLOB NOT NULL,
+  valid_from INTEGER NOT NULL REFERENCES projection_revisions(view_revision),
+  valid_to INTEGER REFERENCES projection_revisions(view_revision),
+  present INTEGER NOT NULL,
+  body_json TEXT NOT NULL,
+  body_bytes INTEGER NOT NULL,
+  scope_epoch TEXT NOT NULL,
+  search_text TEXT NOT NULL,
+  directory_state TEXT NOT NULL,
+  needs_input INTEGER NOT NULL,
+  PRIMARY KEY(scope_key,address,valid_from)
+) WITHOUT ROWID;
+CREATE INDEX read_window ON read_rows(scope_key,order_key,address,valid_from);
+CREATE INDEX read_anchor ON read_rows(scope_key,anchor_ref,valid_from,order_key,address);
+CREATE UNIQUE INDEX current_read_row ON read_rows(scope_key,address) WHERE valid_to IS NULL;
+CREATE TABLE read_counts(scope_key TEXT NOT NULL,valid_from INTEGER NOT NULL,count INTEGER NOT NULL CHECK(count>=0),PRIMARY KEY(scope_key,valid_from)) WITHOUT ROWID;

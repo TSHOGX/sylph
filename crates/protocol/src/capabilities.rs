@@ -426,7 +426,7 @@ impl CapabilityFacets {
     /// `Link` cached a `SessionCapabilities` and merged facets inside itself, so the
     /// server only ever saw whole surfaces.
     ///
-    /// The reasoning is the same rule as [`crate::Event::stability`] — one fact, one
+    /// The rule is one fact, one
     /// derivation. With three adapters each merging internally there would be three
     /// implementations of "an unmentioned facet is not changed", so the next adapter
     /// author would rediscover the 46-erased-commands bug rather than inherit the fix;

@@ -133,7 +133,7 @@ test("the conversation owns the full width; sidebars are not in flow", async ({
     page.getByRole("complementary", { name: "Workspaces" }),
   ).toBeHidden();
   await expect(
-    page.getByRole("complementary", { name: "Work panel" }),
+    page.getByRole("complementary", { name: "Trace inspector" }),
   ).toBeHidden();
 
   const width = await viewportWidth(page);
@@ -185,13 +185,13 @@ test("the sessions drawer overlays the conversation and dismisses on navigation"
   await expect(page.getByLabel("Message", { exact: true })).toBeVisible();
 });
 
-test("files open as a bottom sheet, and a file opens full screen from it", async ({
+test("files use a full-height inspector on a narrow viewport", async ({
   page,
 }) => {
   await createSession(page, { workdir: "/tmp" });
 
   await page.getByRole("button", { name: "Open files" }).click();
-  const sheet = page.getByRole("dialog", { name: "Files" });
+  const sheet = page.getByRole("dialog", { name: "Trace inspector" });
   await expect(sheet).toBeVisible();
 
   // Settled, not mid-flight. The panel slides up over 240ms, so a measurement taken
@@ -200,12 +200,10 @@ test("files open as a bottom sheet, and a file opens full screen from it", async
   // animation is also more honest than sleeping a guessed interval.
   await settled(page, sheet);
 
-  // A sheet, not a drawer: files are inspection *of the thing on screen*, so the
-  // conversation stays visible above it. It therefore must not reach the top edge,
-  // and must sit entirely within the viewport once it has arrived.
+  // A declared file context uses the same full-height narrow inspector as details.
   const box = await sheet.boundingBox();
   const height = await page.evaluate(() => window.innerHeight);
-  expect(box!.y).toBeGreaterThan(0);
+  expect(box!.y).toBe(0);
   expect(box!.y + box!.height).toBeLessThanOrEqual(height + 1);
 
   await expect(sheet.getByRole("tree")).toBeVisible();
@@ -386,50 +384,13 @@ test("a long catalogue is a filterable sheet that does not grab focus", async ({
  * bug here is invisible to the desktop suite — at 1280px the same markup is merely
  * roomy.
  */
-test("a request form fits the viewport and is answerable by tapping", async ({
-  page,
-}) => {
-  const sessionId = await createSession(page);
-
-  await page.getByLabel("Message", { exact: true }).fill("question please");
-  await page.getByRole("button", { name: "Send", exact: true }).tap();
-
-  const panel = page.getByTestId("approval-dialog");
-  await expect(panel).toBeVisible({ timeout: 15000 });
-  expect(await overflowingElements(page)).toEqual([]);
-
-  // Tapped rather than checked: the whole row is the label, which is what makes a
-  // 16px control usable in a 44px target.
-  await panel.getByRole("radio", { name: "Tabs" }).tap();
-  await panel.getByRole("checkbox", { name: "ESLint" }).tap();
-  await panel.getByLabel("Notes (optional)").fill("only generated files");
-  expect(await overflowingElements(page)).toEqual([]);
-
+test("a request form fits the viewport and is answerable by tapping", async ({ page }) => {
+  const { requestFixture, openRequest } = await import("./fixtures/trace-requests");
+  const state = await requestFixture(page); const panel = await openRequest(page);
+  await expect(panel).toBeVisible(); expect(await overflowingElements(page)).toEqual([]);
+  await panel.getByRole("radio", { name: "Tabs" }).tap(); await panel.getByRole("checkbox", { name: "ESLint" }).tap();
   await panel.getByRole("button", { name: "Send answer" }).tap();
-
-  const { openExecutionGroups } = await import("./fixtures/execution");
-  await expect
-    .poll(async () => {
-      const response = await page.request.get(
-        `/api/v1/sessions/${encodeURIComponent(sessionId)}/turn-state`,
-      );
-      return (await response.json()).turns[0].turn.status;
-    })
-    .toBe("completed");
-  const response = await page.request.get(
-    `/api/v1/sessions/${encodeURIComponent(sessionId)}/turn-state`,
-  );
-  const turnId = (await response.json()).turns[0].turn.id;
-  await openExecutionGroups(page, sessionId, turnId, true);
-  await page
-    .getByRole("region", { name: /tool call/ })
-    .last()
-    .locator("button[aria-expanded]")
-    .tap();
-  const result = page
-    .getByRole("region", { name: "Tool result", exact: true })
-    .last();
-  await expect(result).toContainText('"q:0": "Tabs"');
+  await expect.poll(() => state.commands[0]?.answer?.input).toMatchObject({ values: { "q:0": "Tabs", "q:1": ["ESLint"] } });
   expect(await overflowingElements(page)).toEqual([]);
 });
 
@@ -443,57 +404,16 @@ test("a request form fits the viewport and is answerable by tapping", async ({
  * levels and focus mode carries the rest. The assertion is the same overflow probe
  * the composer uses, because "does it fit" is the whole question.
  */
-test("a delegation tree three levels deep still fits the viewport", async ({
-  page,
-}) => {
-  const { runExecution, openExecutionGroups } = await import(
-    "./fixtures/execution"
-  );
-  const { sessionId, turnId } = await runExecution(
-    page,
-    "delegate this please",
-  );
-  await openExecutionGroups(page, sessionId, turnId, true);
-  const verify = page.getByRole("region", { name: "Verify delegation" });
-  await verify.getByRole("button").first().tap();
-  const panel = page.getByRole("dialog",{name:"Work panel"});
-  const work = panel.locator(".reading-work > button").first();
-  if (await work.getAttribute("aria-expanded") === "false") await work.tap();
-  const id = (await verify.getAttribute("data-node-id"))!;
-  const response = await page.request.get(
-    `/api/v1/sessions/${encodeURIComponent(sessionId)}/nodes?parent=${encodeURIComponent(id)}`,
-  );
-  const group = (await response.json()).nodes.find(
-    (node: { event: { kind: string } }) => node.event.kind === "execution",
-  );
-  await page
-    .locator(
-      `[data-node-id=${JSON.stringify(group.id)}] > button[aria-expanded]`,
-    )
-    .tap();
-  await expect(
-    page.getByRole("region", { name: "Worker delegation" }),
-  ).toBeVisible();
-  expect(await overflowingElements(page)).toEqual([]);
-  await panel.getByRole("button", { name: "All subagents" }).tap();
-  await expect(panel.getByRole("searchbox")).toBeVisible();
+test("a companion agent reader fits the mobile viewport", async ({ page }) => {
+  const { agentLink, CHILD_AGENT, installTraceFixture, openTrace, unavailableExecution } = await import("./fixtures/trace");
+  const state = await installTraceFixture(page);
+  state.catalogue = [{ agent: agentLink(CHILD_AGENT, "Child"), relation: "spawn", ownExecution: unavailableExecution, activations: { value: 1, scope: "Agent", complete: true }, requiredInput: { value: 0, scope: "Agent", complete: true }, coverage: [] }];
+  await openTrace(page); await page.getByRole("button", { name: "Agents", exact: true }).tap();
+  await page.getByRole("button", { name: "Open alongside", exact: true }).tap();
+  await expect(page.getByText("The child owns this answer", { exact: true })).toBeVisible();
   expect(await overflowingElements(page)).toEqual([]);
 });
 
-/**
- * The three shortcut overlays, on a phone.
- *
- * They were the last surfaces still rendering their own field, rows, and cursor, and
- * they migrated onto the shared choice list — which changed the markup of every row on
- * a viewport no spec exercised them at. Two of the pitfalls this repo records about
- * lists are only observable below the breakpoint: a focused field under 16px zooms
- * mobile Safari and does not zoom back, and a row wide enough to overflow reads as a
- * broken app rather than a cramped one.
- *
- * The history browser earns the widest coverage here, because its paging control moved
- * out of the list and into the footer — which is where the safe-area inset lives, and
- * where a control placed wrongly is simply unreachable on a notched device.
- */
 test("the shortcut overlays fit the viewport and their fields do not trigger zoom", async ({
   page,
 }) => {
@@ -501,14 +421,14 @@ test("the shortcut overlays fit the viewport and their fields do not trigger zoo
 
   for (const [combo, name] of [
     ["ControlOrMeta+p", /command query/i],
-    ["ControlOrMeta+k", /search query/i],
+    ["ControlOrMeta+k", /search retained conversations/i],
     ["ControlOrMeta+Shift+k", /filter this workspace/i],
   ] as const) {
     await page.keyboard.press(combo);
     const dialog = page.getByRole("dialog");
     await expect(dialog).toBeVisible();
 
-    const field = dialog.getByRole("combobox", { name });
+    const field = dialog.getByRole(combo === "ControlOrMeta+k" ? "textbox" : "combobox", { name });
     await expect(field).toBeVisible();
 
     // 16px is the threshold: mobile Safari zooms a focused field below it and does not

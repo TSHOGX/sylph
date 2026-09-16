@@ -3,7 +3,7 @@
 import { useRouter, useParams } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { api, type ConfigOption, type LinkState, type Session } from "@/lib/api";
+import { api, type ConfigOption, type LinkState, type PreparedCommandResult } from "@/lib/api";
 import { Composer } from "@/components/composer";
 import type { StagedAttachment } from "@/components/attachment-picker";
 import { useEnvironments } from "@/lib/environments";
@@ -32,6 +32,7 @@ export default function DraftSessionPage() {
   const [text, setText] = useState("");
   const [attachments, setAttachments] = useState<StagedAttachment[]>([]);
   const [sending, setSending] = useState(false);
+  const [accepted, setAccepted] = useState<PreparedCommandResult | null>(null);
   const [switchingAgent, setSwitchingAgent] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -112,27 +113,26 @@ export default function DraftSessionPage() {
     command?: string;
     args?: Record<string, string>;
   }) => {
-    const body = request.text?.trim() ?? "";
+    const body = request.command ? `/${request.command}${Object.values(request.args ?? {}).length ? ` ${Object.values(request.args ?? {}).join(" ")}` : ""}` : request.text ?? "";
     // A prompt command is a real first turn even when it has no free-form text.
     // Control commands never reach this callback: Composer resolves those against
     // the typed config surface without creating a turn.
-    if ((!body && !request.command) || sending) return;
+    if (!body.trim() || sending || accepted) return;
     setSending(true);
     setError(null);
     try {
-      const result = await api.sessions.preparedTurn(draftId, {
+      const result = await api.sessions.preparedCommand(draftId, {
         text: body,
-        command: request.command,
-        args: request.args,
         attachments: attachments.map(({ name, type, data }) => ({ name, type, data })),
         idempotencyKey: crypto.randomUUID(),
       });
       promoted.current = true;
+      setAccepted(result);
       // Promotion creates the first durable row.  Refresh the sidebar/workspace
       // projections before navigating so the new session is immediately discoverable.
       void queryClient.invalidateQueries({ queryKey: ["sessions"] });
       void queryClient.invalidateQueries({ queryKey: ["workspaces"] });
-      router.replace(`/sessions/${encodeURIComponent(result.session.id)}`);
+      if (result.session) router.replace(`/agents/${encodeURIComponent(result.session.traceAgentRef)}`);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not start the turn");
       setSending(false);
@@ -171,23 +171,29 @@ export default function DraftSessionPage() {
     }
   };
 
-  // Composer only needs the common Session shape for labels and file operations.  The
-  // id remains an opaque draft handle; the API client routes it to prepared file
-  // endpoints instead of allowing it to reach a durable session endpoint.
-  const session: Session = {
+  const session = {
     id: draftId,
-    environment: metadata?.environment ?? "draft",
     agent: metadata?.agent ?? state?.agent ?? "",
-    nativeId: "",
     workdir: metadata?.workdir ?? "",
-    title: metadata?.title ?? null,
-    injectIdentity: metadata?.injectIdentity ?? false,
-    fidelity: "stream",
     flagsJson: "{}",
-    status: "idle",
-    createdAtMs: 0,
-    updatedAtMs: 0,
   };
+
+  useEffect(() => {
+    if (!accepted || accepted.session || ["unknown", "rejected", "cancelled", "conflicting"].includes(accepted.command.state)) return;
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      void api.commands.get(accepted.command.acceptance.commandId, controller.signal).then((next) => {
+        if (controller.signal.aborted) return;
+        setAccepted(next);
+        if (next.session) {
+          void queryClient.invalidateQueries({ queryKey: ["sessions"] });
+          void queryClient.invalidateQueries({ queryKey: ["workspaces"] });
+          router.replace(`/agents/${encodeURIComponent(next.session.traceAgentRef)}`);
+        }
+      }, (reason: unknown) => { if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : String(reason)); });
+    }, 1000);
+    return () => { clearTimeout(timer); controller.abort(); };
+  }, [accepted, queryClient, router]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -200,7 +206,7 @@ export default function DraftSessionPage() {
               <select
                 value={metadata.agent}
                 onChange={(event) => void switchAgent(event.target.value)}
-                disabled={switchingAgent}
+                disabled={switchingAgent || Boolean(accepted)}
                 className="max-w-32 rounded border border-line bg-canvas px-2 py-1 text-xs"
                 aria-label="Agent"
               >
@@ -226,12 +232,13 @@ export default function DraftSessionPage() {
         </div>
       </div>
 
+      {accepted && <p role="status" className="border-t border-line p-3 text-sm">{accepted.command.state === "unknown" ? "Delivery unconfirmed. Recover status before submitting again." : `Command ${accepted.command.state.replaceAll("_", " ")} · Waiting for the vendor identity`}<button className="ml-2 min-h-11 rounded px-3 underline focus-ring" onClick={() => { void api.commands.get(accepted.command.acceptance.commandId).then(setAccepted); }}>Recover status</button></p>}
       {state && (
         <Composer
           session={session}
           agents={environment?.agents ?? []}
-          turnCount={0}
-          isLive={false}
+          agentLocked={Boolean(accepted)}
+          busyExecution={false}
           text={text}
           onTextChange={setText}
           attachments={attachments}
@@ -247,7 +254,7 @@ export default function DraftSessionPage() {
           config={config}
           control={{ available: true }}
           sending={sending}
-          sendError={error}
+          sendError={error ? new Error(error) : null}
           onStop={() => {
             void api.sessions.discardPrepared(draftId).finally(() => router.push("/"));
           }}
@@ -257,7 +264,7 @@ export default function DraftSessionPage() {
             if (option) void setConfig(option, value);
           }}
           onAgentChange={(agent) => switchAgent(agent)}
-          configError={error}
+          configError={error ? new Error(error) : null}
         />
       )}
     </div>

@@ -199,6 +199,25 @@ impl EvidenceCatalogue {
         &self.evidence
     }
 
+    pub async fn scope_is_readable(&self, proof: &ScopeProof) -> Result<bool> {
+        let mut connection = self.evidence.readers.acquire().await?;
+        let matches: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM ingestion_epochs WHERE epoch=? AND scope_ref=?)",
+        )
+        .bind(proof.epoch.as_str())
+        .bind(proof.scope.encode())
+        .fetch_one(&mut *connection)
+        .await?;
+        if !matches {
+            return Ok(false);
+        }
+        match check_epoch(&mut connection, &proof.epoch).await {
+            Ok(()) => Ok(true),
+            Err(CatalogueError::DeletedScope) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
     pub async fn scope_proof(&self, epoch: &IngestionEpoch) -> Result<ScopeProof> {
         let json:Option<String>=sqlx::query_scalar("SELECT s.scope_json FROM ingestion_epochs e JOIN ingestion_scopes s ON s.scope_ref=e.scope_ref WHERE e.epoch=?").bind(epoch.as_str()).fetch_optional(&self.evidence.readers).await?;
         Ok(ScopeProof {
@@ -207,6 +226,13 @@ impl EvidenceCatalogue {
             )?,
             epoch: epoch.clone(),
         })
+    }
+
+    /// Evidence admission and visibility changes have independent clocks. A
+    /// tombstone can require a new projection even when no new capture arrived.
+    pub async fn active_visibility_is_current(&self) -> Result<bool> {
+        Ok(sqlx::query_scalar("SELECT j.visibility_revision=c.visibility_revision FROM trace_active a JOIN trace_build_jobs j ON j.generation=a.generation CROSS JOIN trace_catalogue_clock c WHERE a.singleton=1 AND c.singleton=1")
+            .fetch_optional(&self.evidence.readers).await?.unwrap_or(false))
     }
 
     pub async fn pointer(&self) -> Result<ActivePointer> {
@@ -769,9 +795,57 @@ impl EvidenceCatalogue {
         Ok(())
     }
 
+    /// A damaged published file cannot continue to satisfy previously issued
+    /// snapshots even after a replacement generation is ready.
+    pub async fn cancel_generation_views(&self, generation: &str) -> Result<()> {
+        sqlx::query("UPDATE trace_view_leases SET state='cancelled',cancel_reason='generation unavailable' WHERE generation=? AND state IN ('pending','active')")
+            .bind(generation).execute(&self.evidence.writer).await?;
+        Ok(())
+    }
+
+    /// Install this root while a pending/active view already holds the snapshot.
+    /// Cross-database consumers hide their old index before moving its root, and
+    /// only mark the replacement ready after all matching documents commit.
+    pub async fn pin_revision(
+        &self,
+        kind: PinOwnerKind,
+        owner_id: &str,
+        snapshot: &Snapshot,
+    ) -> Result<()> {
+        if !matches!(kind, PinOwnerKind::Search | PinOwnerKind::Export) || owner_id.is_empty() {
+            return Err(CatalogueError::Invalid(
+                "revision pin owner is invalid".into(),
+            ));
+        }
+        sqlx::query("INSERT INTO trace_revision_pins VALUES(?,?,?,?,?) ON CONFLICT(owner_kind,owner_id) DO UPDATE SET generation=excluded.generation,evidence_cut=excluded.evidence_cut,view_revision=excluded.view_revision")
+            .bind(kind.as_str()).bind(owner_id).bind(&snapshot.generation)
+            .bind(signed(snapshot.evidence_cut)?).bind(signed(snapshot.view_revision)?)
+            .execute(&self.evidence.writer).await?;
+        Ok(())
+    }
+
+    /// Call only after invalidating the corresponding index/export job. Existing
+    /// result leases remain independent roots for their original checkpoints.
+    pub async fn release_revision_pin(&self, kind: PinOwnerKind, owner_id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM trace_revision_pins WHERE owner_kind=? AND owner_id=?")
+            .bind(kind.as_str())
+            .bind(owner_id)
+            .execute(&self.evidence.writer)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn retired_searches(&self, now_ms: i64, limit: usize) -> Result<Vec<String>> {
+        if limit == 0 || limit > self.limits.max_pin_batch {
+            return Err(CatalogueError::Limit("retired search batch"));
+        }
+        Ok(sqlx::query_scalar("SELECT g.generation FROM trace_generations g WHERE g.state IN ('retained','cancelled','retired') AND NOT EXISTS(SELECT 1 FROM trace_view_leases l WHERE l.generation=g.generation AND l.state IN ('pending','active') AND l.expires_at_ms>?) AND (EXISTS(SELECT 1 FROM trace_revision_pins r WHERE r.owner_kind='search' AND r.owner_id=g.generation) OR EXISTS(SELECT 1 FROM trace_payload_pins p WHERE p.owner_kind='search' AND p.owner_id=g.generation)) ORDER BY g.generation LIMIT ?")
+            .bind(now_ms).bind(limit as i64).fetch_all(&self.evidence.readers).await?)
+    }
+
     pub async fn generation_is_pinned(&self, generation: &str, now_ms: i64) -> Result<bool> {
-        Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM trace_active WHERE generation=?) OR EXISTS(SELECT 1 FROM trace_build_jobs WHERE generation=? AND state IN ('building','ready')) OR EXISTS(SELECT 1 FROM trace_view_leases WHERE generation=? AND state IN ('pending','active') AND expires_at_ms>?)")
-            .bind(generation).bind(generation).bind(generation).bind(now_ms).fetch_one(&self.evidence.readers).await?)
+        Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM trace_active WHERE generation=?) OR EXISTS(SELECT 1 FROM trace_build_jobs WHERE generation=? AND state IN ('building','ready')) OR EXISTS(SELECT 1 FROM trace_view_leases WHERE generation=? AND state IN ('pending','active') AND expires_at_ms>?) OR EXISTS(SELECT 1 FROM trace_revision_pins WHERE generation=?)")
+            .bind(generation).bind(generation).bind(generation).bind(now_ms).bind(generation).fetch_one(&self.evidence.readers).await?)
     }
 
     pub async fn minimum_leased_revision(
@@ -783,7 +857,7 @@ impl EvidenceCatalogue {
         if pending {
             return Ok(Some(0));
         }
-        let value:Option<i64>=sqlx::query_scalar("SELECT MIN(view_revision) FROM trace_view_leases WHERE generation=? AND state='active' AND expires_at_ms>?").bind(generation).bind(now_ms).fetch_one(&self.evidence.readers).await?;
+        let value:Option<i64>=sqlx::query_scalar("SELECT MIN(view_revision) FROM (SELECT view_revision FROM trace_view_leases WHERE generation=? AND state='active' AND expires_at_ms>? UNION ALL SELECT view_revision FROM trace_revision_pins WHERE generation=?)").bind(generation).bind(now_ms).bind(generation).fetch_one(&self.evidence.readers).await?;
         value.map(unsigned).transpose()
     }
 

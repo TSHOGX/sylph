@@ -156,9 +156,8 @@ function flagIcon(key: string) {
 export function Composer({
   session,
   agents,
-  /** Turns already in this session. Zero means the agent is still changeable. */
-  turnCount,
-  isLive,
+  agentLocked,
+  busyExecution,
   text,
   onTextChange,
   attachments,
@@ -185,15 +184,17 @@ export function Composer({
   canQueueSteering = false,
   onNativeQueue,
   canQueue = false,
+  canNativeQueue = false,
+  canStop = true,
   onSteer,
   onQueue,
   blockedCount = 0,
   onShowBlocked,
 }: {
-  session: Session;
+  session: Pick<Session, "agent" | "workdir" | "flagsJson"> & { id: string | null };
   agents: Agent[];
-  turnCount: number;
-  isLive: boolean;
+  agentLocked: boolean;
+  busyExecution: boolean;
   text: string;
   onTextChange: (value: string) => void;
   attachments: StagedAttachment[];
@@ -272,6 +273,8 @@ export function Composer({
   onNativeQueue?: (text: string, priority: boolean) => void;
   /** Whether the agent accepts text for *after* the running turn. */
   canQueue?: boolean;
+  canNativeQueue?: boolean;
+  canStop?: boolean;
   onSteer?: (text: string) => void;
   onQueue?: (text: string) => void;
   /**
@@ -425,20 +428,20 @@ export function Composer({
   // whether the user may type at all.
   const modes = CONTROL_DELIVERIES.map((mode) => ({
     ...mode,
-    available: mode.capability === "steer" ? canSteer : mode.capability === "queue_steering" ? canQueueSteering : canQueue,
+    available: mode.id === "steer" ? canSteer : mode.id === "native_steer" ? canQueueSteering : mode.id === "native_queue" ? canNativeQueue : canQueue,
   }));
   const selectedMode = modes.find((mode) => mode.id === deliveryMode && mode.available)?.id
-    ?? (canSteer ? "steer" : canQueueSteering ? "native_steer" : "queue");
-  const steering = isLive && selectedMode === "steer" && canSteer;
-  const queueing = isLive && selectedMode === "queue" && canQueue;
-  const nativeQueueing = isLive && (selectedMode === "native_steer" ? canQueueSteering : selectedMode === "native_queue" && canQueue);
-  const disabled = (isLive && ((!steering && !queueing && !nativeQueueing) || attachments.length > 0)) || sending;
+    ?? modes.find((mode) => mode.available)?.id;
+  const selectedDelivery = modes.find((mode) => mode.id === selectedMode);
+  const steering = busyExecution && selectedMode === "steer" && canSteer;
+  const queueing = busyExecution && selectedMode === "queue" && canQueue;
+  const nativeQueueing = busyExecution && (selectedMode === "native_steer" ? canQueueSteering : selectedMode === "native_queue" && canNativeQueue);
+  const disabled = (busyExecution && ((!steering && !queueing && !nativeQueueing) || attachments.length > 0)) || sending;
   const canSend = text.trim().length > 0 && !disabled;
 
   // The agent is fixed once the conversation has content. Switching it would
   // hand an existing transcript to a different runner — and with it a different
   // identity and lifecycle policy — so it is offered only on an empty session.
-  const agentLocked = turnCount > 0;
 
   // Auto-grow to the content, bounded. A fixed two-row box hides the start of a
   // long message while it is being written, and a freely growing one eats the
@@ -469,6 +472,7 @@ export function Composer({
       // Sequential rather than concurrent: these are writes into the user's
       // project, and a partial failure is far easier to describe when the files
       // land in a known order.
+      if (!session.id) throw new Error("This agent has no declared file context.");
       for (const item of items) {
         await api.files.upload(session.id, {
           path: relativeTo(path, session.workdir),
@@ -518,6 +522,7 @@ export function Composer({
       // than sending a blank value the runner would pass through.
       if (value) next[key] = value;
       else delete next[key];
+      if (!session.id) throw new Error("This agent has no session configuration target.");
       return api.sessions.update(session.id, { flags: next });
     },
     onSuccess: () => {
@@ -812,7 +817,7 @@ export function Composer({
               />
             </div>
           )}
-          {isLive && (
+          {busyExecution && (
             <div className="border-b border-line px-3 py-1.5">
               <div role="group" aria-label={t("control.deliveryMode")} className="flex flex-wrap items-center gap-1">
                 {modes.filter((mode) => mode.available).map((mode) => (
@@ -827,7 +832,7 @@ export function Composer({
                   </button>
                 ))}
               </div>
-              <p className="mt-1 text-3xs text-ink-muted">{t(modes.find((mode) => mode.id === selectedMode)!.hint)}</p>
+              {selectedDelivery && <p className="mt-1 text-3xs text-ink-muted">{t(selectedDelivery.hint)}</p>}
               {!canQueue && <p className="mt-1 text-3xs text-ink-muted">{t("control.queueUnsupported", { agent: session.agent })}</p>}
               {!canSteer && !canQueueSteering && <p className="mt-1 text-3xs text-ink-muted">{t("control.steerUnsupported", { agent: session.agent })}</p>}
               {attachments.length > 0 && <p role="status" className="mt-1 text-3xs text-ink-muted">{t("control.attachmentsWait")}</p>}
@@ -842,6 +847,7 @@ export function Composer({
               slashActive ? `${slashListboxId}-${slashIndex}` : undefined
             }
             ref={textareaRef}
+            data-composer-editor
             value={text}
             rows={1}
             onChange={(event) => onTextChange(event.target.value)}
@@ -914,7 +920,7 @@ export function Composer({
                     // vendor delivers after the turn is what made a user's "don't do that"
                     // arrive too late while everything reported success.
                     t("composer.placeholderQueue")
-                  : isLive
+                  : busyExecution
                     ? t("composer.placeholderBusy")
                     : t("composer.placeholder")
             }
@@ -995,7 +1001,7 @@ export function Composer({
                   // Mid-turn the agent is already running with the old value, so a
                   // change now would silently apply to the *next* turn while
                   // appearing to affect this one.
-                  disabled={isLive}
+                  disabled={busyExecution}
                   icon={flagIcon(option.category ?? option.id)}
                   onSet={(value) => onSetConfig?.(option.id, value)}
                 />
@@ -1009,7 +1015,7 @@ export function Composer({
                   {(trigger) => (
                     <Button
                       variant="chip"
-                      disabled={isLive || patchFlags.isPending}
+                      disabled={busyExecution || patchFlags.isPending}
                       icon={flagIcon(key)}
                       className="max-w-40 shrink-0"
                       {...trigger}
@@ -1031,7 +1037,7 @@ export function Composer({
               unreachable. Shown only when the agent declared it — an interrupt
               button on an agent that cannot interrupt is a lie.
             */}
-            {isLive && canInterrupt && (
+            {busyExecution && canInterrupt && (
               <Button
                 variant="secondary"
                 onClick={onInterrupt}
@@ -1045,7 +1051,7 @@ export function Composer({
             {/* Send and Stop have separate DOM identities. Reusing Send's button
                 for Stop interpolates its primary colors into danger colors with
                 insufficient contrast, and changes the focused control's action. */}
-            {(!isLive || steering || queueing || nativeQueueing) && (
+            {(!busyExecution || steering || queueing || nativeQueueing) && (
               <Button
                 type="submit"
                 variant="primary"
@@ -1057,7 +1063,7 @@ export function Composer({
                 <span className="max-md:hidden">{sending ? t("action.sendingEllipsis") : t("action.send")}</span>
               </Button>
             )}
-            {isLive && (
+            {busyExecution && canStop && (
               <Button
                 variant="danger"
                 onClick={onStop}
@@ -1211,7 +1217,7 @@ function SlashStatus({
 
   // Whether a retry can change the answer is the protocol's rule, not this
   // component's: `isRetryable` mirrors `UnavailableReason::is_retryable`, so the button
-  // cannot come to disagree with the cache lifetime in `use-agent-session.ts` that is
+  // cannot come to disagree with the cache lifetime in the operational control reader that is
   // decided from the same rule. Offering a retry for `no_agent` would invite the user
   // to keep paying a process spawn for an outcome that cannot change.
   const retryable = status === "unavailable" && Boolean(capabilityError || (reason && isRetryable(reason)));

@@ -1,10 +1,11 @@
 use super::EvidenceCatalogue;
 use crate::trace::{
     evidence::{EvidenceError, ReceiptDisposition},
-    upload::{AdmissionGuard, CaptureUploadTicket, PayloadDeclaration, Result, UploadError},
+    upload::{AdmissionGuard, Result, UploadError},
 };
 use sqlx::{Row, SqliteConnection};
 use sylph_protocol::trace::{Capture, Issuer, PayloadRef};
+use sylph_protocol::{CaptureUploadTicket, PayloadDeclaration};
 
 impl EvidenceCatalogue {
     pub(crate) async fn begin_capture_upload(
@@ -93,17 +94,18 @@ impl EvidenceCatalogue {
         })
     }
 
-    pub(crate) async fn capture_chunk_length(
+    pub(crate) async fn capture_chunk_status(
         &self,
         issuer: &Issuer,
         ticket: &CaptureUploadTicket,
         reference: &PayloadRef,
-    ) -> Result<u64> {
+    ) -> Result<(u64, bool)> {
         let mut conn = self.evidence.readers.acquire().await?;
-        authenticate(&mut conn, issuer, ticket, true).await?;
+        let row = authenticate(&mut conn, issuer, ticket, true).await?;
         let length:Option<i64>=sqlx::query_scalar("SELECT expected_length FROM trace_capture_payloads WHERE upload_id=? AND payload_ref=? AND kind='bytes'").bind(&ticket.id).bind(reference.as_str()).fetch_optional(&mut *conn).await?;
-        u64::try_from(length.ok_or(UploadError::Unavailable)?)
-            .map_err(|_| UploadError::Invalid("negative byte extent".into()))
+        let length = u64::try_from(length.ok_or(UploadError::Unavailable)?)
+            .map_err(|_| UploadError::Invalid("negative byte extent".into()))?;
+        Ok((length, row.try_get::<String, _>("state")? == "admitted"))
     }
 
     pub(crate) async fn record_capture_chunk(
@@ -113,7 +115,10 @@ impl EvidenceCatalogue {
         reference: &PayloadRef,
     ) -> Result<()> {
         let mut tx = self.evidence.writer.begin_with("BEGIN IMMEDIATE").await?;
-        authenticate(&mut tx, issuer, ticket, true).await?;
+        let row = authenticate(&mut tx, issuer, ticket, true).await?;
+        if row.try_get::<String, _>("state")? == "admitted" {
+            return Ok(());
+        }
         let result=sqlx::query("UPDATE trace_capture_payloads SET received=1 WHERE upload_id=? AND payload_ref=? AND kind='bytes'").bind(&ticket.id).bind(reference.as_str()).execute(&mut *tx).await?;
         if result.rows_affected() != 1 {
             return Err(UploadError::Unavailable);
@@ -189,7 +194,7 @@ async fn authenticate(
     conn: &mut SqliteConnection,
     issuer: &Issuer,
     ticket: &CaptureUploadTicket,
-    require_open: bool,
+    require_live_payload: bool,
 ) -> Result<sqlx::sqlite::SqliteRow> {
     let row = sqlx::query("SELECT * FROM trace_capture_uploads WHERE upload_id=?")
         .bind(&ticket.id)
@@ -202,11 +207,15 @@ async fn authenticate(
         return Err(UploadError::Authority);
     }
     if row.try_get::<String, _>("state")? == "cancelled"
-        || (require_open && row.try_get::<String, _>("state")? != "open")
+        || (require_live_payload
+            && !matches!(
+                row.try_get::<String, _>("state")?.as_str(),
+                "open" | "admitted"
+            ))
     {
         return Err(UploadError::Unavailable);
     }
-    if require_open
+    if require_live_payload
         && super::super::epoch_tombstone(conn, &row.try_get::<String, _>("ingestion_epoch")?)
             .await?
             .is_some()

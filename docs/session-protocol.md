@@ -1,18 +1,12 @@
 # Session Protocol
 
-**Authority split:** this document owns vendor process/control behavior, requests and
-capabilities. [unified-trace-foundation.md](unified-trace-foundation.md) replaces the
-former event/block/span semantics, and [unified-trace-storage.md](unified-trace-storage.md)
-defines capture and pure mapping. Superseded trace headings below remain source-comment
-navigation points; they do not authorize an alternate trace model.
+This document owns vendor process controls, requests and capabilities. The trace model
+is defined by [unified-trace-foundation.md](unified-trace-foundation.md), and exact capture,
+receipts and pure mapping by [unified-trace-storage.md](unified-trace-storage.md).
 
-The process/control contract between the server and an agent. Capture can observe live
-I/O, native history, or both; one pure semantic mapping interprets that evidence.
-
-Vendor runtime code is linked into the envagent and talks to the vendor process. The
-pure mapping module is callable by the server over retained observations. Capture
-envelopes cross `sylph.env.v1` (`docs/environments.md`); schema/build identity is explicit
-at that boundary and at semantic generation publication.
+Vendor runtime code is linked into the envagent and holds its process. Server mappers
+read retained observations independently of that process or machine. The two communicate
+through the typed capture and operational contracts over `sylph.env.v1`.
 
 **Read this and the dedicated vendor mapping before writing an adapter.** Control and
 capability rules below are contracts an adapter must satisfy, and most of them are rules whose violation is *silent* — a vendor
@@ -32,8 +26,9 @@ because everything else assumes them:
 
 ## The unit is a session, not a turn
 
-An adapter holds a session for its lifetime: `open` once, then a turn per `send`, and
-the outcome arrives as an event rather than as an exit code.
+An adapter holds a session for its lifetime: `run` once, then input through `send`.
+Its operational message stream reports native activity and settlement. The trace mapper
+reads execution outcomes from the exact retained vendor frames and source records.
 
 A process per *turn* cannot work, for two independent reasons. Everything stateful a
 vendor CLI knows — loaded skills, permission grants, a warmed context, an MCP
@@ -41,25 +36,28 @@ connection — would be reachable only by restarting and re-resolving it. And it
 "the turn ended" and "the process exited" the same event, leaving an agent that speaks
 after its turn (§ An agent may start a turn) nowhere to speak from.
 
-## An adapter is a trait, with three modes
+## The acquisition and control contract
 
-An adapter package contains envagent capture/control and a pure server semantic mapper.
-Run captures a controlled live process, adopt captures an available native inventory,
-and watch follows source changes. They all feed the same evidence contract and mapper;
-none fabricates live events from native messages to satisfy the former block API.
+`Adapter::run(RunSpec, Arc<dyn RawCaptureSink>)` returns a held `Session`. Its
+`Session::messages()` yields one `ControlStream` carrying `Request`, `Capabilities`, and
+`ControlNotice::{Identity, Active, Settled}`. The raw sink commits exact stdin, stdout,
+stderr and measured process lifecycle bytes before runtime decoding or reply routing.
 
-[unified-trace-storage.md](unified-trace-storage.md#capture-contract) owns the replacement
-interface. Existing Rust trait signatures are implementation context until that interface
-lands; there is no compatibility adapter wrapping the obsolete vocabulary.
+`Adapter::native_sources()` returns source locators, formats and independently evidenced
+owner hints; `enumerate()` returns cheap catalogue metadata. The envagent's shared durable
+registry acquires and follows files, snapshots and consistent native SQLite reads.
+Adoption, following and re-reading all use that registry. Server replay uses the archive
+without a vendor process or filesystem call.
 
 ### What the adapter owns, and what it must not
 
-**Owns:** the vendor CLI's command line and native store format, translation in both
-directions, the vendor's own ids, and the decision to omit rather than guess.
+The adapter owns vendor argv, request/reply protocol, native locators, capability discovery
+and control validation. A locator or requested native id is not identity proof. The adapter
+returns retained observation references for the id the vendor actually reports.
 
-**Must not:** decide identity injection (the server passes it), invent an event kind
-the vocabulary does not have, retry a turn on its own, or report a refusal as a
-success. The last of those is the easiest to do by accident — see § A refused set.
+The server decides identity injection. The adapter cannot invent semantic activations,
+promote tool calls into agents, retry an ambiguous input, or report an unanswered vendor
+request as rejected. Typed trace facts are produced only by pure server mappers.
 
 ## Opening a session
 
@@ -74,8 +72,8 @@ success. The last of those is the easiest to do by accident — see § A refused
 | `permission_mode` | initial mode, if the vendor takes one at launch |
 
 **Dictate the id where the vendor allows it.** `claude` and `pi` accept a
-`--session-id`; `codex` assigns its own and reports it. Dictating means the identity is
-known before the first event, so nothing has to correlate afterwards.
+`--session-id`; `codex` assigns its own and reports it. Every path still requires retained
+vendor confirmation. A requested id cannot establish that the vendor actually used it.
 
 **Which of the two applies is `AgentInfo::dictates_native_id`, read from a probe** — never
 a list of agent names held beside the adapters, which would diverge from them the moment
@@ -91,12 +89,15 @@ A minted id is **not a second id space** (`docs/architecture.md` § Identity). I
 to the vendor on `--session-id`, and the vendor adopts it as its own native id, so the
 value Sylph stores and the value the vendor's store holds are one value.
 
-An adapter that cannot dictate reports the vendor's id when it starts the first turn,
-and the server keys the durable session on what came back. A prepared link may report
-no id at all while it is idle; that is valid because it has no durable record to resume.
-The adapter must return a non-empty id from the first-turn promotion operation. If it
-cannot, promotion fails and the prepared link is closed without writing a session or
-turn row.
+A prepared link can have no native id while idle. Capture starts under a server-issued
+inventory authorization before native identity exists. The session returns a non-empty
+id and `identity_evidence()` when the vendor establishes it; Claude may need the first
+input, while Codex can establish it during `thread/start`.
+
+The server binds a launch only from admitted identity evidence. Captures, accepted input
+and command target keep their original identities and authorization epochs. A lost reply
+or unresolved identity leaves explicit ambiguity; it cannot create a guessed session or
+replace the accepted input with a vendor-transformed representation.
 
 ### A launch flag gating a runtime-mutable value must be set unconditionally
 
@@ -143,9 +144,9 @@ permission mode / output style, `pi`'s model / thinking level / queue modes, and
 pub struct ConfigOption {
     pub id: String,
     pub name: String,
-    pub category: String,       // advisory grouping; a client groups without knowing the vocabulary
+    pub category: Option<String>,       // advisory grouping; a client groups without knowing the vocabulary
     pub kind: ConfigKind,       // Select | Boolean
-    pub current_value: Option<String>,
+    pub current_value: Option<serde_json::Value>,
     pub options: Vec<ConfigChoice>,
 }
 ```
@@ -170,7 +171,7 @@ than one provider, and some display names are duplicated outright. So **a model'
 identity is `(provider, id)`, never the id alone.**
 
 Three layers enforce it, because a client renders whatever an agent it has never seen
-reports — including agents written by other people. The adapter issues
+reports. The adapter issues
 provider-qualified values, the list component enforces one current row per
 single-select group, and the server validates a value against what was enumerated.
 
@@ -243,8 +244,8 @@ project's real command list depends on files the CLI reads at startup.
 ## Requests: the agent asks, a human answers
 
 The agent asks a question mid-turn and waits; a human answers from any attached
-client. A request is raised by the adapter, journaled by the server, published to every
-attached client, and blocks nothing else.
+client. The adapter raises the native ask, the envagent scopes its public id to the held
+process, and the server stores and publishes its operational state.
 
 ```rust
 pub struct Request {
@@ -265,11 +266,15 @@ A resolution carries the chosen option and optionally `input` — which may be a
 **edited** version of what the agent proposed. That is how "allow, but change the
 command" works, a real terminal affordance a yes/no dialog drops.
 
-**A pending request is durable state, not UI state.** It is journaled, survives a
-client disconnect, and is re-delivered on reconnect — otherwise closing a laptop lid
-strands an agent forever. If the link dies with requests outstanding they are
-journaled as `abandoned`, so the timeline explains why the turn stopped rather than
-showing an unexplained gap.
+**A pending request is durable state.** Reconnect of the same held process repeats the
+same public request id. A successor process receives a new scope even when its native
+request counter restarts. A resolution must name a pending public id; the envagent
+translates it back to the native id immediately before vendor forwarding.
+
+Claiming an answer and admitting its immutable command occur atomically. A duplicate
+request notification cannot revive a resolved or ambiguously dispatched answer. The
+server records waiting, resolving and resolved operational states separately from the
+vendor's retained request/result evidence.
 
 **`allow_persistent: false` means a client must omit the "always allow" affordance
 entirely**, not merely discourage it. `claude` sets it on asks where accepting always
@@ -283,8 +288,8 @@ show is racing a clock it cannot see and the user experiences a dialog that answ
 itself. The server never auto-applies a default when it lapses — that would remove
 the user from the decision this channel exists to give them.
 
-**First resolution wins**; a second is refused, naming the resolver, so two people
-answering at once is a defined outcome rather than a race.
+**First resolution wins.** A concurrent answer cannot dispatch another vendor decision
+for the same public request. A transport failure after dispatch remains unknown.
 
 ### Announce every departure, not only the arrival
 
@@ -365,65 +370,31 @@ follow: confirm the key exists in the vendor's own binary or schema before writi
 and assert on **the tool result the model reads**, because "the panel closed" and "the
 answer arrived" are different claims and only the second is the feature.
 
-## Events
+## Trace evidence
 
-The normalized vocabulary is the typed fact families in
-[unified-trace-foundation.md](unified-trace-foundation.md#evidence-claims-and-deterministic-reduction).
 Capture occurrence, semantic claim, resolved object and query change have distinct
-identities. A kind/phase/stream/span envelope is not the replacement object model.
-
-## Delegated trajectories
-
-Delegation connects independently advancing AgentThreads through invocation, spawn,
-delivery and activation evidence. Operations and Resources remain independently typed.
-The governing rules are
-[unified-trace-foundation.md](unified-trace-foundation.md#ownership-topology-interaction-and-context).
+identities. The typed fact families and deterministic reduction rules live in
+[unified-trace-foundation.md](unified-trace-foundation.md#evidence-claims-and-deterministic-reduction).
+A runtime control message does not substitute for execution evidence.
 
 ### Time axes are independent
 
-See [unified-trace-foundation.md](unified-trace-foundation.md#ordering-clocks-and-measurements).
-Source order, receipt order, causal order and history selection remain separate; endpoint
-wall elapsed time does not replace a vendor's reported monotonic duration.
-
-### Promotion: a trajectory is defined by use, not by declaration
-
-This former promotion rule is replaced. A tool hosting nested calls remains an Operation;
-actual native child identity establishes an AgentThread. Arguments, returns, independent
-resources and activations have separate lifecycles under
-[unified-trace-foundation.md](unified-trace-foundation.md#execution-results-and-resources).
+Source order, receipt order, causal order and selected history remain separate. Clock
+units, domains and uncertainty follow
+[unified-trace-foundation.md](unified-trace-foundation.md#ordering-clocks-and-measurements).
 
 ### `name` is absent when unknown
 
-Names are optional evidenced metadata, never identity or proof of a child. Read-time
-fallback labels belong to the reader and cannot enter durable authored content.
-See [unified-trace-foundation.md](unified-trace-foundation.md#identity-and-reference-resolution).
-
-### Keying rules that produce corruption when broken
-
-Typed native scopes and source occurrence identities replace unscoped block/span keys.
-Owner, actual record UUID and content-part index remain independently represented.
-[unified-trace-foundation.md](unified-trace-foundation.md#identity-and-reference-resolution)
-is authoritative; the dedicated vendor specs establish each actual namespace.
-
-### Structure survives the ephemeral/stable split
-
-There is no semantic ephemeral/stable retention split in the replacement. Every admitted
-observation, including live deltas and lifecycle boundaries, is durably retained before
-acknowledgment. Query caching is independently disposable. See
-[unified-trace-storage.md](unified-trace-storage.md#admission-and-acknowledgments).
+Names are optional evidenced metadata. Reader fallback labels never enter durable
+authored content or supply child identity. Native identity and occurrence namespaces
+are defined by the dedicated vendor mappings.
 
 ### Outcomes, and what a turn may close
 
-[unified-trace-foundation.md](unified-trace-foundation.md#independent-lifecycle-claims)
-owns outcome, close reason and observation state. A parent ending cannot sweep independent
-children/resources closed. A terminal execution is not a promise that no later archive
-evidence can arrive. Command cancellation acceptance is not proof of vendor cancellation.
-
-### `is_backgrounded` inverts the sweep
-
-The replacement removes parent-close sweeps entirely. A vendor background flag is evidence
-about an operation/resource, not the exception that makes independently owned work survive.
-See [unified-trace-foundation.md](unified-trace-foundation.md#operation-contract).
+The [independent lifecycle contract](unified-trace-foundation.md#independent-lifecycle-claims)
+separates vendor outcome, control acceptance and observation loss. A process exit can
+report only its evidenced scope. A parent ending cannot close independent children or
+resources; later retained evidence may still arrive.
 
 ## An agent may start a turn
 
@@ -435,7 +406,7 @@ trace ownership are independent under
 
 ## Failure
 
-An adapter reports what it knows and omits what it does not. Three rules:
+An adapter reports what it knows and omits what it does not:
 
 - **Never report a refusal as a success** (§ A refused set).
 - **Never synthesize a value the vendor did not give.** A synthesized id, name, or
@@ -458,20 +429,16 @@ The machine boundary is `sylph.env.v1`, implemented by the serde-only values in
 `crates/protocol/src/env.rs` and the length-delimited runtime in
 `crates/envagent/src/transport.rs`.
 
-An envagent allocates `producer_id` and `producer_seq` before sending. It keeps
-each item in its WAL spool until the server has durably ingested it and replies
-with an `ack` for a contiguous prefix. The server assigns `server_seq` inside
-the event/receipt transaction; replaying a producer item is therefore an
-idempotent no-op and never creates a second canonical event.
+A raw capture carries its producer observation identity, source position and fixed
+ingestion authorization epoch. Begin/chunk/commit upload receives a terminal retained or
+authorized-deletion receipt before the spool releases bytes. The server's evidence cut
+and trace publication watermark are separate from source occurrence order.
 
-Hello/welcome carries version negotiation, environment identity, connection
-epoch, agent inventory, health, and the server's accepted cursors. A stale
-epoch cannot acknowledge a newer connection. Commands carry an opaque request
-id plus `replayable` or `at_most_once`; a result may be `accepted`, `rejected`,
-or `unknown`, and an unknown at-most-once command is never retried blindly.
+Hello/welcome negotiates version and connection epoch, and reports agent inventory and
+health. Capture replies are scoped to that epoch. Commands carry immutable request ids
+and `replayable` or `at_most_once` policy; outcomes are `accepted`, `rejected` or `unknown`.
+An ambiguous at-most-once command is not repeated after reconnect or process restart.
 
-The wire reserves a `TurnInputFact` container message rather than a synthetic
-user event, and typed `SessionEdge` rows for delegation and fork provenance.
-The current adapter stream still emits only `Event`/`Request`/`Capabilities`/
-`NativeRecord`; carrying those two facts (and child events) into the wire is an
-explicit platform integration gate, not a synthesized timeline projection.
+Current capability snapshots, pending requests and control leases replay independently
+of semantic mapping. [environments.md](environments.md#message-classes) owns the wire
+message list and runtime scheduling rules.

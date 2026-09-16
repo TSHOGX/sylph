@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::Instant;
 
@@ -28,7 +27,6 @@ pub fn mark_start() {
 pub struct HealthResponse {
     ok: bool,
     api_version: String,
-    schema_version: i64,
     /// Whether this build can run any agent at all.
     ///
     /// A server with zero agents answers every other probe successfully while no
@@ -59,7 +57,6 @@ pub struct AgentsHealth {
 /// LaunchAgent probe can check liveness without holding a cookie. It therefore
 /// reports only availability, never counts or paths.
 pub async fn health(State(state): State<AppState>) -> Result<Json<HealthResponse>> {
-    let schema_version = state.store.schema_version().await.unwrap_or(0);
     let available = state
         .env_bridge
         .list_environments()
@@ -71,97 +68,24 @@ pub async fn health(State(state): State<AppState>) -> Result<Json<HealthResponse
     Ok(Json(HealthResponse {
         ok: true,
         api_version: "1".to_string(),
-        schema_version,
         agents: AgentsHealth { available },
     }))
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DiagnosticsResponse {
-    ok: bool,
-    version: String,
-    uptime_seconds: u64,
-    sessions: HashMap<String, i64>,
-    turns: HashMap<String, i64>,
-    /// Which agents this build can run.
-    ///
-    /// `broken_adapters` and `agent_roots` are gone with discovery. Both existed because
-    /// an adapter was a *directory to be found*, so "no agents" needed to name where it
-    /// looked — a missing install and a mistyped path gave the same empty list and
-    /// needed opposite fixes. An adapter is now linked into the binary, so there is no
-    /// path to get wrong and no broken-but-present state to report.
-    agents: Vec<String>,
-    /// Turns the supervisor is running right now. May be lower than the journal's
-    /// running count if a link died without the reaper having recorded it yet.
-    ///
-    /// # Why this is not called `activeProcesses`
-    ///
-    /// It was, and the value has always been `active_turn_count()` — a turn count
-    /// published under a process name. That was harmless only while every process
-    /// was one Sylph spawned, so the two numbers differed by nothing a reader could
-    /// observe. It stops being harmless with adopted sessions, where a process is
-    /// alive and is not ours: "active processes" would then be read as a count of
-    /// agents on this machine, which this number has never been and cannot become
-    /// without asking every vendor. Name the thing that is counted.
-    active_turns: usize,
-    /// The last retention pass, or `null` before the first one completes.
-    ///
-    /// Reported because retention's correct behaviour is usually "nothing was
-    /// dropped", which is indistinguishable from a broken pass without the counts.
-    /// `withheld` beside `terminal` is what separates the two: a terminal session
-    /// is *supposed* to keep everything forever, while a delegated session that
-    /// keeps withholding means the archive is not confirming it — and an
-    /// all-`unchanged` pass means the ingestion daemon has stopped advancing.
-    retention: Option<crate::storage::PassReport>,
-    /// Raw native records that failed to reach durable history since startup.
-    ///
-    /// A timeline can still look healthy after this counter increments, but its
-    /// re-projection source is incomplete; exposing the count makes that loss actionable.
-    native_record_failures: u64,
-}
-
-/// GET /api/v1/diagnostics
-///
-/// Authenticated: unlike `/health`, this exposes session and turn counts plus
-/// runner failure messages, which can carry local filesystem paths.
-pub async fn diagnostics(State(state): State<AppState>) -> Result<Json<DiagnosticsResponse>> {
-    let sessions = state
+pub async fn diagnostics(State(state): State<AppState>) -> Result<Json<serde_json::Value>> {
+    let sessions = state.store.count_sessions_by_status().await?;
+    let evidence = state
+        .trace
+        .evidence()
+        .evidence_cut()
+        .await
+        .map_err(|e| crate::error::Error::Internal(e.to_string()))?;
+    let outbox = state
         .store
-        .count_sessions_by_status()
-        .await?
-        .into_iter()
-        .collect();
-
-    let turns = state
-        .store
-        .count_turns_by_status(None)
-        .await?
-        .into_iter()
-        .collect();
-
-    Ok(Json(DiagnosticsResponse {
-        ok: true,
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        uptime_seconds: uptime_seconds(),
-        sessions,
-        turns,
-        agents: state
-            .env_bridge
-            .list_environments()
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .flat_map(|environment| {
-                environment
-                    .agents
-                    .into_iter()
-                    .filter(|agent| agent.available)
-                    .map(|agent| agent.name)
-            })
-            .collect(),
-        active_turns: state.store.active_turn_count().await?,
-        retention: state.retention.last_pass().await,
-        native_record_failures: state.history.native_record_failures(),
-    }))
+        .progress(crate::models::now_ms())
+        .await
+        .map_err(|e| crate::error::Error::Internal(e.to_string()))?;
+    Ok(Json(
+        serde_json::json!({"ok":true,"version":env!("CARGO_PKG_VERSION"),"uptimeSeconds":uptime_seconds(),"sessions":sessions,"evidenceCut":evidence,"pendingOutbox":outbox.pending_count,"oldestPendingOutboxAgeMs":outbox.oldest_pending_age_ms}),
+    ))
 }

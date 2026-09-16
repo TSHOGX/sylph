@@ -35,7 +35,7 @@
  *
  * The dialog focuses its deny affordance, matching `AlertDialog`'s reasoning: a
  * stray Enter on a dialog that just appeared must not grant a permission. The
- * agent's own `defaultOption` is honoured when it names one, and it is deny in
+ * agent's own `default` is honoured when it names one, and it is deny in
  * practice for anything destructive. A form is the one exception: there the first
  * control is focused instead, because an unanswered form cannot be submitted by
  * Enter anyway and starting on the deny row would make answering take an extra key.
@@ -131,8 +131,7 @@ export function ApprovalDialog({ request, onResolve, onDismiss, busy }: Props) {
 
   const risky = request.risk === "destructive";
   // A question the agent asked, rather than permission it needs. Either it declared
-  // a form, or it is a `choice` whose options are themselves the answers - the older
-  // shape, still rendered so an adapter that has not been updated keeps working.
+  // a form, or it is a `choice` whose declared options are themselves the answers.
   const asking = Boolean(form) || request.kind === "choice";
   const changed = field !== null && edited !== proposed;
   const complete = form ? isFormComplete(form, formState) : true;
@@ -164,13 +163,14 @@ export function ApprovalDialog({ request, onResolve, onDismiss, busy }: Props) {
       if (!container) return;
       const target =
         container.querySelector<HTMLElement>("[data-first-field]") ??
+        Array.from(container.querySelectorAll<HTMLElement>("[data-option-id]")).find((element) => element.dataset.optionId === request.default) ??
         container.querySelector<HTMLElement>('[data-deny="true"]');
       target?.focus();
     });
     return () => {
       cancelled = true;
     };
-  }, [request.id, ref]);
+  }, [request.id, request.default, ref]);
 
   function resolve(option: string) {
     if (busy) return;
@@ -194,7 +194,8 @@ export function ApprovalDialog({ request, onResolve, onDismiss, busy }: Props) {
       role="dialog"
       aria-modal="true"
       aria-labelledby={`approval-title-${request.id}`}
-      className="flex flex-col gap-3 rounded-lg border border-warning-line bg-raised p-4 shadow-lg"
+      tabIndex={-1}
+      className="fixed inset-x-3 top-1/2 z-50 mx-auto flex max-h-[calc(100dvh-24px)] max-w-2xl -translate-y-1/2 flex-col gap-3 overflow-y-auto rounded-lg border border-warning-line bg-raised p-4 shadow-lg"
       data-testid="approval-dialog"
     >
       <div className="flex items-start gap-2">
@@ -239,6 +240,7 @@ export function ApprovalDialog({ request, onResolve, onDismiss, busy }: Props) {
                 key={option.id}
                 type="button"
                 data-deny={declining ? "true" : undefined}
+                data-option-id={option.id}
                 disabled={busy}
                 onClick={() => resolve(option.id)}
                 className={`focus-ring tap-target flex flex-col items-start gap-0.5 rounded-lg border px-3 py-2 text-left transition-colors disabled:opacity-50 ${
@@ -274,12 +276,13 @@ export function ApprovalDialog({ request, onResolve, onDismiss, busy }: Props) {
             <span className="text-xs text-warning">{t("approval.edited")}</span>
           ) : null}
         </label>
-      ) : Object.keys(detail).length > 0 ? (
+      ) : request.detail !== undefined ? (
         <pre className="max-h-40 overflow-auto rounded border border-line bg-sunken px-2 py-1.5 font-mono text-xs text-ink-muted">
-          {JSON.stringify(detail, null, 2)}
+          {JSON.stringify(request.detail, null, 2)}
         </pre>
       ) : null}
 
+      {options.length === 0 && <p role="status" className="text-sm">This request has no permitted answer choices.</p>}
       {/* Verbs. A form renders them too: with the fields carrying the answer, an
           option is what to *do* with it - send it, or decline to give one - which is
           what makes "pick, then add a note, then submit" expressible at all. The
@@ -294,6 +297,7 @@ export function ApprovalDialog({ request, onResolve, onDismiss, busy }: Props) {
               <Button
                 key={option.id}
                 data-deny={denying ? "true" : undefined}
+                data-option-id={option.id}
                 variant={optionVariant(option, risky)}
                 size="sm"
                 // An incomplete form blocks only the submitting verbs. Declining

@@ -545,3 +545,212 @@ async fn killed_capture_recovers_cursor_and_lexical_queue_at_one_commit_boundary
         assert_eq!(queued.len(), 2);
     }
 }
+
+#[tokio::test]
+async fn snapshot_reauthorization_keeps_position_and_replacement_starts_a_generation() {
+    let fixture = Fixture::new(CaptureLimits::default(), 1024 * 1024).await;
+    fixture.write(b"{\"selected\":1}");
+    let first = fixture
+        .registry
+        .capture_snapshot(&fixture.source, authorization("epoch-1"))
+        .await
+        .unwrap();
+    let replay = fixture
+        .registry
+        .capture_snapshot(&fixture.source, authorization("epoch-1"))
+        .await
+        .unwrap();
+    assert!(replay.observations.is_empty());
+    let reauthorized = fixture
+        .registry
+        .capture_snapshot(&fixture.source, authorization("epoch-2"))
+        .await
+        .unwrap();
+    assert_eq!(first.generation, reauthorized.generation);
+    let queue = fixture.registry.pending(10).await.unwrap();
+    assert_eq!(
+        queue[0].capture.source_position,
+        queue[1].capture.source_position
+    );
+    assert_ne!(
+        queue[0].capture.observation_ref,
+        queue[1].capture.observation_ref
+    );
+    assert_eq!(bytes(&queue[0]), b"{\"selected\":1}");
+    let replacement = fixture.dir.path().join("replacement");
+    std::fs::write(&replacement, b"{\"selected\":1}").unwrap();
+    std::fs::rename(replacement, &fixture.source.locator).unwrap();
+    let changed = fixture
+        .registry
+        .capture_snapshot(&fixture.source, authorization("epoch-2"))
+        .await
+        .unwrap();
+    assert_eq!(changed.generation, first.generation + 1);
+    assert!(changed.generation_changed);
+    std::fs::remove_file(&fixture.source.locator).unwrap();
+    assert!(
+        fixture
+            .registry
+            .capture_snapshot(&fixture.source, authorization("epoch-2"))
+            .await
+            .unwrap()
+            .source_missing
+    );
+    fixture.write(b"{\"selected\":1}");
+    assert_eq!(
+        fixture
+            .registry
+            .capture_snapshot(&fixture.source, authorization("epoch-2"))
+            .await
+            .unwrap()
+            .generation,
+        changed.generation + 1
+    );
+}
+
+#[tokio::test]
+async fn oversized_snapshot_does_not_advance_a_cursor_or_queue_bytes() {
+    let limits = CaptureLimits {
+        chunk_bytes: 8,
+        read_bytes: 16,
+        max_record_bytes: 32,
+        ..Default::default()
+    };
+    let fixture = Fixture::new(limits, 1024 * 1024).await;
+    let file = std::fs::File::create(&fixture.source.locator).unwrap();
+    file.set_len(1024 * 1024 * 1024).unwrap();
+    let error = fixture
+        .registry
+        .capture_snapshot(&fixture.source, authorization("epoch-1"))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, CaptureSpoolError::RecordLimit(32)));
+    assert!(fixture.registry.pending(1).await.unwrap().is_empty());
+    assert_eq!(
+        fixture
+            .registry
+            .cursor(&fixture.source, &authorization("epoch-1").epoch)
+            .await
+            .unwrap()
+            .offset,
+        0
+    );
+}
+
+#[tokio::test]
+async fn native_ownership_proof_names_the_identity_record_after_blank_and_unrelated_lines() {
+    let mut fixture = Fixture::new(CaptureLimits::default(), 1024 * 1024).await;
+    fixture.source.identity_record_ordinal = Some(2);
+    fixture
+        .write(b"\n{\"type\":\"queue-operation\"}\n{\"sessionId\":\"native\",\"type\":\"user\"}\n");
+    let pass = fixture.capture().await;
+    let proof = fixture
+        .registry
+        .source_proof(&fixture.source.reference, pass.generation)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(proof, pass.observations[2]);
+    assert_ne!(proof, pass.observations[0]);
+    let retained = fixture.registry.pending(4).await.unwrap();
+    assert!(String::from_utf8(bytes(&retained[2]))
+        .unwrap()
+        .contains("sessionId"));
+}
+
+#[tokio::test]
+async fn ordinary_capture_backpressure_preserves_capacity_for_an_explicit_process_gap() {
+    let fixture = Fixture::new(CaptureLimits::default(), 8192).await;
+    fixture
+        .registry
+        .capture_frame(
+            "vendor/rpc",
+            TransportKind::LiveStdout,
+            vec![b'x'; 5600],
+            authorization("epoch-1"),
+        )
+        .await
+        .unwrap();
+    let failed = fixture
+        .registry
+        .capture_frame(
+            "vendor/rpc",
+            TransportKind::LiveStdout,
+            vec![b'x'; 500],
+            authorization("epoch-1"),
+        )
+        .await;
+    assert!(matches!(
+        failed,
+        Err(CaptureSpoolError::Spool(SpoolError::Overflow { .. }))
+    ));
+    let gap = fixture
+        .registry
+        .capture_frame(
+            "vendor/lifecycle",
+            TransportKind::Supervisor,
+            b"{\"kind\":\"capture_gap\"}".to_vec(),
+            authorization("epoch-1"),
+        )
+        .await
+        .unwrap();
+    let queued = fixture.registry.pending(4).await.unwrap();
+    assert_eq!(queued.len(), 2);
+    assert_eq!(queued[1].capture.observation_ref, gap);
+    assert!(
+        fixture.registry.spool.size_bytes().await.unwrap() <= fixture.registry.spool.max_bytes()
+    );
+}
+
+#[tokio::test]
+async fn capture_delivery_barrier_cannot_be_extended_by_later_live_frames() {
+    let fixture = Fixture::new(CaptureLimits::default(), 1024 * 1024).await;
+    let first = fixture
+        .registry
+        .capture_frame(
+            "rpc",
+            TransportKind::LiveStdout,
+            b"first\n".to_vec(),
+            authorization("epoch-1"),
+        )
+        .await
+        .unwrap();
+    let frontier = fixture.registry.pending_frontiers().await.unwrap();
+    let second = fixture
+        .registry
+        .capture_frame(
+            "rpc",
+            TransportKind::LiveStdout,
+            b"second\n".to_vec(),
+            authorization("epoch-1"),
+        )
+        .await
+        .unwrap();
+    let frozen = fixture
+        .registry
+        .pending_metadata_through(10, Some(&frontier))
+        .await
+        .unwrap();
+    assert_eq!(frozen.len(), 1);
+    assert_eq!(frozen[0].capture.observation_ref, first);
+    fixture
+        .registry
+        .acknowledge(&[CaptureReceipt::Retained {
+            observation: first,
+            admission_seq: 1,
+        }])
+        .await
+        .unwrap();
+    assert!(fixture
+        .registry
+        .pending_metadata_through(10, Some(&frontier))
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        fixture.registry.pending_metadata(10).await.unwrap()[0]
+            .capture
+            .observation_ref,
+        second
+    );
+}

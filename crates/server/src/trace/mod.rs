@@ -3,11 +3,14 @@
 //! These independent writers implement `docs/unified-trace-storage.md`. Projection
 //! workers consume committed admissions; neither a mapper nor a reader owns admission.
 
+pub mod cas;
 pub mod evidence;
 pub mod exporter;
-pub mod generation;
-pub mod outbox;
-pub mod worker;
-pub mod publication;
-pub mod upload;
 pub mod gc;
+pub mod generation;
+pub mod publication;
+pub mod reading_store;
+pub mod search;
+pub mod service;
+pub mod upload;
+pub mod worker;

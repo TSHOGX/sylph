@@ -43,7 +43,7 @@ function workdir(files: Record<string, string>): string {
 async function openPane(page: Page, dir: string) {
   await createSession(page, { workdir: dir });
   await page.keyboard.press("ControlOrMeta+Backslash");
-  const pane = page.getByRole("complementary", { name: "Work panel" });
+  const pane = page.getByRole("complementary", { name: "Trace inspector" });
   await expect(pane).toBeVisible();
   return pane;
 }

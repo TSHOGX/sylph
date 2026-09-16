@@ -56,7 +56,9 @@ owns progress and status; `docs/` owns design.
 - `crates/fts5-jieba/` — the SQLite FTS5 tokenizer, linked into the server so Chinese is
   searchable. Vendored rather than depended on by path, which is only ever right on one
   machine.
-- `crates/server/` — Rust, Axum, SQLx. Holds the store, the supervisor, and the API.
+- `crates/trace/` — pure vendor mapping, deterministic reduction and reader projections.
+- `crates/server/` — Rust, Axum, SQLx. Holds operational policy, trace evidence,
+  generation publication and the API.
 - `frontend/` — Next.js App Router, React, TanStack Query, Tailwind.
 - `docs/` — the governing specs. Read the relevant section before implementing.
 - `scripts/` — install and deployment tooling.
@@ -94,8 +96,8 @@ The server runs nothing on its own: start an envagent and pair it
 E2E starts both servers itself on the ports in `docs/configuration.md` § Ports, with a
 throwaway `SYLPH_HOME` and the `e2e` cargo feature, which compiles in a fixture agent
 *instead of* the three real ones — so it never touches your store or spends tokens.
-`Agents this build can run: e2e` in the backend log confirms the harness is on the
-fixture. Do not start servers by hand for it; it shells out to `cargo`, and a cold run
+`Fixture adapters enabled: codex (no vendor processes)` in the envagent log confirms
+that the harness uses the fixture. Its raw frames use the production Codex mapper. Do not start servers by hand for it; it shells out to `cargo`, and a cold run
 compiles the backend first.
 
 **Nothing the E2E launcher spawns may be `detached`, and that is a hang, not a leak.**
@@ -188,10 +190,10 @@ Every entry below is a family of that defect, owned by one document.
 | Reading a vendor payload: wrong key, wrong unit, wrong shape | `docs/agents.md` § Reading a vendor payload |
 | An inherited environment that redirects a vendor's authentication | `docs/agents.md` § A host-managed auth switch inherited from another agent session |
 | A vendor's `success` that did not do what you asked | `docs/session-protocol.md` § Three rules about reading a vendor's answer |
-| Delegation, `span`, promotion, `abandoned` vs `failed` | `docs/session-protocol.md` § Delegated trajectories |
-| Retention, watermarks, withheld vs a zero bound | `docs/storage.md` § Retention is watermark-driven |
+| Agent identity, independent activation and operation outcomes | `docs/unified-trace-foundation.md` § Execution, results, and resources |
+| Evidence retention, deletion epochs and payload roots | `docs/unified-trace-storage.md` § Retention, deletion, and garbage collection |
 | Identity, one id space, no session class | `docs/architecture.md` § Identity |
-| Why a turn stopped short: `CloseReason`, reason vs status | `docs/session-protocol.md` § Outcomes, and what a turn may close |
+| Own terminal outcome, close reason and observation loss | `docs/unified-trace-foundation.md` § Independent lifecycle claims |
 | Whether a fact is per-environment or per-caller, and what may be cached | `docs/architecture.md` § A facet describes the environment, never the caller |
 | Who may authorize, and whether ungrantable means unreachable | `docs/api/admin.md` § `administer` is ungrantable |
 | Path containment, symlinks, where agents may run | `docs/configuration.md` § `browse_roots` bounds where agents run |
@@ -302,8 +304,8 @@ the standard pattern does not address the bottleneck, or when security calls for
 stricter, and document the deviation and its evidence where the code lives.
 
 Record decisions as comments next to the code they govern, including what was rejected and
-why. `frontend/components/execution-timeline.tsx` shows the intended density: it explains how
-virtualization and stable node identities preserve the visible reading position.
+why. `frontend/components/agent-reader.tsx` explains how snapshot windows, stable anchors
+and virtualization preserve the visible reading position.
 
 ## Compatibility
 

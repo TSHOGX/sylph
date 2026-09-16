@@ -7,7 +7,7 @@ test("draft remains usable while opening files and changing config", async ({ pa
   const envBody = await env.json();
   const environment = envBody.environments[0].id;
   const created = await page.request.post("/api/v1/sessions", {
-    data: { environment, agent: "e2e", workdir: "/tmp" },
+    data: { environment, agent: "codex", workdir: "/tmp" },
   });
   expect(created.ok()).toBe(true);
   const { draftId } = await created.json();
@@ -30,7 +30,7 @@ test("switching drafts does not discard the replacement", async ({ page }) => {
   const env = await page.request.get("/api/v1/environments");
   const environment = (await env.json()).environments[0].id;
   const created = await page.request.post("/api/v1/sessions", {
-    data: { environment, agent: "e2e", workdir: "/tmp" },
+    data: { environment, agent: "codex", workdir: "/tmp" },
   });
   const { draftId } = await created.json();
   await page.goto(`/sessions/draft/${encodeURIComponent(draftId)}`);
@@ -39,7 +39,7 @@ test("switching drafts does not discard the replacement", async ({ page }) => {
   await menu.click();
   await expect(page.getByRole("menu")).toBeVisible();
   const replacement = await page.request.post("/api/v1/sessions", {
-    data: { environment, agent: "e2e", workdir: "/tmp" },
+    data: { environment, agent: "codex", workdir: "/tmp" },
   });
   expect(replacement.ok()).toBe(true);
   const replacementId = (await replacement.json()).draftId;
@@ -55,7 +55,7 @@ test("navigating from one empty draft discards the draft left behind", async ({ 
   const env = await page.request.get("/api/v1/environments");
   const environment = (await env.json()).environments[0].id;
   const first = await page.request.post("/api/v1/sessions", {
-    data: { environment, agent: "e2e", workdir: "/tmp" },
+    data: { environment, agent: "codex", workdir: "/tmp" },
   });
   const firstDraft = (await first.json()).draftId;
   await page.goto(`/sessions/draft/${encodeURIComponent(firstDraft)}`);
@@ -95,24 +95,25 @@ test("starting another session while a draft is open leaves the new draft alive"
   const env = await page.request.get("/api/v1/environments");
   const environment = (await env.json()).environments[0].id;
   const first = await page.request.post("/api/v1/sessions", {
-    data: { environment, agent: "e2e", workdir: "/tmp" },
+    data: { environment, agent: "codex", workdir: "/tmp" },
   });
   const firstDraft = (await first.json()).draftId;
-  const firstTurn = await page.request.post(`/api/v1/sessions/draft/${encodeURIComponent(firstDraft)}/turns`, {
+  const firstTurn = await page.request.post(`/api/v1/sessions/draft/${encodeURIComponent(firstDraft)}/commands`, {
     data: { text: "seed" },
   });
-  const firstSession = (await firstTurn.json()).session;
-  await page.goto(`/sessions/${encodeURIComponent(firstSession.id)}`);
+  let accepted = await firstTurn.json();
+  await expect.poll(async () => { if (accepted.session) return true; accepted = await (await page.request.get(`/api/v1/commands/${encodeURIComponent(accepted.command.acceptance.commandId)}`)).json(); return Boolean(accepted.session); }).toBe(true);
+  const firstSession = accepted.session;
+  await page.goto(`/agents/${encodeURIComponent(firstSession.traceAgentRef)}`);
   await expect(page.getByLabel("Message", { exact: true })).toBeVisible();
-  const group = page.locator("button[aria-expanded]").filter({ hasText: "tmp" }).first();
-  await group.click({ button: "right" });
-  const menu = page.getByRole("menu");
-  await menu.getByRole("menuitem", { name: "New session here", exact: true }).click();
+  const sidebar = page.getByRole("complementary", { name: "Workspaces" });
+  await sidebar.getByRole("button", { name: "tmp actions", exact: true }).click();
+  await page.getByRole("menu").getByRole("menuitem", { name: "New session here", exact: true }).click();
   await expect(page).toHaveURL(/\/sessions\/draft\/(?:draft-|remote-draft-)/);
   await expect(page.getByLabel("Message", { exact: true })).toBeVisible();
   const secondDraft = decodeURIComponent(page.url().split("/").pop()!);
   const metadata = await page.request.get(`/api/v1/sessions/draft/${encodeURIComponent(secondDraft)}`);
   expect(metadata.ok()).toBe(true);
   const oldMetadata = await page.request.get(`/api/v1/sessions/draft/${encodeURIComponent(firstDraft)}`);
-  expect(oldMetadata.status()).toBe(404);
+  expect(oldMetadata.status()).toBe(409);
 });

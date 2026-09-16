@@ -124,7 +124,7 @@ fi
 
 # --- preflight ------------------------------------------------------------
 
-command -v cargo >/dev/null || die "cargo not found. Install Rust 1.85+."
+command -v cargo >/dev/null || die "cargo not found. Install Rust 1.89+."
 command -v node >/dev/null || die "node not found. Install Node.js 22.5+."
 command -v npm >/dev/null || die "npm not found. Install Node.js 22.5+."
 

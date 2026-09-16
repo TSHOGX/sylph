@@ -52,6 +52,80 @@ fn capture(seq: u64, live: bool) -> Capture {
 fn agent(id: &str) -> AgentRef {
     AgentRef::Session(SessionId::decode(&format!("env:codex:{id}")).unwrap())
 }
+
+#[test]
+fn opening_reply_identity_requires_its_retained_request_in_the_same_runtime_source() {
+    let mut request=capture(1,true);request.transport_kind=TransportKind::LiveStdin;request.declared_subject_refs.clear();
+    let reply=capture(2,true);let state=MapperState::default();
+    let sent=CodexMapper.map(MapInput {capture:&request,canonical_observation:&request.observation_ref,raw:br#"{"id":12,"method":"thread/start","params":{"cwd":"/workspace"}}"#,state:&state,archive:&ArchiveContext::default()});
+    let raw=br#"{"id":12,"result":{"thread":{"id":"actual-native"}}}"#;
+    let missing=CodexMapper.map(MapInput {capture:&reply,canonical_observation:&reply.observation_ref,raw,state:&state,archive:&ArchiveContext::default()});assert!(missing.claims.is_empty());
+    let found=CodexMapper.map(MapInput {capture:&reply,canonical_observation:&reply.observation_ref,raw,state:&sent.state,archive:&ArchiveContext::default()});
+    let declaration=found.claims.iter().find(|claim|matches!(&claim.fact,Fact::Declare {object:TraceObject::Agent(agent)} if agent.agent_ref==self::agent("actual-native"))).unwrap();assert!(declaration.evidence.contains(&request.observation_ref));assert!(declaration.evidence.contains(&reply.observation_ref));
+}
+
+#[test]
+fn selected_rollout_metadata_requires_matching_source_identity_and_a_complete_extent() {
+    use sylph_protocol::{NativeDatabaseSnapshot,NativeDatabaseStatus,NativeDatabaseValue};
+    let native=capture(1,false);let mut metadata=capture(2,false);metadata.transport_kind=TransportKind::NativeDatabase;
+    let mut snapshot=NativeDatabaseSnapshot {database_locator:"/native/state_5.sqlite".into(),table:"threads".into(),columns:vec![],status:NativeDatabaseStatus::Available,row:[("id".into(),NativeDatabaseValue::Text("root".into())),("rollout_path".into(),NativeDatabaseValue::Text("/native/selected.jsonl".into()))].into(),selected_source:Some(native.source_position.source.clone()),selected_generation:Some(0),selected_record_count:Some(17),selected_pending_bytes:Some(0)};
+    let archive=ArchiveContext {source_owners:[((native.source_position.source.clone(),0),crate::mapping::SourceOwner {agent:agent("root"),evidence:vec![native.observation_ref],rule:"codex/governing-native-header".into()})].into(),..ArchiveContext::default()};
+    let map=|snapshot:&NativeDatabaseSnapshot|CodexMapper.map(MapInput {capture:&metadata,canonical_observation:&metadata.observation_ref,raw:&serde_json::to_vec(snapshot).unwrap(),state:&MapperState::default(),archive:&archive});
+    let selected=map(&snapshot);assert!(selected.claims.iter().any(|claim|matches!(&claim.fact,Fact::Declare {object:TraceObject::HistorySelection(selection)} if matches!(&selection.membership,SelectionMembership::SourceExtents {extents,..} if extents[0].end_exclusive==17))));
+    snapshot.row.insert("id".into(),NativeDatabaseValue::Text("another-agent".into()));let wrong=map(&snapshot);assert!(wrong.claims.is_empty());assert_eq!(wrong.diagnostics[0].code,DiagnosticCode::ConflictingOwner);
+}
+#[test]
+fn reverted_rollout_selection_stays_unknown_until_its_frozen_base_is_resolved() {
+    use sylph_protocol::{NativeDatabaseSnapshot, NativeDatabaseStatus, NativeDatabaseValue};
+    let native = capture(1, false);
+    let mut metadata = capture(2, false);
+    metadata.transport_kind = TransportKind::NativeDatabase;
+    let snapshot = NativeDatabaseSnapshot {
+        database_locator: "/native/state_5.sqlite".into(),
+        table: "threads".into(),
+        columns: vec![],
+        status: NativeDatabaseStatus::Available,
+        row: [("id".into(), NativeDatabaseValue::Text("root".into()))].into(),
+        selected_source: Some(native.source_position.source.clone()),
+        selected_generation: Some(0),
+        selected_record_count: Some(1),
+        selected_pending_bytes: Some(0),
+    };
+    let source = (native.source_position.source.clone(), 0);
+    let archive = ArchiveContext {
+        source_owners: [(source.clone(), crate::mapping::SourceOwner {
+            agent: agent("root"),
+            evidence: vec![native.observation_ref.clone()],
+            rule: "codex/governing-native-header".into(),
+        })].into(),
+        history_records: [(source, [(0, history::HistoryRecord {
+            position: native.source_position.clone(),
+            observation: native.observation_ref.clone(),
+            vendor_ordinal: Some(214),
+            header: Some(history::HistoryHeader {
+                agent: agent("root"),
+                history_base: Some(serde_json::json!({
+                    "thread_id": "prior-physical-rollout",
+                    "end_ordinal_exclusive": 214,
+                    "end_byte_offset_exclusive": 4200,
+                })),
+                inherited_before: None,
+                inherited_from: None,
+            }),
+        })].into())].into(),
+        ..ArchiveContext::default()
+    };
+    let output = CodexMapper.map(MapInput {
+        capture: &metadata,
+        canonical_observation: &metadata.observation_ref,
+        raw: &serde_json::to_vec(&snapshot).unwrap(),
+        state: &MapperState::default(),
+        archive: &archive,
+    });
+    assert!(output.claims.is_empty(), "a physical suffix is not the selected logical history");
+    assert!(output.diagnostics.iter().any(|issue| issue.code == DiagnosticCode::UnknownSelection));
+}
+
 fn run(values: &[Value], live: bool) -> Vec<MapOutput> {
     let mut state = MapperState::default();
     let mut outputs = vec![];

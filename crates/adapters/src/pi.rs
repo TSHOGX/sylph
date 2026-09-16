@@ -1,62 +1,18 @@
-//! The `pi` adapter: the live RPC surface, and the reader for its native store.
+//! Pi process controls and raw source discovery.
 //!
-//! `docs/agents.md` § `pi` is the governing spec and holds the measurement behind every
-//! quirk below. The vendor's own protocol is documented in the installed package at
-//! `~/.local/lib/node_modules/@earendil-works/pi-coding-agent/`. Every pointer below names
-//! a file in it as `pi-coding-agent/docs/…`, package-relative, so a vendor's document is
-//! never mistakable for one of this repo's own. **That unbundled source-mapped install is
-//! the evidence to prefer**: `AGENTS.md` records an earlier claim about this vendor that
-//! was wrong precisely because it was measured against a minified bundle.
-//!
-//! # One file, five parts, and only one of them touches a process
-//!
-//! [`rpc`] holds the command and config surface: what a value means, what `set_model`
-//! takes, which refusal a bad one earns. [`ui`] projects pi's one inversion, an extension
-//! asking a human something. [`translate`] holds the vendor→Sylph event projection as pure
-//! functions over a [`translate::Correlation`], the same split `claude`'s module makes and
-//! for the same measured reason: an end-to-end check spends real tokens and only sees
-//! whatever shapes one live turn happens to produce, so a mistranslation does not raise —
-//! it produces a plausible timeline that misdescribes what the agent did. [`native`] reads
-//! `~/.pi/agent/sessions/`.
-//!
-//! [`session`] is the one part that holds stdio, and it is deliberately thin: it wires the
-//! other four to a [`crate::process::Child`] and owns only what genuinely needs a process —
-//! reply correlation against outbound traffic, and the answer path for a dialog. Every
-//! decision it makes about a *payload* is delegated, which is what keeps the expensive
-//! parts assertable without spending a token.
-//!
-//! # What this adapter does **not** emit, and why that is a report rather than a gap
-//!
-//! No `approval`, and no `subagent`. `pi` ships no tool-permission callback — a tool runs
-//! when the model calls it — and it reports no delegation on the RPC wire in any form.
-//! Emitting either would fabricate structure the vendor never reports; a flat `pi`
-//! transcript is a true report. `Task`-shaped tools are absent from its catalogue
-//! entirely (`read`, `write`, `edit`, `bash`, `find`, `grep`, `ls`, `tree`), so there is
-//! nothing to mark as delegating either — see [`translate::SPAN_HAS_NO_VENDOR_SOURCE`].
-//!
-//! # `describe` is deleted
-//!
-//! The v1 `--serve` entry point and its NDJSON framing are gone with the
-//! subprocess transport, not ported. There is no v1 or v3 contract left to serve, and
-//! `AGENTS.md` § Compatibility forbids keeping one.
-
-// The three halves are **inline modules rather than files**, unlike `claude`'s directory.
-// One vendor's whole surface is one unit of review here — the config encoding, the event
-// projection, and the store parser each depend on the same measured field spellings — and
-// splitting them into files would let a reader change the encoding in one and the parser in
-// another without seeing both. They are named modules rather than one flat namespace so
-// `translate`'s pure functions stay separable from anything that touches a process.
+//! The process transport retains exact bytes before routing replies or operational
+//! notices. Trace interpretation belongs to the pure mapper in `crates/trace/`.
+//! `docs/unified-trace-pi.md` owns the vendor acquisition and mapping contract.
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use sylph_protocol::{
-    Adapter, AgentInfo, Capability, EventStream, Facet, FlagSpec, LinkFacets, NativeId,
-    NativeRecord, NativeSummary, RunSpec, Session, StoreFilter, UnavailableReason,
+    Adapter, AgentInfo, Capability, Facet, FlagSpec, LinkFacets, NativeId, NativeSource,
+    NativeSummary, RunSpec, Session, StoreFilter, UnavailableReason,
 };
 
 pub use rpc::{model_key, split_model_key, ConfigId, MODEL_KEY_SEPARATOR};
 pub use session::PiSession;
-pub use translate::{Correlation, Emission};
 
 /// The name this adapter answers to, and the `PATH` binary that decides availability.
 ///
@@ -279,35 +235,18 @@ impl Adapter for PiAdapter {
         })
     }
 
-    async fn run(&self, spec: RunSpec) -> Result<Box<dyn Session>> {
-        let session = session::PiSession::open(spec).await?;
+    async fn run(
+        &self,
+        spec: RunSpec,
+        capture: std::sync::Arc<dyn sylph_protocol::RawCaptureSink>,
+    ) -> Result<Box<dyn Session>> {
+        let session = session::PiSession::open(spec, capture).await?;
         Ok(Box::new(session))
     }
 
-    async fn adopt(&self, id: &NativeId) -> Result<EventStream> {
-        native::adopt(id)
-    }
-
-    async fn reproject(&self, records: Vec<NativeRecord>) -> Result<EventStream> {
-        let mut messages = Vec::new();
-        let mut live = std::collections::HashMap::new();
-        for record in records {
-            if record.source.starts_with("live/") {
-                let correlation = live
-                    .entry(record.source)
-                    .or_insert_with(translate::Correlation::new);
-                messages.extend(correlation.translate(&record.payload, 0).messages);
-            } else {
-                messages.extend(native::reproject_native_record(&record)?);
-            }
-        }
-        Ok(Box::pin(futures::stream::iter(
-            messages.into_iter().map(Ok),
-        )))
-    }
-
-    async fn watch(&self, id: &NativeId) -> Result<EventStream> {
-        native::watch(id)
+    async fn native_sources(&self, id: &NativeId) -> Result<Vec<NativeSource>> {
+        let id = id.clone();
+        tokio::task::spawn_blocking(move || native::sources(&id)).await?
     }
 
     async fn enumerate(&self, filter: &StoreFilter) -> Result<Vec<NativeSummary>> {
@@ -347,57 +286,6 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
     use sylph_protocol::RequestedNativeId;
-
-    #[tokio::test]
-    async fn retained_reprojection_keeps_native_and_live_messages() {
-        use futures::TryStreamExt;
-        use serde_json::json;
-        use sylph_protocol::SessionMessage;
-        let record = |source: &str, version, payload| NativeRecord {
-            source: source.to_string(),
-            version,
-            payload,
-            raw_json: None,
-            blobs: Vec::new(),
-        };
-        let records = vec![
-            record(
-                "root.jsonl",
-                1,
-                json!({"type":"message","id":"native-item","message":{"role":"assistant","content":[{"type":"text","text":"native answer"}]}}),
-            ),
-            record(
-                "live/stdout/run.jsonl",
-                1,
-                json!({"type":"message_start","message":{"role":"assistant"}}),
-            ),
-            record(
-                "live/stdout/run.jsonl",
-                2,
-                json!({"type":"message_update","assistantMessageEvent":{"type":"text_start","contentIndex":0}}),
-            ),
-            record(
-                "live/stdout/run.jsonl",
-                3,
-                json!({"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"live answer"}}),
-            ),
-            record(
-                "live/stdout/run.jsonl",
-                4,
-                json!({"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":0,"content":"live answer"}}),
-            ),
-        ];
-        let messages: Vec<_> = PiAdapter
-            .reproject(records)
-            .await
-            .unwrap()
-            .try_collect()
-            .await
-            .unwrap();
-        for expected in ["native answer", "live answer"] {
-            assert!(messages.iter().any(|message| matches!(message, SessionMessage::Event(event) if event.text == expected)), "missing {expected}: {messages:?}");
-        }
-    }
 
     fn spec() -> RunSpec {
         RunSpec {
@@ -1083,8 +971,7 @@ pub mod ui {
 
     /// Project one `extension_ui_request` onto a Sylph request.
     ///
-    /// `now_ms` is a parameter rather than a call to a clock inside, for the same reason
-    /// `translate` takes one: a deadline computed against a global clock is not assertable,
+    /// `now_ms` is a parameter because a deadline computed against a global clock is not assertable,
     /// and pi reports a `timeout` as a *duration* that only becomes an instant here.
     pub fn inversion(payload: &Value, now_ms: i64) -> Inversion {
         let method = payload
@@ -1387,3294 +1274,27 @@ pub mod ui {
     }
 }
 
-/// `pi`'s RPC events, projected onto [`sylph_protocol`] events.
-///
-/// The vendor→Sylph projection: `_translate`, `_delta` and `flatten`
-/// (:458-563). `docs/session-protocol.md` § Events governs.
-///
-/// # Why this is a separate, process-free module
-///
-/// The same reason `claude::translate` is: **a mistranslation does not raise.** It produces
-/// a plausible timeline that misdescribes what the agent did, and an end-to-end check
-/// cannot see one — it spends real tokens and only exercises whatever shapes one live turn
-/// happens to produce. So the whole projection is pure functions over one [`Correlation`],
-/// with no process, no I/O, and no clock of its own.
-///
-/// # Time arrives as an argument
-///
-/// [`sylph_protocol::Event::created_at_ms`] is required, and **pi's RPC events carry no
-/// timestamp at all** — checked against `pi-coding-agent/docs/rpc.md` § Events, where every event shape is
-/// listed and none holds one. (Its *messages* do, which is what the native store reads; a
-/// live `message_update` carries `usage` and `assistantMessageEvent` and nothing else.) So
-/// the adapter stamps arrival, and the clock is a parameter: a test that cannot fix the
-/// stamps cannot assert on ordering.
-pub mod translate {
-    use std::collections::HashMap;
-
-    use serde_json::{json, Value};
-    use sylph_protocol::{Event, EventKind, Phase, SessionMessage};
-
-    /// Why no event this module emits ever carries a `span`.
-    ///
-    /// **`pi` reports no delegation on the RPC wire in any form, and that is measured
-    /// rather than assumed.** Its event table is 21 kinds with no parent, span, or child
-    /// field — `toolCallId` is the only correlation any event carries — and its tool
-    /// catalogue (`read`, `write`, `edit`, `bash`, `find`, `grep`, `ls`, `tree`) holds no
-    /// delegating tool. Sub-agents exist only for SDK embedders, who build a second
-    /// in-process `AgentSession` inside a custom tool; that inner session's events go to
-    /// its own `subscribe` callback and never reach this process.
-    ///
-    /// The one trace such work leaves on the wire is `ToolResultMessage.usage`, documented
-    /// as the tool's combined usage for nested LLM calls — an aggregate token count with no
-    /// identity, no lifecycle, and no count of delegates, so it cannot name a trajectory
-    /// even in principle.
-    ///
-    /// So a flat `pi` transcript is a **true report** rather than a gap. Synthesizing a
-    /// `span` out of a token total, or out of a parser-invented `call:<call_id>` pairing —
-    /// which is a tool-call/result link rather than delegation structure — would put a shape
-    /// in the timeline that nothing in the session corresponds to.
-    pub const SPAN_HAS_NO_VENDOR_SOURCE: &str =
-        "pi exposes no delegation on the RPC wire; a span here would be invented";
-
-    /// What one vendor event turned into.
-    ///
-    /// Mirrors `claude::Emission` field for field where the facts are the same, so a reader
-    /// moving between the two modules is reading one shape. `refresh_capabilities` is
-    /// absent: **pi has no "your commands changed" event** — `get_commands` is polled, not
-    /// pushed — so a flag for it would never be set.
-    #[derive(Debug, Default, Clone, PartialEq)]
-    pub struct Emission {
-        /// Messages to publish, in the order they happened.
-        pub messages: Vec<SessionMessage>,
-        /// The model the vendor reported it is now running, when a payload said so.
-        ///
-        /// Reported rather than stored, because a config surface must be built from what the
-        /// **vendor** last said and never from what the adapter last set. The model can also
-        /// change without anyone asking — pi's own TUI, or a `/model` typed as prose.
-        pub observed_model: Option<String>,
-        /// The turn just settled, so a caller may stop waiting.
-        ///
-        /// Named rather than left for a caller to infer from the last event, because the
-        /// event that settles a turn is **`agent_settled` and not `agent_end`**, and a caller
-        /// reading the wrong one settles a turn while the agent is still working.
-        pub settled: bool,
-    }
-
-    impl Emission {
-        fn push(&mut self, event: Event) {
-            self.messages.push(SessionMessage::Event(event));
-        }
-
-        /// Events only, for a test that wants to assert on the projection.
-        pub fn events(&self) -> Vec<&Event> {
-            self.messages
-                .iter()
-                .filter_map(|message| match message {
-                    SessionMessage::Event(event) => Some(event),
-                    _ => None,
-                })
-                .collect()
-        }
-    }
-
-    /// One in-flight content block, keyed by the vendor's `contentIndex`.
-    #[derive(Debug, Clone)]
-    struct OpenBlock {
-        kind: EventKind,
-        stream_id: String,
-        /// The deltas seen so far.
-        ///
-        /// Accumulated because **pi never re-sends the cumulative text**: `pi-coding-agent/docs/rpc.md` is
-        /// explicit that `message_update` omits the former cumulative `message` field and a
-        /// client needing a partial must assemble it from `contentIndex`. So this is the
-        /// fallback for an `_end` that carries no `content` of its own.
-        text: String,
-    }
-
-    /// What a live `pi` session needs to remember between events.
-    ///
-    /// Every field is here for one of the only two reasons an event translator needs memory:
-    /// a payload arrives *after* the payload that needed it, or *without* a field an earlier
-    /// one carried.
-    #[derive(Debug, Default)]
-    pub struct Correlation {
-        completed_prose: Vec<Event>,
-        /// `contentIndex` → the in-flight block.
-        ///
-        /// **Keyed by the vendor's index alone, and that is sound *here* only because pi
-        /// multiplexes nothing onto it.** `claude` numbers content blocks per message and
-        /// forwards two concurrent subagents' blocks on one stream, so an index-keyed map
-        /// made each delegate's deltas append to the other's text — data corruption
-        /// (`docs/session-protocol.md` § Keying rules). pi has no delegate stream at all
-        /// ([`SPAN_HAS_NO_VENDOR_SOURCE`]), and its indices are scoped to the message that
-        /// `message_start` cleared. If pi ever forwards a second stream, this key is the
-        /// first thing that must grow.
-        blocks: HashMap<u64, OpenBlock>,
-        /// How many messages this session has seen, for a `stream_id` that stays unique
-        /// across them.
-        ///
-        /// The index alone is **not** unique: `message_start` resets the block map, so
-        /// message 2's index 0 is a different block from message 1's index 0. A `stream_id`
-        /// that collided across messages would make the history fold consolidate two
-        /// unrelated blocks into one row.
-        message_seq: u64,
-        message_id: String,
-        /// Whether a turn is open, so `agent_start` does not open a second one.
-        ///
-        /// `agent_start` is emitted per low-level agent run and pi can start another within
-        /// one settled turn — a retry, a compaction, a queued continuation — so a second
-        /// `turn`/`started` would bracket a turn that is already bracketed.
-        turn_open: bool,
-        pub(super) opening_echo_pending: bool,
-        /// The outcome the vendor last reported, held until `agent_settled` closes the turn.
-        ///
-        /// **`agent_settled` carries no payload** — its declared shape is `{type}` alone
-        /// (`dist/core/agent-session.d.ts`) — while the outcome sits on the `AssistantMessage`
-        /// that `message_end` delivers, as `stopReason` plus an optional `errorMessage`. So
-        /// the settling event and the outcome arrive on different payloads, which is the
-        /// second of the only two reasons this struct has memory at all.
-        ///
-        /// `None` means the vendor stated no outcome, and that is published as no stop
-        /// reason rather than as a successful one.
-        outcome: Option<Outcome>,
-    }
-
-    /// What the vendor said about how a response ended.
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct Outcome {
-        /// One of pi's seven `StopReason` values, verbatim.
-        pub stop_reason: String,
-        /// The provider's own sentence, when the response carried one.
-        pub error_message: Option<String>,
-    }
-
-    impl Outcome {
-        /// Read an outcome off an `AssistantMessage`, or `None` when it states none.
-        ///
-        /// Both spellings of both fields are read through `native::defect_field_spelling`'s
-        /// tables, so the live path and the store path resolve one field the same way.
-        pub fn read(message: &Value) -> Option<Self> {
-            let stop_reason = super::native::STOP_REASON
-                .read(message)
-                .and_then(|(value, _)| value.as_str())?
-                .to_string();
-            Some(Self {
-                stop_reason,
-                error_message: super::native::ERROR_MESSAGE
-                    .read(message)
-                    .and_then(|(value, _)| value.as_str())
-                    .map(str::to_string),
-            })
-        }
-
-        /// Whether this outcome is a failure.
-        ///
-        /// **Only `error` is.** `aborted` is a user stopping a turn, and colouring that red
-        /// reports an interrupted turn as a broken one (`docs/session-protocol.md`
-        /// § Outcomes). `pending` and `deferred` are neither, and the remaining three —
-        /// `stop`, `length`, `toolUse` — are ordinary ends.
-        pub fn is_error(&self) -> bool {
-            self.stop_reason == "error"
-        }
-    }
-
-    impl Correlation {
-        pub fn new() -> Self {
-            Self {
-                // Matches the Python's initial `self.message_id`, so a content block arriving
-                // before any `message_start` still synthesizes a stable `stream_id` rather
-                // than one holding an empty segment.
-                message_id: "pi".to_string(),
-                ..Default::default()
-            }
-        }
-
-        /// One vendor event, projected.
-        ///
-        /// An unrecognized `type` produces an empty [`Emission`] rather than an error: pi
-        /// emits 21 kinds and adds more between releases, and one unknown line must not fail
-        /// a turn.
-        ///
-        /// # What is deliberately not here
-        ///
-        /// `response` and `extension_ui_request` belong to the session half. A response has
-        /// to wake the waiter that sent the request, and a UI request has to become a
-        /// [`sylph_protocol::Request`] whose answer routes back over the same stdin — both
-        /// are correlation against *outbound* traffic this module never sees. Splitting them
-        /// out is also what keeps the projection testable without a process.
-        fn finish_prose(&mut self, role: &str, at_ms: i64, out: &mut Emission) {
-            for mut event in self.completed_prose.drain(..) {
-                event.created_at_ms = at_ms;
-                event.data = Some(json!({"presentationRole":role}));
-                out.push(event);
-            }
-        }
-
-        pub fn translate(&mut self, payload: &Value, at_ms: i64) -> Emission {
-            let mut out = Emission::default();
-            match payload.get("type").and_then(Value::as_str) {
-                Some("agent_start") => {
-                    if !self.turn_open {
-                        self.turn_open = true;
-                        out.push(Event::new(EventKind::Turn, Some(Phase::Started), at_ms));
-                    }
-                }
-                Some("message_start") => {
-                    // A new message means a new index space, so the old blocks are gone.
-                    // Any block still open here was never closed by the vendor, which for
-                    // this event means the message ended without an `_end` — dropping it is
-                    // right, because its text is already on the wire as deltas.
-                    self.completed_prose.clear();
-                    self.message_seq += 1;
-                    self.message_id = format!("pi-{}", self.message_seq);
-                    self.blocks.clear();
-                    if let Some(message) = payload.get("message").filter(|message| {
-                        message.get("role").and_then(Value::as_str) == Some("user")
-                    }) {
-                        if self.opening_echo_pending {
-                            self.opening_echo_pending = false;
-                        } else {
-                            let mut event = Event::new(
-                                EventKind::Other("user".into()),
-                                Some(Phase::Completed),
-                                at_ms,
-                            );
-                            event.stream_id = Some(self.message_id.clone());
-                            event.text = flatten(message.get("content").unwrap_or(&Value::Null));
-                            event.data = Some(json!({"vendorMessage": message}));
-                            out.push(event);
-                        }
-                    }
-                    // The model the vendor says it is running, when the message names one.
-                    // Read here rather than tracked, because it is the vendor's claim.
-                    out.observed_model = observed_model(payload.get("message"));
-                }
-                Some("message_update") => self.delta(payload, at_ms, &mut out),
-                Some("tool_execution_start") => {
-                    // **Emitted already `completed`, because pi sends whole arguments.**
-                    // There is no streaming of a tool's input on this vendor:
-                    // `tool_execution_start` carries the full `args` object. A `started`
-                    // phase would be an ephemeral projection the journal never keeps
-                    // (`sylph_protocol::Event::derive_stability`), so the call itself would
-                    // vanish on reload.
-                    //
-                    // Note what `completed` means on a `tool_call`: its *arguments* finished
-                    // streaming, never that the tool finished. The outcome is the
-                    // `tool_result` below.
-                    let mut event = Event::new(EventKind::ToolCall, Some(Phase::Completed), at_ms);
-                    event.stream_id = tool_call_id(payload);
-                    event.name = string_field(payload, "toolName");
-                    let args = payload.get("args").cloned().unwrap_or(json!({}));
-                    event.text = compact(&args);
-                    event.data = Some(json!({"input": args}));
-                    out.push(event);
-                }
-                Some("tool_execution_end") => {
-                    let mut event =
-                        Event::new(EventKind::ToolResult, Some(Phase::Completed), at_ms);
-                    event.stream_id = tool_call_id(payload);
-                    event.name = string_field(payload, "toolName");
-                    event.text = flatten(
-                        payload
-                            .get("result")
-                            .and_then(|result| result.get("content"))
-                            .unwrap_or(&Value::Null),
-                    );
-                    // `isError` is the vendor's own flag and is what escalates a failure
-                    // upward. Absent is not an error — a missing key would otherwise report
-                    // every result as a failure the moment the vendor renamed it.
-                    event.is_error = payload
-                        .get("isError")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false);
-                    out.push(event);
-                }
-                // `compaction_start` is deliberately silent: a compaction that has begun and
-                // not finished has no boundary to draw yet, and an event per half would put
-                // two rows in the timeline where one thing happened.
-                Some("compaction_end") => {
-                    let mut event = Event::new(EventKind::Compact, Some(Phase::Completed), at_ms);
-                    event.text = "Context was compacted".to_string();
-                    // The vendor's reason — `manual`, `threshold`, or `overflow` — is worth
-                    // keeping: "you ran out of room" and "you asked for this" read very
-                    // differently at the same point in a transcript.
-                    if let Some(reason) = string_field(payload, "reason") {
-                        event.data = Some(json!({"reason": reason}));
-                    }
-                    out.push(event);
-                }
-                Some("agent_settled") => {
-                    // **`agent_settled`, not `agent_end`.** Both events genuinely exist and
-                    // both reach the wire (`agent_start` at
-                    // `pi-agent-core/dist/agent-loop.js:49,67`, `agent_end` at
-                    // `:110,157,172`, funnelled through `dist/modes/rpc/rpc-mode.js:265-266`
-                    // — verified against the unbundled install, and `AGENTS.md` records an
-                    // earlier claim that they had zero emit sites as **wrong**).
-                    //
-                    // The distinction is the vendor's own: `agent_end` is one low-level run
-                    // completing and may be followed by a retry, a compaction, or a queued
-                    // continuation, while `agent_settled` is emitted once nothing remains.
-                    // Closing on `agent_end` settles a turn while the agent is still
-                    // working, and the remaining output then arrives with no turn to belong
-                    // to.
-                    self.turn_open = false;
-                    self.blocks.clear();
-                    out.settled = true;
-                    if self.outcome.as_ref().is_some_and(|o|o.stop_reason == "stop") {
-                        self.finish_prose("answer", at_ms, &mut out);
-                    } else { self.completed_prose.clear(); }
-                    out.push(self.close_turn(at_ms));
-                }
-                Some("extension_error") => {
-                    let mut event = Event::new(EventKind::Status, Some(Phase::Completed), at_ms);
-                    event.text = string_field(payload, "error")
-                        .unwrap_or_else(|| "extension error".to_string());
-                    event.is_error = true;
-                    out.push(event);
-                }
-                Some("message_end") => {
-                    // **Publishes nothing, and remembers the one thing only it carries.** Its
-                    // blocks are the `_end` deltas already reported, so emitting them again
-                    // would duplicate every block — but its `message` is the authoritative
-                    // `AssistantMessage`, and `stopReason` and `errorMessage` appear nowhere
-                    // else on the wire. `agent_settled` then closes the turn with it.
-                    if let Some(outcome) = payload.get("message").and_then(Outcome::read) {
-                        out.observed_model = observed_model(payload.get("message"));
-                        if outcome.stop_reason == "toolUse" { self.finish_prose("progress", at_ms, &mut out); }
-                        self.outcome = Some(outcome);
-                    }
-                }
-                // Every other kind pi emits. `turn_start`/`turn_end` are deliberately here
-                // rather than bracketing anything: pi's "turn" is one assistant response
-                // plus its tool calls, so a multi-tool exchange emits several of them
-                // inside one Sylph turn — treating them as brackets would open and close a
-                // turn per model call. `queue_update`, `bash_execution_update`, the retry
-                // family, and `tool_execution_update` carry progress a Sylph event has no
-                // shape for.
-                _ => {}
-            }
-            out
-        }
-
-        /// The `turn`/`completed` that closes a settled turn.
-        ///
-        /// **Reports the vendor's outcome, and states none when the vendor stated none.** A
-        /// hardcoded `stopReason` here asserted a clean finish over every failure: pi answering
-        /// `404` on every request produced a turn that opened, closed successfully, and emitted
-        /// no assistant block — a session that looks like it worked and simply said nothing,
-        /// which is the hardest outcome to debug because the record cannot distinguish it from
-        /// a model that chose not to answer or an adapter that dropped the stream.
-        ///
-        /// So the reason is read from what the vendor reported, `errorMessage` becomes the
-        /// event's text where the failure is legible, and `is_error` follows the reason rather
-        /// than a literal. An absent outcome publishes no `data` at all: a turn must still
-        /// close, and a synthesized reason would be a lie the journal makes permanent.
-        fn close_turn(&mut self, at_ms: i64) -> Event {
-            let mut event = Event::new(EventKind::Turn, Some(Phase::Completed), at_ms);
-            let Some(outcome) = self.outcome.take() else {
-                return event;
-            };
-            event.is_error = outcome.is_error();
-            let mut detail = json!({"stopReason": outcome.stop_reason});
-            if let Some(text) = outcome.error_message {
-                if let Some(object) = detail.as_object_mut() {
-                    object.insert("errorMessage".to_string(), Value::String(text.clone()));
-                }
-                event.text = text;
-            }
-            event.data = Some(detail);
-            event
-        }
-
-        /// One streaming delta, projected onto Sylph's event kinds.
-        ///
-        /// pi's delta types are `{text,thinking,toolcall}_{start,delta,end}`, so the kind
-        /// comes from the prefix and the phase from the suffix. A type this build does not
-        /// know is dropped rather than guessed at — an unknown *kind* has no event to become.
-        fn delta(&mut self, payload: &Value, at_ms: i64, out: &mut Emission) {
-            let Some(delta) = payload.get("assistantMessageEvent") else {
-                return;
-            };
-            let Some(delta_type) = delta.get("type").and_then(Value::as_str) else {
-                return;
-            };
-            let index = delta
-                .get("contentIndex")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-
-            // `rsplit_once` rather than a prefix test, because `toolcall_start` and
-            // `text_start` share a suffix and nothing else.
-            let Some((prefix, suffix)) = delta_type.rsplit_once('_') else {
-                return;
-            };
-            let kind = match prefix {
-                "text" => EventKind::Assistant,
-                "thinking" => EventKind::Thinking,
-                "toolcall" => EventKind::ToolCall,
-                _ => return,
-            };
-
-            // Unique across messages, not merely across indices — see
-            // [`Correlation::message_seq`].
-            let stream_id = format!("{}:{}", self.message_id, index);
-
-            match suffix {
-                "start" => {
-                    self.blocks.insert(
-                        index,
-                        OpenBlock {
-                            kind: kind.clone(),
-                            stream_id: stream_id.clone(),
-                            text: String::new(),
-                        },
-                    );
-                    let mut event = Event::new(kind, Some(Phase::Started), at_ms);
-                    event.stream_id = Some(stream_id);
-                    // `toolcall_start` carries `id` and `toolName` per `pi-coding-agent/docs/rpc.md`, and the
-                    // name is worth publishing at open: a tool call whose name arrives only
-                    // at `_end` renders as an unnamed spinner for however long its arguments
-                    // take to stream.
-                    event.name = string_field(delta, "toolName");
-                    out.push(event);
-                }
-                "delta" => {
-                    let text = delta
-                        .get("delta")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default();
-                    if text.is_empty() {
-                        return;
-                    }
-                    if let Some(block) = self.blocks.get_mut(&index) {
-                        block.text.push_str(text);
-                    }
-                    let mut event = Event::new(kind, Some(Phase::Delta), at_ms);
-                    event.stream_id = Some(stream_id);
-                    event.text = text.to_string();
-                    out.push(event);
-                }
-                "end" => {
-                    let block = self.blocks.remove(&index);
-                    // **`content` on the end event is authoritative where pi sends it**; the
-                    // accumulated deltas are the fallback. `pi-coding-agent/docs/rpc.md` says to treat
-                    // `message_end.message` as authoritative for the same reason: a provider
-                    // may correct or complete a block the deltas only approximated.
-                    let text = delta
-                        .get("content")
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                        .or_else(|| block.as_ref().map(|block| block.text.clone()))
-                        .unwrap_or_default();
-                    // A block whose kind at `_end` disagrees with the one recorded at
-                    // `_start` is the vendor contradicting itself. The opening kind wins,
-                    // because that is what the `started` and `delta` events already carried
-                    // — a `completed` under a different kind would consolidate into a
-                    // different block than the phases it closes.
-                    let kind = block
-                        .as_ref()
-                        .map(|block| block.kind.clone())
-                        .unwrap_or(kind);
-                    let stream_id = block.map(|block| block.stream_id).unwrap_or(stream_id);
-                    let mut event = Event::new(kind.clone(), Some(Phase::Completed), at_ms);
-                    event.stream_id = Some(stream_id);
-                    event.text = text;
-                    if kind == EventKind::ToolCall {
-                        // `toolcall_end.toolCall` holds the completed call, so the arguments
-                        // and the name are both authoritative here.
-                        if let Some(call) = delta.get("toolCall") {
-                            event.name = string_field(call, "name");
-                            event.data = Some(json!({"input": call.get("arguments")}));
-                        }
-                    }
-                    if event.kind == EventKind::Assistant { self.completed_prose.push(event.clone()); }
-                    out.push(event);
-                }
-                _ => {}
-            }
-        }
-    }
-
-    /// The `toolCallId` a tool event correlates on, or `None`.
-    ///
-    /// **Absent rather than a placeholder.** The Python original substituted the literal
-    /// `"pi-tool"` in v1, which for two concurrent tool calls would make
-    /// both events share one `stream_id` and fold into one row — and for one call would pair
-    /// a result to a call it does not belong to. `AGENTS.md`: a guess written into a journal
-    /// is permanent, and `Option`/`null` is the only value that stays honest.
-    fn tool_call_id(payload: &Value) -> Option<String> {
-        string_field(payload, "toolCallId")
-    }
-
-    /// The model a message reports, as `provider id`.
-    ///
-    /// Encoded with [`super::rpc::model_key`] so the value the surface reports and the value
-    /// a client echoes back are the *same string*. Reporting a bare `model` here would
-    /// produce an `observed_model` that matches no choice in the catalogue, so the checkmark
-    /// would sit on no row — the exact symptom the provider-qualified encoding exists to
-    /// prevent, arriving from the other direction.
-    fn observed_model(message: Option<&Value>) -> Option<String> {
-        let message = message?;
-        let id = string_field(message, "model")?;
-        Some(super::rpc::model_key(
-            string_field(message, "provider").as_deref(),
-            &id,
-        ))
-    }
-
-    fn string_field(payload: &Value, key: &str) -> Option<String> {
-        payload
-            .get(key)
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-    }
-
-    /// A tool result's content, flattened to text.
-    ///
-    /// Arrives as a string, or as a list of content blocks — `text` and, measurably, `image`
-    /// (3 of 1754 real blocks). An image block has no text to contribute and is skipped
-    /// rather than serialized: its `data` is base64 and would put a megabyte of it in the
-    /// transcript.
-    pub fn flatten(content: &Value) -> String {
-        match content {
-            Value::Null => String::new(),
-            Value::String(text) => text.clone(),
-            Value::Array(blocks) => {
-                let mut out = String::new();
-                for block in blocks {
-                    match block {
-                        Value::String(text) => out.push_str(text),
-                        Value::Object(_) => {
-                            if let Some(text) = block.get("text").and_then(Value::as_str) {
-                                out.push_str(text);
-                            } else if let Some(text) = block.get("content").and_then(Value::as_str)
-                            {
-                                out.push_str(text);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                out
-            }
-            other => other.to_string(),
-        }
-    }
-
-    /// A JSON value as one compact line, for an event's `text`.
-    fn compact(value: &Value) -> String {
-        serde_json::to_string(value).unwrap_or_default()
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        #[test]
-        fn native_queue_echo_is_retained_even_when_its_text_equals_the_opening_input() {
-            let mut correlation = Correlation::new();
-            correlation.opening_echo_pending = true;
-            let message = json!({"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"same text"}]}});
-            assert!(correlation.translate(&message, 1).events().is_empty());
-            let emitted = correlation.translate(&message, 2);
-            let user = emitted
-                .events()
-                .into_iter()
-                .find(|event| event.kind.as_str() == "user")
-                .unwrap();
-            assert_eq!(user.text, "same text");
-            assert_eq!(user.stream_id.as_deref(), Some("pi-2"));
-        }
-
-        /// Feed a turn's payloads through one correlation, as the vendor sends them.
-        fn turn(payloads: &[Value]) -> Vec<Event> {
-            let mut link = Correlation::new();
-            let mut events = Vec::new();
-            for (index, payload) in payloads.iter().enumerate() {
-                let out = link.translate(payload, 1_000 + index as i64);
-                events.extend(out.events().into_iter().cloned());
-            }
-            events
-        }
-
-        fn closing_turn(events: &[Event]) -> &Event {
-            events
-                .iter()
-                .find(|event| {
-                    event.kind == EventKind::Turn && event.phase == Some(Phase::Completed)
-                })
-                .expect("a settled turn must publish a close")
-        }
-
-        /// A failed response closes the turn as a failure, carrying the provider's sentence.
-        ///
-        /// *The defect this pins:* the close hardcoded `stopReason: "end_turn"`, so pi
-        /// answering `404` on every request produced a turn that opened, closed cleanly, and
-        /// emitted no assistant block — indistinguishable in the record from a model that
-        /// chose not to answer. Asserting the *values* is what catches it; the hardcoded
-        /// version parsed, compiled, and published a well-formed event.
-        #[test]
-        fn a_failed_response_closes_the_turn_as_a_failure_with_the_vendors_sentence() {
-            let events = turn(&[
-                json!({"type": "agent_start"}),
-                json!({"type": "message_start", "message": {"role": "assistant"}}),
-                json!({"type": "message_end", "message": {
-                    "role": "assistant",
-                    "stopReason": "error",
-                    "errorMessage": "404: Thank you for participating in the testing period",
-                }}),
-                json!({"type": "agent_settled"}),
-            ]);
-
-            let close = closing_turn(&events);
-            assert!(close.is_error, "stopReason `error` is a failure");
-            let data = close
-                .data
-                .as_ref()
-                .expect("a stated outcome publishes data");
-            assert_eq!(data["stopReason"], json!("error"));
-            assert_eq!(
-                data["errorMessage"],
-                json!("404: Thank you for participating in the testing period")
-            );
-            assert!(
-                close.text.contains("404"),
-                "the vendor's sentence must be legible on the event, not only in data"
-            );
-        }
-
-        /// An aborted turn is not a failed one.
-        ///
-        /// A user stopping a turn and a model erroring are different outcomes, and colouring
-        /// the first red reports an interrupted turn as a broken one.
-        #[test]
-        fn an_aborted_response_is_reported_as_aborted_and_not_as_an_error() {
-            let events = turn(&[
-                json!({"type": "agent_start"}),
-                json!({"type": "message_end", "message": {
-                    "role": "assistant", "stopReason": "aborted",
-                }}),
-                json!({"type": "agent_settled"}),
-            ]);
-
-            let close = closing_turn(&events);
-            assert!(!close.is_error);
-            assert_eq!(close.data.as_ref().unwrap()["stopReason"], json!("aborted"));
-        }
-
-        /// An ordinary end reports the vendor's own token, not a synthesized one.
-        #[test]
-        fn an_ordinary_end_reports_the_vendors_own_stop_reason() {
-            let events = turn(&[
-                json!({"type": "agent_start"}),
-                json!({"type": "message_end", "message": {
-                    "role": "assistant", "stopReason": "stop",
-                }}),
-                json!({"type": "agent_settled"}),
-            ]);
-
-            let close = closing_turn(&events);
-            assert!(!close.is_error);
-            // `stop`, because that is what pi says. Not `end_turn`, which is a different
-            // vendor's word and was never pi's.
-            assert_eq!(close.data.as_ref().unwrap()["stopReason"], json!("stop"));
-        }
-
-        /// A turn the vendor gave no outcome for still closes, and claims nothing.
-        ///
-        /// Measured on the native store: `stopReason` is absent on 44 real assistant
-        /// messages. The turn must close — a live turn refuses the next message — and it must
-        /// not report a success nobody stated.
-        #[test]
-        fn a_turn_with_no_stated_outcome_closes_without_claiming_one() {
-            let events = turn(&[
-                json!({"type": "agent_start"}),
-                json!({"type": "message_end", "message": {"role": "assistant"}}),
-                json!({"type": "agent_settled"}),
-            ]);
-
-            let close = closing_turn(&events);
-            assert!(!close.is_error);
-            assert!(
-                close.data.is_none(),
-                "an unstated outcome publishes no stop reason at all"
-            );
-        }
-
-        /// Both spellings of the outcome fields resolve, because the store's rename landed
-        /// field by field.
-        #[test]
-        fn the_outcome_reads_both_spelling_eras() {
-            let snake = turn(&[
-                json!({"type": "message_end", "message": {
-                    "role": "assistant", "stop_reason": "error", "error_message": "boom",
-                }}),
-                json!({"type": "agent_settled"}),
-            ]);
-            let close = closing_turn(&snake);
-            assert!(close.is_error);
-            assert_eq!(close.data.as_ref().unwrap()["errorMessage"], json!("boom"));
-        }
-
-        /// A second turn does not inherit the first turn's outcome.
-        ///
-        /// The outcome is taken on close, so a turn the vendor states nothing about cannot
-        /// borrow the previous turn's reason — which would report a stale failure as this
-        /// turn's.
-        #[test]
-        fn an_outcome_is_not_carried_into_the_next_turn() {
-            let mut link = Correlation::new();
-            for payload in [
-                json!({"type": "agent_start"}),
-                json!({"type": "message_end", "message": {
-                    "role": "assistant", "stopReason": "error", "errorMessage": "first",
-                }}),
-                json!({"type": "agent_settled"}),
-            ] {
-                link.translate(&payload, 1_000);
-            }
-
-            let mut second = Vec::new();
-            for payload in [
-                json!({"type": "agent_start"}),
-                json!({"type": "agent_settled"}),
-            ] {
-                second.extend(
-                    link.translate(&payload, 2_000)
-                        .events()
-                        .into_iter()
-                        .cloned(),
-                );
-            }
-
-            let close = closing_turn(&second);
-            assert!(
-                !close.is_error,
-                "the previous turn's failure is not this one's"
-            );
-            assert!(close.data.is_none());
-        }
-
-        /// `message_end` publishes no blocks, so a block is not reported twice.
-        #[test]
-        fn message_end_publishes_no_events_of_its_own() {
-            let mut link = Correlation::new();
-            let out = link.translate(
-                &json!({"type": "message_end", "message": {
-                    "role": "assistant", "stopReason": "stop",
-                }}),
-                1_000,
-            );
-            assert!(
-                out.events().is_empty(),
-                "its blocks are the `_end` deltas already reported"
-            );
-        }
-    }
-}
-
-/// Reading `pi`'s native store: one JSONL file per session under `~/.pi/agent/sessions/`.
-///
-/// `docs/agents.md` § `pi` governs. Three record mappings here are the ones a reader is most
-/// likely to get wrong, because each wrong version raises no error and yields a plausible
-/// record: [`native::defect_timestamp_unit`], [`native::defect_field_spelling`], and
-/// [`native::defect_fork_pointer`] name the tests that pin them, each asserting **the value
-/// that should have been found** (`docs/agents.md` § Reading a vendor payload).
-///
-/// # What the store holds, measured
-///
-/// *Measured 2026-08-28 over `~/.pi/agent/sessions/`: 527 JSONL files, 4881 records.*
-///
-/// ```text
-/// --<cwd with / replaced by ->--/<timestamp>_<uuid>.jsonl    the session
-/// ```
-///
-/// One flat directory per working directory, one file per session, no nesting below that and
-/// no sidecars. Record types, with counts: `message` 3947, `session` 527 (one per file, the
-/// header), `model_change` 211, `thinking_level_change` 196. Nothing else occurs — the
-/// vendor documents `compaction`, `branch_summary`, `custom`, `custom_message`, `label`, and
-/// `session_info` entries, and **this store holds none of them**, which is why there is no
-/// branch for one here. `AGENTS.md`: a type in a vendor's union is not a promise anything
-/// emits it, and a declared-only branch is indistinguishable from one whose condition is
-/// merely rare.
-///
-/// The root is hardcoded: a native store's location is a vendor fact with no configuration
-/// key, and inventing one would offer a lever that cannot be right.
+/// Native source metadata; semantic interpretation is performed after capture.
 pub mod native {
-    use std::collections::{HashMap, VecDeque};
-    use std::io::{Read, Seek, SeekFrom};
-    use std::path::{Path, PathBuf};
-    use std::time::Duration;
+    use anyhow::Result;
+    use sylph_protocol::{Fidelity, NativeId, NativeSource, NativeSummary, StoreFilter};
 
-    use anyhow::{anyhow, Context, Result};
-    use serde_json::{json, Value};
-    use sylph_protocol::{
-        normalize_workdir, Event, EventKind, EventStream, Fidelity, NativeId, NativeRecord,
-        NativeSummary, Phase, SessionMessage, StoreFilter,
-    };
-
-    use crate::native::{
-        candidates, epoch_millis_from_iso, epoch_millis_from_json, timestamp::Unit,
-        SessionCandidate,
-    };
-
-    /// Where `pi` keeps its sessions, `$HOME`-relative.
-    fn store_root() -> Option<PathBuf> {
-        crate::native::home_relative(&[".pi", "agent", "sessions"])
-    }
-
-    /// Stable source name for a Pi session file, relative to the vendor store.
-    fn native_source(path: &Path) -> String {
-        store_root()
-            .and_then(|root| path.strip_prefix(root).ok().map(Path::to_path_buf))
-            .or_else(|| path.file_name().map(PathBuf::from))
-            .and_then(|relative| relative.to_str().map(str::to_string))
-            .unwrap_or_else(|| "session.jsonl".to_string())
-            .replace(std::path::MAIN_SEPARATOR, "/")
-    }
-
-    fn native_record(path: &Path, version: u64, value: &Value, raw: Vec<u8>) -> NativeRecord {
-        NativeRecord {
-            source: native_source(path),
-            version: crate::native::record_revision(version, &raw),
-            raw_json: Some(raw),
-            payload: value.clone(),
-            blobs: Vec::new(),
-        }
-    }
-
-    /// The fidelity a parsed `pi` session yields.
-    ///
-    /// [`Fidelity::Messages`], and the *reason* is worth stating because the vendor's own
-    /// summary is true-but-trap. "Only at `message_end`" sounds like turn granularity and is
-    /// not: a turn emits one per assistant message **and** one per tool result, so a 5-tool
-    /// turn writes ~11 times. That is genuinely mid-turn, which is what makes `watch`
-    /// offerable at all.
-    ///
-    /// It is still `Messages` rather than [`Fidelity::Blocks`], and that is the measured
-    /// difference from `claude`: pi flushes a whole message as **one record** whose content
-    /// is an array of blocks sharing a single timestamp, where `claude` flushes one record
-    /// per block with a distinct timestamp each. So a renderer may time a message here and
-    /// must not time a block within one — the four blocks of an assistant message carry no
-    /// timing that distinguishes them.
     pub const NATIVE_FIDELITY: Fidelity = Fidelity::Messages;
 
-    /// **Defect 1, fixed: `message.timestamp` is epoch milliseconds and was divided by
-    /// 1000.**
-    ///
-    /// `message.timestamp` is epoch **milliseconds**. Divide it as though it were
-    /// microseconds — the shape of a reader whose string branch returns milliseconds while its
-    /// integer branch falls back to `/ 1_000` — and every per-event time decodes to **1970**
-    /// on every integer stamp in the store, while the file parses without a single error.
-    ///
-    /// Two things made it survivable and therefore invisible: the session-level start and end
-    /// come from the *entry's* ISO string and were right, so only the finer-grained per-event
-    /// times were wrong; and a wrong unit yields a plausible *value*, which passes every
-    /// presence check a reviewer would run. `AGENTS.md`: *"a wrong key yields absent, which a
-    /// presence check finds; a wrong unit yields a value, which passes every such check."*
-    ///
-    /// The fix is [`Unit::Millis`] declared at the one call site, never sniffed from
-    /// magnitude — which also keeps the 31 records whose stamp is the literal `1` or `2`
-    /// (written by `"model":"test"` sessions) reading at face value instead of being
-    /// "rescued" into a different era they do not belong to.
-    pub const fn defect_timestamp_unit() -> Unit {
-        Unit::Millis
-    }
-
-    /// **Defect 2, fixed: field spelling is resolved per field, never per file.**
-    ///
-    /// Read only camelCase — `modelId`, `parentId`, `stopReason`, `toolCallId` — and every
-    /// snake_case-era record silently loses those fields. *Measured 2026-08-28 over the whole
-    /// store, by file count per spelling:*
-    ///
-    /// | field | snake files | camel files |
-    /// | --- | --- | --- |
-    /// | `parent_id` / `parentId` | 111 | 120 |
-    /// | `stop_reason` / `stopReason` | 25 | 185 |
-    /// | `model_id` / `modelId` | 46 | 120 |
-    /// | `thinking_level` / `thinkingLevel` | 46 | 120 |
-    /// | `error_message` / `errorMessage` | 25 | 27 |
-    /// | `tool_call_id` / `toolCallId` | 0 | 63 |
-    /// | `is_error` / `isError` | 0 | 63 |
-    /// | `tool_name` / `toolName` | 0 | 63 |
-    /// | `parent_session` / `parentSession` | 407 | **0** |
-    ///
-    /// **The rename landed field by field, so a per-file era is unsound rather than merely
-    /// coarse.** No file carries both spellings of the *same* field — verified, 0 of 527 —
-    /// but different fields flipped at different times, so files hold snake `parent_id`
-    /// beside camel `stopReason`. A reader choosing one era for a whole file gets one right
-    /// and the other wrong. The per-file shortcut is the obvious design and it passes on most
-    /// of the store, which is exactly long enough to be believed.
-    ///
-    /// Two traps around the same measurement, both recorded because they cost real time.
-    /// **The vendor's own version field cannot discriminate**: `"version": 3` is stamped on
-    /// all 527 files in every era. And **a key census must walk the parsed structure, never
-    /// grep the serialized line**: these transcripts discuss field names constantly, so a
-    /// substring test matches words inside message *text* and reports keys a record does not
-    /// have.
-    ///
-    /// There is deliberately **no dual-spelling alias type**. `AGENTS.md` § Compatibility
-    /// forbids it, and the reason is sharper than tidiness: an alias is what makes the *next*
-    /// rename unobservable. [`Spelling`] reads one field from two known keys and
-    /// [`ParseError::UnknownSpelling`] fails loudly on a combination no known era emits.
-    pub const fn defect_field_spelling() -> &'static str {
-        "resolve per field; fail loudly on a combination no known era emits"
-    }
-
-    /// **Defect 3, fixed: a fork pointer is a file path, not a session id.**
-    ///
-    /// The header carries `parentSession`/`parent_session` naming another `.jsonl` on disk.
-    /// Hardcoding a `None` parent here — or reading only one spelling of the field — drops pi
-    /// fork lineage **entirely** rather than partially. That is the better failure of the two
-    /// available, and still a whole relationship missing from every listing.
-    ///
-    /// Under an identity of `(environment, agent, native_id)` the path cannot be stored as
-    /// given: it is not an id, and comparing it against one is the two-id-spaces failure
-    /// `sylph_protocol::NativeId` exists to prevent — silently always false, with no error at
-    /// any layer. So it is **resolved** by reading the target file's own header for its id
-    /// ([`resolve_fork_pointer`]), or recorded as absent.
-    ///
-    /// *Measured:* 67 of 527 headers carry a pointer, and only 14 name a file still on disk.
-    /// So absent-because-unresolvable is the *common* case, and it must stay distinguishable
-    /// from "this session was never forked" for anyone reading the code — which is what
-    /// [`Header::fork_pointer`] surviving beside [`Header::parent_native_id`] is for.
-    pub const fn defect_fork_pointer() -> &'static str {
-        "resolve the path to the target's own id, or record absent — never store the path"
-    }
-
-    /// Which spelling era one field was read under.
-    ///
-    /// Carried rather than discarded so a caller can say *what* it read when a record turns
-    /// out to be malformed, and so a test can assert that both eras are genuinely exercised
-    /// rather than one of them being dead code that happens to compile.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum Spelling {
-        Snake,
-        Camel,
-    }
-
-    /// One field with two known spellings, and nothing else.
-    ///
-    /// **Not a general alias mechanism.** Each constant below names a field this store is
-    /// measured to spell two ways, with the counts on [`defect_field_spelling`]. A field with
-    /// one measured spelling is read directly, so adding a spelling is a deliberate edit here
-    /// rather than something a lookup absorbs.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub struct TwoSpellings {
-        pub snake: &'static str,
-        pub camel: &'static str,
-    }
-
-    impl TwoSpellings {
-        /// Read this field, saying which era answered.
-        ///
-        /// `None` means the record carries neither spelling, which for an optional field is a
-        /// legitimate absence — `parent_id` is `null` on a file's first entry, and
-        /// `stopReason` is absent on 44 real assistant messages.
-        pub fn read<'a>(&self, record: &'a Value) -> Option<(&'a Value, Spelling)> {
-            if let Some(value) = record.get(self.camel) {
-                return Some((value, Spelling::Camel));
-            }
-            record.get(self.snake).map(|value| (value, Spelling::Snake))
-        }
-
-        /// Whether this record carries **both** spellings of this one field.
-        ///
-        /// Measured to occur 0 times in 527 files, and that is why it is an error rather than
-        /// a merge: two spellings of one field in one record is a combination no known era
-        /// emits, so the store has changed in a way this parser has not been measured
-        /// against. Failing loudly is the whole point (`AGENTS.md` § Compatibility) — a
-        /// silent preference for one would make the *next* rename unobservable.
-        pub fn is_ambiguous(&self, record: &Value) -> bool {
-            record.get(self.camel).is_some() && record.get(self.snake).is_some()
-        }
-    }
-
-    /// The entry's parent pointer, which is pi's own tree link.
-    ///
-    /// **Not a `span`.** This is the conversation chain — and for pi it also groups parts
-    /// under a message, so its fanout is 1–3 rather than 1. Honouring it as delegation
-    /// structure would nest a whole transcript into one chain thousands deep
-    /// ([`super::translate::SPAN_HAS_NO_VENDOR_SOURCE`]).
-    pub const PARENT_ID: TwoSpellings = TwoSpellings {
-        snake: "parent_id",
-        camel: "parentId",
-    };
-    pub const MODEL_ID: TwoSpellings = TwoSpellings {
-        snake: "model_id",
-        camel: "modelId",
-    };
-    pub const THINKING_LEVEL: TwoSpellings = TwoSpellings {
-        snake: "thinking_level",
-        camel: "thinkingLevel",
-    };
-    pub const STOP_REASON: TwoSpellings = TwoSpellings {
-        snake: "stop_reason",
-        camel: "stopReason",
-    };
-    pub const ERROR_MESSAGE: TwoSpellings = TwoSpellings {
-        snake: "error_message",
-        camel: "errorMessage",
-    };
-    /// The fork pointer, and the one field measured to occur **only** in snake_case — 407
-    /// files snake, 0 camel — even though `pi-coding-agent/docs/session-format.md` documents it as
-    /// `parentSession`. Both are read because the vendor's own documentation names the camel
-    /// form, so a store written by a newer pi would carry it; the counts say which one a
-    /// reader will actually meet today.
-    pub const PARENT_SESSION: TwoSpellings = TwoSpellings {
-        snake: "parent_session",
-        camel: "parentSession",
-    };
-    /// A tool result's call id, error flag, and tool name.
-    ///
-    /// **Measured camelCase-only, on all 63 files that hold a tool result, with no
-    /// snake_case counterpart anywhere.** So a snake_case-era file cannot hold a tool result
-    /// at all, which means the spelling check is *not independent* of the tool-result path —
-    /// worth knowing before concluding that a snake-era file is missing its tool calls. They
-    /// are still declared as two-spelling fields rather than read directly, because the
-    /// asymmetry is a fact about this store's history rather than about the vendor's naming
-    /// rules, and the next era could close it.
-    pub const TOOL_CALL_ID: TwoSpellings = TwoSpellings {
-        snake: "tool_call_id",
-        camel: "toolCallId",
-    };
-    pub const IS_ERROR: TwoSpellings = TwoSpellings {
-        snake: "is_error",
-        camel: "isError",
-    };
-    pub const TOOL_NAME: TwoSpellings = TwoSpellings {
-        snake: "tool_name",
-        camel: "toolName",
-    };
-
-    /// Every two-spelling field, for the ambiguity check and for a test that asserts the
-    /// list is the one the census measured.
-    pub const TWO_SPELLING_FIELDS: &[TwoSpellings] = &[
-        PARENT_ID,
-        MODEL_ID,
-        THINKING_LEVEL,
-        STOP_REASON,
-        ERROR_MESSAGE,
-        PARENT_SESSION,
-        TOOL_CALL_ID,
-        IS_ERROR,
-        TOOL_NAME,
-    ];
-
-    /// Why a record could not be read.
-    ///
-    /// An error rather than a skip for exactly one case, and the narrowness is the point:
-    /// **a record carrying both spellings of one field is a combination no known era
-    /// emits**, so it is evidence the store changed. Everything else a malformed record can
-    /// be — a missing optional field, an unknown `type`, a half-written final line — is a
-    /// normal state of a store the vendor is currently writing, and
-    /// `crate::native::for_each_json_line` already tolerates it.
-    #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-    pub enum ParseError {
-        #[error(
-            "a pi record carries both '{snake}' and '{camel}': no measured era of this store \
-             emits both spellings of one field, so this parser has not been measured against \
-             whatever wrote it"
-        )]
-        UnknownSpelling {
-            snake: &'static str,
-            camel: &'static str,
-        },
-        #[error("a pi session file has no 'session' header record: {path}")]
-        NoHeader { path: String },
-    }
-
-    /// Refuse a record whose spelling combination no known era emits.
-    ///
-    /// Called on every record before anything reads a field off it, so the failure lands at
-    /// the record rather than three fields later.
-    fn check_spellings(record: &Value) -> Result<(), ParseError> {
-        for field in TWO_SPELLING_FIELDS {
-            if field.is_ambiguous(record) {
-                return Err(ParseError::UnknownSpelling {
-                    snake: field.snake,
-                    camel: field.camel,
-                });
-            }
-        }
-        // Message fields (`stopReason`, `toolCallId`, and friends) live one level below the
-        // JSONL entry. Check that object too, but do not recurse into arbitrary tool payloads:
-        // user text or tool output may legitimately mention both spellings as prose, and that
-        // is not evidence of a new Pi storage era.
-        if let Some(message) = record.get("message") {
-            for field in TWO_SPELLING_FIELDS {
-                if field.is_ambiguous(message) {
-                    return Err(ParseError::UnknownSpelling {
-                        snake: field.snake,
-                        camel: field.camel,
-                    });
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// A session file's header, which is always its **first** line.
-    ///
-    /// Verified: 527 of 527 files open with `{"type":"session",…}`, so nothing has to scan
-    /// for it. That is what makes a listing row cost one line rather than one parse.
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct Header {
-        /// The vendor's session id, and the one field with no fallback.
-        ///
-        /// **`None` is a real state and must not be enumerated.** Measured: one file,
-        /// `None.jsonl`, carries `"id": null`, and it is a placeholder pi wrote rather than a
-        /// session. Skipping it by *filename* keys on a coincidence of how that file was
-        /// named; the null id is the actual fact, so that is what is read. A row with no id names no session, cannot be adopted, and cannot be
-        /// resumed.
-        pub native_id: Option<NativeId>,
-        /// Where it ran, from the header's `cwd`.
-        ///
-        /// `Some("")` is possible and is normalized to `None` here: a forked session's header
-        /// carries an empty `cwd` (measured on `fork-child.jsonl`), and an empty path is not a
-        /// directory an agent can be resumed in. `NativeSummary::workdir` documents the
-        /// consequence — the server answers `NATIVE_SESSION_NOT_RESUMABLE` rather than
-        /// guessing a directory to run an agent in.
-        pub workdir: Option<String>,
-        pub started_at_ms: Option<i64>,
-        /// The **path** the header names as this session's origin, verbatim.
-        ///
-        /// Kept beside [`Self::parent_native_id`] rather than replaced by it, because the two
-        /// absences mean different things and only this field can tell them apart: no pointer
-        /// at all means "never forked", while a pointer whose target is gone means "forked,
-        /// and the origin is unreachable". Measured, the second is the common case — 67
-        /// headers carry a pointer and 14 targets still exist.
-        pub fork_pointer: Option<String>,
-        /// The origin's own id, once resolved by reading the target file's header.
-        ///
-        /// See [`defect_fork_pointer`]: a path is not an id, and storing one where an id
-        /// belongs is the failure `sylph_protocol::NativeId` exists to prevent.
-        pub parent_native_id: Option<NativeId>,
-    }
-
-    /// Read a session file's header without parsing the file.
-    ///
-    /// `resolve_fork` is a parameter rather than always-on because resolution costs one extra
-    /// file open per forked session, and a listing pass over the whole store would pay it 67
-    /// times for rows most listings do not show lineage on. `enumerate` opts in; the
-    /// per-session parse always resolves.
-    pub fn read_header(path: &Path, resolve_fork: bool) -> Result<Header> {
-        use std::io::{BufRead, BufReader};
-
-        let file = std::fs::File::open(path)
-            .with_context(|| format!("opening pi session file {}", path.display()))?;
-        let mut first = String::new();
-        BufReader::new(file)
-            .read_line(&mut first)
-            .with_context(|| format!("reading the header of {}", path.display()))?;
-        let record: Value =
-            serde_json::from_str(first.trim()).map_err(|_| ParseError::NoHeader {
-                path: path.display().to_string(),
-            })?;
-        if record.get("type").and_then(Value::as_str) != Some("session") {
-            return Err(ParseError::NoHeader {
-                path: path.display().to_string(),
-            }
-            .into());
-        }
-        check_spellings(&record)?;
-
-        let fork_pointer = PARENT_SESSION
-            .read(&record)
-            .and_then(|(value, _)| value.as_str())
-            .filter(|path| !path.is_empty())
-            .map(str::to_string);
-
-        Ok(Header {
-            native_id: string_at(&record, "id").map(NativeId::new),
-            workdir: string_at(&record, "cwd"),
-            // The header's outer ISO stamp. **Not an integer here** — the outer `timestamp`
-            // is a string on every record in the store, so an integer fallback never fires on
-            // it. That is why a session-level time can stay right while every *per-event* time
-            // is wrong, which is what made the unit defect survivable
-            // ([`defect_timestamp_unit`]).
-            started_at_ms: record
-                .get("timestamp")
-                .and_then(Value::as_str)
-                .and_then(epoch_millis_from_iso),
-            parent_native_id: match (&fork_pointer, resolve_fork) {
-                (Some(pointer), true) => resolve_fork_pointer(pointer),
-                _ => None,
-            },
-            fork_pointer,
-        })
-    }
-
-    /// The id of the session a fork pointer names, or `None` when it cannot be had.
-    ///
-    /// Resolution is one header read of the target file. `None` covers every way that can
-    /// fail — the file was deleted, moved, or written by another machine — and all of them
-    /// mean the same thing to a reader: this session was forked and Sylph cannot name its
-    /// origin. **Never falls back to the path**, which is [`defect_fork_pointer`].
-    ///
-    /// Deliberately non-recursive: a fork of a fork resolves to its immediate origin, and
-    /// walking further would be inventing a lineage depth the vendor does not record.
-    pub fn resolve_fork_pointer(pointer: &str) -> Option<NativeId> {
-        let path = Path::new(pointer);
-        if !path.is_file() {
-            return None;
-        }
-        // `resolve_fork: false` on the recursive call site, which is what stops a cycle of
-        // two files naming each other from recursing forever. A cycle in fork pointers is
-        // not hypothetical bookkeeping — `AGENTS.md` records two nodes naming each other
-        // silently deleting both in the trajectory tree, and the same shape is available
-        // here.
-        read_header(path, false).ok()?.native_id
-    }
-
-    /// Read a string field, treating `""` and `null` as absent.
-    fn string_at(record: &Value, key: &str) -> Option<String> {
-        record
-            .get(key)
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-    }
-
-    /// What one parsed session yielded.
-    #[derive(Debug, Clone, PartialEq)]
-    pub struct ParsedSession {
-        pub header: Header,
-        pub messages: Vec<SessionMessage>,
-        /// The last activity the file recorded, from its final timestamped record.
-        pub ended_at_ms: Option<i64>,
-        /// The model the session was last set to, as a provider-qualified config value.
-        ///
-        /// Encoded with [`super::rpc::model_key`] so it is the *same string* the live config
-        /// surface issues. A bare id here would match no choice in the catalogue, putting the
-        /// checkmark on no row — the same symptom the encoding exists to prevent, arriving
-        /// from the store instead of from the wire.
-        pub model: Option<String>,
-        pub thinking_level: Option<String>,
-    }
-
-    /// Parse one session file into the same events a live turn emits.
-    ///
-    /// # There is one vocabulary, and this is not a second projection
-    ///
-    /// The kinds, phases and `stream_id`s below are the ones [`crate::pi::translate`] produces,
-    /// because `docs/architecture.md` § One authority requires that the journal, the history
-    /// fold, the timeline and search cannot tell which mode produced a row. The two halves
-    /// are not *shared code* the way `claude`'s are, and that is a measured difference rather
-    /// than an omission: `claude`'s native records and its live payloads are the same shapes
-    /// (which is what lets its `native` feed records through `translate::Correlation`), while
-    /// pi's are genuinely different — the live wire carries per-delta
-    /// `assistantMessageEvent`s and the store carries whole messages with a content array. A
-    /// `Correlation` fed store records would be handed a shape it has no branch for.
-    ///
-    /// What is shared is the vocabulary and [`super::rpc::model_key`], which is the part a
-    /// second copy of would actually diverge.
-    ///
-    /// # Every phase is `completed`
-    ///
-    /// **No care recovers a timing that was never written.** The store holds one record per
-    /// message, so there is no `started` or `delta` to emit and inventing them would publish
-    /// a stream that never streamed — bars of equal length presented as measurements
-    /// (`sylph_protocol::Fidelity`). A `completed` phase is also the only one the journal
-    /// keeps for content kinds, so anything else would be dropped as ephemeral on reload.
-    pub fn parse_session(path: &Path) -> Result<ParsedSession> {
-        let mut header: Option<Header> = None;
-        let mut messages = Vec::new();
-        let mut ended_at_ms = None;
-        let mut model = None;
-        let mut thinking_level = None;
-        let mut failure: Option<anyhow::Error> = None;
-
-        // Keep the original line bytes alongside the parsed value. `for_each_json_line` is
-        // intentionally value-only for listing callers, but adoption must retain lexical JSON
-        // so re-projection can round-trip the vendor record exactly.
-        let file = std::fs::File::open(path)
-            .with_context(|| format!("opening pi session file {}", path.display()))?;
-        let mut reader = std::io::BufReader::new(file);
-        let mut raw_line = Vec::new();
-        let mut ordinal = 0u64;
-        let mut line_number = 0u64;
-        loop {
-            raw_line.clear();
-            let read = std::io::BufRead::read_until(&mut reader, b'\n', &mut raw_line)
-                .with_context(|| format!("reading pi session file {}", path.display()))?;
-            if read == 0 {
-                break;
-            }
-            if !raw_line.ends_with(b"\n") {
-                break;
-            }
-            let trimmed = raw_line.strip_suffix(&[b'\n'][..]).unwrap_or(&raw_line);
-            if trimmed.iter().all(u8::is_ascii_whitespace) {
-                continue;
-            }
-            line_number = line_number.saturating_add(1);
-            let record = match serde_json::from_slice::<Value>(trimmed) {
-                Ok(record) => record,
-                Err(error) => {
-                    // A complete malformed line is an unreadable source, not an omitted
-                    // vendor record. Silently skipping it would make a lossless adoption
-                    // indistinguishable from a successful parse with less history.
-                    if failure.is_none() {
-                        failure = Some(anyhow!(
-                            "invalid complete JSON record {} in {}: {}",
-                            line_number,
-                            path.display(),
-                            error
-                        ));
-                    }
-                    continue;
-                }
-            };
-            ordinal = ordinal.saturating_add(1);
-            if failure.is_some() {
-                continue;
-            }
-            // The outer stamp, which is a string on every record. Used for the session-level
-            // window and as the fallback for a record whose own message carries none.
-            let outer_ms = record
-                .get("timestamp")
-                .and_then(Value::as_str)
-                .and_then(epoch_millis_from_iso);
-            if outer_ms.is_some() {
-                ended_at_ms = outer_ms;
-            }
-
-            if record.get("type").and_then(Value::as_str) == Some("session") && header.is_none() {
-                header = Some(Header {
-                    native_id: string_at(&record, "id").map(NativeId::new),
-                    workdir: string_at(&record, "cwd"),
-                    started_at_ms: outer_ms,
-                    fork_pointer: PARENT_SESSION
-                        .read(&record)
-                        .and_then(|(value, _)| value.as_str())
-                        .filter(|path| !path.is_empty())
-                        .map(str::to_string),
-                    parent_native_id: None,
-                });
-            }
-            match record.get("type").and_then(Value::as_str) {
-                Some("model_change") => {
-                    // The last one wins, because a session can be re-modelled mid-run and
-                    // measurably is — `ordinary-turn.jsonl` changes model between the header
-                    // and the first user message. Setting this only when absent reports the
-                    // *first* model a session ever had, which is not the one that answered.
-                    let provider = string_at(&record, "provider");
-                    if let Some(id) = MODEL_ID.read(&record).and_then(|(value, _)| value.as_str()) {
-                        model = Some(super::rpc::model_key(provider.as_deref(), id));
-                    }
-                }
-                Some("thinking_level_change") => {
-                    if let Some(level) = THINKING_LEVEL
-                        .read(&record)
-                        .and_then(|(value, _)| value.as_str())
-                    {
-                        thinking_level = Some(level.to_string());
-                    }
-                }
-                _ => {}
-            }
-            // Every valid vendor record is retained, including metadata-only rows that have no
-            // current projection. This is what lets a future parser re-project fields today's
-            // vocabulary ignores.
-            let retained = native_record(
-                path,
-                ordinal,
-                &record,
-                raw_line
-                    .strip_suffix(&[b'\n'][..])
-                    .unwrap_or(&raw_line)
-                    .to_vec(),
-            );
-            match reproject_native_record(&retained) {
-                Ok(projected) => {
-                    messages.push(SessionMessage::NativeRecord(retained));
-                    messages.extend(projected);
-                }
-                Err(error) => failure = Some(error),
-            }
-        }
-
-        if let Some(error) = failure {
-            return Err(error);
-        }
-        let Some(header) = header else {
-            // A file with records and no header, or an empty one. Both are real transient
-            // states — `_persist` buffers until the first assistant message, so a file that
-            // exists at all is already past the emptiest case — and both mean this file
-            // cannot name a session.
-            return Err(ParseError::NoHeader {
-                path: path.display().to_string(),
-            }
-            .into());
-        };
-        Ok(ParsedSession {
-            header,
-            messages,
-            ended_at_ms,
-            model,
-            thinking_level,
-        })
-    }
-
-    /// A `model_change` or `thinking_level_change`, as a `status` the timeline can show.
-    ///
-    /// A [`EventKind::Status`] with **no phase**, which makes it stable and therefore
-    /// journaled (`sylph_protocol::Event::derive_stability`). This vocabulary has no
-    /// `subtype`, so the vendor's own record travels in `data` where a reader can see which
-    /// change it was without parsing the text.
-    ///
-    /// `None` when the change names nothing — a `model_change` with no model is a record
-    /// about nothing, and a status reading "Model changed to" is worse than no row.
-    fn change_event(record: &Value, at_ms: Option<i64>, kind: &str) -> Option<Event> {
-        let at_ms = at_ms.unwrap_or(NO_RECORDED_TIME);
-        let (text, detail) = match kind {
-            "model_change" => {
-                let id = MODEL_ID
-                    .read(record)
-                    .and_then(|(value, _)| value.as_str())?;
-                let provider = string_at(record, "provider");
-                let key = super::rpc::model_key(provider.as_deref(), id);
-                (format!("Model set to {key}"), json!({"model": key}))
-            }
-            _ => {
-                let level = THINKING_LEVEL
-                    .read(record)
-                    .and_then(|(value, _)| value.as_str())?;
-                (
-                    format!("Thinking level set to {level}"),
-                    json!({"thinkingLevel": level}),
-                )
-            }
-        };
-        let mut event = Event::new(EventKind::Status, None, at_ms);
-        event.text = text;
-        // The entry's own id as the `stream_id`, so a status is addressable and two changes
-        // to the same setting are two rows rather than one. The vendor's ids are 8-char hex
-        // and unique within a file.
-        event.stream_id = string_at(record, "id");
-        event.data = Some(json!({"change": kind, "detail": detail}));
-        Some(event)
-    }
-
-    /// The stamp for a record that recorded none.
-    ///
-    /// Zero rather than "now": a synthesized arrival time is a lie a journal makes permanent,
-    /// and a reader can recognize the epoch as "the store did not say" where it cannot
-    /// recognize a plausible recent instant. Same constant `claude`'s parser uses, and for
-    /// the same reason.
-    const NO_RECORDED_TIME: i64 = 0;
-
-    /// One `message` record, projected onto events.
-    ///
-    /// A message's content is an **array of blocks** sharing one timestamp, so one record
-    /// yields one event per block. Measured block types: `toolCall` 1759, `text` on
-    /// toolResults 1751, `thinking` 1084, `text` on assistants 612, `text` on users 333,
-    /// `image` on toolResults 3 — and nothing else.
-    fn message_events(record: &Value, outer_ms: Option<i64>, out: &mut Vec<SessionMessage>) {
-        let Some(message) = record.get("message") else {
-            return;
-        };
-
-        // **`message.timestamp` is epoch milliseconds** ([`defect_timestamp_unit`]). The
-        // unit is declared at this one call site and never sniffed, which is also what keeps
-        // the 31 records whose stamp is the literal `1` or `2` reading at face value rather
-        // than being "rescued" into an era they do not belong to.
-        //
-        // The outer ISO stamp is the fallback, not the primary: it is the *entry's* write
-        // time while this is the message's own, and on a tool result the two differ by the
-        // tool's whole runtime.
-        let at_ms = message
-            .get("timestamp")
-            .and_then(|value| epoch_millis_from_json(value, defect_timestamp_unit()))
-            .or(outer_ms)
-            .unwrap_or(NO_RECORDED_TIME);
-
-        let role = message.get("role").and_then(Value::as_str).unwrap_or("");
-        let entry_id = string_at(record, "id");
-
-        if role == "user" {
-            let mut input = sylph_protocol::TurnInputFact::new(super::translate::flatten(
-                message.get("content").unwrap_or(&Value::Null),
-            ));
-            input.recorded_at_ms = (at_ms != NO_RECORDED_TIME).then_some(at_ms);
-            out.push(SessionMessage::TurnInput(input));
-            // Keep a normalized user block for native transcripts. The TurnInput fact
-            // supplies turn provenance; this event makes the user's actual question
-            // visible to renderers that only consume the event vocabulary.
-            let mut event = Event::new(
-                EventKind::Other("user".into()),
-                Some(Phase::Completed),
-                at_ms,
-            );
-            event.text = super::translate::flatten(message.get("content").unwrap_or(&Value::Null));
-            out.push(SessionMessage::Event(event));
-            return;
-        }
-
-        if role == "toolResult" {
-            let mut event = Event::new(EventKind::ToolResult, Some(Phase::Completed), at_ms);
-            // **The `stream_id` is the vendor's `toolCallId`, which is what pairs a result to
-            // its call.** Falling back to the entry id would pair nothing: the call's own
-            // event carries the call id, so a result under a different id folds into no block
-            // and renders as an orphan.
-            event.stream_id = TOOL_CALL_ID
-                .read(message)
-                .and_then(|(value, _)| value.as_str())
-                .map(str::to_string);
-            event.name = TOOL_NAME
-                .read(message)
-                .and_then(|(value, _)| value.as_str())
-                .map(str::to_string);
-            event.text = super::translate::flatten(message.get("content").unwrap_or(&Value::Null));
-            // **Read off the `toolResult` message, which is the only place it occurs.**
-            // Measured: `isError` is present on all 1751 tool results and true on 62 of them,
-            // and occurs nowhere else. The sibling defect in `claude`'s parser was reading
-            // this flag on the wrong role, which reported all 2100 of that store's real tool
-            // failures as successes.
-            event.is_error = IS_ERROR
-                .read(message)
-                .and_then(|(value, _)| value.as_bool())
-                .unwrap_or(false);
-            out.push(SessionMessage::Event(event));
-            return;
-        }
-
-        let Some(blocks) = message.get("content").and_then(Value::as_array) else {
-            // A `content` that is a bare string, which the vendor's own `UserMessage` type
-            // permits even though no record in the measured store uses it. Handled because it
-            // is documented rather than because it was seen, and it costs one branch.
-            if let Some(text) = message.get("content").and_then(Value::as_str) {
-                let mut event = Event::new(role_kind(role), Some(Phase::Completed), at_ms);
-                event.stream_id = entry_id;
-                event.text = text.to_string();
-                out.push(SessionMessage::Event(event));
-            }
-            return;
-        };
-
-        for (index, block) in blocks.iter().enumerate() {
-            let block_type = block.get("type").and_then(Value::as_str).unwrap_or("text");
-            let kind = match block_type {
-                "thinking" => EventKind::Thinking,
-                "toolCall" => EventKind::ToolCall,
-                "text" => role_kind(role),
-                // An `image` block, and anything a later pi adds. **Preserved as
-                // `Other`**, not dropped and not coerced to text: an image a user attached is
-                // part of what they said, and `EventKind::Other` is what the vocabulary has
-                // for a kind this build does not model (`sylph_protocol::EventKind`).
-                other => EventKind::Other(other.to_string()),
-            };
-
-            let mut event = Event::new(kind.clone(), Some(Phase::Completed), at_ms);
-            // **One `stream_id` per block, not per record.** A message holds up to five tool
-            // calls (measured on `multi-tool-turn.jsonl`), and one id across them would fold
-            // five calls into one row. A tool call's own id is the right one because the
-            // result will name it; everything else is `<entry>:<index>`, which mirrors the
-            // live stream's `<message>:<contentIndex>`.
-            event.stream_id = match &kind {
-                EventKind::ToolCall => string_at(block, "id"),
-                _ => entry_id.as_ref().map(|entry| format!("{entry}:{index}")),
-            };
-
-            match &kind {
-                EventKind::ToolCall => {
-                    event.name = string_at(block, "name");
-                    let arguments = block.get("arguments").cloned().unwrap_or(json!({}));
-                    event.text = serde_json::to_string(&arguments).unwrap_or_default();
-                    event.data = Some(json!({"input": arguments}));
-                }
-                EventKind::Thinking => {
-                    // The thinking text is under `thinking`, not `text`. Reading `text` here
-                    // yields an empty string on all 1084 real thinking blocks — a wrong key
-                    // producing a plausible empty record, which is the family this file's
-                    // defect constants are named for.
-                    event.text = block
-                        .get("thinking")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
-                }
-                _ => {
-                    event.text = block
-                        .get("text")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
-                }
-            }
-            if kind == EventKind::Assistant {
-                if let Some(outcome) = super::translate::Outcome::read(message) {
-                    let role = match outcome.stop_reason.as_str() { "toolUse" => Some("progress"), "stop" => Some("answer"), _ => None };
-                    if let Some(role)=role { event.data=Some(json!({"presentationRole":role})); }
-                }
-            }
-            out.push(SessionMessage::Event(event));
-        }
-
-        // A turn's outcome, from the assistant message that ended it. Emitted **after** its
-        // content, because the outcome is what closes the exchange the blocks above are.
-        if role == "assistant" {
-            if let Some(event) = turn_outcome(message, at_ms) {
-                out.push(SessionMessage::Event(event));
-            }
-        }
-    }
-
-    /// Which content kind a role's `text` block becomes.
-    fn role_kind(role: &str) -> EventKind {
-        match role {
-            // There is no `user` event kind: the server owns a turn's request text
-            // (`docs/session-protocol.md`), and a `status` is what carries narration the
-            // timeline should show. `claude`'s parser makes the same call for the same
-            // reason.
-            "user" => EventKind::Status,
-            "assistant" => EventKind::Assistant,
-            // `bashExecution`, `custom`, `branchSummary`, `compactionSummary` — documented by
-            // the vendor and absent from the measured store. Preserved rather than guessed
-            // at, for the reason `EventKind::Other` exists.
-            other => EventKind::Other(other.to_string()),
-        }
-    }
-
-    /// A `turn`/`completed` from an assistant message's stop reason and usage.
-    ///
-    /// **`None` when the message reports no stop reason**, which is 44 real records: a turn
-    /// event claiming an outcome the vendor did not state would put a stop reason in the
-    /// journal that nothing measured.
-    ///
-    /// `stopReason: "error"` is what makes this `is_error` — measured 64 times, and
-    /// `errorMessage` beside it carries the provider's own text (a 400 with a JSON body, on
-    /// `failure-reasoning-required.jsonl`). Both spellings of both fields are read, because
-    /// the two flipped at different times ([`defect_field_spelling`]).
-    fn turn_outcome(message: &Value, at_ms: i64) -> Option<Event> {
-        let stop_reason = STOP_REASON
-            .read(message)
-            .and_then(|(value, _)| value.as_str())?
-            .to_string();
-        let mut event = Event::new(EventKind::Turn, Some(Phase::Completed), at_ms);
-        // The vendor's five terminal reasons are `stop`, `length`, `toolUse`, `error`,
-        // `aborted`. Only `error` is a failure — `aborted` is a user stopping a turn, and
-        // colouring that red reports an interrupted turn as a broken one
-        // (`docs/session-protocol.md` § Outcomes).
-        event.is_error = stop_reason == "error";
-        let error_message = ERROR_MESSAGE
-            .read(message)
-            .and_then(|(value, _)| value.as_str())
-            .map(str::to_string);
-        if let Some(text) = &error_message {
-            event.text = text.clone();
-        }
-        let mut detail = json!({"stopReason": stop_reason});
-        if let (Some(object), Some(usage)) = (detail.as_object_mut(), message.get("usage")) {
-            // The vendor's own usage object, carried whole rather than remapped. Its keys are
-            // *also* two-era — `cache_read`/`cacheRead`, `total_tokens`/`totalTokens` — and a
-            // remap here would need a third spelling table for fields nothing in this crate
-            // reads. A consumer that needs them reads them from the payload where the era is
-            // still visible.
-            object.insert("usage".to_string(), usage.clone());
-        }
-        if let (Some(object), Some(text)) = (detail.as_object_mut(), error_message) {
-            object.insert("errorMessage".to_string(), Value::String(text));
-        }
-        event.data = Some(detail);
-        Some(event)
-    }
-
-    /// Parse everything the store already holds for one session, once.
-    ///
-    /// The stream ends when the pass does.
-    pub fn adopt(id: &NativeId) -> Result<EventStream> {
-        let path = locate(id)?;
-        let parsed = parse_session(&path)?;
-        Ok(Box::pin(futures::stream::iter(
-            parsed.messages.into_iter().map(Ok),
-        )))
-    }
-
-    /// Parse, then follow the file as it grows.
-    ///
-    /// Pi's persistence is not append-only. `_rewriteFile()` opens the same path with mode
-    /// `"w"` and writes the selected branch again, while `_persist()` can delay creating the
-    /// path until the first assistant message. A byte offset that is treated as permanent
-    /// therefore either skips the beginning of a rewritten generation or reports `ENOENT` for
-    /// a session that is merely waiting to flush. `PiFollowState` keeps a source cursor at
-    /// complete-line boundaries, verifies the consumed prefix before every pass, and rediscovers
-    /// the path when a generation disappears or is replaced.
-    ///
-    /// The stream is intentionally unbounded. A terminal-owned session has no process handle
-    /// for Sylph to close, so the watcher keeps polling after a quiet period; the envagent owns
-    /// cancellation and backpressure when it hosts this adapter. Missing early files are a
-    /// pending source, not an error and not an empty session.
-    pub fn watch(id: &NativeId) -> Result<EventStream> {
-        let root = store_root()
-            .ok_or_else(|| anyhow!("HOME is not set, so ~/.pi/agent/sessions cannot be located"))?;
-        Ok(follow(PiFollowState::new(root, id.clone())))
-    }
-
-    /// Acquire native envelopes during RPC execution without projecting a second transcript.
-    pub(super) struct LiveRecords(PiFollowState);
-
-    impl LiveRecords {
-        pub(super) fn new(id: NativeId) -> Option<Self> {
-            store_root().map(|root| Self(PiFollowState::new(root, id)))
-        }
-
-        pub(super) fn poll(&mut self) -> Result<Vec<SessionMessage>> {
-            let mut messages = self.0.poll()?;
-            messages.retain(|message| matches!(message, SessionMessage::NativeRecord(_)));
-            Ok(messages)
-        }
-    }
-
-    /// Construct the polling stream around one source-specific cursor.
-    fn follow(state: PiFollowState) -> EventStream {
-        // `message_end` is the native flush boundary. A 250ms poll keeps a watcher responsive
-        // without making an idle session perform a tight metadata loop; the envagent may later
-        // replace this timer with a platform file notification while retaining the cursor rules.
-        const POLL: Duration = Duration::from_millis(250);
-
-        Box::pin(futures::stream::unfold(state, |mut state| async move {
-            loop {
-                if let Some(message) = state.pending.pop_front() {
-                    return Some((Ok(message), state));
-                }
-
-                if state.backoff_after_error {
-                    // A complete malformed line is retryable (Pi may be in the middle of a
-                    // truncate-rewrite), but yielding it in a tight loop would turn one source
-                    // defect into an error flood and starve every other adapter pass.
-                    tokio::time::sleep(POLL).await;
-                    state.backoff_after_error = false;
-                }
-
-                match state.poll() {
-                    Ok(messages) if !messages.is_empty() => {
-                        state.pending.extend(messages);
-                        continue;
-                    }
-                    Ok(_) => tokio::time::sleep(POLL).await,
-                    Err(error) => {
-                        state.backoff_after_error = true;
-                        return Some((Err(error), state));
-                    }
-                }
-            }
-        }))
-    }
-
-    /// A cursor for Pi's one-file native source.
-    ///
-    /// The cursor is deliberately source-specific rather than shared with Claude's bundle
-    /// reader. Pi's file can be rewritten in place, and its records are projected directly from
-    /// whole messages; neither fact is true of Claude's append-only multi-file bundle. The
-    /// generic part is only the complete-line boundary and the poll scheduling.
-    #[derive(Debug)]
-    struct PiFollowState {
-        root: PathBuf,
-        id: NativeId,
-        path: Option<PathBuf>,
-        offset: u64,
-        /// FNV-1a state for the bytes through `offset`. Re-reading this prefix before a pass
-        /// detects a same-inode truncate-rewrite whose new size happens to be greater than the
-        /// old offset. It is intentionally cheap and deterministic; the source is local and the
-        /// hash is only a change detector, never an identity or security primitive.
-        prefix_hash: u64,
-        identity: Option<FileIdentity>,
-        /// Last `(size, mtime-nanos, ctime-nanos)` examined. An idle watcher returns after
-        /// `stat` instead of re-reading the whole consumed prefix every 250 ms.
-        observed: Option<(u64, u128, u128)>,
-        /// The source image and tail fingerprint whose parse error was already reported. A
-        /// permanent malformed line is announced once, then retried only after its bytes change
-        /// instead of producing ten identical errors per second.
-        failed: Option<((u64, u128, u128), u64)>,
-        /// Incremented whenever the source path is reset. It is not a server sequence; it makes
-        /// generation transitions inspectable in tests and available to a future source cursor.
-        generation: u64,
-        header_seen: bool,
-        /// Record ids and lexical fingerprints already projected. A rewrite repeats the
-        /// selected branch's prefix; unchanged records must not be published a second time,
-        /// while a record whose payload changed under the same id is projected once as the new
-        /// generation's update. Keep only a compact fingerprint rather than retaining every
-        /// tool-output `Value` in memory for the watcher's lifetime.
-        seen: HashMap<String, u64>,
-        raw_seen: std::collections::HashSet<u64>,
-        ordinal: u64,
-        pending: VecDeque<SessionMessage>,
-        backoff_after_error: bool,
-    }
-
-    impl PiFollowState {
-        fn new(root: PathBuf, id: NativeId) -> Self {
-            Self {
-                root,
-                id,
-                path: None,
-                offset: 0,
-                prefix_hash: FNV_OFFSET,
-                identity: None,
-                observed: None,
-                failed: None,
-                generation: 0,
-                header_seen: false,
-                seen: HashMap::new(),
-                raw_seen: std::collections::HashSet::new(),
-                ordinal: 0,
-                pending: VecDeque::new(),
-                backoff_after_error: false,
-            }
-        }
-
-        #[cfg(test)]
-        fn generation(&self) -> u64 {
-            self.generation
-        }
-
-        /// One non-blocking pass. Empty means either that the source has not appeared yet, that
-        /// its final line is incomplete, or that it has not grown since the previous pass.
-        fn poll(&mut self) -> Result<Vec<SessionMessage>> {
-            if self.path.is_none() {
-                self.path = find_in_root(&self.root, &self.id);
-                if self.path.is_none() {
-                    // `_persist` intentionally delays creating a file until an assistant
-                    // message exists. Keep this source pending so a later file is discovered.
-                    return Ok(Vec::new());
-                }
-                self.reset_cursor(None);
-            }
-
-            let path = self.path.clone().expect("path set above");
-            let Some(metadata) = std::fs::metadata(&path).ok() else {
-                // A branch switch can unlink/replace the file between directory discovery and
-                // this pass. Drop the path and rediscover it by native id immediately when the
-                // replacement is already visible; otherwise the next scheduled pass remains
-                // pending.
-                if self.rediscover() {
-                    return self.poll();
-                }
-                return Ok(Vec::new());
-            };
-            let identity = FileIdentity::of(&metadata);
-            let size = metadata.len();
-            let fingerprint = metadata_fingerprint(&metadata);
-
-            let mut reset = self.identity.is_some_and(|old| Some(old) != identity);
-            if size < self.offset {
-                reset = true;
-            }
-            if !reset
-                && self.observed.is_some_and(|(old_size, ..)| old_size == size)
-                && self.observed != Some(fingerprint)
-            {
-                // A same-size metadata change cannot be an append. Treat it as a rewrite so a
-                // generation that only replaced the suffix is still re-evaluated, even when
-                // the consumed prefix happens to remain byte-identical.
-                reset = true;
-            }
-            if !reset {
-                if let Some((failed_fingerprint, failed_tail)) = self.failed {
-                    if failed_fingerprint == fingerprint {
-                        let current_tail = match read_span(&path, self.offset, size - self.offset) {
-                            Ok(current_tail) => current_tail,
-                            Err(error) if is_not_found(&error) => {
-                                self.path = None;
-                                self.reset_cursor(None);
-                                return Ok(Vec::new());
-                            }
-                            Err(error) => return Err(error),
-                        };
-                        if hash_bytes(&current_tail) == failed_tail {
-                            return Ok(Vec::new());
-                        }
-                        self.failed = None;
-                    }
-                }
-            }
-            if !reset
-                && self.observed == Some(fingerprint)
-                && self.offset == size
-                && fingerprint.1 != 0
-            {
-                return Ok(Vec::new());
-            }
-            if !reset && self.offset > 0 {
-                // A same-inode rewrite can preserve both size and inode. Verify the bytes that
-                // the cursor has already consumed before trusting the offset.
-                let current = match read_span(&path, 0, self.offset) {
-                    Ok(current) => current,
-                    Err(error) if is_not_found(&error) => {
-                        if self.rediscover() {
-                            return self.poll();
-                        }
-                        return Ok(Vec::new());
-                    }
-                    Err(error) => return Err(error),
-                };
-                if current.len() as u64 != self.offset || hash_bytes(&current) != self.prefix_hash {
-                    reset = true;
-                }
-            }
-            if reset {
-                self.reset_cursor(identity);
-            } else if self.identity.is_none() {
-                self.identity = identity;
-            }
-
-            let (bytes, next_offset) = match read_complete_range(&path, self.offset, size) {
-                Ok(result) => result,
-                Err(error) if is_not_found(&error) => {
-                    if self.rediscover() {
-                        return self.poll();
-                    }
-                    return Ok(Vec::new());
-                }
-                Err(error) => return Err(error),
-            };
-            if bytes.is_empty() {
-                self.identity = identity;
-                self.observed = Some(fingerprint);
-                self.failed = None;
-                return Ok(Vec::new());
-            }
-            let records = match parse_complete_records(&path, &bytes) {
-                Ok(records) => records,
-                Err(error) => {
-                    self.failed = Some((fingerprint, hash_bytes(&bytes)));
-                    return Err(error);
-                }
-            };
-
-            // Stage all state changes until every complete line in this pass parses. A malformed
-            // line must remain retryable after Pi finishes rewriting it; advancing first would
-            // turn a transient writer race into permanent data loss.
-            let mut header_seen = self.header_seen;
-            let mut staged_seen = HashMap::new();
-            let mut updates = Vec::new();
-            let mut projected = Vec::new();
-            let mut ordinal = self.ordinal;
-            let mut raw_updates = Vec::new();
-            for (record, raw) in records {
-                ordinal += 1;
-                if !header_seen {
-                    if record.get("type").and_then(Value::as_str) != Some("session") {
-                        // The header is always first in a valid Pi file. During a rewrite the
-                        // reader may observe the body before that first line is complete; hold
-                        // the bytes and retry rather than projecting under an unknown identity.
-                        return Ok(Vec::new());
-                    }
-                    let Some(native_id) = string_at(&record, "id") else {
-                        return Ok(Vec::new());
-                    };
-                    if native_id != self.id.as_str() {
-                        // The path now names another session. Do not consume its records under
-                        // this watcher; rediscovery will choose the requested id.
-                        self.path = None;
-                        self.reset_cursor(None);
-                        return Ok(Vec::new());
-                    }
-                    header_seen = true;
-                }
-
-                let key = record_key(&record, &raw);
-                let signature = value_signature(&record, &raw);
-                let unchanged = staged_seen
-                    .get(&key)
-                    .or_else(|| self.seen.get(&key))
-                    .is_some_and(|old| *old == signature);
-                // Project before committing the seen value. If field spelling is ambiguous or
-                // another parser error appears, the same record is retried on the next pass.
-                let mut messages = match project_record(&record) {
-                    Ok(messages) => messages,
-                    Err(error) => {
-                        self.failed = Some((fingerprint, hash_bytes(&bytes)));
-                        return Err(error);
-                    }
-                };
-                let retained = native_record(&path, ordinal, &record, raw);
-                crate::native::input_cursors(&mut messages, &retained);
-                if !self.raw_seen.contains(&retained.version) {
-                    raw_updates.push(retained.version);
-                    projected.push(SessionMessage::NativeRecord(retained));
-                }
-                if !unchanged {
-                    staged_seen.insert(key.clone(), signature);
-                    updates.push((key, signature));
-                    projected.extend(messages);
-                }
-            }
-
-            self.header_seen = header_seen;
-            self.offset = next_offset;
-            self.ordinal = ordinal;
-            self.raw_seen.extend(raw_updates);
-            // After a reset the old hash is the FNV offset; extending it over the complete bytes
-            // is equivalent to hashing the newly consumed prefix. For a normal append, extending
-            // the previous state avoids a second full-file hash.
-            self.prefix_hash = extend_hash(self.prefix_hash, &bytes);
-            self.identity = identity;
-            self.observed = Some(fingerprint);
-            self.failed = None;
-            for (key, signature) in updates {
-                self.seen.insert(key, signature);
-            }
-            Ok(projected)
-        }
-
-        fn rediscover(&mut self) -> bool {
-            self.path = None;
-            self.reset_cursor(None);
-            let Some(path) = find_in_root(&self.root, &self.id) else {
-                return false;
-            };
-            self.path = Some(path);
-            true
-        }
-
-        fn reset_cursor(&mut self, identity: Option<FileIdentity>) {
-            self.offset = 0;
-            self.prefix_hash = FNV_OFFSET;
-            self.identity = identity;
-            self.observed = None;
-            self.failed = None;
-            self.header_seen = false;
-            self.ordinal = 0;
-            self.generation = self.generation.saturating_add(1);
-        }
-    }
-
-    /// The file identity used to detect a rename/replacement that leaves size and content
-    /// looking unchanged. On non-Unix targets no stable inode is available through `std`, and
-    /// the prefix/size checks still cover truncate-rewrites.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    struct FileIdentity {
-        #[cfg(unix)]
-        dev: u64,
-        #[cfg(unix)]
-        ino: u64,
-    }
-
-    impl FileIdentity {
-        fn of(metadata: &std::fs::Metadata) -> Option<Self> {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::MetadataExt;
-                Some(Self {
-                    dev: metadata.dev(),
-                    ino: metadata.ino(),
-                })
-            }
-            #[cfg(not(unix))]
-            {
-                let _ = metadata;
-                None
-            }
-        }
-    }
-
-    fn modified_nanos(metadata: &std::fs::Metadata) -> u128 {
-        metadata
-            .modified()
-            .ok()
-            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|since| since.as_nanos())
-            .unwrap_or(0)
-    }
-
-    fn changed_nanos(metadata: &std::fs::Metadata) -> u128 {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            let seconds = metadata.ctime();
-            let nanos = metadata.ctime_nsec();
-            if seconds < 0 || nanos < 0 {
-                0
-            } else {
-                (seconds as u128)
-                    .saturating_mul(1_000_000_000)
-                    .saturating_add(nanos as u128)
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = metadata;
-            0
-        }
-    }
-
-    fn metadata_fingerprint(metadata: &std::fs::Metadata) -> (u64, u128, u128) {
-        (
-            metadata.len(),
-            modified_nanos(metadata),
-            changed_nanos(metadata),
-        )
-    }
-
-    const FNV_OFFSET: u64 = 14_695_981_039_346_656_037;
-    const FNV_PRIME: u64 = 1_099_511_628_211;
-
-    fn extend_hash(mut hash: u64, bytes: &[u8]) -> u64 {
-        for byte in bytes {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(FNV_PRIME);
-        }
-        hash
-    }
-
-    fn hash_bytes(bytes: &[u8]) -> u64 {
-        extend_hash(FNV_OFFSET, bytes)
-    }
-
-    fn is_not_found(error: &anyhow::Error) -> bool {
-        error
-            .downcast_ref::<std::io::Error>()
-            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
-    }
-
-    /// Find a session by header id without turning a missing/partial file into an error.
-    fn find_in_root(root: &Path, id: &NativeId) -> Option<PathBuf> {
-        if !root.exists() {
-            return None;
-        }
-        candidates(root, is_session_file)
-            .into_iter()
-            .find_map(|candidate| {
-                read_header(&candidate.path, false)
-                    .ok()
-                    .filter(|header| header.native_id.as_ref() == Some(id))
-                    .map(|_| candidate.path)
-            })
-    }
-
-    /// Read only complete JSONL records from a byte range. The final unterminated line is
-    /// deliberately withheld; Pi may still be writing it and the next pass must retry it. A
-    /// normal pass is bounded to `MAX_BATCH_BYTES`; a single unusually large JSON record is
-    /// allowed to exceed that bound so it cannot be stranded forever without a newline.
-    fn read_complete_range(path: &Path, offset: u64, size: u64) -> Result<(Vec<u8>, u64)> {
-        if size <= offset {
-            return Ok((Vec::new(), offset));
-        }
-        const MAX_BATCH_BYTES: u64 = 4 * 1024 * 1024;
-        const MAX_LINE_BYTES: u64 = 64 * 1024 * 1024;
-        let remaining = size - offset;
-        let mut requested = remaining.min(MAX_BATCH_BYTES);
-        loop {
-            let bytes = read_span(path, offset, requested)?;
-            if bytes.len() as u64 != requested {
-                // The writer changed the file while it was being read. Keep the old cursor and
-                // let the next pass classify the resulting generation/size change.
-                return Ok((Vec::new(), offset));
-            }
-            if let Some(at) = bytes.iter().rposition(|byte| *byte == b'\n') {
-                let complete = at + 1;
-                return Ok((bytes[..complete].to_vec(), offset + complete as u64));
-            }
-            if requested == remaining {
-                // No complete line yet; retain the bytes implicitly by leaving `offset` alone.
-                return Ok((Vec::new(), offset));
-            }
-            if requested >= MAX_LINE_BYTES {
-                return Err(anyhow!(
-                    "an incomplete pi JSONL record at byte offset {offset} exceeds the \
-                     {MAX_LINE_BYTES}-byte watcher line bound"
-                ));
-            }
-            // The first record itself is larger than the ordinary batch. Keep extending until
-            // its newline appears; parsing a record requires holding that one record anyway, but
-            // the explicit line bound keeps a wedged writer from growing this task without end.
-            requested = requested
-                .saturating_add(MAX_BATCH_BYTES)
-                .min(remaining)
-                .min(MAX_LINE_BYTES);
-        }
-    }
-
-    fn read_span(path: &Path, offset: u64, length: u64) -> Result<Vec<u8>> {
-        let mut file = std::fs::File::open(path)
-            .with_context(|| format!("opening pi session file {}", path.display()))?;
-        file.seek(SeekFrom::Start(offset))
-            .with_context(|| format!("seeking pi session file {}", path.display()))?;
-        let mut bytes = Vec::new();
-        file.take(length)
-            .read_to_end(&mut bytes)
-            .with_context(|| format!("reading pi session file {}", path.display()))?;
-        Ok(bytes)
-    }
-
-    fn parse_complete_records(path: &Path, bytes: &[u8]) -> Result<Vec<(Value, Vec<u8>)>> {
-        let mut records = Vec::new();
-        for (index, line) in bytes.split(|byte| *byte == b'\n').enumerate() {
-            if line.iter().all(u8::is_ascii_whitespace) {
-                continue;
-            }
-            let value = serde_json::from_slice(line).map_err(|error| {
-                anyhow!(
-                    "invalid complete JSON record {} in {}: {}",
-                    index + 1,
-                    path.display(),
-                    error
-                )
-            })?;
-            records.push((value, line.to_vec()));
-        }
-        Ok(records)
-    }
-
-    fn record_key(record: &Value, raw: &[u8]) -> String {
-        let record_type = record
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
-        record
-            .get("id")
-            .and_then(Value::as_str)
-            .filter(|id| !id.is_empty())
-            .map(|id| format!("{record_type}:{id}"))
-            .unwrap_or_else(|| format!("{record_type}:raw:{:016x}", value_signature(record, raw)))
-    }
-
-    fn value_signature(record: &Value, raw: &[u8]) -> u64 {
-        // `Value` equality is semantic, but retaining every value just to compare generations
-        // would make a long-lived watcher grow with tool-output size. JSON serialization gives
-        // us a compact semantic fingerprint; raw bytes are the fallback for an impossible
-        // serialization failure.
-        serde_json::to_vec(record)
-            .map(|bytes| hash_bytes(&bytes))
-            .unwrap_or_else(|_| hash_bytes(raw))
-    }
-
-    /// Project one complete native record using the same functions as `parse_session`.
-    ///
-    /// Keeping this small adapter-specific projection separate from the cursor means a rewrite
-    /// can replay changed records without reparsing the whole file, while field spelling and
-    /// timestamp rules remain exactly one implementation.
-    fn project_record(record: &Value) -> Result<Vec<SessionMessage>> {
-        check_spellings(record)?;
-        let outer_ms = record
-            .get("timestamp")
-            .and_then(Value::as_str)
-            .and_then(epoch_millis_from_iso);
-        let mut messages = Vec::new();
-        let before = messages.len();
-        match record.get("type").and_then(Value::as_str) {
-            Some("model_change") => {
-                if let Some(event) = change_event(record, outer_ms, "model_change") {
-                    messages.push(SessionMessage::Event(event));
-                }
-            }
-            Some("thinking_level_change") => {
-                if let Some(event) = change_event(record, outer_ms, "thinking_level_change") {
-                    messages.push(SessionMessage::Event(event));
-                }
-            }
-            Some("message") => {
-                message_events(record, outer_ms, &mut messages);
-                let message_ms = record
-                    .get("message")
-                    .and_then(|message| message.get("timestamp"))
-                    .and_then(|value| epoch_millis_from_json(value, defect_timestamp_unit()))
-                    .or(outer_ms);
-                if let Some(at_ms) = message_ms {
-                    for message in &mut messages[before..] {
-                        if let SessionMessage::Event(event) = message {
-                            event.recorded_at_ms = Some(at_ms);
-                        }
-                    }
-                }
-            }
-            // The session header and currently unmeasured entry types carry metadata only. The
-            // raw record is still consumed so a later generation does not replay it forever.
-            _ => {}
-        }
-        if let Some(at_ms) = outer_ms {
-            for message in &mut messages[before..] {
-                if let SessionMessage::Event(event) = message {
-                    if event.recorded_at_ms.is_none() {
-                        event.recorded_at_ms = Some(at_ms);
-                    }
-                }
-            }
-        }
-        Ok(messages)
-    }
-
-    /// Re-project one retained Pi envelope without consulting the native store path.
-    #[allow(dead_code)]
-    pub(crate) fn reproject_native_record(record: &NativeRecord) -> Result<Vec<SessionMessage>> {
-        let mut messages = project_record(&record.payload)?;
-        crate::native::input_cursors(&mut messages, record);
-        Ok(messages)
-    }
-
-    /// Find one session's file by its native id.
-    ///
-    /// The directory is a mangled `cwd` and is **not derivable from the session id**, so the
-    /// store has to be walked. Measured: 527 files, and one header read each is 12 ms for the
-    /// whole store — well under a per-session parse, which is why there is no index here to
-    /// keep in sync.
-    ///
-    /// Matched on the header's **id**, not on the filename. The filename is
-    /// `<timestamp>_<uuid>.jsonl` and its uuid does match the session id in the general case,
-    /// but a forked file's name is not derived from its id at all (measured: `fork-child`'s
-    /// name is a bare uuid), so a name test would fail to find exactly the sessions whose
-    /// lineage matters most.
-    fn locate(id: &NativeId) -> Result<PathBuf> {
-        let root = store_root()
-            .ok_or_else(|| anyhow!("HOME is not set, so ~/.pi/agent/sessions cannot be located"))?;
-        find_in_root(&root, id)
-            .ok_or_else(|| anyhow!("no `pi` session {} in {}", id.as_str(), root.display()))
-    }
-
-    /// Whether this path is a session transcript.
-    ///
-    /// Extension only, because the store holds nothing else: one flat directory per working
-    /// directory, one `.jsonl` per session, no sidecars and no nesting. There is deliberately
-    /// **no filename filter.** Excluding a placeholder like `None.jsonl` by name keys on
-    /// how the vendor happened to name it. The actual fact is that its header carries
-    /// `"id": null`, and that is where it is filtered ([`Header::native_id`]).
-    fn is_session_file(path: &Path) -> bool {
-        path.extension().is_some_and(|ext| ext == "jsonl")
+    pub fn enumerate(filter: &StoreFilter) -> Result<Vec<NativeSummary>> {
+        crate::native::inventory::enumerate(super::AGENT_NAME, filter)
     }
 
     pub fn lookup(id: &NativeId) -> Result<Option<NativeSummary>> {
-        let Some(root) = store_root() else {
-            return Ok(None);
-        };
-        let revision = crate::native::inventory_revision(&root);
-        let mut summary = lookup_in(&root, id);
-        if let Some(summary) = summary.as_mut() {
-            summary.source_revision = revision;
-        }
-        Ok(summary)
+        crate::native::inventory::lookup(super::AGENT_NAME, id)
     }
 
-    fn lookup_in(root: &Path, id: &NativeId) -> Option<NativeSummary> {
-        let candidate = SessionCandidate::of(&find_in_root(root, id)?)?;
-        enumerate_candidates(&StoreFilter::default(), vec![candidate])
-            .into_iter()
-            .find(|row| row.native_id == *id)
-    }
-
-    /// Which native sessions this machine's store holds.
-    ///
-    /// # One header read per file, not one parse
-    ///
-    /// *Measured on the real store:* a full parse of all 527 files (12.9 MB, 4881 records)
-    /// costs **161 ms**, while reading each file's first line costs **12 ms** — about 13×
-    /// cheaper, and the whole header is on that one line because 527 of 527 files open with
-    /// it. `sylph_protocol::Adapter::enumerate` makes this a requirement rather than an
-    /// optimization: an adapter that implements it by parsing each session has not
-    /// implemented it.
-    ///
-    /// The end stamp is the one field a header cannot answer, and it costs a 64 KB tail read
-    /// per file — **27 ms** for the store, and only 35 files exceed 64 KB at all. `event_count`
-    /// is left absent rather than estimated: counting lines is a full read, and a *guessed*
-    /// count is a number a UI would render as fact.
-    pub fn enumerate(filter: &StoreFilter) -> Result<Vec<NativeSummary>> {
-        let Some(root) = store_root() else {
-            return Ok(Vec::new());
-        };
-        if !root.exists() {
-            // A machine with the CLI installed and no sessions yet. An empty listing is the
-            // truthful answer, not an error.
-            return Ok(Vec::new());
-        }
-
-        let revision = crate::native::inventory_revision(&root);
-        let mut summaries = enumerate_candidates(filter, candidates(&root, is_session_file));
-        for summary in &mut summaries {
-            summary.source_revision = revision.clone();
-        }
-        Ok(summaries)
-    }
-
-    fn enumerate_candidates(
-        filter: &StoreFilter,
-        candidates: Vec<SessionCandidate>,
-    ) -> Vec<NativeSummary> {
-        let mut found = Vec::new();
-        for candidate in candidates {
-            // Resolved, because a listing is where lineage is rendered and the cost is one
-            // extra open on the 67 headers that carry a pointer.
-            let Ok(header) = read_header(&candidate.path, true) else {
-                continue;
-            };
-            let Some(native_id) = header.native_id.clone() else {
-                // `"id": null` — a placeholder rather than a session. See
-                // [`Header::native_id`].
-                continue;
-            };
-
-            if let Some(wanted) = &filter.workdir {
-                // **An exact path match after normalizing trailing slashes, never a
-                // substring.** The store this replaces compiled the filter to
-                // `LIKE '%' || ? || '%'`, so asking for `/w/app` also returned `/w/app-old`
-                // and every subdirectory (`StoreFilter::workdir`).
-                let Some(actual) = &header.workdir else {
-                    continue;
-                };
-                if normalize_workdir(actual) != normalize_workdir(wanted) {
-                    continue;
-                }
-            }
-
-            let ended_at_ms = last_recorded_ms(&candidate.path);
-            if let Some(since) = filter.since_ms {
-                // The session's own last activity when it recorded one, and the file's mtime
-                // otherwise — an absent end is not an ended session, so falling back to the
-                // filesystem keeps a still-being-written session from being filtered out of
-                // every listing that names a window.
-                let last = ended_at_ms.unwrap_or(candidate.modified_at_ms);
-                if last < since {
-                    continue;
-                }
-            }
-
-            found.push(NativeSummary {
-                native_id,
-                workdir: header.workdir,
-                // **`pi` records no title at all** — zero occurrences of a title or name key
-                // across the whole store, verified rather than assumed. So this is always
-                // absent and the server's opening-ask fallback is what labels a pi row
-                // (`NativeSummary::title`, which owns that rule so two implementations
-                // cannot disagree about it). Synthesizing one here would also mean this
-                // adapter reading message text during a listing, which is the full parse the
-                // header read exists to avoid.
-                title: None,
-                started_at_ms: header.started_at_ms,
-                ended_at_ms,
-                // Absent rather than estimated: see the note above.
-                event_count: None,
-                source_revision: None,
-                // Always a fork: the header's parent is resolved from `fork_pointer` and
-                // nothing else (`Header::parent_native_id`), so a delegation cannot reach
-                // this field. `parent_session`/`parentSession` occurs 0 times in the whole
-                // store, which is the measurement that makes the fork the only case.
-                parent_relation: header
-                    .parent_native_id
-                    .as_ref()
-                    .map(|_| sylph_protocol::SessionEdgeRelation::Fork),
-                parent_native_id: header.parent_native_id,
-                fidelity: NATIVE_FIDELITY,
-            });
-            if let Some(limit) = filter.limit {
-                if found.len() >= limit {
-                    break;
-                }
-            }
-        }
-
-        // `candidates` already ordered by mtime, which is the cheap ordering key every
-        // listing wants. Deliberately not re-sorted on the session's own recorded end: that
-        // is a different fact — a file being written has an mtime and no end stamp — and
-        // sorting on it would reorder by a field a live session does not have.
-        found
-    }
-
-    /// A trailing slash is not a different directory.
-    /// The last timestamped record in a file, from its tail.
-    ///
-    /// A window rather than a parse, for the reason [`enumerate`] states. The first line of
-    /// the window is dropped when the file is larger than the window, because the read starts
-    /// mid-record — the same rule `claude`'s parser follows, and the reason a tail read cannot
-    /// simply be split on newlines.
-    ///
-    /// `None` when the tail holds no parseable record, which is a real state for a file being
-    /// truncate-rewritten under the reader.
-    fn last_recorded_ms(path: &Path) -> Option<i64> {
-        use std::io::{Read, Seek, SeekFrom};
-
-        /// Records run to a few KB; measured, this finds the last stamp on 527 of 527 files.
-        const TAIL_BYTES: u64 = 64 * 1024;
-
-        let mut file = std::fs::File::open(path).ok()?;
-        let size = file.metadata().ok()?.len();
-        let partial = size > TAIL_BYTES;
-        if partial {
-            file.seek(SeekFrom::Start(size - TAIL_BYTES)).ok()?;
-        }
-        let mut buffer = Vec::new();
-        file.take(TAIL_BYTES).read_to_end(&mut buffer).ok()?;
-        let text = String::from_utf8_lossy(&buffer);
-
-        let mut lines = text.lines();
-        if partial {
-            // The first line of the window began before it. Dropping it is what keeps a
-            // half-record from being reported as a malformed store.
-            lines.next();
-        }
-        let mut last = None;
-        for line in lines {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            let Ok(record) = serde_json::from_str::<Value>(line) else {
-                continue;
-            };
-            if let Some(stamp) = record
-                .get("timestamp")
-                .and_then(Value::as_str)
-                .and_then(epoch_millis_from_iso)
-            {
-                last = Some(stamp);
-            }
-        }
-        last
-    }
-
-    /// Sessions this store holds that are the vendor's **own test fixtures**.
-    ///
-    /// # One filter, not two
-    ///
-    /// A `provider == "faux"` **or** `cwd == "/tmp"` pair is the obvious shape here.
-    /// *Measured over the whole store:* the two together and the `faux` clause alone drop the
-    /// same files, and the `cwd == "/tmp"` clause matches
-    /// **zero** — so it was a filter that had never fired. It is deleted rather than kept:
-    /// `AGENTS.md` § Compatibility, a branch that never fires is indistinguishable from one
-    /// whose condition is merely rare, and keeping it would suggest `/tmp` sessions had been
-    /// found and excluded on purpose.
-    ///
-    /// The `faux` clause survives because it is precise about what it names. `faux` is pi's
-    /// own stub provider — its api strings are literally `faux:<epoch>:<random>` — so a
-    /// session under it was written by pi's test suite and holds no user's work. That is a
-    /// judgement about *whose* data it is, which is why it is not spelled as a path filter.
-    ///
-    /// **Not applied inside [`enumerate`].** A caller that wants the vendor's fixtures out of
-    /// a listing calls this; one auditing the store wants them in. Baking it into the listing
-    /// would make a real session's absence unexplainable from the outside.
-    pub fn is_vendor_fixture(parsed: &ParsedSession) -> bool {
-        parsed
-            .model
-            .as_deref()
-            .is_some_and(|model| model.starts_with("faux "))
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-        use std::path::{Path, PathBuf};
-
-        /// The recorded-payload corpus, reached the way `claude/native.rs` reaches its own.
-        fn fixture(name: &str) -> PathBuf {
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../fixtures/native/pi")
-                .join(name)
-        }
-
-        #[test]
-        fn native_lookup_uses_the_header_even_when_the_filename_is_unrelated() {
-            let root =
-                std::env::temp_dir().join(format!("sylph-pi-lookup-{}", uuid::Uuid::new_v4()));
-            std::fs::create_dir_all(&root).unwrap();
-            std::fs::copy(
-                fixture("ordinary-turn.jsonl"),
-                root.join("unrelated-name.jsonl"),
-            )
-            .unwrap();
-            let id = NativeId::new("019f364f-c1e5-7e4f-a3e5-7c7ed13b17aa");
-            let summary = lookup_in(&root, &id).unwrap();
-            assert_eq!(summary.native_id, id);
-            assert_eq!(summary.workdir.as_deref(), Some("/Users/hsw"));
-            assert!(lookup_in(&root, &NativeId::new("absent")).is_none());
-            std::fs::remove_dir_all(root).unwrap();
-        }
-
-        /// **The per-field spelling resolution, against a file that genuinely mixes them.**
-        ///
-        /// This is the case a per-file era flag cannot handle and the reason the resolution is
-        /// per field: `mixed-spelling-per-field.jsonl` is a real session carrying snake
-        /// `parent_id` and `parent_session` alongside camel `stopReason`, `cacheRead`, and
-        /// `totalTokens`. Measured, files of this shape are a real population, and a reader
-        /// choosing one era for the whole file gets one of those fields right and the other
-        /// wrong.
-        ///
-        /// Asserted through `parse_session` rather than against the field table directly, so
-        /// it pins the behaviour a caller sees rather than an internal helper.
-        #[test]
-        fn a_file_mixing_spellings_across_fields_parses_both() {
-            let parsed = parse_session(&fixture("mixed-spelling-per-field.jsonl"))
-                .expect("a mixed-spelling file must parse, not fail");
-
-            // The record projects at all, which a per-file era flag would already manage.
-            assert!(
-                !parsed.messages.is_empty(),
-                "the message record must project despite the mixed spellings"
-            );
-
-            // The evidence is in *where* the spellings sit. This file writes the header's
-            // fork pointer and the message's parent link in snake_case — both present as
-            // keys, both null, which is itself the era's signature — while the same
-            // message carries camelCase `stopReason` and `usage.cacheRead` with values.
-            //
-            // `check_spellings` is the gate that would reject the file if the two eras
-            // were treated as one, so passing it on a genuinely mixed record IS the
-            // assertion: per-field resolution accepts this, while any rule that first
-            // decides "this file is snake" or "this file is camel" must be wrong about
-            // half of it.
-            let record: serde_json::Value = serde_json::from_str(
-                std::fs::read_to_string(fixture("mixed-spelling-per-field.jsonl"))
-                    .unwrap()
-                    .lines()
-                    .nth(1)
-                    .expect("the fixture has a message record"),
-            )
-            .unwrap();
-            assert!(record.get("parent_id").is_some(), "snake key present");
-            assert!(
-                record.pointer("/message/stopReason").is_some(),
-                "camel key present in the same record"
-            );
-            assert!(
-                check_spellings(&record).is_ok(),
-                "a record mixing spellings across DIFFERENT fields is legitimate and must \
-                 be accepted; only two spellings of ONE field is an error"
-            );
-        }
-
-        /// **Both spellings of one field is refused, not merged.**
-        ///
-        /// Occurs zero times in the real store, which is exactly why it is an error: it
-        /// means the store changed in a way this parser has not been measured against, and
-        /// a silent preference for one spelling is what would make the *next* rename
-        /// unobservable (`AGENTS.md` § Compatibility).
-        ///
-        /// Asserted on a synthesized record because the store contains none — the one case
-        /// where inventing a payload is right, since the point is that no real payload has
-        /// this shape.
-        #[test]
-        fn one_field_in_two_spellings_is_an_error_rather_than_a_silent_preference() {
-            let ambiguous = serde_json::json!({
-                "type": "message",
-                "id": "m1",
-                "parent_id": "a",
-                "parentId": "b",
-                "timestamp": "2026-04-07T22:40:05.606817",
-                "message": {"role": "user", "content": []},
-            });
-            assert!(
-                check_spellings(&ambiguous).is_err(),
-                "a record carrying both spellings of one field must fail loudly"
-            );
-
-            // And the ordinary single-spelling case must still pass, or the check above
-            // would be satisfied by a parser that refused everything.
-            let plain = serde_json::json!({
-                "type": "message",
-                "id": "m1",
-                "parent_id": "a",
-                "timestamp": "2026-04-07T22:40:05.606817",
-                "message": {"role": "user", "content": []},
-            });
-            assert!(check_spellings(&plain).is_ok());
-        }
-
-        #[test]
-        fn an_ambiguous_message_field_is_rejected_at_its_nested_record() {
-            let ambiguous = serde_json::json!({
-                "type": "message",
-                "id": "m1",
-                "timestamp": "2026-04-07T22:40:05.606817",
-                "message": {
-                    "role": "assistant",
-                    "content": [],
-                    "stopReason": "stop",
-                    "stop_reason": "stop"
-                }
-            });
-            assert!(matches!(
-                check_spellings(&ambiguous),
-                Err(ParseError::UnknownSpelling {
-                    snake: "stop_reason",
-                    camel: "stopReason"
-                })
-            ));
-        }
-
-        /// **A `message.timestamp` of `1` or `2` is a test-session placeholder, not a
-        /// timestamp.**
-        ///
-        /// The mixed-spelling fixture carries `message.timestamp: 2`, which is one of the 67
-        /// such values in the real store. They look like a second unit era and are not, which
-        /// is why the decoder takes its unit from the caller rather than sniffing magnitude —
-        /// a heuristic would have read these as seconds and produced 1970.
-        ///
-        /// What matters for a reader is that the *session* still gets a sensible time, from
-        /// the entry's own ISO string, which is the reason the original defect stayed
-        /// survivable for so long.
-        #[test]
-        fn a_placeholder_message_timestamp_does_not_poison_the_session_time() {
-            let parsed = parse_session(&fixture("mixed-spelling-per-field.jsonl")).unwrap();
-            let started = parsed
-                .header
-                .started_at_ms
-                .expect("the header has an ISO stamp");
-
-            // 2026, not 1970: the session time comes from the ISO string rather than from
-            // the placeholder integer beside it.
-            let decoded = chrono::DateTime::from_timestamp_millis(started).unwrap();
-            assert_eq!(
-                decoded.format("%Y").to_string(),
-                "2026",
-                "the session's own time must come from its ISO stamp, not from a \
-                 placeholder `message.timestamp`"
-            );
-        }
-
-        /// **A fork pointer is a file path and must resolve to a `native_id` or be absent.**
-        ///
-        /// The fixture pair is the one real resolvable example in the store, so this is the
-        /// only place the resolution can be exercised end to end.
-        #[test]
-        fn a_fork_pointer_resolves_to_the_parents_own_id() {
-            let child = parse_session(&fixture("fork-child.jsonl")).unwrap();
-            let pointer = child
-                .header
-                .fork_pointer
-                .as_deref()
-                .expect("the child declares a parent");
-
-            // It is a path, not an id — which is the fact that makes resolution necessary.
-            assert!(
-                pointer.ends_with(".jsonl"),
-                "pi records a fork parent as a file path; got {pointer:?}"
-            );
-        }
-
-        /// The vendor-fixture filter names `faux` and nothing else.
-        ///
-        /// A `cwd == "/tmp"` clause is deliberately **not** paired with it: measured, the
-        /// `faux` clause alone drops the same files and the `/tmp` clause matches none, so
-        /// carrying it would imply `/tmp` sessions are excluded when they are not.
-        #[test]
-        fn the_vendor_fixture_filter_keys_on_faux_alone() {
-            let parent = parse_session(&fixture("fork-parent.jsonl")).unwrap();
-            assert!(
-                is_vendor_fixture(&parent),
-                "the fork pair is pi's own test fixture, provider `faux`"
-            );
-
-            let real = parse_session(&fixture("ordinary-turn.jsonl")).unwrap();
-            assert!(
-                !is_vendor_fixture(&real),
-                "a real session must not be filtered; without this the check above \
-                 would pass for a filter that dropped everything"
-            );
-        }
-
-        fn watch_temp_dir(tag: &str) -> PathBuf {
-            let dir =
-                std::env::temp_dir().join(format!("sylph-pi-watch-{tag}-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
-            dir
-        }
-
-        fn watch_header(id: &str) -> String {
-            serde_json::json!({
-                "type": "session",
-                "version": 3,
-                "id": id,
-                "timestamp": "2026-09-03T00:00:00.000Z",
-                "cwd": "/tmp"
-            })
-            .to_string()
-        }
-
-        fn watch_message(id: &str, role: &str, text: &str, timestamp: i64) -> String {
-            let mut message = serde_json::json!({
-                "role": role,
-                "content": [{"type": "text", "text": text}],
-                "timestamp": timestamp
-            });
-            if role == "assistant" {
-                message["stopReason"] = serde_json::json!("stop");
-                message["usage"] = serde_json::json!({
-                    "input": 1,
-                    "output": 1,
-                    "cacheRead": 0,
-                    "cacheWrite": 0,
-                    "totalTokens": 2,
-                    "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}
-                });
-            }
-            serde_json::json!({
-                "type": "message",
-                "id": id,
-                "parentId": serde_json::Value::Null,
-                "timestamp": "2026-09-03T00:00:01.000Z",
-                "message": message
-            })
-            .to_string()
-        }
-
-        fn event_texts(messages: &[SessionMessage]) -> Vec<String> {
-            messages
-                .iter()
-                .filter_map(|message| match message {
-                    SessionMessage::Event(event) if !event.text.is_empty() => {
-                        Some(event.text.clone())
-                    }
-                    _ => None,
-                })
-                .collect()
-        }
-
-        fn events(messages: &[SessionMessage]) -> Vec<Event> {
-            messages
-                .iter()
-                .filter_map(|message| match message {
-                    SessionMessage::Event(event) => Some(event.clone()),
-                    _ => None,
-                })
-                .collect()
-        }
-
-        /// The watcher's first pass must be the same normalized projection as `adopt`; only
-        /// subsequent polls differ by following the source cursor.
-        #[test]
-        fn a_watchers_first_pass_matches_adopt() {
-            let source = fixture("ordinary-turn.jsonl");
-            let parsed = parse_session(&source).unwrap();
-            let id = parsed.header.native_id.clone().unwrap();
-            let dir = watch_temp_dir("parity");
-            let path = dir.join("session.jsonl");
-            std::fs::copy(&source, &path).unwrap();
-
-            let mut state = PiFollowState::new(dir.clone(), id);
-            let watched = events(&state.poll().unwrap());
-            let adopted = parsed
-                .messages
-                .iter()
-                .filter_map(|message| match message {
-                    SessionMessage::Event(event) => Some(event.clone()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(watched, adopted);
-            let _ = std::fs::remove_dir_all(dir);
-        }
-
-        #[test]
-        fn adopt_leaves_an_unterminated_tail_unpublished() {
-            let dir = watch_temp_dir("adopt-tail");
-            let path = dir.join("session.jsonl");
-            std::fs::write(
-                &path,
-                format!(
-                    "{}\n{{\"type\":\"future\",\"id\":\"pending\"}}",
-                    watch_header("tail")
-                ),
-            )
-            .unwrap();
-            let parsed = parse_session(&path).unwrap();
-            assert_eq!(
-                parsed
-                    .messages
-                    .iter()
-                    .filter(|message| matches!(message, SessionMessage::NativeRecord(_)))
-                    .count(),
-                1
-            );
-            let _ = std::fs::remove_dir_all(dir);
-        }
-
-        #[test]
-        fn lexical_rewrite_is_retained_with_the_same_revision_after_reopen() {
-            let dir = watch_temp_dir("lexical-rewrite");
-            let path = dir.join("session.jsonl");
-            let header = watch_header("lexical");
-            std::fs::write(
-                &path,
-                format!("{header}\n{{\"type\":\"future\",\"id\":\"row\"}}\n"),
-            )
-            .unwrap();
-            let mut state = PiFollowState::new(dir.clone(), NativeId::new("lexical"));
-            let initial = state.poll().unwrap();
-            std::fs::write(
-                &path,
-                format!("{header}\n{{ \"type\" : \"future\", \"id\" : \"row\" }}\n"),
-            )
-            .unwrap();
-            let changed = state.poll().unwrap();
-            let record = changed
-                .iter()
-                .find_map(|message| match message {
-                    SessionMessage::NativeRecord(record) => Some(record),
-                    _ => None,
-                })
-                .expect("lexical-only rewrite must be retained");
-            assert!(!initial.iter().any(|message| matches!(message, SessionMessage::NativeRecord(old) if old.version == record.version)));
-            let reopened = parse_session(&path).unwrap();
-            assert!(reopened.messages.iter().any(
-                |message| matches!(message, SessionMessage::NativeRecord(new) if new == record)
-            ));
-            let _ = std::fs::remove_dir_all(dir);
-        }
-
-        #[test]
-        fn retained_fixture_preserves_recorded_times_and_user_input() {
-            let original = parse_session(&fixture("ordinary-turn.jsonl"))
-                .unwrap()
-                .messages;
-            assert!(original.iter().any(|message| matches!(message, SessionMessage::TurnInput(input) if !input.text.is_empty() && input.recorded_at_ms.is_some())));
-            let retained: Vec<_> = original
-                .iter()
-                .filter_map(|message| match message {
-                    SessionMessage::NativeRecord(record) => Some(record),
-                    _ => None,
-                })
-                .flat_map(|record| reproject_native_record(record).unwrap())
-                .collect();
-            let projected: Vec<_> = original
-                .into_iter()
-                .filter(|message| !matches!(message, SessionMessage::NativeRecord(_)))
-                .collect();
-            assert_eq!(retained, projected);
-        }
-
-        #[test]
-        fn retained_record_reprojection_does_not_read_the_native_path() {
-            let record = NativeRecord {
-                source: "/does/not/exist".into(),
-                version: 1,
-                raw_json: None,
-                payload: json!({"type":"message","message":{"role":"assistant","timestamp":1788307200000_i64,"content":[{"type":"text","text":"ok"}]}}),
-                blobs: Vec::new(),
-            };
-            let messages = reproject_native_record(&record).unwrap();
-            assert!(messages.iter().any(
-                |message| matches!(message, SessionMessage::Event(event) if event.text == "ok")
-            ));
-        }
-
-        #[test]
-        fn adopt_retains_every_pi_jsonl_record_losslessly() {
-            let path = fixture("ordinary-turn.jsonl");
-            let parsed = parse_session(&path).expect("fixture must parse");
-            let records: Vec<_> = parsed
-                .messages
-                .iter()
-                .filter_map(|message| match message {
-                    SessionMessage::NativeRecord(record) => Some(record),
-                    _ => None,
-                })
-                .collect();
-            let expected = std::fs::read_to_string(&path)
-                .unwrap()
-                .lines()
-                .filter(|line| !line.trim().is_empty())
-                .count();
-            assert_eq!(records.len(), expected);
-            assert!(records.iter().all(|record| record.raw_json.is_some()));
-            assert_eq!(
-                records
-                    .iter()
-                    .map(|record| record.version)
-                    .collect::<std::collections::HashSet<_>>()
-                    .len(),
-                expected
-            );
-        }
-
-        #[test]
-        fn adopt_reports_a_complete_malformed_record_as_unreadable() {
-            let dir = watch_temp_dir("adopt-malformed");
-            let path = dir.join("session.jsonl");
-            std::fs::write(
-                &path,
-                format!(
-                    "{}\n{{\"type\":\"message\",\"id\":\"broken\"\n",
-                    watch_header("pi-adopt-malformed")
-                ),
-            )
-            .unwrap();
-
-            let error =
-                parse_session(&path).expect_err("a malformed complete record is unreadable");
-            let text = error.to_string();
-            assert!(text.contains("invalid complete JSON record"), "got {text}");
-            assert!(
-                text.contains("session.jsonl"),
-                "the error must name its source: {text}"
-            );
-            let _ = std::fs::remove_dir_all(dir);
-        }
-
-        /// A final JSON line without a newline is still being written. The cursor stays before
-        /// it, and appending the remainder later produces exactly one event rather than either
-        /// dropping the line or publishing a half-parsed message.
-        #[test]
-        fn a_watcher_retries_an_incomplete_final_line() {
-            let dir = watch_temp_dir("partial");
-            let path = dir.join("session.jsonl");
-            let id = NativeId::new("pi-watch-partial");
-            let header = watch_header(id.as_str());
-            let user = watch_message("user-1", "user", "hello", 1788000000000);
-            let assistant = watch_message("assistant-1", "assistant", "done", 1788000000100);
-            let split = assistant.len() / 2;
-            std::fs::write(&path, format!("{header}\n{user}\n{}", &assistant[..split])).unwrap();
-
-            let mut state = PiFollowState::new(dir.clone(), id);
-            let first = state.poll().unwrap();
-            assert_eq!(event_texts(&first), vec!["hello"]);
-            let generation = state.generation();
-
-            use std::io::Write;
-            let mut file = std::fs::OpenOptions::new()
-                .append(true)
-                .open(&path)
-                .unwrap();
-            writeln!(file, "{}", &assistant[split..]).unwrap();
-            let second = state.poll().unwrap();
-            assert_eq!(event_texts(&second), vec!["done"]);
-            assert_eq!(
-                state.generation(),
-                generation,
-                "an append is not a new generation"
-            );
-            assert!(state.poll().unwrap().is_empty(), "the line is emitted once");
-            let _ = std::fs::remove_dir_all(dir);
-        }
-
-        /// Pi's branch navigation rewrites a file in place. A changed record under an existing
-        /// id is projected as the new generation, while unchanged prefix records are not
-        /// duplicated.
-        #[test]
-        fn a_watcher_detects_a_same_inode_truncate_rewrite_without_replaying_the_prefix() {
-            let dir = watch_temp_dir("rewrite");
-            let path = dir.join("session.jsonl");
-            let id = NativeId::new("pi-watch-rewrite");
-            let header = watch_header(id.as_str());
-            let user = watch_message("user-1", "user", "hello", 1788000000000);
-            let old = watch_message("assistant-1", "assistant", "old", 1788000000100);
-            std::fs::write(&path, format!("{header}\n{user}\n{old}\n")).unwrap();
-
-            let mut state = PiFollowState::new(dir.clone(), id);
-            assert_eq!(event_texts(&state.poll().unwrap()), vec!["hello", "old"]);
-            let generation = state.generation();
-
-            let changed = watch_message("assistant-1", "assistant", "new", 1788000000100);
-            // `old` and `new` have the same byte length, so size-only cursors cannot detect this
-            // rewrite. The consumed-prefix hash must force a generation reset.
-            std::fs::write(&path, format!("{header}\n{user}\n{changed}\n")).unwrap();
-            let second = state.poll().unwrap();
-            assert_eq!(event_texts(&second), vec!["new"]);
-            assert!(state.generation() > generation);
-            assert!(state.poll().unwrap().is_empty());
-
-            // Even a byte-identical rewrite is a new source generation. It produces no second
-            // event because the record fingerprint is unchanged, but its cursor provenance is
-            // still advanced rather than silently treating the rewrite as an append.
-            let rewritten_generation = state.generation();
-            std::fs::write(&path, format!("{header}\n{user}\n{changed}\n")).unwrap();
-            assert!(state.poll().unwrap().is_empty());
-            assert!(state.generation() > rewritten_generation);
-            let _ = std::fs::remove_dir_all(dir);
-        }
-
-        /// A rewrite can pass through an empty file before Pi has written the replacement
-        /// header. That transient generation must neither end the stream nor lose the later
-        /// complete record.
-        #[test]
-        fn a_watcher_survives_an_empty_intermediate_rewrite_generation() {
-            let dir = watch_temp_dir("empty-generation");
-            let path = dir.join("session.jsonl");
-            let id = NativeId::new("pi-watch-empty-generation");
-            let header = watch_header(id.as_str());
-            let user = watch_message("user-1", "user", "before", 1788000000000);
-            std::fs::write(&path, format!("{header}\n{user}\n")).unwrap();
-
-            let mut state = PiFollowState::new(dir.clone(), id);
-            assert_eq!(event_texts(&state.poll().unwrap()), vec!["before"]);
-
-            std::fs::write(&path, "").unwrap();
-            assert!(state.poll().unwrap().is_empty());
-
-            let after = watch_message("assistant-1", "assistant", "after", 1788000000100);
-            std::fs::write(&path, format!("{header}\n{user}\n{after}\n")).unwrap();
-            assert_eq!(event_texts(&state.poll().unwrap()), vec!["after"]);
-            let _ = std::fs::remove_dir_all(dir);
-        }
-
-        /// A malformed complete line is reported once for the current source image. Re-polling
-        /// an unchanged image waits for a repair instead of flooding the consumer with copies
-        /// of the same diagnostic.
-        #[test]
-        fn a_watcher_reports_a_malformed_image_once_until_it_changes() {
-            let dir = watch_temp_dir("malformed");
-            let path = dir.join("session.jsonl");
-            let id = NativeId::new("pi-watch-malformed");
-            std::fs::write(&path, format!("{}\nnot-json\n", watch_header(id.as_str()))).unwrap();
-
-            let mut state = PiFollowState::new(dir.clone(), id);
-            assert!(state.poll().is_err());
-            assert!(state.poll().unwrap().is_empty());
-
-            let user = watch_message("user-1", "user", "repaired", 1788000000000);
-            std::fs::write(
-                &path,
-                format!("{}\n{}\n", watch_header("pi-watch-malformed"), user),
-            )
-            .unwrap();
-            assert_eq!(event_texts(&state.poll().unwrap()), vec!["repaired"]);
-            let _ = std::fs::remove_dir_all(dir);
-        }
-
-        /// Replacing the path with a new inode is a generation change even when its consumed
-        /// prefix is byte-identical. The watcher resets, skips the already-seen records, and
-        /// emits only the newly appended record from the replacement.
-        #[test]
-        fn a_watcher_handles_a_replaced_file_generation() {
-            let dir = watch_temp_dir("generation");
-            let path = dir.join("session.jsonl");
-            let replacement = dir.join("session.next.jsonl");
-            let id = NativeId::new("pi-watch-generation");
-            let header = watch_header(id.as_str());
-            let user = watch_message("user-1", "user", "hello", 1788000000000);
-            std::fs::write(&path, format!("{header}\n{user}\n")).unwrap();
-
-            let mut state = PiFollowState::new(dir.clone(), id);
-            assert_eq!(event_texts(&state.poll().unwrap()), vec!["hello"]);
-            let generation = state.generation();
-
-            let assistant = watch_message("assistant-1", "assistant", "after", 1788000000100);
-            std::fs::write(&replacement, format!("{header}\n{user}\n{assistant}\n")).unwrap();
-            std::fs::rename(&replacement, &path).unwrap();
-            let second = state.poll().unwrap();
-            assert_eq!(event_texts(&second), vec!["after"]);
-            assert!(state.generation() > generation);
-            let _ = std::fs::remove_dir_all(dir);
-        }
-
-        #[test]
-        fn a_watcher_rediscovers_a_generation_moved_to_a_new_path() {
-            let dir = watch_temp_dir("moved-generation");
-            let path = dir.join("old.jsonl");
-            let replacement = dir.join("new.jsonl");
-            let id = NativeId::new("pi-watch-moved-generation");
-            let header = watch_header(id.as_str());
-            let user = watch_message("user-1", "user", "before", 1788000000000);
-            std::fs::write(&path, format!("{header}\n{user}\n")).unwrap();
-
-            let mut state = PiFollowState::new(dir.clone(), id);
-            assert_eq!(event_texts(&state.poll().unwrap()), vec!["before"]);
-
-            let assistant = watch_message("assistant-1", "assistant", "moved", 1788000000100);
-            std::fs::write(&replacement, format!("{header}\n{user}\n{assistant}\n")).unwrap();
-            std::fs::remove_file(&path).unwrap();
-            // The replacement has a different filename; one poll must rediscover it rather than
-            // waiting for a second scheduler tick.
-            assert_eq!(event_texts(&state.poll().unwrap()), vec!["moved"]);
-            let _ = std::fs::remove_dir_all(dir);
-        }
-
-        /// A watch started before Pi flushes its first assistant message keeps a pending source
-        /// and discovers the file on a later pass instead of returning `ENOENT` or ending.
-        #[test]
-        fn a_watcher_treats_a_delayed_file_as_pending() {
-            let dir = watch_temp_dir("delayed");
-            let path = dir.join("session.jsonl");
-            let id = NativeId::new("pi-watch-delayed");
-            let mut state = PiFollowState::new(dir.clone(), id.clone());
-            assert!(state.poll().unwrap().is_empty());
-
-            let header = watch_header(id.as_str());
-            let user = watch_message("user-1", "user", "late", 1788000000000);
-            std::fs::write(&path, format!("{header}\n{user}\n")).unwrap();
-            assert_eq!(event_texts(&state.poll().unwrap()), vec!["late"]);
-            let _ = std::fs::remove_dir_all(dir);
-        }
-
-        /// The public follow loop keeps waiting while the source is pending and yields as soon
-        /// as the delayed file appears; it does not terminate after the initial empty pass.
-        #[tokio::test]
-        async fn the_follow_stream_waits_for_a_delayed_source() {
-            use futures::StreamExt;
-
-            let dir = watch_temp_dir("delayed-stream");
-            let path = dir.join("session.jsonl");
-            let id = NativeId::new("pi-watch-delayed-stream");
-            let header = watch_header(id.as_str());
-            let user = watch_message("user-1", "user", "streamed", 1788000000000);
-            let writer = tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_millis(25)).await;
-                std::fs::write(&path, format!("{header}\n{user}\n")).unwrap();
-            });
-
-            let mut stream = follow(PiFollowState::new(dir.clone(), id));
-            let item = tokio::time::timeout(Duration::from_secs(2), async {
-                loop {
-                    let item = stream
-                        .next()
-                        .await
-                        .expect("the watcher remains open")
-                        .expect("the delayed file is valid");
-                    if matches!(item, SessionMessage::Event(_)) {
-                        break item;
-                    }
-                }
-            })
-            .await
-            .expect("the pending source should eventually appear");
-            assert!(matches!(
-                item,
-                SessionMessage::Event(event) if event.text == "streamed"
-            ));
-            writer.await.unwrap();
-            let _ = std::fs::remove_dir_all(dir);
-        }
-
-        /// A native Pi watcher is observation-only. Live `PiSession` still advertises its own
-        /// controls; this facet is specifically for a terminal-owned source.
-        #[test]
-        fn a_terminal_owned_pi_session_is_observable_but_not_drivable() {
-            let facets = super::super::PiAdapter::native_link_facets();
-            assert!(facets.observe.available);
-            assert!(!facets.control.available);
-            assert_eq!(
-                facets.control.reason,
-                Some(sylph_protocol::UnavailableReason::NotOursToDrive)
-            );
-        }
+    pub fn sources(id: &NativeId) -> Result<Vec<NativeSource>> {
+        crate::native::inventory::sources(super::AGENT_NAME, id)
     }
 }
 
-/// The live session: `pi --mode rpc`'s stdio, held for the session's lifetime.
-///
-/// # What this module owns, and why everything else is elsewhere
-///
-/// Exactly three things genuinely need a process, and they are the three that could not be
-/// tested without one anyway: **reply correlation** against traffic this adapter sent,
-/// **the answer path** for a dialog whose response routes back over the same stdin, and
-/// **the pump** that turns lines into [`sylph_protocol::SessionMessage`]s. Everything about
-/// a *payload* — which command a config change becomes, what a dialog looks like, what an
-/// event projects to — is [`crate::pi::rpc`], [`crate::pi::ui`], and
-/// [`crate::pi::translate`].
-///
-/// [`crate::pi::translate::Correlation`]'s own doc says why the two exceptions live here:
-/// a `response` has to wake the caller that sent it, and an `extension_ui_request` has to
-/// become a [`sylph_protocol::Request`] whose answer goes back out. Both are correlation
-/// against *outbound* traffic the projection never sees.
-///
-/// # Three vendor facts this module is shaped by, all measured on pi 0.84.3
-///
-/// - **`abort`'s reply is gated on the turn winding down.** `agent-session.js:1171`:
-///   `abort()` calls `waitForIdle()` before returning, so the `{"command":"abort"}`
-///   response arrives *after* `agent_settled`. Awaiting it would make
-///   [`sylph_protocol::Session::interrupt`] block for as long as a running tool takes to
-///   notice, and past [`crate::process::REPLY_TIMEOUT`] it would report a failure for an
-///   abort that worked. So the abort is sent without awaiting a reply, and the turn's close
-///   arrives on the stream where a client is already watching for it.
-/// - **`setThinkingLevel` clamps rather than refusing** (`agent-session.js:1290`): an
-///   unsupported level is silently replaced by the nearest supported one and answered
-///   `success: true`. This is the same shape as `claude` answering success for `manual`
-///   while confirming `default` (`AGENTS.md`), so a `success` here is not a promise the
-///   vendor did what was asked — which is why [`PiSession::set_config`] validates against
-///   what the vendor enumerated *and* re-reads the surface afterwards.
-/// - **A command is dispatched without being awaited** (`rpc-mode.js:626`, `void
-///   handleInputLine(line)`), so `get_state` answers while a turn streams. That is what
-///   makes reading the surface from the vendor mid-turn viable rather than a deadlock.
+/// Held RPC process, configuration, human requests, and operational state.
 pub mod session {
     use crate::now_ms;
     use std::collections::HashMap;
@@ -4684,7 +1304,7 @@ pub mod session {
     use async_trait::async_trait;
     use serde_json::{json, Value};
     use sylph_protocol::{
-        AdapterError, ConfigOption, Event, EventKind, EventStream, NativeId, NativeRecord,
+        AdapterError, ConfigOption, ControlNotice, ControlStream, NativeId, RawCaptureSink,
         RequestedNativeId, Resolution, RunSpec, Session, SessionCapabilities, SessionMessage,
         TurnInput,
     };
@@ -4700,7 +1320,8 @@ pub mod session {
 
     use crate::process::{self, Child, Spawn};
 
-    use super::{rpc, translate, ui};
+    use super::{rpc, ui};
+    use sylph_protocol::trace::ObservationRef;
 
     /// What pi offered for one open dialog, keyed by the vendor's own request id.
     ///
@@ -4714,8 +1335,9 @@ pub mod session {
     /// One held `pi --mode rpc` process, as a [`Session`].
     pub struct PiSession {
         native_id: NativeId,
+        identity_evidence: ObservationRef,
         child: Arc<Child>,
-        /// Yielded **once** by [`Session::events`]. Two consumers of one vendor's stdio
+        /// Yielded **once** by [`Session::messages`]. Two consumers of one vendor's stdio
         /// would each see half the turn, which is the same reason
         /// [`crate::process::Child`] reads stdout in exactly one task.
         stream: Mutex<Option<mpsc::Receiver<Result<SessionMessage>>>>,
@@ -4727,16 +1349,7 @@ pub mod session {
         /// catalogue is cached.** Current values are read from the vendor every time
         /// ([`PiSession::read_surface`]).
         models: Arc<Mutex<Option<Value>>>,
-        /// Serializes surface refreshes, so the last publish is the one that read last.
-        ///
-        /// Two concurrent refreshes could otherwise interleave read-then-publish and leave
-        /// a client holding the *earlier* read. One lock held across both halves makes the
-        /// ordering a property of the code rather than of the scheduler.
-        refreshing: Arc<Mutex<()>>,
         dialogs: Dialogs,
-        /// Shared input correlation: send reserves the opening echo before the reader can
-        /// observe it; native queue messages remain vendor-authored transcript events.
-        correlation: Arc<Mutex<translate::Correlation>>,
         /// The identity preamble's file, deleted on [`Session::close`].
         preamble: Option<std::path::PathBuf>,
     }
@@ -4749,7 +1362,7 @@ pub mod session {
         /// envagent names an id, and the alternative — minting one here — is the
         /// synthesized-identity failure [`NativeId`] forbids and the Python original
         /// committed — v1 minted one with `uuid4()`.
-        pub async fn open(spec: RunSpec) -> Result<Self> {
+        pub async fn open(spec: RunSpec, capture: Arc<dyn RawCaptureSink>) -> Result<Self> {
             let requested = match &spec.native_id {
                 RequestedNativeId::Dictate(id) | RequestedNativeId::Resume(id) => id.clone(),
                 RequestedNativeId::New => {
@@ -4793,7 +1406,7 @@ pub mod session {
                 env_remove: Vec::new(),
                 reply_id: Some(Box::new(reply_id)),
             };
-            let attached = Self::attach(spawn, requested, preamble.clone()).await;
+            let attached = Self::attach(spawn, requested, preamble.clone(), capture).await;
             if attached.is_err() {
                 // The file is this adapter's, and a failed launch is the one path where
                 // nothing else will ever delete it.
@@ -4816,36 +1429,69 @@ pub mod session {
             spawn: Spawn,
             native_id: NativeId,
             preamble: Option<std::path::PathBuf>,
+            capture: Arc<dyn RawCaptureSink>,
         ) -> Result<Self> {
-            let (child, lines) = Child::spawn(spawn).await?;
+            let (child, lines) = Child::spawn(spawn, capture).await?;
             let child = Arc::new(child);
 
             // Bounded, and generously: a turn's deltas arrive faster than a server folds
             // them, and a channel small enough to block here would make this adapter's own
             // backpressure part of what a streaming measurement measures.
             let (messages, stream) = mpsc::channel(1024);
-            let session = Self {
-                native_id,
-                child: child.clone(),
-                stream: Mutex::new(Some(stream)),
-                models: Arc::new(Mutex::new(None)),
-                refreshing: Arc::new(Mutex::new(())),
-                dialogs: Arc::new(Mutex::new(HashMap::new())),
-                correlation: Arc::new(Mutex::new(translate::Correlation::new())),
-                preamble,
-            };
-
+            let models = Arc::new(Mutex::new(None));
+            let refreshing = Arc::new(Mutex::new(()));
+            let dialogs = Arc::new(Mutex::new(HashMap::new()));
+            let identified = Arc::new(std::sync::atomic::AtomicBool::new(false));
             tokio::spawn(pump(Pump {
                 lines,
                 messages,
-                child,
-                correlation: session.correlation.clone(),
-                dialogs: session.dialogs.clone(),
-                models: session.models.clone(),
-                refreshing: session.refreshing.clone(),
-                source: format!("live/stdout/{}.jsonl", uuid::Uuid::new_v4()),
-                native: super::native::LiveRecords::new(session.native_id.clone()),
+                child: child.clone(),
+                native_id: native_id.clone(),
+                identified: identified.clone(),
+                dialogs: dialogs.clone(),
+                models: models.clone(),
+                refreshing: refreshing.clone(),
+                snapshot: Arc::new(Mutex::new(SnapshotState::default())),
             }));
+
+            // An argv request is not proof of identity. Only the retained vendor reply
+            // establishes which session this process actually opened.
+            let verified = async {
+                let reply = child
+                    .request_with_receipt(|id| json!({"id": id.to_string(), "type": "get_state"}))
+                    .await?;
+                let state = response_data("get_state", &reply.value)?;
+                let actual = state
+                    .get("sessionId")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty())
+                    .ok_or_else(|| anyhow!("pi get_state omitted its sessionId"))?;
+                if actual != native_id.as_str() {
+                    return Err(anyhow!(
+                        "pi opened session {actual:?}, expected {:?}",
+                        native_id.as_str()
+                    ));
+                }
+                Ok::<_, anyhow::Error>(reply.observation)
+            }
+            .await;
+            let identity_evidence = match verified {
+                Ok(evidence) => evidence,
+                Err(error) => {
+                    child.close().await;
+                    return Err(error);
+                }
+            };
+            identified.store(true, std::sync::atomic::Ordering::Release);
+            let session = Self {
+                native_id,
+                identity_evidence,
+                child,
+                stream: Mutex::new(Some(stream)),
+                models,
+                dialogs,
+                preamble,
+            };
 
             Ok(session)
         }
@@ -4880,6 +1526,10 @@ pub mod session {
     impl Session for PiSession {
         fn native_id(&self) -> Option<NativeId> {
             Some(self.native_id.clone())
+        }
+
+        async fn identity_evidence(&self) -> Vec<ObservationRef> {
+            vec![self.identity_evidence.clone()]
         }
 
         /// The whole surface, every field of it read from the vendor.
@@ -4953,11 +1603,7 @@ pub mod session {
                     object.insert("images".to_string(), Value::Array(images));
                 }
             }
-            self.correlation.lock().await.opening_echo_pending = true;
-            if let Err(error) = self.call("prompt", fields).await {
-                self.correlation.lock().await.opening_echo_pending = false;
-                return Err(error);
-            }
+            self.call("prompt", fields).await?;
             Ok(())
         }
 
@@ -5122,7 +1768,7 @@ pub mod session {
                 .context("pi would not accept a dialog answer")
         }
 
-        fn events(&mut self) -> Option<EventStream> {
+        fn messages(&mut self) -> Option<ControlStream> {
             // `try_lock` because this is the one sync method on an otherwise async trait,
             // and the lock is uncontended by construction: `&mut self` means nothing else
             // holds this session. Taking the receiver is what makes a second call `None`.
@@ -5151,47 +1797,44 @@ pub mod session {
         }
     }
 
-    /// Everything the pump task owns.
-    ///
-    /// A struct rather than eight arguments because they travel together and four of them
-    /// are the same `Arc<Mutex<…>>` shape, where a swapped pair compiles.
+    #[derive(Default)]
+    struct SnapshotState {
+        cursor: Option<String>,
+        degraded: bool,
+    }
+
     struct Pump {
         lines: mpsc::Receiver<process::Line>,
         messages: mpsc::Sender<Result<SessionMessage>>,
         child: Arc<Child>,
-        correlation: Arc<Mutex<translate::Correlation>>,
+        native_id: NativeId,
+        identified: Arc<std::sync::atomic::AtomicBool>,
         dialogs: Dialogs,
         models: Arc<Mutex<Option<Value>>>,
         refreshing: Arc<Mutex<()>>,
-        source: String,
-        native: Option<super::native::LiveRecords>,
+        snapshot: Arc<Mutex<SnapshotState>>,
     }
 
-    /// Turn pi's lines into session messages, for the session's whole life.
-    ///
-    /// Ends when the vendor closes stdout or the server drops the session. A **parse failure
-    /// is forwarded and does not end the stream**: one malformed line must not fail a turn,
-    /// and `sylph_protocol::EventStream` documents an `Err` item as a failure *reading* the
-    /// session rather than a failure of it.
+    /// Only operational state crosses this channel. All vendor bytes, including malformed
+    /// frames, replies and unknown events, have already been durably captured by `Child`.
     async fn pump(mut state: Pump) {
-        let mut last_model: Option<String> = None;
-        let mut version = 0u64;
-        let mut poll = tokio::time::interval(std::time::Duration::from_millis(250));
+        let mut active = false;
+        let mut last_model = None;
+        let mut poll = tokio::time::interval_at(
+            tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(1),
+        );
         poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             let line = tokio::select! {
                 line = state.lines.recv() => line,
-                _ = poll.tick() => {
-                    if !retain_native(&mut state).await { return; }
-                    continue;
-                }
+                _ = poll.tick() => { refresh_snapshot(&state); continue; }
             };
             let Some(line) = line else {
-                let _ = retain_native(&mut state).await;
                 break;
             };
-            let (payload, raw) = match line {
-                Ok(line) => (line.value, line.raw),
+            let payload = match line {
+                Ok(line) => line.value,
                 Err(error) => {
                     if state.messages.send(Err(error)).await.is_err() {
                         break;
@@ -5199,106 +1842,110 @@ pub mod session {
                     continue;
                 }
             };
-            let at_ms = now_ms();
-
-            match payload.get("type").and_then(Value::as_str) {
-                // An `extension_ui_request` is the session half's business, not the
-                // projection's: its answer routes back over this process's own stdin.
+            let notice = match payload.get("type").and_then(Value::as_str) {
                 Some("extension_ui_request") => {
-                    if !handle_ui_request(&state, &payload, at_ms).await {
+                    if !handle_ui_request(&state, &payload, now_ms()).await {
                         break;
                     }
-                    continue;
+                    None
                 }
-                // A `response` reaching the pump is one [`reply_id`] declined to correlate,
-                // which after that predicate means exactly two things: it carried no `id`, or
-                // no waiter held the one it carried. Both are **this adapter's business rather
-                // than a fact about the session**, so it is logged and never published —
-                // publishing it would put a `set_model` acknowledgement in the transcript as
-                // an event.
-                //
-                // The reachable case is `abort`, which is deliberately sent without an id
-                // because its reply is gated on the turn winding down. pi omits `id` from a
-                // response when the command carried none, so its acknowledgement lands here by
-                // construction rather than by accident.
+                Some("agent_start") if !active => {
+                    active = true;
+                    Some(ControlNotice::Active {
+                        native_id: state.native_id.clone(),
+                        native_turn_id: None,
+                    })
+                }
+                Some("agent_settled") => {
+                    active = false;
+                    refresh_snapshot(&state);
+                    Some(ControlNotice::Settled {
+                        native_id: state.native_id.clone(),
+                        native_turn_id: None,
+                    })
+                }
+                Some("message_start" | "message_end") => {
+                    if let Some(message) = payload.get("message") {
+                        if let (Some(provider), Some(model)) = (
+                            message.get("provider").and_then(Value::as_str),
+                            message.get("model").and_then(Value::as_str),
+                        ) {
+                            let observed = rpc::model_key(Some(provider), model);
+                            if last_model.as_ref() != Some(&observed) {
+                                last_model = Some(observed);
+                                refresh_config(&state);
+                            }
+                        }
+                    }
+                    None
+                }
                 Some("response") => {
-                    debug!(?payload, "pi answered a request nothing was waiting for");
-                    continue;
+                    debug!("pi answered an uncorrelated control request");
+                    None
                 }
-                _ => {}
-            }
-
-            // Retain the exact vendor envelope before projecting it. Control responses and
-            // UI requests are handled above and intentionally do not become transcript rows.
-            version = version.saturating_add(1);
-            if state
-                .messages
-                .send(Ok(SessionMessage::NativeRecord(NativeRecord {
-                    source: state.source.clone(),
-                    version,
-                    raw_json: Some(raw),
-                    payload: payload.clone(),
-                    blobs: Vec::new(),
-                })))
-                .await
-                .is_err()
-            {
-                return;
-            }
-
-            let emission = {
-                // Never hold input correlation across bounded channel backpressure.
-                let mut correlation = state.correlation.lock().await;
-                correlation.translate(&payload, at_ms)
+                _ => None,
             };
-
-            for message in emission.messages {
-                if state.messages.send(Ok(message)).await.is_err() {
-                    return;
-                }
-            }
-
-            // **The vendor reporting a different model is a capability change, so it is
-            // published rather than stored.** pi's own TUI can steer a session, and a
-            // `/model` typed as prose changes it too, so a client that only ever learns the
-            // model from its own `set_config` reply shows a stale one indefinitely — the
-            // announce-arrival-without-departure shape, applied to a value rather than to a
-            // set.
-            if let Some(observed) = emission.observed_model {
-                if last_model.as_deref() != Some(observed.as_str()) {
-                    last_model = Some(observed);
-                    refresh_config(&state);
+            if let Some(notice) = notice {
+                if state
+                    .messages
+                    .send(Ok(SessionMessage::Control(notice)))
+                    .await
+                    .is_err()
+                {
+                    break;
                 }
             }
         }
     }
 
-    async fn retain_native(state: &mut Pump) -> bool {
-        let Some(native) = state.native.as_mut() else {
-            return true;
+    /// Observe selected history even when navigation appends no native entry. The vendor
+    /// has no page-size parameter: its complete response is captured under transport limits.
+    /// `since` names a previously observed entry, never a locally invented ordinal.
+    fn refresh_snapshot(state: &Pump) {
+        if !state.identified.load(std::sync::atomic::Ordering::Acquire) {
+            return;
+        }
+        let Ok(mut cursor) = state.snapshot.clone().try_lock_owned() else {
+            return;
         };
-        match native.poll() {
-            Ok(messages) => {
-                for message in messages {
-                    if state.messages.send(Ok(message)).await.is_err() {
-                        return false;
+        let child = state.child.clone();
+        tokio::spawn(async move {
+            let fields = cursor
+                .cursor
+                .as_ref()
+                .map(|id| json!({"since": id}))
+                .unwrap_or_else(|| json!({}));
+            match call(&child, "get_entries", fields).await {
+                Ok(data) => {
+                    cursor.degraded = false;
+                    if let Some(last) = data
+                        .get("entries")
+                        .and_then(Value::as_array)
+                        .and_then(|entries| entries.last())
+                        .and_then(|entry| entry.get("id"))
+                        .and_then(Value::as_str)
+                    {
+                        cursor.cursor = Some(last.to_string());
                     }
                 }
-                true
+                Err(error) => {
+                    // A rewritten source may retire the cursor. The next observation asks
+                    // for a new baseline; the failed response remains retained evidence.
+                    cursor.cursor = None;
+                    if cursor.degraded {
+                        debug!("pi entry snapshot remains unavailable: {error}");
+                    } else {
+                        warn!("could not capture pi entry snapshot: {error}");
+                        cursor.degraded = true;
+                    }
+                }
             }
-            Err(error) => state.messages.send(Err(error)).await.is_ok(),
-        }
+        });
     }
 
-    /// One `extension_ui_request`, published or answered. `false` means the consumer is gone.
     async fn handle_ui_request(state: &Pump, payload: &Value, at_ms: i64) -> bool {
         match ui::inversion(payload, at_ms) {
             ui::Inversion::Ask(request) => {
-                // Remembered **before** the request is published, because the answer can
-                // arrive on another task the instant a client sees it — and an offered list
-                // recorded afterwards would be missing for exactly the fastest answers.
-                //
-                // `Some` only for a dialog that genuinely offered options; see [`Dialogs`].
                 let offered = match payload.get("method").and_then(Value::as_str) {
                     Some("select") => Some(ui::offered_options(payload)),
                     _ => None,
@@ -5314,32 +1961,12 @@ pub mod session {
                     .await
                     .is_ok()
             }
-            ui::Inversion::Notice(text) => {
-                let mut event = Event::new(EventKind::Notice, None, at_ms);
-                event.text = text;
-                state
-                    .messages
-                    .send(Ok(SessionMessage::Event(event)))
-                    .await
-                    .is_ok()
-            }
-            ui::Inversion::Ignore => true,
-            // **Cancelled, never left parked.** An unknown dialog method still blocks pi, so
-            // silence stalls the turn until the vendor's own timeout lapses — which presents
-            // as a session that stopped for no reason. Reported as a `status` rather than a
-            // `notice`, because this is the adapter narrating its own limit rather than the
-            // agent saying something, and not as an error, because nothing failed: a build
-            // that has not been taught a method is a gap in Sylph, not in the session.
+            ui::Inversion::Notice(_) | ui::Inversion::Ignore => true,
             ui::Inversion::Unsupported { method, vendor_id } => {
-                let _ = state.child.send(ui::cancel_response(&vendor_id)).await;
-                let mut event = Event::new(EventKind::Status, None, at_ms);
-                event.text =
-                    format!("pi asked something this build cannot show ({method}); dismissed");
-                state
-                    .messages
-                    .send(Ok(SessionMessage::Event(event)))
-                    .await
-                    .is_ok()
+                if let Err(error) = state.child.send(ui::cancel_response(&vendor_id)).await {
+                    warn!("could not dismiss unsupported pi dialog {method}: {error}");
+                }
+                true
             }
         }
     }
@@ -5354,7 +1981,7 @@ pub mod session {
     /// that owns stdout, not by this pump.
     ///
     /// What a spawn *does* risk is two refreshes publishing out of order, which
-    /// [`PiSession::refreshing`] prevents by holding one lock across read **and** publish.
+    /// the shared refresh lock prevents by covering both the read and publish.
     /// A stream position is not at stake the way it is for a request: a facet is idempotent
     /// state a client reconciles against, not an event that means something different a few
     /// rows earlier or later.
@@ -5399,9 +2026,7 @@ pub mod session {
     ///
     /// `type: "response"` is pi's own direction marker — each vendor spells it differently,
     /// which is why the knowledge lives here and not in [`crate::process`]. This is also what
-    /// now *enforces* [`translate::Correlation::translate`]'s rule that a `response` and an
-    /// `extension_ui_request` are the session half's business: the transport keeps replies off
-    /// the projection's input, rather than the split being only documented.
+    /// keeps replies separate from operational notifications.
     ///
     /// # A string, and deliberately not "a string or a number"
     ///
@@ -5446,6 +2071,10 @@ pub mod session {
             .await
             .with_context(|| format!("pi did not answer `{command}`"))?;
 
+        response_data(command, &reply)
+    }
+
+    fn response_data(command: &str, reply: &Value) -> Result<Value> {
         // The discriminant first. A refusal carries `error` and no `data`.
         if reply.get("success").and_then(Value::as_bool) != Some(true) {
             let reason = reply
@@ -5524,12 +2153,6 @@ pub mod session {
         Ok(path)
     }
 
-    /// Epoch milliseconds now.
-    ///
-    /// **pi's RPC events carry no timestamp at all** — checked against `pi-coding-agent/docs/rpc.md`, where
-    /// every event shape is listed and none holds one — so the adapter stamps arrival. That
-    /// is why [`translate::Correlation::translate`] takes the clock as an argument: a test
-    /// that cannot fix the stamps cannot assert on ordering.
     /// One user message, with images inline and every other file named by path.
     ///
     /// pi takes images as `ImageContent` blocks and reads text files perfectly well with its
@@ -5580,7 +2203,7 @@ pub mod session {
         use super::*;
         use std::path::{Path, PathBuf};
         use std::time::Duration;
-        use sylph_protocol::{Phase, RefusalCode};
+        use sylph_protocol::RefusalCode;
 
         /// A scripted `pi` peer: one `sh` process speaking the RPC surface.
         ///
@@ -5622,6 +2245,12 @@ while IFS= read -r line; do
         printf '{"type":"extension_ui_request","id":"%s","method":"select","title":"Pick","options":["Allow","Block"]}\n' "$i"
       fi
       printf '{"id":"%s","type":"response","command":"get_state","success":true,"data":{"model":%s,"thinkingLevel":"%s","sessionId":"scripted"}}\n' "$i" "$MODEL" "$LEVEL" ;;
+    get_entries)
+      case "$line" in
+        *'"since":"entry-1"'*) ENTRIES='[]' ;;
+        *) ENTRIES='[{"id":"entry-1","type":"custom","parentId":null,"data":{"retained":true}}]' ;;
+      esac
+      printf '{"id":"%s","type":"response","command":"get_entries","success":true,"data":{"entries":%s,"leafId":"entry-1"}}\n' "$i" "$ENTRIES" ;;
     get_available_models)
       printf '{"id":"%s","type":"response","command":"get_available_models","success":true,"data":{"models":[%s,{"id":"deepseek-v4-pro","provider":"deepseek","name":"DeepSeek V4 Pro"},{"id":"deepseek-v4-pro","provider":"openrouter","name":"DeepSeek V4 Pro"}]}}\n' "$i" "$MODEL" ;;
     get_available_thinking_levels)
@@ -5736,6 +2365,7 @@ done
                 spawn_peer(&log, path, collide),
                 NativeId::new("scripted"),
                 None,
+                crate::process::test_capture(),
             )
             .await
             .expect("the scripted peer must attach");
@@ -5751,7 +2381,8 @@ done
                 let lines: Vec<Value> = std::fs::read_to_string(log)
                     .unwrap_or_default()
                     .lines()
-                    .filter_map(|line| serde_json::from_str(line).ok())
+                    .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                    .filter(|line| line["type"] != "get_state" && line["type"] != "get_entries")
                     .collect();
                 if lines.len() >= count {
                     return lines;
@@ -5768,16 +2399,10 @@ done
         ///
         /// A timeout rather than an unbounded await, so a test asserting that **nothing** is
         /// published can say so — which is what pins "a reply is not an event".
-        async fn next_message(stream: &mut EventStream, ms: u64) -> Option<SessionMessage> {
+        async fn next_message(stream: &mut ControlStream, ms: u64) -> Option<SessionMessage> {
             use futures::StreamExt;
             tokio::time::timeout(Duration::from_millis(ms), async {
-                while let Some(item) = stream.next().await {
-                    let message = item.expect("the scripted peer emits no read failures here");
-                    if !matches!(message, SessionMessage::NativeRecord(_)) {
-                        return Some(message);
-                    }
-                }
-                None
+                stream.next().await.map(|item|item.expect("the scripted peer emits no read failures here"))
             })
             .await
             .ok()
@@ -5785,36 +2410,161 @@ done
         }
 
         #[tokio::test]
-        async fn live_stdout_retains_lexical_raw_before_each_projection() {
-            use futures::StreamExt;
-            let raw =
-                r#"{ "type" : "extension_error", "error" : "raw\\u0020body", "future" : [1,2] }"#;
-            let (mut session, _log) = scripted("live-raw", &[raw, raw]).await;
-            let mut stream = session.events().unwrap();
-            let mut source = None;
-            for version in 1..=2 {
-                let message = tokio::time::timeout(Duration::from_secs(2), stream.next())
-                    .await
-                    .unwrap()
-                    .unwrap()
+        async fn identity_uses_the_retained_vendor_reply_and_keeps_unknown_bytes() {
+            let dir = scratch("identity-capture");
+            let log = dir.join("commands.jsonl");
+            let events = dir.join("events.jsonl");
+            let raw = b"{ \"type\": \"future_event\", \"value\": 1, \"value\": 2 }\r\n";
+            std::fs::write(&events, raw).unwrap();
+            let capture = Arc::new(crate::process::RecordingCapture::default());
+            let session = PiSession::attach(
+                spawn_peer(&log, Some(&events), false),
+                NativeId::new("scripted"),
+                None,
+                capture.clone(),
+            )
+            .await
+            .unwrap();
+            let evidence = session.identity_evidence().await;
+            assert_eq!(session.native_id().unwrap().as_str(), "scripted");
+            assert_eq!(evidence.len(), 1);
+            {
+                let records = capture.records.lock().unwrap();
+                let proof = records
+                    .iter()
+                    .find(|(_, receipt)| receipt == &evidence[0])
                     .unwrap();
-                let SessionMessage::NativeRecord(record) = message else {
-                    panic!("the raw envelope must precede its projection: {message:?}");
-                };
-                assert_eq!(record.raw_json.as_deref(), Some(raw.as_bytes()));
-                assert_eq!(record.payload["future"], json!([1, 2]));
-                assert_eq!(record.version, version);
-                assert!(record.source.starts_with("live/stdout/"));
-                if let Some(source) = &source {
-                    assert_eq!(&record.source, source);
-                } else {
-                    source = Some(record.source);
+                let response: Value = serde_json::from_slice(&proof.0.bytes).unwrap();
+                assert_eq!(response["command"], "get_state");
+                assert_eq!(response["data"]["sessionId"], "scripted");
+                assert!(records.iter().any(|(record, _)| record.bytes == raw));
+            }
+            session.close().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn an_argv_identity_mismatch_refuses_the_link() {
+            let dir = scratch("wrong-identity");
+            let result = PiSession::attach(
+                spawn_peer(&dir.join("commands.jsonl"), None, false),
+                NativeId::new("requested-but-not-opened"),
+                None,
+                crate::process::test_capture(),
+            )
+            .await;
+            let error = result
+                .err()
+                .expect("the requested identity is not evidence");
+            assert!(error.to_string().contains("opened session"));
+        }
+
+        #[tokio::test]
+        async fn a_missing_vendor_identity_refuses_the_link() {
+            let dir = scratch("missing-identity");
+            let mut spawn = spawn_peer(&dir.join("commands.jsonl"), None, false);
+            spawn.args[1] = PEER.replace(",\"sessionId\":\"scripted\"", "");
+            let result = PiSession::attach(
+                spawn,
+                NativeId::new("scripted"),
+                None,
+                crate::process::test_capture(),
+            )
+            .await;
+            assert!(result
+                .err()
+                .expect("identity must be reported")
+                .to_string()
+                .contains("omitted its sessionId"));
+        }
+
+        #[tokio::test]
+        async fn inner_starts_keep_one_operational_interval_until_settlement() {
+            let (mut session, _) = scripted(
+                "outer-interval",
+                &[
+                    r#"{"type":"agent_start"}"#,
+                    r#"{"type":"agent_end"}"#,
+                    r#"{"type":"agent_start"}"#,
+                    r#"{"type":"message_end","message":{"role":"assistant","stopReason":"stop"}}"#,
+                    r#"{"type":"agent_settled"}"#,
+                ],
+            )
+            .await;
+            let mut stream = session.messages().unwrap();
+            assert!(matches!(
+                next_message(&mut stream, 1000).await,
+                Some(SessionMessage::Control(ControlNotice::Active {
+                    native_turn_id: None,
+                    ..
+                }))
+            ));
+            assert!(matches!(
+                next_message(&mut stream, 1000).await,
+                Some(SessionMessage::Control(ControlNotice::Settled {
+                    native_turn_id: None,
+                    ..
+                }))
+            ));
+            assert!(next_message(&mut stream, 100).await.is_none());
+            session.close().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn snapshots_retain_the_head_and_resume_from_a_vendor_entry() {
+            let dir = scratch("snapshot-cursor");
+            let capture = Arc::new(crate::process::RecordingCapture::default());
+            let session = PiSession::attach(
+                spawn_peer(&dir.join("commands.jsonl"), None, false),
+                NativeId::new("scripted"),
+                None,
+                capture.clone(),
+            )
+            .await
+            .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let observed = capture.records.lock().unwrap().iter().any(|(record, _)| {
+                        serde_json::from_slice::<Value>(&record.bytes).is_ok_and(|value| {
+                            value["type"] == "get_entries" && value["since"] == "entry-1"
+                        })
+                    });
+                    if observed {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
                 }
-                let event = stream.next().await.unwrap().unwrap();
+            })
+            .await
+            .expect("the next snapshot must use the vendor entry cursor");
+            {
+                let records = capture.records.lock().unwrap();
+                assert!(records.iter().any(|(record, _)| {
+                    serde_json::from_slice::<Value>(&record.bytes).is_ok_and(|value| {
+                        value["command"] == "get_entries"
+                            && value["data"]["leafId"] == "entry-1"
+                            && value["data"]["entries"][0]["data"]["retained"] == true
+                    })
+                }));
+                let state_at = records
+                    .iter()
+                    .position(|(record, _)| {
+                        serde_json::from_slice::<Value>(&record.bytes)
+                            .is_ok_and(|value| value["command"] == "get_state")
+                    })
+                    .unwrap();
+                let entries_at = records
+                    .iter()
+                    .position(|(record, _)| {
+                        serde_json::from_slice::<Value>(&record.bytes)
+                            .is_ok_and(|value| value["type"] == "get_entries")
+                    })
+                    .unwrap();
                 assert!(
-                    matches!(event, SessionMessage::Event(event) if event.kind == EventKind::Status)
+                    state_at < entries_at,
+                    "identity must precede entry snapshots"
                 );
             }
+            session.close().await.unwrap();
         }
 
         /// **The surface's current values come from the vendor, not from what was set.**
@@ -6035,64 +2785,6 @@ done
             );
         }
 
-        /// **A turn's outcome is read from the vendor, never asserted by the adapter.**
-        ///
-        /// *Measured 2026-08-28 on pi 0.84.3:* the configured model 404'd on every request, and
-        /// the observable result was a turn that opened, closed `completed` with no error, and
-        /// produced no assistant block — a session that looks like it worked and simply said
-        /// nothing. One hardcoded `{"stopReason": "end_turn"}` asserted a clean finish over
-        /// every failure, and the Rust port inherited it because a constant compiles and reads
-        /// as a default.
-        ///
-        /// This drives the failure through the whole session half: the peer emits the real
-        /// event sequence, and the close must carry the vendor's `error` reason, the provider's
-        /// own sentence, and `is_error`.
-        #[tokio::test]
-        async fn a_vendor_failure_closes_the_turn_as_a_failure_with_its_own_sentence() {
-            let sentence =
-                "404: Thank you for participating in the Stealth Ox Alpha testing period";
-            let events = [
-                r#"{"type":"agent_start"}"#,
-                r#"{"type":"message_start","message":{"role":"assistant"}}"#,
-                &format!(
-                    r#"{{"type":"message_end","message":{{"role":"assistant","stopReason":"error","errorMessage":"{sentence}"}}}}"#
-                ),
-                r#"{"type":"agent_settled"}"#,
-            ];
-            let (mut session, _log) = scripted("vendor-failure", &events).await;
-            let mut stream = session.events().expect("the stream is yielded once");
-
-            let mut closed = None;
-            while let Some(message) = next_message(&mut stream, 2000).await {
-                if let SessionMessage::Event(event) = message {
-                    if event.kind == EventKind::Turn && event.phase == Some(Phase::Completed) {
-                        closed = Some(event);
-                        break;
-                    }
-                }
-            }
-            let closed = closed.expect("the turn must close");
-            assert!(
-                closed.is_error,
-                "`error` is a failure; a hardcoded reason reports it as a clean finish"
-            );
-            assert_eq!(
-                closed
-                    .data
-                    .as_ref()
-                    .and_then(|data| data.get("stopReason"))
-                    .and_then(Value::as_str),
-                Some("error"),
-                "the reason must be the vendor's"
-            );
-            // Silence is the hardest outcome to debug, so the provider's sentence has to be
-            // somewhere a reader will find it.
-            assert!(
-                closed.text.contains("Stealth Ox Alpha"),
-                "the failure must be legible: {closed:?}"
-            );
-        }
-
         /// **A reply is not an event.**
         ///
         /// A `set_model` acknowledgement in the transcript is a row nothing emitted.
@@ -6103,22 +2795,19 @@ done
         async fn an_uncorrelated_reply_is_not_published_as_an_event() {
             let events = [
                 r#"{"type":"response","command":"abort","success":true}"#,
-                r#"{"type":"extension_error","error":"an extension threw"}"#,
+                r#"{"type":"agent_start"}"#,
             ];
             let (mut session, _log) = scripted("reply-not-event", &events).await;
-            let mut stream = session.events().unwrap();
+            let mut stream = session.messages().unwrap();
 
-            // The *first* thing published must be the extension error, not the response above
-            // it — which is only observable because the peer emits them in that order.
             let first = next_message(&mut stream, 2000)
                 .await
-                .expect("the extension error must be published");
-            let SessionMessage::Event(event) = first else {
-                panic!("expected an event, got {first:?}");
-            };
-            assert_eq!(event.kind, EventKind::Status);
-            assert!(event.is_error);
-            assert_eq!(event.text, "an extension threw");
+                .expect("control notice");
+            assert!(matches!(
+                first,
+                SessionMessage::Control(ControlNotice::Active { .. })
+            ));
+            assert!(next_message(&mut stream, 100).await.is_none());
         }
 
         /// **A malformed line is forwarded and does not end the stream.**
@@ -6128,12 +2817,9 @@ done
         /// so a half-written payload is a real state rather than a hypothetical.
         #[tokio::test]
         async fn a_malformed_line_is_reported_and_the_stream_continues() {
-            let events = [
-                "not json at all",
-                r#"{"type":"extension_error","error":"still here"}"#,
-            ];
+            let events = ["not json at all", r#"{"type":"agent_start"}"#];
             let (mut session, _log) = scripted("malformed", &events).await;
-            let mut stream = session.events().unwrap();
+            let mut stream = session.messages().unwrap();
 
             use futures::StreamExt;
             let first = tokio::time::timeout(Duration::from_millis(2000), stream.next())
@@ -6145,10 +2831,10 @@ done
             let second = next_message(&mut stream, 2000)
                 .await
                 .expect("the stream must continue past a bad line");
-            let SessionMessage::Event(event) = second else {
-                panic!("expected an event");
-            };
-            assert_eq!(event.text, "still here");
+            assert!(matches!(
+                second,
+                SessionMessage::Control(ControlNotice::Active { .. })
+            ));
         }
 
         /// **The stream is yielded once**, because two consumers of one vendor's stdio would
@@ -6156,9 +2842,9 @@ done
         #[tokio::test]
         async fn the_event_stream_is_yielded_exactly_once() {
             let (mut session, _log) = scripted("yield-once", &[]).await;
-            assert!(session.events().is_some());
+            assert!(session.messages().is_some());
             assert!(
-                session.events().is_none(),
+                session.messages().is_none(),
                 "a second subscription is a bug, not a second reader"
             );
         }
@@ -6182,7 +2868,7 @@ done
                 r#"{"type":"extension_ui_request","id":"uuid-3","method":"input","title":"Name it"}"#,
             ];
             let (mut session, log) = scripted("dialog-answers", &events).await;
-            let mut stream = session.events().unwrap();
+            let mut stream = session.messages().unwrap();
 
             // Every request must be published before answering, so the offered lists are
             // recorded.
@@ -6252,24 +2938,17 @@ done
         /// **An unknown dialog method is cancelled, never left parked.**
         ///
         /// It still blocks pi, so silence stalls the turn until the vendor's own timeout lapses
-        /// — which presents as a session that stopped for no reason. The dismissal is reported
-        /// as a `status` and **not** as an error: nothing failed, this build simply has not been
-        /// taught the method.
+        /// — which presents as a session that stopped for no reason. The original request and
+        /// dismissal stay in raw capture without creating a semantic transcript event.
         #[tokio::test]
-        async fn an_unknown_dialog_method_is_dismissed_and_narrated() {
+        async fn an_unknown_dialog_method_is_dismissed_without_a_semantic_event() {
             let events = [
                 r#"{"type":"extension_ui_request","id":"uuid-9","method":"holograph","title":"?"}"#,
             ];
             let (mut session, log) = scripted("unknown-dialog", &events).await;
-            let mut stream = session.events().unwrap();
+            let mut stream = session.messages().unwrap();
 
-            let message = next_message(&mut stream, 2000).await.expect("narrated");
-            let SessionMessage::Event(event) = message else {
-                panic!("an unknown method is narrated, not raised as a request: {message:?}");
-            };
-            assert_eq!(event.kind, EventKind::Status);
-            assert!(!event.is_error, "a gap in Sylph is not a session failure");
-            assert!(event.text.contains("holograph"), "{event:?}");
+            assert!(next_message(&mut stream, 100).await.is_none());
 
             let lines = sent(&log, 1).await;
             assert_eq!(
@@ -6294,7 +2973,7 @@ done
         #[tokio::test]
         async fn interrupt_returns_without_a_reply_and_publishes_nothing_itself() {
             let (mut session, log) = scripted("interrupt", &[]).await;
-            let mut stream = session.events().unwrap();
+            let mut stream = session.messages().unwrap();
 
             tokio::time::timeout(Duration::from_secs(2), session.interrupt())
                 .await
@@ -6367,7 +3046,7 @@ done
                 r#"{"type":"message_start","message":{"role":"assistant","model":"claude-opus-5","provider":"anthropic"}}"#,
             ];
             let (mut session, _log) = scripted("model-observed", &events).await;
-            let mut stream = session.events().unwrap();
+            let mut stream = session.messages().unwrap();
 
             let mut facets = None;
             for _ in 0..10 {
@@ -6398,46 +3077,6 @@ done
                 model.current_value.as_ref().and_then(Value::as_str),
                 Some("anthropic claude-opus-5"),
                 "and its value is read back from the vendor, not taken from the event"
-            );
-        }
-
-        /// **No event this adapter emits carries a `span`.**
-        ///
-        /// pi reports no delegation on the RPC wire in any form, so a `span` here would be
-        /// invented structure the timeline would then render as real
-        /// ([`translate::SPAN_HAS_NO_VENDOR_SOURCE`]). Asserted over a whole turn rather than
-        /// per event, because the failure would be one branch quietly synthesizing one.
-        #[tokio::test]
-        async fn nothing_this_adapter_publishes_carries_a_span() {
-            let events = [
-                r#"{"type":"agent_start"}"#,
-                r#"{"type":"message_start","message":{"role":"assistant"}}"#,
-                r#"{"type":"message_update","assistantMessageEvent":{"type":"text_start","contentIndex":0}}"#,
-                r#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"working"}}"#,
-                r#"{"type":"tool_execution_start","toolCallId":"call-1","toolName":"bash","args":{"cmd":"ls"}}"#,
-                r#"{"type":"tool_execution_end","toolCallId":"call-1","toolName":"bash","result":{"content":"a.txt"}}"#,
-                r#"{"type":"message_end","message":{"role":"assistant","stopReason":"stop"}}"#,
-                r#"{"type":"agent_settled"}"#,
-            ];
-            let (mut session, _log) = scripted("no-span", &events).await;
-            let mut stream = session.events().unwrap();
-
-            let mut seen = 0;
-            while let Some(message) = next_message(&mut stream, 2000).await {
-                if let SessionMessage::Event(event) = message {
-                    seen += 1;
-                    assert!(
-                        event.span.is_none(),
-                        "pi exposes no delegation; this span is invented: {event:?}"
-                    );
-                    if event.kind == EventKind::Turn && event.phase == Some(Phase::Completed) {
-                        break;
-                    }
-                }
-            }
-            assert!(
-                seen >= 6,
-                "the whole turn must have been observed, saw {seen}"
             );
         }
 
@@ -6527,7 +3166,7 @@ done
         #[tokio::test]
         async fn a_vendor_request_sharing_an_in_flight_id_reaches_the_stream_not_the_waiter() {
             let (mut session, _log) = scripted_colliding("id-collision").await;
-            let mut stream = session.events().expect("the stream is yielded once");
+            let mut stream = session.messages().expect("the stream is yielded once");
 
             // The caller's own reply, which a broken predicate hands to the dialog instead.
             let surface = session
@@ -6582,7 +3221,7 @@ done
                 flags: Default::default(),
                 permission_mode: None,
             };
-            let error = PiSession::open(spec)
+            let error = PiSession::open(spec, crate::process::test_capture())
                 .await
                 .err()
                 .expect("pi dictates its id; opening without one must fail");
@@ -6635,27 +3274,5 @@ done
             assert_eq!(plain, vec!["--mode".to_string()]);
             let _ = std::fs::remove_file(&path);
         }
-    }
-}
-
-#[cfg(test)]
-mod reading_tests {
-    use super::*;
-    #[test]
-    fn a_final_prose_role_waits_for_agent_settled() {
-        let mut correlation=Correlation::default();
-        for payload in [serde_json::json!({"type":"message_start","message":{"role":"assistant"}}),
-          serde_json::json!({"type":"message_update","assistantMessageEvent":{"type":"text_start","contentIndex":0}}),
-          serde_json::json!({"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":0,"content":"Recorded answer"}}),
-          serde_json::json!({"type":"message_end","message":{"role":"assistant","stopReason":"stop"}})] {
-            correlation.translate(&payload,1);
-        }
-        assert!(correlation.translate(&serde_json::json!({"type":"agent_end"}),2).events().is_empty());
-        let ending=serde_json::json!({"type":"agent_settled"});
-        println!("vendor settlement: {ending}");
-        let out=correlation.translate(&ending,3);
-        let event=out.events().into_iter().find(|e|e.kind==sylph_protocol::EventKind::Assistant).unwrap();
-        assert_eq!(event.text,"Recorded answer");
-        assert_eq!(event.data.as_ref().unwrap()["presentationRole"],"answer");
     }
 }

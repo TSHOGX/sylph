@@ -20,6 +20,8 @@ USAGE
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    #[cfg(feature = "e2e")]
+    eprintln!("Fixture adapters enabled: codex (no vendor processes)");
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
@@ -209,7 +211,7 @@ async fn run(_args: &[String]) -> Result<()> {
                 .unwrap_or_else(|| credential.environment_id.clone()),
         )?,
         connection_epoch: 0,
-        spool_cursors: Default::default(),
+
         agents,
         health: Some(EnvironmentHealth {
             connected: true,

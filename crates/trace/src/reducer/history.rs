@@ -287,6 +287,9 @@ pub(super) fn resolve_histories(active: &[&Claim], result: &mut Reduction) {
         .enumerate()
         .map(|(index, entry)| (entry, index))
         .collect();
+    for selection in selections.values() {
+        result.selection_memberships.insert(selection.selection_ref.clone(),membership(selection,&graph,&selections,active,&entry_order,&mut BTreeSet::new()));
+    }
     for agent in agents {
         let ReadingView {
             order: archive_order,
@@ -294,7 +297,7 @@ pub(super) fn resolve_histories(active: &[&Claim], result: &mut Reduction) {
             unresolved: unresolved_entries,
             basis: order_basis,
         } = read_views.remove(&agent).unwrap();
-        let mut latest: BTreeMap<(SourceRef, u64), SelectionObservationGroup<'_>> = BTreeMap::new();
+        let mut latest: BTreeMap<SourceRef, SelectionObservationGroup<'_>> = BTreeMap::new();
         for claim in active {
             if let Fact::SelectHistory {
                 agent: selected_agent,
@@ -306,9 +309,10 @@ pub(super) fn resolve_histories(active: &[&Claim], result: &mut Reduction) {
                     continue;
                 }
                 let prior = latest
-                    .entry((selected_at.source.clone(), selected_at.generation))
+                    .entry(selected_at.source.clone())
                     .or_insert((selected_at, vec![]));
-                match source_order(selected_at, prior.0) {
+                let order=if selected_at.generation!=prior.0.generation {Some(selected_at.generation.cmp(&prior.0.generation))}else{source_order(selected_at,prior.0)};
+                match order {
                     Some(std::cmp::Ordering::Greater) => {
                         *prior = (selected_at, vec![(selection, &claim.claim_ref)])
                     }

@@ -112,6 +112,9 @@ impl SemanticMapper for InventoryMapper {
         evidence.push(input.canonical_observation.clone());
         evidence.sort();
         evidence.dedup();
+        output.source_definitions.push(super::codex::history::RecordedSource {
+            definition:definition.clone(),observation:input.canonical_observation.clone(),
+        });
         output.source_owners.push(SourceOwnership {
             source: definition.source,
             generation: definition.generation,

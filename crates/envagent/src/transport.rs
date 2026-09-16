@@ -434,8 +434,7 @@ where
             environment_id,
             connection_epoch,
             server_epoch,
-            accepted_cursors,
-            max_batch_events,
+
             heartbeat_interval_ms,
         }) => {
             if protocol != sylph_protocol::ENV_PROTOCOL {
@@ -447,8 +446,7 @@ where
                 environment_id,
                 connection_epoch,
                 server_epoch,
-                accepted_cursors,
-                max_batch_events,
+
                 heartbeat_interval_ms,
             })
         }
@@ -553,8 +551,7 @@ mod tests {
                     environment_id: sylph_protocol::EnvironmentId::parse("env7fk2").unwrap(),
                     connection_epoch: 1,
                     server_epoch: 2,
-                    accepted_cursors: Default::default(),
-                    max_batch_events: 128,
+
                     heartbeat_interval_ms: 15_000,
                 })
                 .await

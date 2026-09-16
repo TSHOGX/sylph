@@ -44,61 +44,41 @@ A single-machine install is therefore **two processes**, `sylph-server` and
 
 ## `sylph.env.v1`
 
-One connection per envagent, initiated by the envagent, carrying framed messages in both
-directions with independent streams multiplexed over it. A stream is a session's event
-flow, a file transfer, or a control exchange.
+One connection per envagent, initiated by the envagent, carries framed messages in both
+directions. Capture upload, command results, operational session state, and file operations
+share the connection but have separate identities and receipt rules.
 
 The envagent dials out, so a laptop behind NAT, an SSH host on a private network, and a
-sandbox that auto-pauses are one case.
-
-Adapter framing is not the wire. Inside the envagent an adapter is a Rust call and events
-are values (`docs/session-protocol.md`); NDJSON survives only where bytes cross a machine
-boundary. The vocabulary is shared with the adapter contract without anything depending
-on a subprocess.
-
-Plaintext transport remains loopback-only. A non-loopback envagent listener requires the
-configured rustls certificate and key, and a remote envagent validates the server certificate
-against its configured CA before the wire handshake.
+sandbox that auto-pauses use the same runtime. Plaintext remains loopback-only. A remote
+listener requires configured rustls credentials, and the envagent validates the server
+certificate before the protocol handshake.
 
 ### Message classes
 
-| Class | Direction | Purpose |
+| Message | Direction | Purpose |
 | --- | --- | --- |
-| `hello` / `welcome` | env → server, server → env | version, agents present, machine facts, resume cursor |
-| `session.*` | server → env | open, send a turn, interrupt, steer, set config |
-| `event` | env → server | normalized events carrying producer sequence and source provenance |
-| `native_blob_chunk` | env → server | bounded, ack-gated chunk of a native sidecar snapshot |
-| `ack` | server → env | durable through a contiguous producer prefix |
-| `agents` | env → server | the agent inventory changed (§ Agent availability) |
-| `watch.*` | server → env | start or stop following a native session |
-| `adopt.*` | server → env | bring in what a native store already holds |
-| `files.*` | both | read, write, list, stat within a session's workdir |
-| `health` | both | probe and report |
+| `hello` / `welcome` | both | Version, installation, connection epoch, agent inventory and machine health |
+| `command` / `command_result` | both | Immutable request identity, retry policy and operational outcome |
+| `capture_upload` | env → server | Begin a declared capture, transfer bounded payload chunks, and commit it |
+| `capture_reply` | server → env | Upload ticket, chunk receipt, terminal retained/deletion receipt, or explicit rejection |
+| `session_control_state` | env → server | Current command lease, actual native turn identity, and active state |
+| `capability_snapshot` / `request` | env → server | Current capabilities and requests awaiting human input |
+| `heartbeat` / `agents` / `diagnostic` | env → server | Current connection and machine state |
 
-**The producer sequence and the canonical server sequence are distinct.** The envagent
-allocates a monotonic producer sequence before spooling; the server assigns the session's
-canonical sequence inside its durable ingest transaction. A dropped connection resumes
-from the first unacknowledged producer item rather than guessing from a remote clock.
+[The wire schema](sylph.env.v1.schema.json) describes these envelopes. Known envelopes reject
+unknown fields; unknown message types cannot enter capture admission. There is no semantic
+event batch, native-transfer projection path, or acknowledgement cursor in the handshake.
 
-Native adopt and watch events arrive without a server turn id, so ingest assigns one
-server-owned container per source. The vendor stream is unchanged; the container is what
-makes each event reachable through the per-turn history API. A terminal event closes it,
-and a finite source emits an ordered close diagnostic at EOF.
+The producer receipt identity and native source position are independent. The envagent
+commits exact bytes and a fixed ingestion authorization epoch before parsing or routing any
+vendor frame. The server admits those captures and maps trace semantics from retained
+evidence. [unified-trace-storage.md](unified-trace-storage.md#capture-contract) owns this
+contract, including pre-identity inventory capture and source generation changes.
 
-Native records that name a large sidecar are accompanied by `native_blob_chunk` messages.
-The envagent opens the validated vendor locator on its machine, snapshots it in bounded
-chunks, and spools those chunks before the record. The server retains the complete body in
-CAS before acknowledging the record; a locator is never opened by the server and is never
-used as a backup after projection.
-
-File commands carry the session's recorded `workdir` from the server. The envagent
-canonicalizes that root and confines every operation to it; a process-local hosted link
-or vendor-store scan is not a prerequisite. Restarting an envagent or narrowing its
-browse roots therefore cannot discard the file root of a session already recorded.
-
-A transfer handle is published only after its last sidecar producer sequence is
-acknowledged. Finite source EOF likewise waits through its close diagnostic. Both waits
-target a fixed producer prefix; newer events cannot extend their work indefinitely.
+File commands carry the session's recorded `workdir`. The envagent canonicalizes that root
+and confines operations to it; a process-local link or vendor-store scan is not required.
+A source locator remains acquisition metadata and is never opened by the server as a
+fallback for absent retained payloads.
 
 **History work cannot consume interactive command capacity.** Native enumeration,
 adoption, following, and re-reading share a bounded pool separate from file access and
@@ -110,8 +90,8 @@ cancels unfinished command tasks and releases its acknowledgement waiters; it ne
 replays an ambiguous at-most-once operation automatically.
 
 Stateless reads use fresh replayable request identities and connection-local waiters.
-File listings and reads, catalogue enumeration, capability and health probes, and native
-transfer chunk reads do not persist command receipts or response bodies. Their deadline
+File listings and reads, catalogue enumeration, capability and health probes do not
+persist command receipts or response bodies. Their deadline
 includes socket queueing, and late replies after timeout or disconnect are discarded.
 Mutating commands retain the durable ambiguity and outcome ledger, so this optimization
 cannot make a vendor input retryable after an unknown outcome.
@@ -160,33 +140,43 @@ a turn or assert consumption. A vendor refusal is typed separately from a transp
 only a negative vendor response or local validation proves rejection. An unanswered command
 remains unknown.
 
-The envagent spools adapter output without waiting for network acknowledgement, then drains
-the spool through a bounded delivery wake-up. The server reads command replies independently
-of ordered event ingestion. This breaks the wait cycle between a command holding the session
-sequencer and lifecycle events preceding its reply. A bounded ingress queue may disconnect
-on overflow; the durable producer prefix replays on reconnect. Batch boundaries never defer
-a turn's settlement past an event that opens its successor.
+The envagent commits raw adapter output before decoding it and drains the spool through
+bounded uploads. Operational replies and lifecycle state are independent of semantic
+projection. A native turn id cannot replace a command lease: they name different facts.
+A late completion for an earlier native turn cannot settle its successor.
 
 ## Spooling, and why the record survives a dropped connection
 
-There is a network between the adapter and the journal, so a drop would put a hole in the
-journal at the tail of a turn — the part AFK exists to deliver.
+The shared WAL-mode SQLite capture registry commits source identity, generation, lexical
+position, producer sequence, authorization epoch and payload bytes together. Partial JSONL
+tails remain durable without advancing the complete cursor. Snapshot reads are bounded
+before allocation and verified again before a revision is committed.
 
-An envagent therefore keeps a **local durable spool**:
+Only a terminal retained or authorized-deletion receipt releases queued bytes. Reconnect
+replays the same observations and authorization epochs; it does not reserialize vendor
+payloads, mint another occurrence, or infer acceptance from a command result. The server
+archive remains authoritative after admission.
 
-- Every event is appended to a local WAL-mode SQLite file **before** being sent.
-- Rows are deleted only when the server acks past them.
-- On reconnect, `hello` carries the last acked sequence per live session and the envagent
-  resumes from there.
-- The spool is bounded by size; on overflow the envagent stops the session's agent rather
-  than dropping events.
+At-most-once commands have a separate operational attempt ledger. An attempt is reserved
+before the vendor operation; a duplicate returns its retained outcome. An interrupted
+attempt without a durable result stays unknown and is not executed again. Fresh replayable
+read commands do not accumulate bodies in this ledger.
 
-The spool is a bounded, ack-gated buffer and is authoritative for nothing: two durable
-records would reintroduce the "which copy is the truth" question the authority model
-exists to answer. Its only contract is that nothing leaves it until the server has it.
+Vendor process lifecycle captures distinguish spawn, measured exit, and capture failure.
+The process transport retains stdin before attempting the write, waits for the write
+receipt, and captures stdout/stderr before routing JSON. A lost reply stays unknown;
+only an explicit vendor refusal or local validation can prove rejection. Oversized
+vendor lines stop at the configured frame bound and report an acquisition gap.
 
-Three ordinary events exercise it, and it is a correctness requirement for all three:
-closing a laptop lid, switching Wi-Fi, and a sandbox auto-pausing on idle.
+Native SQLite metadata is acquired through a consistent read transaction, including WAL
+commits. Unknown columns retain SQLite storage classes and exact binary/text bytes. A
+selected Codex rollout records its captured source generation, complete lexical record
+count, and pending tail size; directory order and modification time never select it.
+
+Referenced output files are watched after their parent capture is durable. Each observed
+sidecar revision produces a separate attachment observation with an exact parent JSON
+Pointer and retained payload reference. The original capture remains immutable. Missing,
+unreadable, and later available sidecars are distinct observations.
 
 ### Overflow is a fact in the record
 
@@ -352,7 +342,7 @@ Two Khora properties shape the design:
 
 **The data plane exists only while `running`.** Pause closes admission, drains, then
 quiesces the guest, so auto-pause on idle is a feature and a link dying is expected. This
-is what the spool and the ack cursor are for.
+is what the durable capture spool and terminal receipts are for.
 
 **`Connect` replays a bounded tail and is explicitly not durable**, so it is a reconnect
 convenience rather than a record.
@@ -363,20 +353,14 @@ the server's store.
 
 ## Watching and adopting a native session
 
-Both bring in a session Sylph did not start, and they differ only in whether it is still
-running. Both are explicit acts (`docs/architecture.md` § Data travels one way).
+Adoption captures the selected native session's current inventory. Following keeps
+acquiring that inventory as it changes. Both use the same source registry and pure trace
+mappers, preserve vendor fidelity, and are explicit actions regardless of who started the
+native session (`docs/architecture.md` § Data travels one way).
 
-**adopt** — the adapter parses what the native store already holds and emits it as
-normalized events. One pass, then done. Fidelity is whatever the vendor wrote.
-
-**watch** — the same parse, then follow the file as it grows. All three supported agents
-flush mid-turn, so a watcher sees a turn in progress rather than only its end;
-`docs/agents.md` § Capability matrix has the per-vendor granularity and the hazards a
-watcher must be built around.
-
-A watched session's **control** facet is whatever that vendor offers a second party, which
-is not universal; its **observe** facet works regardless. This is the facet pair from
-`docs/architecture.md`, and a watched session is not a third link state.
+A following link observes files independently of control. It cannot interrupt an external
+process merely because its native transcript is readable. A held vendor process has its
+own operational control capability and lease.
 
 ### A product surface bringing a session in asks to follow it
 
@@ -434,16 +418,12 @@ reproduce the flood one layer up.
 
 ## Native persistence faults
 
-A failed native write is a synchronization failure, not evidence the vendor agent
-stopped. The server journals a synchronization notice, Nacks the unaccepted producer
-prefix, and keeps the connection and turn alive. A successful retry records recovery;
-repeated failures of the same blocked pass do not produce one notice per record.
-Protocol authentication, epoch, producer, and payload-integrity violations still refuse
-the connection.
+A failed acquisition pass records an unreadable or missing source observation at the last
+committed cursor. It cannot claim that the vendor stopped. Complete lexical bytes remain
+queued until their terminal receipt, and an admission failure leaves the same observation
+available for replay. A successful later pass records the changed source state.
 
-The envagent stops delivery at the first Nack. It does not send later numbered records
-that can only create more gaps. One bounded replay task retries the retained prefix
-alongside command handling, including after restart. Producer sequence assignment,
-receipt validation, and accepted-through continuity remain unchanged. This is one
-producer channel; the design does not claim collision-free sharding or independent
-session delivery channels.
+Delivery stops at the first unaccepted capture so later records cannot conceal a producer
+gap. Bounded replay runs alongside control and file commands. Invalid authorization,
+connection epoch or payload integrity is refused before receipt; a retry cannot rewrite
+the retained observation or its fixed ingestion epoch.

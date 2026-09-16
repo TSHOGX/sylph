@@ -119,15 +119,9 @@ test("a directory with several sessions is one row that opens the newest", async
 
   // And it opens the newest session, which is what "resume" means.
   await tmpRow.getByRole("link").click();
-  // The id is **encoded** in the URL, because it is the identity triple and its `:`
-  // separators have to survive a path segment. Both producers agree on that — this row's
-  // href and `workspace-sidebar.tsx`'s — and `use-session-id-param` decodes it back on the
-  // way in. Asserting the raw spelling would be asserting a URL the app must not produce:
-  // read raw, the id reaches `segment()` and is double-encoded, which is what made every
-  // session unopenable.
-  await expect(page).toHaveURL(
-    new RegExp(`/sessions/${encodeURIComponent(newest).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`),
-  );
+  const metadata = await (await page.request.get(`/api/v1/sessions/${encodeURIComponent(newest)}`)).json();
+  await expect(page).toHaveURL(new RegExp(`/agents/${encodeURIComponent(metadata.session.traceAgentRef)}$`));
+
 });
 
 test("the start screen's create button runs the same path as its shortcut", async ({

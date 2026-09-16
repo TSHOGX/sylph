@@ -1,58 +1,14 @@
-//! Reading a vendor's native store: the parts every agent's parser needs.
-//!
-//! The `Parser` trait, candidate discovery, JSONL iteration, and fingerprinting live here;
-//! the per-vendor record shapes live in each agent's own module, because that is where the
-//! measurements are — [`crate::claude::native`], [`crate::codex::native`],
-//! [`crate::pi::native`].
-//!
-//! # Every record mapping is derived from a printed payload
-//!
-//! **A store-reading defect does not raise an error.** A missing key is indistinguishable
-//! from a field the vendor omitted, so it yields a plausible record rather than a failure —
-//! a parser can read an entire store without a single error while misreading most of it.
-//!
-//! So verify by asserting on *values a parser should have found* against a payload you have
-//! printed, never by observing that a run completed. `docs/agents.md` § Reading a vendor
-//! payload carries the measured instances and the rest of the rules.
+//! Shared native catalogue discovery and attachment byte inspection.
+//! Exact capture and cursors belong to the envagent registry; trace projection belongs
+//! to the pure vendor mappers in `crates/trace/src/mapping/`.
 
 use std::fs;
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
-
+pub mod inventory;
 pub mod timestamp;
 
 pub use timestamp::{epoch_millis_from_iso, epoch_millis_from_json};
-
-/// Identity of one source position and its exact revision, stable across reader restarts.
-/// The store checks byte equality on collision; a changed line must never reuse its old
-/// identity merely because a new reader starts its generation counter at zero.
-pub(crate) fn record_revision(position: u64, bytes: &[u8]) -> u64 {
-    let mut hash = 0xcbf29ce484222325u64;
-    for byte in position.to_le_bytes().iter().chain(bytes) {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
-}
-
-/// Bind adopted input to the retained envelope that supplied it. Reprojection uses the
-/// same cursor, so rereading a prompt never manufactures a second turn container.
-pub(crate) fn input_cursors(
-    messages: &mut [sylph_protocol::SessionMessage],
-    record: &sylph_protocol::NativeRecord,
-) {
-    for message in messages {
-        if let sylph_protocol::SessionMessage::TurnInput(input) = message {
-            input.source_cursor = Some(sylph_protocol::SourceCursor {
-                source: record.source.clone(),
-                generation: record.version,
-                offset: 0,
-            });
-        }
-    }
-}
 
 /// Where a vendor keeps its sessions on this machine.
 ///
@@ -197,61 +153,6 @@ pub fn inventory_revision(root: &Path) -> Option<String> {
     Some(format!("{:016x}", digest.finish()))
 }
 
-/// Call `visit` with every JSON object one line of `path` holds.
-///
-/// # A malformed line is skipped, and the pass continues
-///
-/// These are files a vendor is *currently writing*. A half-written final line is the
-/// normal state of a live session, not corruption, so failing the pass on it would make
-/// every running session unreadable. `pi` is the sharp case: `_rewriteFile()`
-/// truncate-rewrites with mode `"w"` and no lock, so a reader can observe an empty or
-/// half-written file and the correct response is to keep reading.
-///
-/// The cost of that tolerance is that a *systematically* malformed store also reads as
-/// empty rather than as broken, so a caller that gets zero records from a non-empty file
-/// should say so — see [`JsonLines::skipped`].
-pub fn for_each_json_line(
-    path: &Path,
-    mut visit: impl FnMut(serde_json::Value) -> Result<()>,
-) -> Result<JsonLines> {
-    let file = fs::File::open(path)
-        .with_context(|| format!("opening native session file {}", path.display()))?;
-    let mut stats = JsonLines::default();
-    // Native transcripts hold whole tool outputs, so a single line can be megabytes;
-    // `BufReader::lines` allocates per line rather than holding the file.
-    for line in BufReader::new(file).lines() {
-        let Ok(line) = line else {
-            // An I/O error mid-file, not a parse failure: the file is being rewritten
-            // under us. Same treatment for the same reason.
-            stats.skipped += 1;
-            continue;
-        };
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        match serde_json::from_str::<serde_json::Value>(trimmed) {
-            Ok(value) => {
-                stats.parsed += 1;
-                visit(value)?;
-            }
-            Err(_) => stats.skipped += 1,
-        }
-    }
-    Ok(stats)
-}
-
-/// What one pass over a JSONL file saw.
-///
-/// Returned rather than logged so a caller can distinguish "this session is empty" from
-/// "nothing in this file parsed" — which look identical downstream and mean opposite
-/// things.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct JsonLines {
-    pub parsed: usize,
-    pub skipped: usize,
-}
-
 /// A file's image type from its magic bytes, or `None` when it is not one this list knows.
 ///
 /// **Content, not extension.** An attachment travels to a vendor inlined — `pi` wants
@@ -353,55 +254,6 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
-    }
-
-    /// A half-written final line is the normal state of a live session, so it must not
-    /// cost the records before it. This is the `pi` truncate-rewrite hazard in the
-    /// smallest form that can be asserted.
-    #[test]
-    fn a_truncated_final_line_does_not_lose_the_records_before_it() {
-        let dir = temp_dir("truncated");
-        let path = dir.join("session.jsonl");
-        fs::write(&path, "{\"a\":1}\n{\"a\":2}\n{\"a\":3,\"b\":\n").unwrap();
-
-        let mut seen = Vec::new();
-        let stats = for_each_json_line(&path, |value| {
-            seen.push(value["a"].as_i64().unwrap());
-            Ok(())
-        })
-        .unwrap();
-
-        assert_eq!(seen, vec![1, 2]);
-        assert_eq!(stats.parsed, 2);
-        assert_eq!(stats.skipped, 1, "the partial line is counted, not silent");
-    }
-
-    /// An empty file and an unparseable one are different facts, and the caller has to
-    /// be able to tell them apart — they look identical once the records are gone.
-    #[test]
-    fn an_unparseable_file_is_distinguishable_from_an_empty_one() {
-        let dir = temp_dir("unparseable");
-        let empty = dir.join("empty.jsonl");
-        fs::write(&empty, "").unwrap();
-        let garbage = dir.join("garbage.jsonl");
-        fs::write(&garbage, "not json\nalso not json\n").unwrap();
-
-        let empty_stats = for_each_json_line(&empty, |_| Ok(())).unwrap();
-        assert_eq!((empty_stats.parsed, empty_stats.skipped), (0, 0));
-
-        let garbage_stats = for_each_json_line(&garbage, |_| Ok(())).unwrap();
-        assert_eq!((garbage_stats.parsed, garbage_stats.skipped), (0, 2));
-    }
-
-    /// Blank lines are separators, not records: a store that pads with them must not
-    /// report skipped lines it did not have.
-    #[test]
-    fn blank_lines_are_not_counted_as_skipped() {
-        let dir = temp_dir("blank");
-        let path = dir.join("padded.jsonl");
-        fs::write(&path, "\n{\"a\":1}\n\n\n{\"a\":2}\n\n").unwrap();
-        let stats = for_each_json_line(&path, |_| Ok(())).unwrap();
-        assert_eq!((stats.parsed, stats.skipped), (2, 0));
     }
 
     #[test]

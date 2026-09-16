@@ -48,11 +48,20 @@ fn normalize(path: &str) -> String {
 
 /// Every `<METHOD> <path>` pair the router registers.
 fn implemented() -> BTreeSet<String> {
-    let source = include_str!("../src/lib.rs");
+    [include_str!("../src/lib.rs"), include_str!("../src/api/trace.rs")]
+        .into_iter()
+        .flat_map(implemented_routes)
+        .collect()
+}
+
+fn implemented_routes(source: &str) -> BTreeSet<String> {
     let router = source
         .split_once("pub fn router")
         .expect("lib.rs declares `pub fn router`")
         .1;
+    // Each router is a top-level function. Its final route must not absorb
+    // methods such as Value::get from handler bodies later in the same file.
+    let router = router.split_once("\n}").expect("router function ends").0;
 
     let mut pairs = BTreeSet::new();
     // `.route("<path>", <handler chain>)` — the chain runs to the next `.route(` or to
@@ -80,6 +89,16 @@ fn implemented() -> BTreeSet<String> {
         }
     }
     pairs
+}
+
+#[test]
+fn route_coverage_does_not_read_http_verbs_from_later_handler_bodies() {
+    let source = r#"pub fn router() -> Router {
+    Router::new().route("/api/v1/trace/views/{token}", axum::routing::delete(release))
+}
+fn handler() { record.get("value"); }
+"#;
+    assert_eq!(implemented_routes(source), BTreeSet::from(["DELETE /api/v1/trace/views/{}".into()]));
 }
 
 /// Every `<METHOD> <path>` pair the schema declares.
@@ -257,71 +276,32 @@ fn every_ref_resolves_and_every_schema_is_referenced() {
     );
 }
 
-/// The schema's turn statuses are exactly the ones the journal can hold.
-///
-/// Nothing checked this, and it had drifted in both directions at once: the schema listed
-/// `stopped`, which no code has ever written, and omitted `starting`, `stopping`,
-/// `cancelled`, and `interrupted`, all four of which a client can be handed. A generated
-/// client would have had a variant for a value it will never see and no variant for four it
-/// will — the second half failing at the moment a turn is interrupted, which is when a user
-/// is already looking at something that went wrong.
-///
-/// Read from the migration rather than from a list here, for the reason
-/// `every_route_the_router_registers_is_documented` parses `lib.rs`: a third copy of the
-/// vocabulary would agree with a wrong value as readily as the schema did.
+/// Published command states are exactly the closed operational database vocabulary.
 #[test]
-fn every_turn_status_the_schema_declares_is_one_the_journal_allows() {
-    let migration = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("migrations/journal/001_initial_schema.sql"),
-    )
-    .expect("the initial migration is part of the repo");
-
-    // The `turns` table's own CHECK, not the first status constraint in the file — the
-    // sessions table declares one too, and matching that would have compared the schema
-    // against `idle`/`running` while reporting itself green.
-    let turns = migration
-        .split_once("CREATE TABLE turns")
-        .expect("the turns table")
-        .1;
-    let check = turns
-        .split_once("status TEXT NOT NULL CHECK (status IN (")
-        .expect("the status CHECK")
+fn every_command_state_is_declared_by_the_control_schema() {
+    let sql = include_str!("../src/db/control/schema.sql");
+    let states = sql
+        .split_once("state TEXT NOT NULL CHECK (state IN")
+        .unwrap()
+        .1
+        .split_once("(")
+        .unwrap()
         .1
         .split_once("))")
-        .expect("the CHECK closes")
+        .unwrap()
         .0;
-    let allowed: std::collections::BTreeSet<String> = check
+    let allowed: BTreeSet<String> = states
         .split(',')
         .map(|value| value.trim().trim_matches('\'').to_string())
-        .filter(|value| !value.is_empty())
         .collect();
-    assert!(
-        allowed.len() > 4,
-        "parsed {} statuses out of the migration, so the parse is wrong rather than the \
-         schema: {allowed:?}",
-        allowed.len()
-    );
-
-    let raw = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/api-v1.openapi.json"),
-    )
-    .expect("the OpenAPI schema is part of the repo");
     let schema: serde_json::Value =
-        serde_json::from_str(&raw).expect("the OpenAPI schema is valid JSON");
-    let documented: std::collections::BTreeSet<String> = schema["components"]["schemas"]["Turn"]
-        ["properties"]["status"]["enum"]
+        serde_json::from_str(include_str!("../../../docs/api-v1.openapi.json")).unwrap();
+    let published: BTreeSet<String> = schema["components"]["schemas"]["OperationalCommand"]
+        ["properties"]["state"]["enum"]
         .as_array()
-        .expect("Turn.status declares an enum")
+        .unwrap()
         .iter()
-        .map(|value| value.as_str().expect("a status is a string").to_string())
+        .map(|value| value.as_str().unwrap().to_string())
         .collect();
-
-    assert_eq!(
-        documented, allowed,
-        "docs/api-v1.openapi.json and migrations/journal/001_initial_schema.sql disagree about what \
-         a turn's status can be. Values only the schema declares describe a state nothing \
-         writes; values only the migration allows are ones a generated client cannot \
-         represent."
-    );
+    assert_eq!(published, allowed);
 }

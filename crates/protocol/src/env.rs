@@ -13,15 +13,13 @@ pub const QUICK_START_SENTINEL: &str = "__sylph_quick_start__";
 
 use crate::{
     AgentInfo, Capability, CapabilityFacets, CommandOutcome, CommandRequest, CommandRequestId,
-    EnvironmentId, IdempotencyPolicy, LinkFacets, NativeId, NativeRecord, ProducerId, ProducerSeq,
-    Request, SequencedEvent, ServerSeq, SessionCapabilities, SessionEdge, SessionId, SourceCursor,
-    TurnInputFact,
+    EnvironmentId, IdempotencyPolicy, LinkFacets, NativeId, ProducerId, Request,
+    SessionCapabilities, SessionId,
 };
 
 pub const PROTOCOL: &str = "sylph.env.v1";
 pub const VERSION_MAJOR: u16 = 1;
 pub const VERSION_MINOR: u16 = 0;
-pub const DEFAULT_MAX_BATCH_EVENTS: usize = 128;
 
 /// Hard upper bound for one framed message, on both ends of the wire.
 ///
@@ -40,29 +38,6 @@ pub const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 /// wants a prefix asks for one with `limit`, and a caller that asked for the whole file
 /// must be told it did not get it.
 pub const MAX_FILE_READ_BYTES: u64 = 32 * 1024 * 1024;
-
-/// Native sidecars use bounded producer frames, separate from timeline events.
-pub const NATIVE_BLOB_CHUNK_BYTES: usize = 1024 * 1024;
-
-/// The largest sidecar the envagent may snapshot for raw retention.
-pub const MAX_NATIVE_BLOB_BYTES: u64 = 256 * 1024 * 1024;
-
-/// One ordered piece of a native sidecar, spooled before its referencing record.
-///
-/// The server retains chunks durably before acknowledging them, then commits the
-/// complete body to CAS before acknowledging the native record. `data` is base64,
-/// keeping the wire expansion bounded without putting bytes in timeline events.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NativeBlobChunk {
-    pub source: String,
-    pub version: u64,
-    pub name: String,
-    pub size: u64,
-    pub offset: u64,
-    pub data: String,
-    pub final_chunk: bool,
-}
 
 /// A protocol version offered by one side of a connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -149,10 +124,6 @@ pub struct Hello {
     pub installation_id: String,
     pub producer_id: ProducerId,
     pub connection_epoch: u64,
-    /// Last contiguous prefix the envagent knows the server accepted, by
-    /// producer.  The map is keyed by the producer id's wire spelling.
-    #[serde(default)]
-    pub spool_cursors: BTreeMap<String, ProducerSeq>,
     /// Every agent this envagent knows, available or not
     /// (`docs/environments.md` § Agent availability).
     #[serde(default)]
@@ -175,7 +146,6 @@ impl Hello {
             installation_id: installation_id.into(),
             producer_id,
             connection_epoch,
-            spool_cursors: BTreeMap::new(),
             agents: Vec::new(),
             health: None,
         }
@@ -191,11 +161,6 @@ pub struct Welcome {
     pub environment_id: EnvironmentId,
     pub connection_epoch: u64,
     pub server_epoch: u64,
-    /// Server-side contiguous producer prefixes.  A reconnect starts at
-    /// each value plus one.
-    #[serde(default)]
-    pub accepted_cursors: BTreeMap<String, ProducerSeq>,
-    pub max_batch_events: usize,
     pub heartbeat_interval_ms: u64,
 }
 
@@ -211,8 +176,6 @@ impl Welcome {
             environment_id,
             connection_epoch,
             server_epoch,
-            accepted_cursors: BTreeMap::new(),
-            max_batch_events: DEFAULT_MAX_BATCH_EVENTS,
             heartbeat_interval_ms: 15_000,
         }
     }
@@ -223,12 +186,16 @@ impl Welcome {
 #[serde(
     tag = "kind",
     rename_all = "snake_case",
-    rename_all_fields = "camelCase"
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
 )]
+// Values are bounded by the wire frame and queue limits; retain one owned serde envelope.
+#[allow(clippy::large_enum_variant)]
 pub enum EnvironmentCommand {
     /// Start a disposable prepared link on the envagent.  No canonical session
     /// row exists until a later `Run` promotes it with a first turn.
     Prepare {
+        capture_authorization: crate::CaptureAuthorization,
         draft_id: String,
         agent: String,
         workdir: String,
@@ -242,6 +209,7 @@ pub enum EnvironmentCommand {
         permission_mode: Option<String>,
     },
     Run {
+        capture_authorization: crate::CaptureAuthorization,
         session_id: Option<SessionId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         draft_id: Option<String>,
@@ -300,6 +268,7 @@ pub enum EnvironmentCommand {
         resolution: serde_json::Value,
     },
     Watch {
+        capture_authorization: crate::CaptureAuthorization,
         session_id: SessionId,
         agent: String,
         native_id: NativeId,
@@ -307,38 +276,22 @@ pub enum EnvironmentCommand {
         turn_id: Option<String>,
     },
     Adopt {
+        capture_authorization: crate::CaptureAuthorization,
         session_id: SessionId,
         agent: String,
         native_id: NativeId,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         turn_id: Option<String>,
     },
-    /// Parse the vendor's store again for a session the server already holds.
-    ///
-    /// Distinct from [`Self::Adopt`] rather than a flag on it, because `Adopt`
-    /// is refused outright once a row exists — which is exactly this case
-    /// (`docs/environments.md` § Re-reading a session Sylph already holds).
-    ///
-    /// The envagent hosts no new source for this: a re-read is a bare parse
-    /// whose messages are answered inline, so it neither registers a native
-    /// source nor spawns a pump. That keeps it from disturbing a live watcher
-    /// on the same session, whose cursor is mid-file while this one starts at
-    /// the beginning.
+    /// Reacquire native lexical sources through the shared durable capture registry.
+    /// The server reprojects from retained evidence without an adapter-side semantic API.
     Reread {
+        capture_authorization: crate::CaptureAuthorization,
         session_id: SessionId,
         agent: String,
         native_id: NativeId,
     },
-    /// Re-project records already retained by the server; no vendor filesystem read occurs.
-    Reproject {
-        session_id: SessionId,
-        agent: String,
-        transfer_id: String,
-    },
-    NativeTransfer {
-        session_id: SessionId,
-        operation: crate::NativeTransferOperation,
-    },
+    /// Contained filesystem access under the server-recorded workdir.
     Files {
         session_id: SessionId,
         /// The server's recorded root, independent of any process-local hosted link.
@@ -369,12 +322,7 @@ pub enum EnvironmentCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         workdir: Option<String>,
     },
-    /// Release a run/watch/adopt source after the server has created its
-    /// canonical session row.  The explicit barrier closes the race between
-    /// a command result and the first producer batch.
-    Activate {
-        session_id: SessionId,
-    },
+    /// Close a held process or stop following its native sources.
     Close {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session_id: Option<SessionId>,
@@ -619,102 +567,6 @@ pub struct CommandResultMessage {
     pub idempotency: Option<IdempotencyPolicy>,
 }
 
-/// A bounded group of normalized events from one producer.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct EventBatch {
-    pub environment_id: EnvironmentId,
-    pub producer_id: ProducerId,
-    pub connection_epoch: u64,
-    pub events: Vec<SequencedEvent>,
-}
-
-impl EventBatch {
-    pub fn new(
-        environment_id: EnvironmentId,
-        producer_id: ProducerId,
-        connection_epoch: u64,
-        events: Vec<SequencedEvent>,
-    ) -> Result<Self, WireError> {
-        let batch = Self {
-            environment_id,
-            producer_id,
-            connection_epoch,
-            events,
-        };
-        batch.validate()?;
-        Ok(batch)
-    }
-
-    pub fn validate(&self) -> Result<(), WireError> {
-        if self.events.is_empty() {
-            return Err(WireError::EmptyBatch);
-        }
-        if self.events.len() > DEFAULT_MAX_BATCH_EVENTS {
-            return Err(WireError::BatchTooLarge(DEFAULT_MAX_BATCH_EVENTS));
-        }
-        let mut previous: Option<ProducerSeq> = None;
-        for event in &self.events {
-            if event.producer_seq == ProducerSeq::ZERO {
-                return Err(WireError::NonContiguousBatch {
-                    expected: 1,
-                    actual: 0,
-                });
-            }
-            if event.producer_id != self.producer_id {
-                return Err(WireError::ProducerMismatch);
-            }
-            if event.session_id.environment != self.environment_id {
-                return Err(WireError::EnvironmentMismatch);
-            }
-            if let Some(previous) = previous {
-                let expected = previous.get().saturating_add(1);
-                if event.producer_seq.get() != expected {
-                    return Err(WireError::NonContiguousBatch {
-                        expected,
-                        actual: event.producer_seq.get(),
-                    });
-                }
-            }
-            previous = Some(event.producer_seq);
-        }
-        Ok(())
-    }
-
-    pub fn first_seq(&self) -> ProducerSeq {
-        self.events
-            .first()
-            .map(|event| event.producer_seq)
-            .unwrap_or(ProducerSeq::ZERO)
-    }
-
-    pub fn last_seq(&self) -> ProducerSeq {
-        self.events
-            .last()
-            .map(|event| event.producer_seq)
-            .unwrap_or(ProducerSeq::ZERO)
-    }
-}
-
-/// Acknowledgement of a contiguous producer prefix.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Ack {
-    pub producer_id: ProducerId,
-    pub accepted_through: ProducerSeq,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub server_seq_through: Option<ServerSeq>,
-}
-
-/// Refusal of a batch whose prefix cannot be accepted safely.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Nack {
-    pub producer_id: ProducerId,
-    pub expected_next: ProducerSeq,
-    pub reason: String,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Heartbeat {
@@ -733,8 +585,6 @@ pub struct CapabilitySnapshot {
     pub link: Option<LinkFacets>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<SessionCapabilities>,
-    pub producer_id: ProducerId,
-    pub producer_seq: ProducerSeq,
     pub connection_epoch: u64,
 }
 
@@ -757,19 +607,6 @@ pub struct CapabilityResult {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SourceState {
-    pub session_id: SessionId,
-    pub cursor: SourceCursor,
-    pub state: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
-    pub producer_id: ProducerId,
-    pub producer_seq: ProducerSeq,
-    pub connection_epoch: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct EnvironmentHealth {
     pub connected: bool,
     #[serde(default)]
@@ -788,10 +625,6 @@ pub struct Diagnostic {
     pub session_id: Option<SessionId>,
     #[serde(default)]
     pub details: BTreeMap<String, serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub producer_id: Option<ProducerId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub producer_seq: Option<ProducerSeq>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -875,9 +708,29 @@ pub enum FileOperation {
 #[serde(
     tag = "type",
     rename_all = "snake_case",
-    rename_all_fields = "camelCase"
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
 )]
 pub enum WireMessage {
+    SessionControlState {
+        session_id: SessionId,
+        lease: Option<String>,
+        native_turn_id: Option<String>,
+        active: bool,
+        connection_epoch: u64,
+    },
+
+    CaptureUpload {
+        request_id: String,
+        operation: crate::CaptureUpload,
+        connection_epoch: u64,
+    },
+    CaptureReply {
+        request_id: String,
+        outcome: crate::CaptureReply,
+        connection_epoch: u64,
+    },
+
     Hello {
         protocol: String,
         versions: Vec<ProtocolVersion>,
@@ -886,8 +739,6 @@ pub enum WireMessage {
         installation_id: String,
         producer_id: ProducerId,
         connection_epoch: u64,
-        #[serde(default)]
-        spool_cursors: BTreeMap<String, ProducerSeq>,
         #[serde(default)]
         agents: Vec<AgentInventory>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -899,9 +750,6 @@ pub enum WireMessage {
         environment_id: EnvironmentId,
         connection_epoch: u64,
         server_epoch: u64,
-        #[serde(default)]
-        accepted_cursors: BTreeMap<String, ProducerSeq>,
-        max_batch_events: usize,
         heartbeat_interval_ms: u64,
     },
     Command {
@@ -916,23 +764,7 @@ pub enum WireMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         idempotency: Option<IdempotencyPolicy>,
     },
-    EventBatch {
-        environment_id: EnvironmentId,
-        producer_id: ProducerId,
-        connection_epoch: u64,
-        events: Vec<SequencedEvent>,
-    },
-    Ack {
-        producer_id: ProducerId,
-        accepted_through: ProducerSeq,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        server_seq_through: Option<ServerSeq>,
-    },
-    Nack {
-        producer_id: ProducerId,
-        expected_next: ProducerSeq,
-        reason: String,
-    },
+
     Heartbeat {
         connection_epoch: u64,
         sent_at_ms: i64,
@@ -956,56 +788,15 @@ pub enum WireMessage {
         link: Option<LinkFacets>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         capabilities: Option<SessionCapabilities>,
-        producer_id: ProducerId,
-        producer_seq: ProducerSeq,
         connection_epoch: u64,
     },
-    SourceState {
-        session_id: SessionId,
-        cursor: SourceCursor,
-        state: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        detail: Option<String>,
-        producer_id: ProducerId,
-        producer_seq: ProducerSeq,
-        connection_epoch: u64,
-    },
-    TurnInput {
-        session_id: SessionId,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        turn_id: Option<String>,
-        turn: TurnInputFact,
-        producer_id: ProducerId,
-        producer_seq: ProducerSeq,
-        connection_epoch: u64,
-    },
-    Edge {
-        edge: SessionEdge,
-        producer_id: ProducerId,
-        producer_seq: ProducerSeq,
-        connection_epoch: u64,
-    },
+
     Request {
         session_id: SessionId,
         request: Request,
-        producer_id: ProducerId,
-        producer_seq: ProducerSeq,
         connection_epoch: u64,
     },
-    NativeRecord {
-        session_id: SessionId,
-        record: NativeRecord,
-        producer_id: ProducerId,
-        producer_seq: ProducerSeq,
-        connection_epoch: u64,
-    },
-    NativeBlobChunk {
-        session_id: SessionId,
-        chunk: NativeBlobChunk,
-        producer_id: ProducerId,
-        producer_seq: ProducerSeq,
-        connection_epoch: u64,
-    },
+
     Diagnostic {
         level: DiagnosticLevel,
         code: String,
@@ -1014,8 +805,6 @@ pub enum WireMessage {
         session_id: Option<SessionId>,
         #[serde(default)]
         details: BTreeMap<String, serde_json::Value>,
-        producer_id: ProducerId,
-        producer_seq: ProducerSeq,
         connection_epoch: u64,
     },
 }
@@ -1023,22 +812,17 @@ pub enum WireMessage {
 impl WireMessage {
     pub fn kind(&self) -> &'static str {
         match self {
+            Self::SessionControlState { .. } => "session_control_state",
+            Self::CaptureUpload { .. } => "capture_upload",
+            Self::CaptureReply { .. } => "capture_reply",
             Self::Hello { .. } => "hello",
             Self::Welcome { .. } => "welcome",
             Self::Command { .. } => "command",
             Self::CommandResult { .. } => "command_result",
-            Self::EventBatch { .. } => "event_batch",
-            Self::Ack { .. } => "ack",
-            Self::Nack { .. } => "nack",
             Self::Heartbeat { .. } => "heartbeat",
             Self::Agents { .. } => "agents",
             Self::CapabilitySnapshot { .. } => "capability_snapshot",
-            Self::SourceState { .. } => "source_state",
-            Self::TurnInput { .. } => "turn_input",
-            Self::Edge { .. } => "edge",
             Self::Request { .. } => "request",
-            Self::NativeRecord { .. } => "native_record",
-            Self::NativeBlobChunk { .. } => "native_blob_chunk",
             Self::Diagnostic { .. } => "diagnostic",
         }
     }
@@ -1051,18 +835,8 @@ impl WireMessage {
             installation_id: hello.installation_id,
             producer_id: hello.producer_id,
             connection_epoch: hello.connection_epoch,
-            spool_cursors: hello.spool_cursors,
             agents: hello.agents,
             health: hello.health,
-        }
-    }
-
-    pub fn from_event_batch(batch: EventBatch) -> Self {
-        Self::EventBatch {
-            environment_id: batch.environment_id,
-            producer_id: batch.producer_id,
-            connection_epoch: batch.connection_epoch,
-            events: batch.events,
         }
     }
 }
@@ -1094,16 +868,6 @@ pub enum WireError {
     EmptyType,
     #[error("known wire message '{kind}' is malformed: {message}")]
     MalformedKnown { kind: String, message: String },
-    #[error("event batch is empty")]
-    EmptyBatch,
-    #[error("event batch exceeds the maximum of {0} events")]
-    BatchTooLarge(usize),
-    #[error("event batch carries a different producer id")]
-    ProducerMismatch,
-    #[error("event batch contains a session from a different environment")]
-    EnvironmentMismatch,
-    #[error("event batch is not contiguous: expected {expected}, got {actual}")]
-    NonContiguousBatch { expected: u64, actual: u64 },
     #[error("no compatible protocol version was offered")]
     NoCompatibleVersion,
 }
@@ -1119,21 +883,6 @@ pub fn decode_message(bytes: &[u8]) -> Result<DecodedMessage, WireError> {
         return Err(WireError::EmptyType);
     }
     match serde_json::from_value::<WireMessage>(value.clone()) {
-        Ok(WireMessage::EventBatch {
-            environment_id,
-            producer_id,
-            connection_epoch,
-            events,
-        }) => {
-            let batch = EventBatch {
-                environment_id,
-                producer_id,
-                connection_epoch,
-                events,
-            };
-            batch.validate()?;
-            Ok(DecodedMessage::Known(WireMessage::from_event_batch(batch)))
-        }
         Ok(message) => Ok(DecodedMessage::Known(message)),
         Err(error) if known_kind(kind) => Err(WireError::MalformedKnown {
             kind: kind.to_string(),
@@ -1149,21 +898,17 @@ pub fn decode_message(bytes: &[u8]) -> Result<DecodedMessage, WireError> {
 fn known_kind(kind: &str) -> bool {
     matches!(
         kind,
-        "hello"
+        "capture_upload"
+            | "capture_reply"
+            | "session_control_state"
+            | "hello"
             | "welcome"
             | "command"
             | "command_result"
-            | "event_batch"
-            | "ack"
-            | "nack"
             | "heartbeat"
             | "agents"
             | "capability_snapshot"
-            | "source_state"
-            | "turn_input"
-            | "edge"
             | "request"
-            | "native_record"
             | "diagnostic"
     )
 }
@@ -1190,26 +935,6 @@ pub fn negotiate(offers: &[ProtocolVersion]) -> Result<ProtocolVersion, WireErro
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AgentName, Event, EventKind, Phase};
-
-    fn session(native: &str) -> SessionId {
-        SessionId::new(
-            EnvironmentId::parse("env7fk2").unwrap(),
-            AgentName::parse("claude").unwrap(),
-            NativeId::new(native),
-        )
-    }
-
-    fn event(seq: u64) -> SequencedEvent {
-        SequencedEvent::pending(
-            ProducerId::parse("p1").unwrap(),
-            ProducerSeq::new(seq),
-            session("n1"),
-            Event::new(EventKind::Assistant, Some(Phase::Completed), seq as i64),
-            None,
-        )
-    }
-
     #[test]
     fn hello_and_welcome_round_trip_with_explicit_epochs() {
         let hello = Hello::current(
@@ -1242,27 +967,6 @@ mod tests {
     }
 
     #[test]
-    fn event_batches_require_one_contiguous_producer_prefix() {
-        let batch = EventBatch::new(
-            EnvironmentId::parse("env7fk2").unwrap(),
-            ProducerId::parse("p1").unwrap(),
-            1,
-            vec![event(1), event(2)],
-        )
-        .unwrap();
-        assert_eq!(batch.first_seq(), ProducerSeq::new(1));
-        assert_eq!(batch.last_seq(), ProducerSeq::new(2));
-        assert!(EventBatch::new(
-            EnvironmentId::parse("env7fk2").unwrap(),
-            ProducerId::parse("p1").unwrap(),
-            1,
-            vec![event(1), event(3)],
-        )
-        .is_err());
-        assert_eq!(WireMessage::from_event_batch(batch).kind(), "event_batch");
-    }
-
-    #[test]
     fn unknown_message_types_are_forward_compatible() {
         let decoded = decode_message(br#"{"type":"future","value":{"x":1}}"#).unwrap();
         assert!(matches!(
@@ -1272,10 +976,20 @@ mod tests {
     }
 
     #[test]
+    fn known_wire_messages_reject_unrecognized_fields() {
+        assert!(matches!(
+            decode_message(
+                br#"{"type":"heartbeat","connectionEpoch":1,"sentAtMs":2,"producerSeq":3}"#
+            ),
+            Err(WireError::MalformedKnown { .. })
+        ));
+    }
+
+    #[test]
     fn malformed_known_payload_is_rejected_before_it_can_create_a_gap() {
-        let decoded = decode_message(br#"{"type":"event_batch","events":"not-an-array"}"#);
+        let decoded = decode_message(br#"{"type":"capture_upload","operation":"not-an-object"}"#);
         assert!(
-            matches!(decoded, Err(WireError::MalformedKnown { kind, .. }) if kind == "event_batch")
+            matches!(decoded, Err(WireError::MalformedKnown { kind, .. }) if kind == "capture_upload")
         );
     }
 
@@ -1294,21 +1008,6 @@ mod tests {
     }
 
     #[test]
-    fn a_turn_input_is_not_an_event_kind() {
-        let message = WireMessage::TurnInput {
-            session_id: session("n1"),
-            turn_id: Some("turn-1".into()),
-            turn: TurnInputFact::new("fix it"),
-            producer_id: ProducerId::parse("p1").unwrap(),
-            producer_seq: ProducerSeq::new(1),
-            connection_epoch: 1,
-        };
-        let value = serde_json::to_value(message).unwrap();
-        assert_eq!(value["type"], "turn_input");
-        assert!(value.get("kind").is_none());
-    }
-
-    #[test]
     fn generated_schema_mentions_every_wire_message_kind() {
         let schema: serde_json::Value =
             serde_json::from_str(include_str!("../../../docs/sylph.env.v1.schema.json"))
@@ -1321,22 +1020,17 @@ mod tests {
             .map(str::to_owned)
             .collect();
         let expected = [
+            "captureUpload",
+            "captureReply",
+            "sessionControlState",
             "hello",
             "welcome",
             "command",
             "commandResult",
-            "eventBatch",
-            "ack",
-            "nack",
             "heartbeat",
             "agents",
             "capabilitySnapshot",
-            "sourceState",
-            "turnInput",
-            "edge",
             "request",
-            "nativeRecord",
-            "nativeBlobChunk",
             "diagnostic",
         ]
         .into_iter()

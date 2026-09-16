@@ -96,6 +96,18 @@ CREATE TABLE trace_lease_scopes (
 ) WITHOUT ROWID;
 CREATE INDEX trace_leases_by_scope ON trace_lease_scopes(scope_ref,ingestion_epoch,lease_id);
 
+-- Search/export work pins semantic membership as well as payload bytes. Reader
+-- leases are independent roots, so replacing an index pin preserves result jobs.
+CREATE TABLE trace_revision_pins (
+  owner_kind TEXT NOT NULL CHECK(owner_kind IN ('search','export')),
+  owner_id TEXT NOT NULL,
+  generation TEXT NOT NULL REFERENCES trace_generations(generation),
+  evidence_cut INTEGER NOT NULL CHECK(evidence_cut>=0),
+  view_revision INTEGER NOT NULL CHECK(view_revision>=0),
+  PRIMARY KEY(owner_kind,owner_id)
+) WITHOUT ROWID;
+CREATE INDEX trace_revision_pins_by_generation ON trace_revision_pins(generation,view_revision);
+
 CREATE TABLE trace_payload_pins (
   owner_kind TEXT NOT NULL CHECK(owner_kind IN ('generation','search','export')),
   owner_id TEXT NOT NULL,

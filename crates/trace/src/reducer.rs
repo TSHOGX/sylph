@@ -138,6 +138,7 @@ pub struct Reduction {
     pub agent_states: BTreeMap<AgentRef, Vec<(AgentState, ClaimRef)>>,
     pub relations: Vec<ResolvedRelation>,
     pub histories: BTreeMap<AgentRef, HistoryView>,
+    pub selection_memberships:BTreeMap<SelectionRef,Option<Vec<EntryRef>>>,
     pub messages: BTreeMap<MessageRef, MessageHistory>,
     pub coverage: Vec<(Coverage, ClaimRef)>,
     pub diagnostics: Vec<ReductionDiagnostic>,

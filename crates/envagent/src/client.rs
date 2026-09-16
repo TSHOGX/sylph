@@ -11,12 +11,12 @@ use tokio::sync::{mpsc, oneshot, watch, Semaphore};
 const MAX_INTERACTIVE_COMMANDS: usize = 8;
 const MAX_HISTORY_COMMANDS: usize = 2;
 
-use crate::runtime::{ChannelEventSink, EventSink};
+use crate::runtime::{CaptureTransport, ChannelCaptureTransport};
 use crate::transport::{ConnectionSupervisor, FramedConnection};
 
 /// A live connection after hello/welcome negotiation.
 pub struct ClientConnection {
-    pub sink: Arc<ChannelEventSink>,
+    pub sink: Arc<ChannelCaptureTransport>,
     pub incoming: mpsc::Receiver<sylph_protocol::DecodedMessage>,
     pub welcome: sylph_protocol::Welcome,
     sender: mpsc::Sender<sylph_protocol::WireMessage>,
@@ -71,10 +71,8 @@ pub async fn connect(
             }
         }
     });
-    let sink = Arc::new(ChannelEventSink::new(
+    let sink = Arc::new(ChannelCaptureTransport::new(
         out_tx,
-        welcome.environment_id.clone(),
-        hello.producer_id.clone(),
         welcome.connection_epoch,
     ));
     let sink_for_reader = sink.clone();
@@ -157,8 +155,7 @@ where
             environment_id,
             connection_epoch,
             server_epoch,
-            accepted_cursors,
-            max_batch_events,
+
             heartbeat_interval_ms,
         }) => sylph_protocol::Welcome {
             protocol,
@@ -166,8 +163,7 @@ where
             environment_id,
             connection_epoch,
             server_epoch,
-            accepted_cursors,
-            max_batch_events,
+
             heartbeat_interval_ms,
         },
         other => return Err(anyhow!("expected envagent welcome, got {other:?}")),
@@ -198,10 +194,8 @@ where
             }
         }
     });
-    let sink = Arc::new(ChannelEventSink::new(
+    let sink = Arc::new(ChannelCaptureTransport::new(
         out_tx.clone(),
-        welcome.environment_id.clone(),
-        hello.producer_id.clone(),
         welcome.connection_epoch,
     ));
     tokio::spawn(writer_loop(writer, out_rx, sink.clone()));
@@ -298,7 +292,7 @@ async fn run_connection(
                     }
                     let queue_us=queued_at.elapsed().as_micros() as u64;
                     let executing=std::time::Instant::now();
-                    let outcome = runtime.handle_command(command).await;
+                    let outcome = runtime.execute_command(request_id.clone(),idempotency,command).await;
                     if let Some(relative)=file_list {
                         tracing::debug!(%request_id,%relative,queue_us,filesystem_us=executing.elapsed().as_micros() as u64,"file_list_timing");
                     }
@@ -314,20 +308,7 @@ async fn run_connection(
                     (key, request_id)
                 });
             }
-            sylph_protocol::DecodedMessage::Known(sylph_protocol::WireMessage::Nack {
-                expected_next,
-                reason,
-                ..
-            }) => {
-                if !replay_failure_reported {
-                    tracing::error!(expected=expected_next.get(),"server rejected retained delivery: {reason}");
-                    replay_failure_reported=true;
-                } else { tracing::debug!(expected=expected_next.get(),"retained delivery still blocked: {reason}"); }
-                if replay_tasks.is_empty() {
-                    let retry=runtime.clone();
-                    replay_tasks.spawn(async move {tokio::time::sleep(Duration::from_millis(500)).await;retry.flush_snapshot().await});
-                }
-            }
+
             sylph_protocol::DecodedMessage::Unknown { kind, .. } => {
                 tracing::debug!("ignoring unknown server frame {kind}");
             }
@@ -386,7 +367,6 @@ fn is_history_command(command: &sylph_protocol::EnvironmentCommand) -> bool {
         sylph_protocol::EnvironmentCommand::Adopt { .. }
             | sylph_protocol::EnvironmentCommand::Watch { .. }
             | sylph_protocol::EnvironmentCommand::Reread { .. }
-            | sylph_protocol::EnvironmentCommand::Reproject { .. }
             | sylph_protocol::EnvironmentCommand::Enumerate { .. }
     )
 }
@@ -441,13 +421,11 @@ fn command_session_key(command: &sylph_protocol::EnvironmentCommand) -> Option<S
         | EnvironmentCommand::Resolve { session_id, .. }
         | EnvironmentCommand::Watch { session_id, .. }
         | EnvironmentCommand::Adopt { session_id, .. }
-        | EnvironmentCommand::NativeTransfer { session_id, .. }
-        | EnvironmentCommand::Activate { session_id }
         | EnvironmentCommand::Close {
             session_id: Some(session_id),
         } => Some(format!("session:{session_id}")),
         EnvironmentCommand::Close { session_id: None } => None,
-        EnvironmentCommand::Reread { .. } | EnvironmentCommand::Reproject { .. } => None,
+        EnvironmentCommand::Reread { .. } => None,
     }
 }
 
@@ -491,16 +469,22 @@ pub async fn run_runtime_reconnecting(
 struct DisconnectedSink;
 
 #[async_trait::async_trait]
-impl EventSink for DisconnectedSink {
-    async fn deliver(&self, _events: &[crate::spool::SpoolEvent]) -> Result<u64> {
-        anyhow::bail!("envagent is disconnected")
+impl CaptureTransport for DisconnectedSink {
+    async fn upload(
+        &self,
+        _operation: sylph_protocol::CaptureUpload,
+    ) -> Result<sylph_protocol::CaptureReply> {
+        anyhow::bail!("envagent disconnected")
+    }
+    async fn notify(&self, _message: sylph_protocol::WireMessage) -> Result<()> {
+        anyhow::bail!("envagent disconnected")
     }
 }
 
 async fn writer_loop<W: AsyncWrite + Unpin>(
     mut writer: W,
     mut out_rx: mpsc::Receiver<sylph_protocol::WireMessage>,
-    sink: Arc<ChannelEventSink>,
+    sink: Arc<ChannelCaptureTransport>,
 ) -> Result<()> {
     let mut framed = FramedConnection::new(&mut writer);
     let result = async {
@@ -516,36 +500,24 @@ async fn writer_loop<W: AsyncWrite + Unpin>(
 
 async fn reader_loop<R: AsyncRead + Unpin>(
     reader: R,
-    sink: Arc<ChannelEventSink>,
+    sink: Arc<ChannelCaptureTransport>,
     in_tx: mpsc::Sender<sylph_protocol::DecodedMessage>,
 ) -> Result<()> {
     let mut framed = FramedConnection::new(reader);
     let result = async {
         loop {
             let message = framed.read_env_message().await?;
-            if let sylph_protocol::DecodedMessage::Known(sylph_protocol::WireMessage::Ack {
-                producer_id,
-                accepted_through,
-                server_seq_through,
-            }) = &message
+            if let sylph_protocol::DecodedMessage::Known(
+                sylph_protocol::WireMessage::CaptureReply {
+                    request_id,
+                    outcome,
+                    connection_epoch,
+                },
+            ) = &message
             {
-                let ack = sylph_protocol::Ack {
-                    producer_id: producer_id.clone(),
-                    accepted_through: *accepted_through,
-                    server_seq_through: *server_seq_through,
-                };
-                sink.acknowledge(&ack).await;
+                sink.reply(request_id, outcome.clone(), *connection_epoch)
+                    .await;
                 continue;
-            }
-            if let sylph_protocol::DecodedMessage::Known(sylph_protocol::WireMessage::Nack {
-                producer_id,
-                expected_next,
-                ..
-            }) = &message
-            {
-                if sink.is_for_producer(producer_id) {
-                    sink.reject_gap(*expected_next).await;
-                }
             }
             if in_tx.send(message).await.is_err() {
                 break;
@@ -556,56 +528,4 @@ async fn reader_loop<R: AsyncRead + Unpin>(
     .await;
     sink.fail_pending().await;
     result.map_err(Into::into)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    mod scheduling;
-    use crate::runtime::EventSink;
-    use crate::spool::SpoolEvent;
-    use sylph_protocol::{EnvironmentId, Event, EventKind, ProducerId, WireMessage};
-
-    #[tokio::test]
-    async fn reader_eof_releases_a_delivery_waiting_for_ack() {
-        let (agent_stream, peer_stream) = tokio::io::duplex(1024);
-        let (sender, mut outgoing) = mpsc::channel(2);
-        let sink = Arc::new(ChannelEventSink::new(
-            sender,
-            EnvironmentId::parse("env7fk2").unwrap(),
-            ProducerId::parse("producer-a").unwrap(),
-            1,
-        ));
-        let (in_tx, _in_rx) = mpsc::channel(2);
-        let reader_sink = sink.clone();
-        let reader = tokio::spawn(reader_loop(agent_stream, reader_sink, in_tx));
-
-        let row = SpoolEvent {
-            producer_id: "producer-a".into(),
-            producer_seq: 1,
-            kind: "event".into(),
-            session_id: "env7fk2:fixture:n".into(),
-            arrival_turn_id: None,
-            payload: serde_json::to_vec(&Event::new(EventKind::Status, None, 1)).unwrap(),
-            source_cursor: None,
-            recorded_at_ms: None,
-        };
-        let deliver_sink = sink.clone();
-        let delivery = tokio::spawn(async move { deliver_sink.deliver(&[row]).await });
-        assert!(matches!(
-            outgoing.recv().await,
-            Some(WireMessage::EventBatch { .. })
-        ));
-
-        drop(peer_stream);
-        let result = tokio::time::timeout(std::time::Duration::from_millis(100), delivery)
-            .await
-            .expect("reader EOF must release the delivery waiter")
-            .expect("delivery task must not panic");
-        assert!(result.is_err());
-        reader
-            .await
-            .expect("reader task must not panic")
-            .unwrap_err();
-    }
 }

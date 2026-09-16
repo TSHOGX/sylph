@@ -172,6 +172,7 @@ fn server_queue_is_independent_of_native_receiver_acceptance() {
 #[test]
 fn receipt_before_command_requests_retained_correlation_instead_of_fabricating_input() {
     let fact = OperationalFact::Delivery {
+        input_revision: "original-v1".into(),
         command_id: "command-a".into(),
         fact: DeliveryFact::Consumed {
             revision: "original-v1".into(),
@@ -184,8 +185,8 @@ fn receipt_before_command_requests_retained_correlation_instead_of_fabricating_i
         absent.requests,
         [ArchiveRequest::Correlation {
             agent: agent(),
-            namespace: "sylph.command".into(),
-            key: vec!["command-a".into()]
+            namespace: "sylph.command.revision".into(),
+            key: vec!["command-a".into(),"original-v1".into()]
         }]
     );
     let accepted = run(
@@ -233,6 +234,7 @@ fn non_message_control_and_its_rejection_do_not_create_human_input() {
     };
     let rejection = run(
         &OperationalFact::Delivery {
+            input_revision: "original-v1".into(),
             command_id: "command-a".into(),
             fact: DeliveryFact::Rejected {
                 receipt: b"rejected\r\n".to_vec(),
@@ -344,6 +346,7 @@ fn identity_binding_requires_a_proof_that_names_the_actual_agent() {
     };
     let mut archive = ArchiveContext {
         observations: [observation.clone()].into(),
+        observation_sources:[(observation.clone(),SourcePosition {source:SourceRef {issuer:observation.issuer.clone(),instance:"runtime:fixture".into()},generation:0,locator:SourceLocator::Frame {ordinal:1}})].into(),
         ..ArchiveContext::default()
     };
     let unproved = run(&fact, &capture, &archive);
@@ -353,4 +356,24 @@ fn identity_binding_requires_a_proof_that_names_the_actual_agent() {
         .object_evidence
         .insert(AnyObjectRef::Agent(agent()), vec![observation]);
     assert_eq!(run(&fact, &capture, &archive).bound_agents, vec![agent()]);
+}
+
+#[test]
+fn queued_edits_keep_the_original_input_and_dispatch_correlates_the_exact_revision() {
+    let first=run(&accepted(CommandKind::Queue),&capture(1),&ArchiveContext::default());
+    let revised=OperationalFact::Revised {command_id:"command-a".into(),previous_revision:"original-v1".into(),input:SubmittedRevision {revision:"edited-v2".into(),media_type:"text/plain".into(),bytes:b"edited request".to_vec()},authorization:AuthorizationReceipt {subject:"human-a".into(),decision_ref:"grant-2".into(),lease_ref:None,evaluated_at_ms:2}};
+    let second=run(&revised,&capture(2),&ArchiveContext::default());
+    assert!(second.claims.iter().any(|claim|matches!(&claim.fact,Fact::DeliveryStage {stage:DeliveryStage::Cancelled {..},delivery} if matches!(delivery.address(),ObjectAddress::Native {key,..} if key==&vec!["command-a".to_owned(),"original-v1".to_owned()]))));
+    let mut archive=ArchiveContext {correlations:first.correlations.clone(),..ArchiveContext::default()};archive.correlations.extend(second.correlations.clone());
+    let delivered=run(&OperationalFact::Delivery {command_id:"command-a".into(),input_revision:"edited-v2".into(),fact:DeliveryFact::Consumed {revision:"edited-v2".into(),receipt:b"{}".to_vec()}},&capture(3),&archive);
+    assert!(delivered.claims.iter().any(|claim|matches!(&claim.fact,Fact::DeliveryStage {delivery,stage:DeliveryStage::Admitted {..}} if matches!(delivery.address(),ObjectAddress::Native {key,..} if key==&vec!["command-a".to_owned(),"edited-v2".to_owned()]))));
+    assert_eq!(first.payloads[0].bytes,b"Human \0\xff\r\n");assert_eq!(second.payloads[0].bytes,b"edited request");
+}
+
+#[test]
+fn submitted_multipart_input_preserves_text_and_decoded_attachment_bytes() {
+    let mut fact=accepted(CommandKind::Send);let OperationalFact::Accepted {command}=&mut fact else {unreachable!()};
+    command.input.media_type="application/vnd.sylph.input+json".into();command.input.bytes=serde_json::to_vec(&serde_json::json!({"text":"keep\r\n你好","attachments":[{"name":"pixel.png","type":"image/png","data":"AAEC/w=="}]})).unwrap();
+    let output=run(&fact,&capture(1),&ArchiveContext::default());let revision=output.claims.iter().find_map(|claim|match &claim.fact {Fact::Declare {object:TraceObject::MessageRevision(value)}=>Some(value),_=>None}).unwrap();assert_eq!(revision.parts.len(),2);assert_eq!(revision.parts[0].kind,ContentKind::Text);assert_eq!(revision.parts[1].kind,ContentKind::Image);assert_eq!(revision.parts[1].media_type.as_deref(),Some("image/png"));
+    assert_eq!(output.payloads.iter().find(|payload|payload.reference==revision.parts[0].payload).unwrap().bytes,"keep\r\n你好".as_bytes());assert_eq!(output.payloads.iter().find(|payload|payload.reference==revision.parts[1].payload).unwrap().bytes,[0,1,2,255]);
 }

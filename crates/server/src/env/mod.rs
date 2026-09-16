@@ -16,7 +16,7 @@
 pub mod bridge;
 pub mod registry;
 
-pub use bridge::{DispatchResult, EnvBridge, IngestResult};
+pub use bridge::{DispatchResult, EnvBridge};
 pub use registry::{
     EnvironmentRegistry, EnvironmentSnapshot, PairingGrant, PairingOffer, RegistryError,
 };

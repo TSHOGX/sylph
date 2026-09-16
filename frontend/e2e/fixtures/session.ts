@@ -15,7 +15,7 @@ import { expect, type Page } from "@playwright/test";
  */
 
 /** The fixture agent installed by `playwright.config.ts`. The only agent present. */
-const AGENT = "e2e";
+const AGENT = "codex";
 
 /**
  * The environment this machine is, resolved once per worker.
@@ -65,7 +65,7 @@ async function environmentId(page: Page): Promise<string> {
     await page.waitForTimeout(200);
   }
 
-  throw new Error("the paired envagent did not report the e2e agent within 30 seconds");
+  throw new Error("the paired envagent did not report the fixture codex agent within 30 seconds");
 }
 
 /**
@@ -140,12 +140,18 @@ export async function createSession(
   ).toBe(true);
 
   const { draftId } = (await response.json()) as { draftId: string };
-  const firstTurn = await page.request.post(`/api/v1/sessions/draft/${encodeURIComponent(draftId)}/turns`, {
+  const firstTurn = await page.request.post(`/api/v1/sessions/draft/${encodeURIComponent(draftId)}/commands`, {
     data: { text: "fixture setup" },
   });
   expect(firstTurn.ok(), `first turn failed: ${firstTurn.status()} ${await firstTurn.text()}`).toBe(true);
-  const { session } = (await firstTurn.json()) as { session: { id: string } };
-  await page.goto(`/sessions/${session.id}`);
+  let result = await firstTurn.json() as { session?: { id: string; traceAgentRef: string }; command: { acceptance: { commandId: string } } };
+  await expect.poll(async () => {
+    if (result.session) return true;
+    const response = await page.request.get(`/api/v1/commands/${encodeURIComponent(result.command.acceptance.commandId)}`);
+    expect(response.ok()).toBe(true); result = await response.json(); return Boolean(result.session);
+  }, { timeout: 30000 }).toBe(true);
+  const session = result.session!;
+  await page.goto(`/agents/${encodeURIComponent(session.traceAgentRef)}`);
   await expect(page.getByLabel("Message", { exact: true })).toBeVisible();
   return session.id;
 }

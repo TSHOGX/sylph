@@ -1,291 +1,130 @@
-//! Sylph Web backend library.
-//!
-//! The binary in `main.rs` is a thin wrapper: it loads configuration, builds
-//! [`AppState`], and serves [`router`]. Everything else lives here so
-//! integration tests can construct the same router in-process and drive it
-//! through `tower::ServiceExt::oneshot`, with no ports to bind and no race
-//! against a spawning server.
-
-use std::sync::Arc;
-
+//! Sylph server composition. Operational policy and trace evidence have independent writers.
 use axum::{
     extract::DefaultBodyLimit,
     middleware as axum_middleware,
     routing::{get, post},
     Router,
 };
+use std::sync::Arc;
 use tower_http::trace::TraceLayer;
-
 pub mod api;
 pub mod attachments;
 pub mod config;
 pub mod db;
-/// Parsing spreadsheets, documents, and presentations. A library with no HTTP
-/// knowledge, so it sits beside `attachments` rather than inside `api`.
 pub mod documents;
 pub mod env;
 pub mod error;
-pub mod events;
 pub mod link_state;
 pub mod middleware;
 pub mod models;
 pub mod paths;
-/// Durable, replayable history: folded deltas, content-addressed blobs, and
-/// watermark-driven retention.
-pub mod storage;
-pub mod supervisor;
 pub mod trace;
-
-use crate::config::Config;
-use crate::db::JournalStore;
-use crate::error::Error;
-use crate::events::EventHub;
-
-#[cfg(test)]
-mod fixtures;
+use config::Config;
+use db::ControlStore;
+use error::Error;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub store: JournalStore,
+    pub store: ControlStore,
     pub config: Config,
-    pub hub: EventHub,
-    /// The warm tier. Reads come here once a turn has been consolidated.
-    pub history: crate::storage::HistoryStore,
-    /// Moves settled turns into history. Exposed so a test can trigger the same
-    /// work the background sweeper does, rather than waiting on it.
-    pub consolidator: crate::storage::Consolidator,
-    /// Prunes history down to what a downstream authority confirms. Exposed for the
-    /// same reason as the consolidator: a test drives one pass instead of waiting
-    /// five minutes for the interval.
-    pub retention: crate::storage::RetentionScheduler,
-    /// Writes an adapter's parse of a native store into the journal.
-    ///
-    /// Held here, sharing the **one** sequence allocator and the **one** batching
-    /// writer, because that sharing is the correctness property rather than a
-    /// convenience: a second allocator over one session would hand out numbers a live
-    /// link is also handing out and `UNIQUE(session, seq)` would refuse one of the two
-    /// writes, intermittently and under concurrency (`crate::events::seq`). A second
-    /// writer would leave the fold reading a buffer nobody flushed.
-    pub ingest: crate::db::NativeIngest,
-    /// A short-lived snapshot of what this machine's native stores hold.
-    ///
-    /// Both reasons it exists are measured and neither is a micro-optimization: listing
-    /// this machine's stores costs ~5.6 s, and an offset cursor into a store being
-    /// written silently skips and duplicates rows. See `api::native_index`.
-    pub native_index: crate::api::native_index::NativeIndex,
-    /// Inbound envagent protocol bridge, and **the only way execution reaches an
-    /// adapter**.
-    ///
-    /// There is no local seam beside it, not even for the server's own machine, so a
-    /// single-machine install runs two processes (`docs/architecture.md`). That is the
-    /// property rather than a deployment detail: a same-machine shortcut would be the
-    /// one path where durable ingest, command idempotency, and reconnect epochs were
-    /// bypassed, and it would be the path every test took — so the guarantees would
-    /// hold everywhere except where they were exercised.
-    pub env_bridge: Arc<crate::env::EnvBridge>,
+    pub trace: Arc<trace::service::TraceService>,
+    pub native_index: api::native_index::NativeIndex,
+    pub env_bridge: Arc<env::EnvBridge>,
+    pub exporter: trace::exporter::OutboxExporter,
+}
+/// Periodic work may retain durable handles but never owns the product lifetime.
+#[derive(Clone)]
+pub(crate) struct WeakAppState {
+    store: ControlStore,
+    config: Config,
+    trace: std::sync::Weak<trace::service::TraceService>,
+    native_index: api::native_index::NativeIndex,
+    env_bridge: std::sync::Weak<env::EnvBridge>,
+    exporter: trace::exporter::OutboxExporter,
+}
+impl WeakAppState {
+    pub(crate) fn upgrade(&self) -> Option<AppState> {
+        Some(AppState {
+            store: self.store.clone(),
+            config: self.config.clone(),
+            trace: self.trace.upgrade()?,
+            native_index: self.native_index.clone(),
+            env_bridge: self.env_bridge.upgrade()?,
+            exporter: self.exporter.clone(),
+        })
+    }
 }
 
 impl AppState {
-    /// Consolidate every settled turn now, returning how many moved.
-    pub async fn consolidate_now(&self) -> usize {
-        self.consolidator.sweep().await
+    pub(crate) fn downgrade(&self) -> WeakAppState {
+        WeakAppState {
+            store: self.store.clone(),
+            config: self.config.clone(),
+            trace: Arc::downgrade(&self.trace),
+            native_index: self.native_index.clone(),
+            env_bridge: Arc::downgrade(&self.env_bridge),
+            exporter: self.exporter.clone(),
+        }
     }
 
-    /// Assemble application state from configuration.
-    ///
-    /// An install that can run no agents is **reported, not fatal**: history stays
-    /// readable and every other surface works, which is why the report has to be
-    /// loud rather than the startup being aborted.
     pub async fn build(config: Config) -> anyhow::Result<Self> {
-        Self::build_inner(config).await
-    }
-
-    async fn build_inner(config: Config) -> anyhow::Result<Self> {
-        let store = JournalStore::new(&config.journal_path).await?;
-        // Seed the local development identity once so in-process clients and the
-        // browser bootstrap cookie resolve to the same authority Subject.
+        tokio::fs::create_dir_all(&config.data_dir).await?;
+        let trace = Arc::new(trace::service::TraceService::open(&config.data_dir).await?);
+        let store = ControlStore::open(
+            &config.control_path,
+            sylph_protocol::trace::Issuer::Server("sylph-server".into()),
+            db::control::OutboxLimits::default(),
+        )
+        .await?;
         store
             .upsert_subject(
                 "bootstrap",
                 "Bootstrap",
-                &crate::middleware::auth::hash_token_for_storage(&config.cookie_secret),
+                &middleware::auth::hash_token_for_storage(&config.cookie_secret),
                 true,
             )
             .await?;
-        tracing::info!("Journal initialized at {}", config.journal_path);
-
-        // Zero runnable agents is not a quiet degradation: no session can be created
-        // and no existing one can offer a command, so every feature depending on a
-        // live link fails while the server reports healthy. Discovery logged that at
-        // the same level as success, one line among hundreds, which is how a stale
-        // install presented as a composer ignoring the `/` key.
-        //
-        // Availability is now per environment (`docs/environments.md`), so
-        // `GET /environments` is where a client learns *which* agent is missing on
-        // *which* machine. This line is the server-side half, and it stays at `error`
-        // for the same reason it was raised to `error` before: it names a total
-        // failure whose symptom appears three layers away.
-        // Child processes do not survive a restart, so anything the journal
-        // still lists as live is unrecoverable.
-        let interrupted = store.interrupt_stale_turns().await?;
-        if interrupted > 0 {
-            tracing::warn!(
-                "Interrupted {} stale turns from a previous backend session",
-                interrupted
-            );
-        }
-
-        // Before the consolidator can move those turns. A crash skips `settle`, so
-        // a delegation open at crash time has no closing event — and consolidation
-        // folds a trajectory with no close into no block at all, which loses the
-        // delegation while keeping its children, reattaching them to the root.
-        let closed = store.close_stale_trajectories().await?;
-        if closed > 0 {
-            tracing::warn!(
-                "Closed {} delegated trajectory(ies) left open by a previous backend session",
-                closed
-            );
-        }
-
-        // No link survives a restart, so a request still marked pending is
-        // waiting on a process that no longer exists. Left alone it would show a
-        // session forever blocked on a question nobody can answer.
-        let abandoned = store.abandon_all_open_requests().await?;
-        if abandoned > 0 {
-            tracing::warn!(
-                "Abandoned {} unanswered agent request(s) from a previous backend session",
-                abandoned
-            );
-        }
-
-        // Resolved once, in `Config`, so the supervisor injects the same file
-        // `GET /soul` displays. Deriving it here as well is how the two would
-        // drift into disagreeing about whether identity is active.
-
-        // The warm tier, opened before anything can settle a turn into it.
-        let history = crate::storage::HistoryStore::open(
-            &config.history_path,
-            crate::storage::cas::BlobStore::new(config.blobs_dir.clone()),
-        )
-        .await?;
-        // The same repair as `close_stale_trajectories` above, one tier down.
-        // Consolidation preserves a trajectory the turn-settle sweep deliberately left
-        // open — backgrounded work, which is genuinely still running — and `started` is
-        // a true statement only while the process that would report it is alive. No
-        // link survives a restart, so anything still `started` here can never be
-        // reported on and would spin forever.
-        //
-        // Before the sweeper, so a turn consolidated by this run is not immediately
-        // re-examined, and after the journal sweep above so the two cannot both claim
-        // the same trajectory.
-        let stranded = history.close_running_trajectories().await?;
-        if stranded > 0 {
-            tracing::warn!(
-                "Closed {} delegated trajectory(ies) left running in history by a previous backend session",
-                stranded
-            );
-        }
-
-        let consolidator = crate::storage::Consolidator::new(store.clone(), history.clone());
-        // Catches whatever a crash or a restart left unconsolidated, then keeps
-        // watching. A turn that settles normally is handled the moment it does.
-        consolidator.spawn_sweeper();
-
-        let hub = EventHub::new();
-        // The host is the only environment today. It is constructed here rather
-        // than inside the supervisor so a session-chosen environment later
-        // replaces one argument instead of reaching into the supervisor.
-        let environment_registry = crate::env::EnvironmentRegistry::new();
-        // One allocator, shared. Both the supervisor and each link's drain task
-        // emit events for the same session, and separate counters would hand out
-        // the same sequence number.
-        let seq = crate::events::SeqAllocator::new(store.clone());
-        let retention_registry = environment_registry.clone();
-        let env_bridge = Arc::new(crate::env::EnvBridge::new(
-            store.clone(),
-            history.clone(),
-            seq.clone(),
-            hub.clone(),
-            environment_registry,
-        ));
+        store.recover_inflight(models::now_ms()).await?;
+        store.reset_runtime_connections().await?;
+        let exporter =
+            trace::exporter::OutboxExporter::new(store.clone(), trace.uploads().clone())?;
+        let env_bridge = Arc::new(env::EnvBridge::new(store.clone(), trace.clone()));
         env_bridge.spawn_health_reaper();
-
-        // Batches the journal's hot path. One instance, shared: the drain task
-        // buffers a turn's deltas and the supervisor flushes them before the fold,
-        // so separate writers would leave the fold reading a buffer nobody flushed.
-        let writer = crate::db::JournalWriter::new(store.clone());
-
-        let ingest = crate::db::NativeIngest::new(
-            store.clone(),
-            writer.clone(),
-            seq.clone(),
-            history.clone(),
-        )
-        .with_hub(hub.clone());
-
-        let closer = crate::supervisor::TurnCloser::new(
-            store.clone(),
-            hub.clone(),
-            seq,
-            consolidator.clone(),
-            writer.clone(),
-        );
-        env_bridge.set_turn_closer(closer).await;
-        env_bridge
-            .set_trajectory_reconciler(crate::supervisor::TrajectoryReconciler::new(
-                store.clone(),
-                history.clone(),
-            ))
-            .await;
-
-        // Retention's authority is now the **envagent that holds the vendor's own
-        // native store** rather than a separate archive (`docs/storage.md`
-        // § Two retention classes). The environment is passed rather than assumed inside so
-        // a per-session environment later replaces an argument.
-        let retention = crate::storage::RetentionScheduler::new(
-            store.clone(),
-            history.clone(),
-            retention_registry,
-        );
-        retention.spawn();
-
         let state = Self {
             store,
             config,
-            hub,
-            history,
-            consolidator,
-            retention,
-            ingest,
-            native_index: crate::api::native_index::NativeIndex::new(),
+            trace,
+            native_index: api::native_index::NativeIndex::new(),
             env_bridge,
+            exporter,
         };
-        state.store.recover_control_requests().await?;
-        crate::api::imports::recover_state(&state.store).await?;
-        crate::api::imports::spawn_sync(state.clone());
-        crate::api::controls::spawn_dispatcher(state.clone());
+        state.trace.spawn();
+        let exporter = state.exporter.clone();
+        let trace = Arc::downgrade(&state.trace);
+        let control = state.store.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                let Some(trace) = trace.upgrade() else {
+                    break;
+                };
+                match exporter.run_once().await {
+                    Ok(progress) if progress.transferred > 0 => trace.notify_admission(),
+                    Ok(_) => {}
+                    Err(error) => tracing::error!(%error,"operational evidence export failed"),
+                };
+                if let Err(error) = control.erase_pending_inputs().await {
+                    tracing::error!(%error,"control input deletion failed");
+                }
+            }
+        });
+        api::imports::recover_state(&state.store).await?;
+        api::imports::spawn_sync(state.clone());
+        api::controls::spawn_dispatcher(state.clone());
         Ok(state)
     }
 }
-
-/// Largest request body the API accepts.
-///
-/// `docs/api/files.md` caps a turn at 10 MiB of attachments, and base64
-/// inflates that by about a third before JSON overhead, so the wire limit must
-/// exceed the payload limit or a valid upload would be rejected before
-/// [`attachments::stage`] could report which file was too large.
-///
-/// This must be applied as [`DefaultBodyLimit`], not `tower_http`'s
-/// `RequestBodyLimitLayer`: the `Json` extractor consults `DefaultBodyLimit`
-/// and enforces its own 2 MiB default, so raising only the outer tower limit
-/// still yields a 413 from the extractor before any handler runs.
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
-
-/// Build the API router.
-///
-/// Route order matters for the auth layer: `/health` and `/auth/token` are
-/// exempt inside the middleware rather than being registered outside it, so
-/// that the exempt list stays in one place next to the checks it bypasses.
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/v1/health", get(api::health::health))
@@ -294,13 +133,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/auth/login", post(middleware::auth::login))
         .route("/api/v1/auth/logout", post(middleware::auth::logout))
         .route("/api/v1/diagnostics", get(api::health::diagnostics))
-        // What configuration resolved to, and which source supplied each value.
-        // Read-only: see `api::config` for why a loopback HTTP surface must not be
-        // able to rewrite `browse_roots` or `agents_dir`.
         .route("/api/v1/config", get(api::config::get))
-        // Which environments are paired, whether they are reachable, and what each
-        // can run. This is what replaced `GET /agents`: availability is per machine,
-        // so a merged global list would be true of nowhere.
         .route("/api/v1/environments", get(api::environments::list))
         .route(
             "/api/v1/environments/pairings",
@@ -332,24 +165,21 @@ pub fn router(state: AppState) -> Router {
             get(api::sessions::list).post(api::sessions::create),
         )
         .route(
-            "/api/v1/sessions/draft/{id}/capabilities",
-            get(api::links::prepared_capabilities),
-        )
-        .route(
             "/api/v1/sessions/draft/{id}",
             get(api::sessions::prepared_get).delete(api::links::discard_prepared),
         )
         .route(
-            "/api/v1/sessions/draft/{id}/turns",
-            post(api::turns::create_prepared),
+            "/api/v1/sessions/draft/{id}/commands",
+            post(api::controls::create_prepared),
+        )
+        .route(
+            "/api/v1/sessions/draft/{id}/capabilities",
+            get(api::links::prepared_capabilities),
         )
         .route(
             "/api/v1/sessions/draft/{id}/config",
             post(api::links::prepared_set_config),
         )
-        // A prepared link already knows its contained workdir, even though it has
-        // no durable identity yet.  Reuse the session file handlers; `resolve`
-        // distinguishes the server-issued draft handle from an encoded session id.
         .route(
             "/api/v1/sessions/draft/{id}/files",
             get(api::files::tree)
@@ -372,111 +202,20 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/sessions/draft/{id}/files/raw",
             get(api::files::raw),
         )
-        // Bring in a session an agent already has, from that agent's own native
-        // store. Replaces `POST /sessions/import`, which named a row in a separate
-        // archive that no longer exists.
         .route("/api/v1/sessions/adopt", post(api::sessions::adopt))
-        .route(
-            "/api/v1/environments/{environment}/imports",
-            post(api::imports::create),
-        )
-        .route(
-            "/api/v1/environments/{environment}/imports/list",
-            get(api::imports::list),
-        )
-        .route("/api/v1/imports/{id}", get(api::imports::get))
-        .route("/api/v1/imports/{id}/items", get(api::imports::items))
-        .route("/api/v1/imports/{id}/events", get(api::imports::events))
-        .route("/api/v1/imports/{id}/cancel", post(api::imports::cancel))
-        .route("/api/v1/imports/{id}/retry", post(api::imports::retry))
-        // What native sessions an environment holds, without adopting any. This is what
-        // makes adopt offerable in a UI rather than requiring a user to know a vendor
-        // id. A literal path, so it is declared beside `adopt` and above
-        // `/sessions/{id}` — axum prefers a static segment over a capture, but keeping
-        // the two literals together is what makes that visible to a reader.
         .route("/api/v1/sessions/enumerate", get(api::sessions::enumerate))
-        // No `DELETE`: there is no empty draft to discard, because `POST /sessions`
-        // now starts an agent and a row exists only once one has assigned an id
-        // (`docs/api/sessions.md` § `DELETE /api/v1/sessions/{id}` — removed).
         .route(
             "/api/v1/sessions/{id}",
-            get(api::sessions::get).patch(api::sessions::update),
+            get(api::sessions::get)
+                .patch(api::sessions::update)
+                .delete(api::sessions::delete),
         )
         .route(
-            "/api/v1/sessions/{id}/turns",
-            get(api::sessions::export_turns).post(api::turns::create),
+            "/api/v1/sessions/{id}/commands",
+            get(api::controls::list).post(api::controls::create),
         )
-        .route(
-            "/api/v1/sessions/{id}/bodies/{seq}",
-            get(api::sessions::body),
-        )
-        .route("/api/v1/sessions/{id}/conversation", get(api::sessions::conversation))
-        .route("/api/v1/sessions/{id}/delegations", get(api::sessions::delegations))
-        .route("/api/v1/sessions/{id}/nodes", get(api::sessions::nodes))
-        .route(
-            "/api/v1/sessions/{id}/nodes/search",
-            get(api::sessions::search_nodes),
-        )
-        .route(
-            "/api/v1/sessions/{id}/nodes/{node}/body",
-            get(api::sessions::node_body),
-        )
-        .route(
-            "/api/v1/sessions/{id}/turn-state",
-            get(api::sessions::history),
-        )
-        .route("/api/v1/sessions/{id}/edges", get(api::sessions::edges))
-        // Parse the vendor's store again for a session already held, ingesting only what
-        // the journal lacks. Distinct from `adopt`, which refuses a session that already
-        // has a row, and from `watch`, which leaves a follower behind
-        // (`docs/api/sessions.md` § `POST /api/v1/sessions/{id}/reread`).
+        .route("/api/v1/commands/{id}", get(api::controls::get))
         .route("/api/v1/sessions/{id}/reread", post(api::sessions::reread))
-        .route(
-            "/api/v1/sessions/{id}/reproject",
-            post(api::sessions::reproject),
-        )
-        // Files before `{id}` would be ambiguous the other way round: axum
-        // matches literal segments before captures, so the more specific
-        // `files/content` route must be registered, but order among these
-        // does not matter. They are grouped for readability.
-        .route(
-            "/api/v1/sessions/{id}/files",
-            get(api::files::tree)
-                .post(api::files::upload)
-                .delete(api::files::remove),
-        )
-        // Creating a directory is its own route rather than a mode of the POST
-        // above: one takes a body of bytes and the other takes a name, and a
-        // handler switching on which field is present is how an upload with a
-        // typo'd key silently becomes a mkdir.
-        .route(
-            "/api/v1/sessions/{id}/files/directory",
-            post(api::files::mkdir),
-        )
-        .route(
-            "/api/v1/sessions/{id}/files/content",
-            get(api::files::content),
-        )
-        // Parsed documents and raw bytes, both rooted at the session workdir
-        // like the tree above.
-        .route(
-            "/api/v1/sessions/{id}/files/document",
-            get(api::files::document),
-        )
-        .route("/api/v1/sessions/{id}/files/raw", get(api::files::raw))
-        // Machine-level directory browsing, bounded by configured roots rather
-        // than by a session. Separate from the `sessions/{id}/files` tree
-        // because the root differs: see `api::fs` for the threat model.
-        .route("/api/v1/fs/roots", get(api::fs::roots))
-        .route("/api/v1/fs/tree", get(api::fs::tree))
-        // The identity text itself, so the injection toggle is not a decision
-        // made blind. Read-only: editing SOUL.md is a filesystem act, and a
-        // loopback HTTP surface that rewrote a prompt preamble would be a much
-        // larger security question than one that displays it.
-        .route("/api/v1/soul", get(api::soul::get))
-        .route("/api/v1/workspaces", get(api::workspaces::list))
-        .route("/api/v1/search", get(api::search::search))
-        // A session's live agent: what it can do, and what it is waiting on.
         .route(
             "/api/v1/sessions/{id}/capabilities",
             get(api::links::capabilities),
@@ -490,62 +229,42 @@ pub fn router(state: AppState) -> Router {
             get(api::links::list_requests),
         )
         .route(
-            "/api/v1/sessions/{id}/control-requests",
-            get(api::links::control_requests),
+            "/api/v1/sessions/{id}/files",
+            get(api::files::tree)
+                .post(api::files::upload)
+                .delete(api::files::remove),
         )
         .route(
-            "/api/v1/control-requests/{id}",
-            axum::routing::patch(api::controls::edit).delete(api::controls::cancel),
+            "/api/v1/sessions/{id}/files/directory",
+            post(api::files::mkdir),
         )
         .route(
-            "/api/v1/control-requests/{id}/steer",
-            post(api::controls::steer),
+            "/api/v1/sessions/{id}/files/content",
+            get(api::files::content),
         )
-        .route("/api/v1/requests/{id}/resolve", post(api::links::resolve))
-        // Scoped to the session rather than the turn: both act on the agent, and
-        // the session is what holds a link. A turn-scoped route would need the
-        // caller to know a turn id to interrupt the only turn running.
         .route(
-            "/api/v1/sessions/{id}/interrupt",
-            post(api::links::interrupt),
+            "/api/v1/sessions/{id}/files/document",
+            get(api::files::document),
         )
-        .route("/api/v1/sessions/{id}/steer", post(api::links::steer))
-        // Separate from `steer` because the two differ by *when the agent reads the text*,
-        // which decides what the request means: a steer carries a turn precondition and a
-        // queued follow-up cannot have one. See `api::links::queue`.
-        .route("/api/v1/sessions/{id}/queue", post(api::links::queue))
+        .route("/api/v1/sessions/{id}/files/raw", get(api::files::raw))
         .route(
-            "/api/v1/sessions/{id}/native-queue",
-            post(api::links::native_queue),
+            "/api/v1/environments/{environment}/imports",
+            post(api::imports::create),
         )
-        // Typed session config: what `/model` and `/permissions` resolve to, so a
-        // control command is a typed set rather than prose sent as a prompt.
-        .route("/api/v1/sessions/{id}/config", post(api::links::set_config))
-        // Replay is session-scoped and server-paced: reconstruction is subtle
-        // enough that doing it per frontend would let frontends disagree.
-        .route("/api/v1/sessions/{id}/replay", get(api::replay::replay))
-        // Session-scoped facts: a link attaching or dying, capabilities changing,
-        // a request raised. Distinct from the turn stream, which only exists while
-        // a turn does.
-        .route("/api/v1/sessions/{id}/events", get(api::links::events))
-        // Complete reconnectable session trace, including turn and delegated trajectory
-        // events. The facts stream above remains a lightweight invalidation channel.
         .route(
-            "/api/v1/sessions/{id}/trace/events",
-            get(api::links::trace_events),
+            "/api/v1/environments/{environment}/imports/list",
+            get(api::imports::list),
         )
-        .route("/api/v1/turns/{id}", get(api::turns::get))
-        .route("/api/v1/turns/{id}/events", get(api::turns::events))
-        .route("/api/v1/turns/{id}/stop", post(api::turns::stop))
-        // Registered before `.layer`, which only wraps routes that already
-        // exist: a fallback added afterwards would bypass the auth and trace
-        // layers, and would answer unmatched paths without being logged.
-        //
-        // These two exist so the error envelope has no holes. axum's default
-        // fallback returns a bodiless 404, which a client reads as the bare
-        // string "Not Found" — identical to what it shows when a *file* is
-        // missing. Making the router speak the same envelope as every handler
-        // is what lets a client distinguish a stale backend from a bad path.
+        .route("/api/v1/imports/{id}", get(api::imports::get))
+        .route("/api/v1/imports/{id}/items", get(api::imports::items))
+        .route("/api/v1/imports/{id}/events", get(api::imports::events))
+        .route("/api/v1/imports/{id}/cancel", post(api::imports::cancel))
+        .route("/api/v1/imports/{id}/retry", post(api::imports::retry))
+        .route("/api/v1/fs/roots", get(api::fs::roots))
+        .route("/api/v1/fs/tree", get(api::fs::tree))
+        .route("/api/v1/soul", get(api::soul::get))
+        .route("/api/v1/workspaces", get(api::workspaces::list))
+        .merge(api::trace::router())
         .fallback(|| async { Error::RouteNotFound })
         .method_not_allowed_fallback(|| async { Error::MethodNotAllowed })
         .layer(axum_middleware::from_fn_with_state(

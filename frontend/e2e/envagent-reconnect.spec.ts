@@ -30,7 +30,7 @@ test("reconnects the paired environment after an envagent restart", async ({ pag
     environments.some(
       (environment) =>
         environment.connected &&
-        environment.agents.some((agent) => agent.name === "e2e" && agent.available),
+        environment.agents.some((agent) => agent.name === "codex" && agent.available),
     ),
   ).toBe(true);
 });

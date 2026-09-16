@@ -1,10 +1,9 @@
 # Agents
 
-This document owns process setup, controls and dated vendor measurements. Replacement
-trace interpretation is owned by the dedicated [Claude](unified-trace-claude.md),
-[Codex](unified-trace-codex.md), and [Pi](unified-trace-pi.md) mappings. Older block/span,
-input segmentation and synthetic native-event examples below describe the existing
-implementation only; they cannot override those target contracts.
+This document owns process setup, operational controls and dated vendor measurements.
+Trace interpretation lives in the dedicated [Claude](unified-trace-claude.md),
+[Codex](unified-trace-codex.md), and [Pi](unified-trace-pi.md) mappings. Exact acquisition
+and publication follow [unified-trace-storage.md](unified-trace-storage.md).
 
 One module per vendor, holding everything Sylph knows about that CLI: how to launch
 it, how to read its native store, what it exposes to a second party, and where it
@@ -35,7 +34,7 @@ machine's inventory changes (`docs/environments.md` § Agent availability).
 | --- | --- |
 | launch argv, per mode | each CLI spells resume, session id, model, and effort differently |
 | native store location and format | JSONL per session, or a store with its own row ids |
-| does it accept a dictated session id | decides whether Sylph knows identity before the first event |
+| does it accept a dictated session id | chooses launch argv; retained vendor confirmation still proves identity |
 | mid-turn flush granularity | decides whether `watch` sees a turn in progress or only its end |
 | second-party control surface | decides whether the control facet exists at all |
 | which vendor keys carry what | the most-repeated defect class in this repo |
@@ -45,6 +44,11 @@ owns capture/source identity, generations and complete-record cursors. Native an
 observations both contribute semantic facts under explicit equivalence rules; missing
 joins remain visible. No mode discards richer native semantics merely because a live
 connection already exists.
+
+Runtime `Adapter::run` receives the raw capture sink; `Session::messages` is an operational
+`ControlStream`. `native_sources` locates evidence, while the shared envagent registry owns
+complete cursors, generations, stable snapshots and retention. Pure vendor mappers in
+`crates/trace/src/mapping/` read admitted evidence without envagent I/O.
 
 ## Capability matrix
 
@@ -98,46 +102,24 @@ the vendor normalizes silently, so a picker offering it lands on a different row
 capability payload answering it erases everything it does not mention; facets exist
 for this.
 
-**Delegation notifications.** The subtypes are `task_started`, `task_progress`,
-`task_updated`, `task_notification`; there is no `task_completed` or `task_failed`. A close
-arrives either as `task_updated` with `patch.status`, or as `task_notification` with
-`status` plus the delegate's summary. `task_updated` carries **no `tool_use_id`**, so the
-host is remembered from `task_started`, or the close lands at the root while the trajectory
-it closes sits inside a container.
-
-**`task_type` is the only thing distinguishing a delegation from a backgrounded shell
-job.** `local_agent` is a real subagent; `local_bash` is `run_in_background` on Bash
-reporting through the same channel. Neither `task_updated` nor `task_notification` carries
-the field, so it too is remembered from `task_started`. **Filter narrowly and let an unknown
-type through**: that direction costs a missing subtree, while the other publishes a shell
-command as a subagent and escalates its host tool's status.
+**Task notifications describe several kinds of work.** `task_started`, `task_progress`,
+`task_updated` and `task_notification` are retained exactly. A `local_bash` task is a
+backgrounded shell resource; a native child identity is required for an AgentThread.
+The [Claude mapping](unified-trace-claude.md#delegation-is-an-invocation-of-another-agent) defines those joins.
 
 **`--forward-subagent-text` forwards only for the built-in `Task`.** `Agent` and
-`Workflow` forward nothing on stdout, so their interior must come from the native bundle;
-the `Task` delegate file is the overlapping copy and is suppressed only after its host tool
-is known.
+`Workflow` need their native bundle for interior evidence. Live and native observations
+are both captured; absence on one surface never authorizes discarding the other.
 
-**Claude's native bundle is read by one cursor-driven reader in every mode.** `adopt`,
-`watch`, and live attachment share root/delegate/journal/manifest traversal and one
-projection. JSONL cursors advance only past complete lines; manifests are
-content-fingerprinted snapshots; sidecars have three source states: `missing`, `partial`,
-and `ready`. A partial sidecar is never treated as valid metadata, and a missing sidecar
-is not an eternal `pending` state: native launch/result records or task notifications are
-used when present, otherwise live close releases the delegate at the root. No timeout
-decides source meaning.
+**One registry captures Claude's native bundle.** Root and delegate JSONL, workflow
+journals/manifests and metadata snapshots use durable source generations. JSONL advances
+only past complete lines. Stable snapshots are checked twice before commit. A partial or
+missing source is an explicit source state and cannot become a successful empty object.
 
-**A resumed live reader captures its baseline before process launch.** Capturing after
-`system/init` can skip a delegate created between spawn and identity discovery. Existing
-bytes are hydrated into correlation state without re-emission; only bytes after the
-pre-launch boundary are projected live.
-
-**Workflow manifests may arrive after delegate files.** Delegate content is retained under
-its trajectory id while the parent-bearing declaration waits for the manifest's `runId`
-join. When the manifest arrives, the declaration is emitted once with the measured parent,
-so watch, live, and a later reload converge on the same tree without a retraction API.
-
-**`is_backgrounded` is reported on `task_started` and nowhere later**, so it must be
-re-attached to every subsequent phase.
+**Workflow manifests may arrive after delegate files.** Every source is retained as it
+arrives. Source definitions cite actual native identity or a proved companion transcript;
+late manifest evidence resolves relationships in the server mapper without rewriting raw
+captures. A path, tool label or timeout cannot establish a child identity.
 
 **A refusal has no `response` member** — `subtype: "error"` is the discriminant. Read
 it before the payload.
@@ -166,8 +148,8 @@ link (`docs/architecture.md` § One link, two typed capability facets).
 **Never connect or write to a socket in the user's real `cc-socks` directory.** That
 injects a turn into a live session of theirs. Probe only a throwaway child's own pid.
 
-**It records its own title for most sessions but not all**, so any surface showing one
-needs the opening-ask fallback.
+**A recorded title is optional.** Catalogue metadata preserves the vendor value when
+present; a reader can label an unnamed session without persisting a placeholder.
 
 **In the native store, a tool result's id and its error flag are both on the content
 block — nowhere else.** Stated as shapes rather than as counts, since a developer's store
@@ -177,7 +159,7 @@ true.
 `tool_use_id` sits on the `tool_result` block inside `message.content[]`, on every such
 block. `toolUseResult` under either spelling, and the top level of the record, hold it
 nowhere — so a parser reading those pairs nothing, and the pairing
-`docs/session-protocol.md` § Keying rules depends on does not exist.
+[Claude operation mapping](unified-trace-claude.md#lifecycle-and-result-authority) requires is absent.
 
 `is_error` is on that same block and **only** on records whose `message.role` is `user`,
 never on an assistant message. Read from the assistant branch it classifies every tool
@@ -346,143 +328,44 @@ present an empty slash menu as a failure. Its typed config is approval policy.
 **Native store is `rollout-*.jsonl`, flushed at item completion**, with
 `token_count` ticks proving mid-turn append.
 
-**The record vocabulary has two eras, and the discriminant is `history_mode`.** In the
-newer, paginated era `event_msg/item_completed` carries the turn's content keyed by
-`item.type` — Reasoning, CommandExecution, AgentMessage, FileChange, UserMessage,
-SubAgentActivity, McpToolCall, ContextCompaction, ImageView, CollabAgentToolCall, roughly
-in that order of frequency. A parser that drops `item_completed` reads almost nothing from
-a paginated rollout.
+**Native content surfaces have distinct schemas.** `history_mode` describes the native
+display-item format; it is not a reason to drop `response_item`. The live app-server,
+`exec --json`, native rollout and pagination database use different field names and
+shapes. [The Codex mapping](unified-trace-codex.md#content-and-delivery) owns their exact
+interpretation and correspondence rules.
 
-**Do not discriminate on `cli_version`.** One CLI version appears in both eras, and the
-store holds files written by the *newest* version present in the legacy shape — so a
-version comparison picks the wrong parser on a file the vendor is still producing today.
-The discriminant is `session_meta.payload.history_mode`. It is absent on the majority of
-files, all of which predate the field and are legacy, so **absence reads as legacy rather
-than as an error**.
+**A native child can carry a parent id without an id suffix.** Parentage comes from
+`session_meta.payload.parent_thread_id` or the typed
+`session_meta.payload.source.subagent.thread_spawn.parent_thread_id`. A file or agent-path
+naming convention cannot replace these fields. `forked_from_id` and `history_base`
+describe history/context ancestry, which remains separate from spawn parentage.
 
-**The two content streams are mutually exclusive per file.** "Both must be read" is true
-of the *store* and false of a *record*: nearly every file holds `item_completed` or
-`event_msg/agent_message`, not both, and reading both in a paginated file
-**double-counts every assistant message**.
+**Forwarded child frames retain the child's `threadId`.** One app-server connection can
+observe several agents. Runtime controls ignore other threads' activity/settings/approval
+frames, while raw capture keeps them all for their actual owner's mapper. A parent's
+activity notification cannot close a child activation or supply its result.
 
-A small set of the oldest files does hold both, and the obvious dedup fails on them: the
-pair carries the same text with matching `msg_…` ids but differs by a millisecond or two
-*and* by block type (`input_text` against `text`), so a key of `sha(text):timestamp`
-cannot match them. **Choose one stream per file from the discriminant** rather than
-discovering the overlap per record.
+**Model calls and runtime work have separate native identities.** A `function_call`
+uses `call_id`; a runtime `commandExecution` can use an independent `exec-*` id. Missing
+join evidence stays unresolved. Generic tool-host nesting is not agent delegation.
 
-**`CommandExecution` is not redundant with the tool call, and cannot be dropped as a
-duplicate.** It is the only carrier of `exit_code`, `status`, and `duration`, it uses a
-disjoint `exec-` id space, and it carries **no** `call_id` — so it cannot be paired to
-the `function_call` it completes by id at all. Neither stream can simply be preferred
-over the other.
+**Complete-line capture is shared across all native followers.** The registry retains
+unknown/malformed complete records, pending tails and source generation changes. All
+physical files for the same logical thread survive. An explicit `history_base.thread_id`
+can locate predecessor files, including duplicate matching locators; discovery does not
+select one by recency or size.
 
-**A subagent may record only a parent id with no id-suffix marker.** Measured from its
-own store: a rollout with `parent_thread_id` set and `thread_source: subagent`. So
-lineage cannot be recovered from an id-naming convention alone.
+**Selection is a database fact.** A consistent read of `state_5.sqlite`'s `threads` row
+retains the actual `id`, `rollout_path`, unknown columns and SQLite storage classes,
+including WAL commits. The acquisition observation cites the captured selected source,
+generation and complete lexical extent. Missing or unreadable metadata leaves selection
+unknown. `thread_history_*.sqlite` is a pagination projection and cannot replace native
+rollout evidence.
 
-**Lineage is nested, and reading only the flat key finds almost none of it.** The
-authoritative spelling is the nested
-`session_meta.source.subagent.thread_spawn.parent_thread_id`; a top-level
-`parent_thread_id` exists but is rare. A parser written only to the flat key finds almost
-nothing while erroring on nothing — read the nested path, and treat the flat one as a
-supplement.
-
-**`forked_from_id` alone does not mean "fork".** On 0.150.1 a subagent carries it too,
-equal to its `parent_thread_id`. The discriminant for a real fork is `parentThreadId:
-null` with `forkedFromId` set. Where both exist the parent wins
-(`docs/database-schema.md` § Identity in the schema).
-
-**`SubAgentActivity` names a host call id and a child thread id in one record**, which
-makes codex the one agent of the three whose native store carries real delegation
-structure. That is what `span` can honestly be built from here; see § Reading a vendor
-payload for why a parser-synthesized pairing is not.
-
-**codex forwards a delegate's interior, and this is the opposite of `claude`.** A real
-`spawn_agent` delegation emitted `subAgentActivity` and `collabAgentToolCall`, **and the
-delegate's own `commandExecution` and `agentMessage` items arrived unprompted, carrying
-the child's `threadId`** — so a codex delegation card may claim a real, fillable interior.
-
-Three properties of that structure decide how it may be read, and each is a branch an
-adapter author would otherwise get wrong:
-
-- **`kind` is `started` or `interacted` only.** `interrupted` and `completed` are not
-  emitted, so **a codex delegation has no close record in the store** and a parsed
-  delegation's end has to come from the turn containing it. This is the declared-only-event
-  trap in its usual form (§ Reading a vendor payload).
-- **`agent_thread_id` is the *other party*, not the child.** In a parent's rollout it names
-  the child; in the child's own rollout an `interacted` record names the **parent**
-  (`agent_path: "/root"`). The record's own side therefore decides the edge's direction;
-  mapping it to `span` unconditionally inverts every child-side edge, and nothing
-  downstream can detect that.
-- **`collabAgentToolCall` is not lineage.** It carries empty `receiver_thread_ids` and
-  `agents_states` with `tool: "wait"`, and its `status` is the *wait's* rather than any
-  delegate's. It marks a barrier.
-
-**The `spawn_agent` brief is ciphertext in current versions**, so a delegation's name is
-unrecoverable from the parent's own record. `docs/session-protocol.md` § "`name` is absent
-when unknown" governs: omit the name, because the journal makes every guess permanent and a
-row written with a placeholder is afterwards indistinguishable from one that carried a real
-name.
-
-**A childless trajectory means the opposite of what it means under `claude`**: there it is
-a terminal state the card must state, here a loading state, since codex does forward the
-interior. The two agents need opposite defaults, which is why `fidelity` and the capability
-facets are per-record rather than global.
-
-**There are three codex event vocabularies for the same concepts, and they are not
-interchangeable.** An adapter reading one while mapping names learned from another gets
-nothing, silently.
-
-| Source | Spelling | Example |
-| --- | --- | --- |
-| app-server | slash + camelCase | `item/completed`, `commandExecution` |
-| `exec --json` | dot + snake_case | `item.completed`, `command_execution` |
-| rollout JSONL | `type` / `payload` | `response_item` / `custom_tool_call` |
-
-Mapping the app-server's names onto Sylph's vocabulary: `reasoning`→`thinking`,
-`agentMessage`→`assistant`, `commandExecution`→ **both** `tool_call` and `tool_result`
-(one item carries the call and its outcome), `turn/started|completed`→`turn`,
-`thread/tokenUsage/updated`→`usage`, `thread/status/changed`→`status`,
-`contextCompaction`→`compact`.
-
-With no Sylph equivalent: `webSearch`, `imageGeneration`, `imageView`, `sleep`,
-`enteredReviewMode`/`exitedReviewMode`, `hookPrompt`, and `plan` — which Sylph reserves but
-does not implement (`docs/session-protocol.md` § Events). Only a minority of the declared
-`ThreadItem` variants and server-request kinds appear in real turns, which is § Reading a
-vendor payload's declared-only trap again: **write branches for what was observed, and let
-an unknown variant through rather than dropping it.**
-
-**`custom_tool_call` does not supersede `function_call`.** Both appear in the same files,
-and `function_call` is still how every collaboration tool is issued, so a parser that
-switches shapes on a version stops reading the calls that matter.
-
-**Mid-turn flush is confirmed, so `watch` is genuinely offerable**: a single turn appends
-to its rollout many times over its life, the first append within a fraction of a second,
-interleaving reasoning, tool calls, and token counts.
-
-The Codex watcher follows complete JSONL lines with a generation-aware byte
-cursor, rediscovers child and fork rollouts as they appear, and preserves
-cursors when a rollout moves between date directories. Reload reconstructs
-delegation/fork edges from headers and measured team paths. Forwarded child
-items in the parent rollout are de-duplicated when the child's own rollout is
-present, so one normalized event has one owner.
-
-**Identity is the vendor's, structurally.** `thread/start` has no `threadId` parameter at
-all — the id comes back at `result.thread.id` — so "assigns its own" follows from the shape
-of the API rather than from observation. Resume keeps the id and appends to the same
-rollout file; fork mints a new id with `forkedFromId` set.
-
-**`thread_history_*.sqlite` is a pagination index over the rollouts, not a replacement —
-read the JSONL.** `thread_history_projection_state` tracks a per-thread
-`next_rollout_byte_offset` and `thread_turns` keeps byte offsets pointing back into the
-file, so the tables are built incrementally *from* the rollouts and cover only a fraction
-of the threads a real install holds.
-
-So the JSONL is authoritative for `adopt` and `watch`. `enumerate` may prefer the
-projection where a thread is present, since it is the only carrier of turn-level `status`,
-`duration_ms`, `started_at`, and `completed_at`, and falls back to walking the files for
-every thread it does not hold.
+**Identity is proved by the vendor response.** `thread/start` has no `threadId` parameter;
+the confirmed id is `result.thread.id`. Its retained reply is correlated with the exact
+retained `thread/start` or `thread/resume` request on the same process stream. An arbitrary
+JSON-RPC result carrying a nested `thread` object does not bind identity.
 
 **Model and effort come from `model/list`, and a bad effort value is confirmed rather
 than refused.**
@@ -505,10 +388,10 @@ entirely invented key with `status: "ok"`. It is a file writer, not a settings A
 
 ## `pi`
 
-The target timestamp interpretation is
+Timestamp interpretation is
 [unified-trace-pi.md](unified-trace-pi.md#context-payloads-and-measurements): offsetless
 historical timestamps remain ambiguous unless actual timezone/epoch evidence resolves
-them. The current parser's machine timezone is not such evidence.
+them. The parser's current machine timezone is not such evidence.
 
 **No second-party control surface.** `RpcClientOptions` is
 `{cliPath, cwd, env, provider, model, args}` — no address field, no `createServer`, no
@@ -543,9 +426,9 @@ it reads stdin. Sylph exposes this primitive as QueueSteering and follow-up as Q
 editable server-owned queue. Turn-scoped Steer is refused without writing to the vendor. Codex's `expectedTurnId` supplies the required atomic
 precondition; the envagent binds that vendor id to Sylph's unique turn generation.
 
-**A turn ends on `agent_settled`, not `agent_end`**, because `pi` can emit `agent_end` and
-then continue. Both events exist and both reach the wire; the distinction is about which
-one is terminal, not about which one is real.
+**The operational interval ends on `agent_settled`.** Pi can emit `agent_end` and then
+continue. Both native frames are retained. The [Pi lifecycle mapping](unified-trace-pi.md#activation-and-operation-lifecycle)
+separates inner activations from the outer harness interval.
 
 **Prefer an unbundled source-mapped install to a minified bundle** when checking this
 vendor's behaviour — one is available at
@@ -557,14 +440,11 @@ mode `"w"` and no lock, so a reader can observe an empty or half-written file. A
 `_persist` buffers until the first assistant message, so the file **does not exist** early
 in a turn — an absent file is not an absent session.
 
-The Pi watcher therefore keeps a byte cursor only at complete-line boundaries, verifies the
-consumed prefix before each changed-file pass, and treats an inode replacement or prefix change
-as a new file generation. Unchanged record ids are de-duplicated across a rewrite; a record whose
-payload changed under the same id requires the supported field-revision rule before
-changing its semantic projection. Changed owner or predecessor claims remain conflicts. A missing or
-partial header remains a pending source and is rediscovered on the next pass. This is a
-source-specific rule: Claude's append-only bundle cursor and Codex's rollout cursor must not
-inherit Pi's rewrite assumptions.
+The shared capture registry keeps a complete-line cursor and verifies the consumed prefix.
+Replacement, truncation or prefix change creates a new source generation. Captured native
+entry ids and field revisions are reconciled by the pure Pi mapper; the acquisition layer
+never drops a reread because its JSON content hash matches. Missing files and partial tails
+remain source observations, and later source bytes remain admissible.
 
 Pi's persistence writer terminates each `JSON.stringify(entry)` with `\n`; a valid JSON value
 without that terminator is consequently treated as an in-flight final line and retried rather
@@ -580,7 +460,8 @@ owns publication of the link state.
 *and* per tool result, so a 5-tool turn writes ~11 times. That is message granularity,
 not turn granularity.
 
-**It records no title of its own**, so every row needs the opening-ask fallback.
+**Native `session_info` entries may name a session.** The catalogue keeps an observed
+name and leaves unknown titles absent.
 
 **Its native store has two field-spelling eras, and the rename landed field by field
 rather than atomically.** Every multi-word key moved from snake_case to camelCase —
@@ -621,7 +502,7 @@ both, but the offsetless window sits in the **middle** of the offset-aware range
 
 **Offsetless historical timestamps are ambiguous without source evidence.** A sibling
 epoch value can establish that message's time; the parser's current timezone cannot
-establish the timezone of an earlier environment. The replacement preserves the lexical
+establish the timezone of an earlier environment. Capture preserves the lexical
 stamp and explicit uncertainty under
 [unified-trace-pi.md](unified-trace-pi.md#context-payloads-and-measurements).
 
@@ -672,22 +553,26 @@ here costs real data and looks like correct behaviour.
 
 ## Testing an agent module
 
-Two kinds of test, and neither substitutes for the other.
+Acquisition/control tests and semantic mapping tests exercise distinct contracts.
 
-**Recorded-payload tests** pin classification against real vendor JSON checked into the
-repo. This is where classification is actually covered: a live run spends real tokens and
-sees only whatever shapes one turn happens to produce, so a classification defect — a
-backgrounded shell job read as a delegation, say — is invisible to it.
+**Recorded-payload mapping tests** run against retained vendor JSON and assert actual
+owners, content values, unknown fields, usage units and independent lifecycle claims.
+The common gate is [unified-trace-conformance.md](unified-trace-conformance.md).
 
-**A live verification path** runs a real turn against the real CLI and refreshes the
-recorded payloads. Recorded fixtures go stale as vendors change, so this cannot be
-deleted along with the adapter subprocess — it is what keeps the fixtures honest.
+**Scripted vendor peers** exercise process capture before reply routing, control requests,
+native identity proof, capability changes and stale-turn guards without paid model calls.
+Spool tests verify lexical bytes, fixed authorization epochs, crash recovery, mutations,
+missing sources, WAL metadata and changing sidecars. Every new behavior test must fail
+under a targeted mutation of the contract it claims to cover.
+
+**A live verification path** refreshes dated vendor captures when an external contract
+changes. Use a throwaway session and preserve the observed bytes; a model's prose about
+what happened cannot verify an adapter wire field.
 
 **A fixture's size and timing are both part of the contract**, not details of it. A
 two-item model list cannot observe an unscrollable, unsearchable catalogue, because real
 agents report a dozen or more. A scenario emitting its whole tree inside one millisecond
 gives every bar equal length, so a client computing durations from the wrong field passes
-everything. And a delegate that forwards nothing cannot be timed from its interior at all,
-so "each delegate forwards at least one event" is a fixture requirement rather than a nod
-to realism. **When a defect is a function of how much a control holds or how fast events
-arrive, the fixture's shape is the test.**
+everything. A source that forwards no interior needs its own absent-coverage case; a
+visible-interval test needs independently timed boundaries. **When a defect depends on
+catalogue size or event pacing, the fixture's shape is part of the test.**

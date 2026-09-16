@@ -1,0 +1,1105 @@
+"use client";
+import { useT } from "@/lib/i18n";
+import dynamic from "next/dynamic";
+import Link from "next/link";
+import { useEffect, useRef, useState } from "react";
+import { traceAPI } from "@/lib/trace-api";
+import { rememberTraceNavigation, traceCacheKey } from "@/lib/trace-cache";
+import { useTraceResource } from "@/lib/use-trace-resource";
+import { useWorkspaceUI } from "@/lib/workspace-ui";
+import { useDialog } from "@/lib/use-dialog";
+import {
+  agentName,
+  agentUrl,
+  availabilityLabel,
+  executionLabel,
+  representationLabel,
+  type ObjectDetail,
+  type ReaderBootstrap,
+  type Representation,
+  type TraceView,
+} from "@/lib/trace-types";
+import { describeCount } from "@/lib/trace-window";
+import { TracePayload } from "./trace-payload";
+import { ArtifactsPane } from "./artifacts-pane";
+const Companion = dynamic(() =>
+  import("./agent-reader").then((module) => module.AgentReader),
+);
+const button =
+  "min-h-11 rounded px-3 text-sm hover:bg-hover focus-ring disabled:opacity-50";
+export type Inspection =
+  | { kind: "agents" | "find" | "history" | "coverage" | "files" }
+  | { kind: "object"; reference: string }
+  | { kind: "agent"; agent: string };
+
+export function TraceInspector({
+  bootstrap,
+  inspection,
+  onInspect,
+}: {
+  bootstrap: ReaderBootstrap;
+  inspection: Inspection;
+  onInspect: (value: Inspection) => void;
+}) {
+  const t = useT();
+  const ui = useWorkspaceUI();
+  const [available, setAvailable] = useState(0);
+  const [trail, setTrail] = useState<Inspection[]>([]);
+  const [pinned, setPinned] = useState<
+    Array<{ reference: string; label: string }>
+  >([]);
+  const [width, setWidth] = useState(480);
+  const visible = ui.isMobile ? ui.drawer === "files" : ui.rightOpen;
+  const full = available < 940;
+  const close = () => {
+    if (ui.isMobile) ui.closeDrawer();
+    else ui.setRightOpen(false);
+  };
+  const { ref, onKeyDown } = useDialog<HTMLElement>({
+    enabled: visible && full && !ui.artifactFullscreen,
+    onClose: close,
+  });
+  const tabs = useRef<HTMLDivElement>(null);
+  const selected =
+    inspection.kind === "files"
+      ? "files"
+      : inspection.kind === "agents" || inspection.kind === "agent"
+        ? "agents"
+        : "details";
+  useEffect(() => {
+    const parent = document.getElementById("main");
+    if (!parent) return;
+    const observer = new ResizeObserver(([entry]) =>
+      setAvailable(entry.contentRect.width),
+    );
+    observer.observe(parent);
+    return () => observer.disconnect();
+  }, []);
+  const inspect = (next: Inspection) => {
+    setTrail((previous) => [...previous, inspection].slice(-10));
+    onInspect(next);
+  };
+  const back = () => {
+    const previous = trail.at(-1);
+    if (!previous) return;
+    setTrail((items) => items.slice(0, -1));
+    onInspect(previous);
+  };
+  const resize = (next: number) =>
+    setWidth(Math.max(420, Math.min(640, available - 520, next)));
+  if (!visible) return null;
+  const style = full
+    ? undefined
+    : { width: Math.max(420, Math.min(width, available - 520)) };
+  return (
+    <aside
+      ref={ref}
+      aria-label={t("trace.inspectorLabel")}
+      role={full && !ui.artifactFullscreen ? "dialog" : undefined}
+      aria-modal={(full && !ui.artifactFullscreen) || undefined}
+      onKeyDown={onKeyDown}
+      style={style}
+      className={`${full ? "fixed inset-0 z-40" : "relative shrink-0 border-l border-line"} flex min-h-0 min-w-0 flex-col bg-canvas`}
+    >
+      {!full && (
+        <div
+          role="separator"
+          aria-label="Resize inspector"
+          aria-orientation="vertical"
+          aria-valuemin={420}
+          aria-valuemax={Math.min(640, available - 520)}
+          aria-valuenow={Math.round(style!.width)}
+          tabIndex={0}
+          className="absolute bottom-0 left-0 top-0 z-10 w-2 cursor-col-resize focus-ring"
+          onKeyDown={(event) => {
+            if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+              event.preventDefault();
+              resize(width + (event.key === "ArrowLeft" ? 20 : -20));
+            }
+          }}
+          onPointerDown={(event) => {
+            event.currentTarget.setPointerCapture(event.pointerId);
+          }}
+          onPointerMove={(event) => {
+            if (event.currentTarget.hasPointerCapture(event.pointerId))
+              resize(
+                event.currentTarget.parentElement!.getBoundingClientRect()
+                  .right - event.clientX,
+              );
+          }}
+        />
+      )}
+      <header className="flex shrink-0 items-center justify-between border-b border-line px-3 py-1">
+        <h2 className="text-sm font-semibold">
+          {full ? t("trace.inspectConversation") : t("trace.inspector")}
+        </h2>
+        <button className={button} onClick={close}>
+          {full ? t("trace.backConversation") : t("trace.close")}
+        </button>
+      </header>
+      <div
+        ref={tabs}
+        role="tablist"
+        aria-label="Inspector destinations"
+        className="flex shrink-0 border-b border-line px-2"
+        onKeyDown={(event) => {
+          const buttons = Array.from(
+            tabs.current?.querySelectorAll<HTMLButtonElement>("[role=tab]") ??
+              [],
+          );
+          const index = buttons.indexOf(
+            document.activeElement as HTMLButtonElement,
+          );
+          const next =
+            event.key === "ArrowRight"
+              ? (index + 1) % buttons.length
+              : event.key === "ArrowLeft"
+                ? (index + buttons.length - 1) % buttons.length
+                : event.key === "Home"
+                  ? 0
+                  : event.key === "End"
+                    ? buttons.length - 1
+                    : null;
+          if (next !== null) {
+            event.preventDefault();
+            buttons[next]?.focus();
+          }
+        }}
+      >
+        {(["agents", "details", "files"] as const).map((tab) => (
+          <button
+            key={tab}
+            role="tab"
+            id={`inspector-${tab}`}
+            aria-controls={`inspector-panel-${tab}`}
+            aria-selected={selected === tab}
+            tabIndex={selected === tab ? 0 : -1}
+            className={button}
+            onClick={() =>
+              inspect({ kind: tab === "details" ? "coverage" : tab })
+            }
+          >
+            {t(
+              (
+                {
+                  agents: "trace.agents",
+                  details: "trace.details",
+                  files: "trace.files",
+                } as const
+              )[tab],
+            )}
+          </button>
+        ))}
+      </div>
+      {(trail.length > 0 ||
+        pinned.length > 0 ||
+        inspection.kind === "object") && (
+        <div className="flex shrink-0 flex-wrap items-center gap-1 border-b border-line px-2">
+          {trail.length > 0 && (
+            <button className={button} onClick={back}>
+              {t("trace.previousDetail")}
+            </button>
+          )}
+          {inspection.kind === "object" && (
+            <button
+              className={button}
+              disabled={
+                pinned.length >= 4 ||
+                pinned.some((item) => item.reference === inspection.reference)
+              }
+              onClick={() =>
+                setPinned((previous) => [
+                  ...previous,
+                  {
+                    reference: inspection.reference,
+                    label: t("trace.pinnedLabel", {
+                      count: previous.length + 1,
+                    }),
+                  },
+                ])
+              }
+            >
+              {t("trace.pinDetail")}
+            </button>
+          )}
+          {pinned.map((item) => (
+            <span key={item.reference} className="flex items-center">
+              <button
+                className={button}
+                onClick={() =>
+                  inspect({ kind: "object", reference: item.reference })
+                }
+              >
+                {item.label}
+              </button>
+              <button
+                className={button}
+                aria-label={t("trace.unpin", { label: item.label })}
+                onClick={() =>
+                  setPinned((previous) =>
+                    previous.filter(
+                      (value) => value.reference !== item.reference,
+                    ),
+                  )
+                }
+              >
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+      <div
+        role="tabpanel"
+        id={`inspector-panel-${selected}`}
+        aria-labelledby={`inspector-${selected}`}
+        className="flex min-h-0 min-w-0 flex-1 flex-col"
+      >
+        {inspection.kind === "agent" ? (
+          <>
+            <button
+              className={`${button} shrink-0 text-left`}
+              onClick={() => onInspect({ kind: "agents" })}
+            >
+              {t("trace.allAgents")}
+            </button>
+            <Companion
+              key={inspection.agent}
+              agent={inspection.agent}
+              companion
+            />
+          </>
+        ) : inspection.kind === "files" ? (
+          bootstrap.header.fileContext ? (
+            <ArtifactsPane />
+          ) : (
+            <p className="p-4 text-sm">{t("trace.noFiles")}</p>
+          )
+        ) : (
+          <div className="min-h-0 flex-1 overflow-auto p-3">
+            {inspection.kind === "agents" && (
+              <AgentDirectory
+                bootstrap={bootstrap}
+                alongside={(agent) => inspect({ kind: "agent", agent })}
+              />
+            )}
+            {inspection.kind === "find" && (
+              <AgentSearch bootstrap={bootstrap} />
+            )}
+            {inspection.kind === "history" && (
+              <HistoryDirectory bootstrap={bootstrap} />
+            )}
+            {inspection.kind === "coverage" && (
+              <Coverage bootstrap={bootstrap} />
+            )}
+            {inspection.kind === "object" && (
+              <ObjectInspection
+                key={inspection.reference}
+                reference={inspection.reference}
+                history={bootstrap.header.history.selection}
+                view={bootstrap.view}
+                maximum={bootstrap.window.limits.maxPayloadBytes}
+                onInspect={inspect}
+              />
+            )}
+          </div>
+        )}
+      </div>
+    </aside>
+  );
+}
+
+function AgentDirectory({
+  bootstrap,
+  alongside,
+}: {
+  bootstrap: ReaderBootstrap;
+  alongside: (agent: string) => void;
+}) {
+  const t = useT();
+  const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState("all");
+  const [cursor, setCursor] = useState<string | null>(null);
+  const address = bootstrap.header.agent.address;
+  const result = useTraceResource(
+    traceCacheKey(bootstrap.view, ["agents", address, query, filter, cursor]),
+    (signal) =>
+      traceAPI.agents(address, bootstrap.view, query, filter, cursor, signal),
+  );
+  return (
+    <div className="space-y-3">
+      <label className="block text-sm">
+        {t("trace.findAgents")}
+        <input
+          className="mt-1 min-h-11 w-full rounded border border-line bg-canvas px-3 text-base"
+          value={query}
+          onChange={(event) => {
+            setQuery(event.target.value);
+            setCursor(null);
+          }}
+        />
+      </label>
+      <label className="block text-sm">
+        {t("trace.show")}
+        <select
+          className="ml-2 min-h-11 rounded border border-line bg-canvas px-2"
+          value={filter}
+          onChange={(event) => {
+            setFilter(event.target.value);
+            setCursor(null);
+          }}
+        >
+          {[
+            ["all", t("trace.all")],
+            ["active", t("trace.observedActive")],
+            ["needs_input", t("trace.needsMe")],
+            ["completed", t("trace.completed")],
+            ["unknown", t("trace.outcomeUnknown")],
+          ].map(([value, label]) => (
+            <option key={value} value={value}>
+              {label}
+            </option>
+          ))}
+        </select>
+      </label>
+      <p className="text-xs text-ink-muted">
+        {t("trace.scopeAgents", {
+          agent: agentName(bootstrap.header.agent, t),
+        })}{" "}
+        {result.data &&
+          describeCount(result.data.total, t("trace.agentsNoun"), t)}
+      </p>
+      {result.error && <p role="alert">{result.error.message}</p>}
+      {result.pending && <p role="status">{t("trace.loadingAgents")}</p>}
+      <ul className="space-y-2">
+        {result.data?.items.map((row) => (
+          <li
+            key={row.agent.address}
+            className="rounded border border-line p-3"
+          >
+            <Link
+              className="block break-words font-medium underline"
+              href={agentUrl(row.agent.address)}
+            >
+              {agentName(row.agent, t)}
+            </Link>
+            <p className="mt-1 text-xs text-ink-muted">
+              {row.agent.vendor} · {row.relation} ·{" "}
+              {executionLabel(row.ownExecution, t)}
+            </p>
+            <p className="mt-1 text-xs">
+              {describeCount(row.activations, t("trace.activationsNoun"), t)} ·{" "}
+              {describeCount(row.requiredInput, t("trace.requestsNoun"), t)}
+            </p>
+            {row.coverage
+              .filter((coverage) => coverage.state.kind !== "available")
+              .map((coverage, index) => (
+                <p key={index} className="text-xs">
+                  {coverage.dimension}: {availabilityLabel(coverage.state)}
+                </p>
+              ))}
+            <button
+              className={button}
+              onClick={() => alongside(row.agent.address)}
+            >
+              {t("trace.alongside")}
+            </button>
+          </li>
+        ))}
+      </ul>
+      <PageControls
+        page={result.data}
+        pending={result.pending}
+        setCursor={setCursor}
+      />
+    </div>
+  );
+}
+
+function HistoryDirectory({ bootstrap }: { bootstrap: ReaderBootstrap }) {
+  const t = useT();
+  const [cursor, setCursor] = useState<string | null>(null);
+  const result = useTraceResource(
+    traceCacheKey(bootstrap.view, [
+      "histories",
+      bootstrap.header.agent.address,
+      cursor,
+    ]),
+    (signal) =>
+      traceAPI.histories(
+        bootstrap.header.agent.address,
+        bootstrap.view,
+        cursor,
+        signal,
+      ),
+  );
+  return (
+    <div>
+      <h3 className="mb-3 font-medium">{t("trace.histories")}</h3>
+      {result.error && <p role="alert">{result.error.message}</p>}
+      <ul>
+        {result.data?.items.map((history) => (
+          <li key={history.selection} className="border-b border-line py-3">
+            <Link
+              className="underline"
+              href={agentUrl(bootstrap.header.agent.address, history.selection)}
+            >
+              {history.label}
+              {history.isCurrent ? " · Current" : ""}
+            </Link>
+            <p className="text-xs text-ink-muted">
+              {describeCount(history.entryCount, t("trace.entriesNoun"), t)}{" "}
+              {availabilityLabel(history.availability)}
+            </p>
+          </li>
+        ))}
+      </ul>
+      <PageControls
+        page={result.data}
+        pending={result.pending}
+        setCursor={setCursor}
+      />
+    </div>
+  );
+}
+
+function AgentSearch({ bootstrap }: { bootstrap: ReaderBootstrap }) {
+  const t = useT();
+  const [input, setInput] = useState("");
+  const [query, setQuery] = useState("");
+  const [cursor, setCursor] = useState<string | null>(null);
+  const [searchView, setSearchView] = useState<TraceView | null>(null);
+  const result = useTraceResource(
+    query
+      ? traceCacheKey(bootstrap.view, [
+          "search",
+          bootstrap.header.agent.address,
+          query,
+          cursor,
+        ])
+      : null,
+    (signal) =>
+      traceAPI
+        .search(
+          bootstrap.header.agent.address,
+          bootstrap.header.history.selection,
+          query,
+          cursor,
+          signal,
+          searchView,
+        )
+        .then((page) => {
+          setSearchView(page.view);
+          return page;
+        }),
+  );
+  return (
+    <div>
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          setQuery(input.trim());
+          setCursor(null);
+          setSearchView(null);
+        }}
+      >
+        <label className="block text-sm">
+          {t("trace.findIn", { agent: agentName(bootstrap.header.agent, t) })}
+          <input
+            value={input}
+            onChange={(event) => setInput(event.target.value)}
+            className="mt-2 min-h-11 w-full rounded border border-line bg-canvas px-3 text-base"
+          />
+        </label>
+        <button className={button} type="submit">
+          {t("trace.searchHistory")}
+        </button>
+      </form>
+      <p className="my-2 text-xs text-ink-muted">
+        {t("trace.indexProgress", {
+          index: bootstrap.progress.searchCut ?? t("trace.unknown"),
+          evidence: bootstrap.progress.evidenceCut,
+        })}
+      </p>
+      {result.error && <p role="alert">{result.error.message}</p>}
+      {result.pending && <p role="status">{t("trace.searching")}</p>}
+      <ul className="space-y-3">
+        {result.data?.items.map((hit) => (
+          <li key={hit.anchor} className="rounded border border-line p-3">
+            <p className="whitespace-pre-wrap text-sm">{hit.excerpt}</p>
+            <Link
+              className={`${button} mt-2 inline-block underline`}
+              href={agentUrl(
+                hit.agent.address,
+                hit.history.selection,
+                hit.anchor,
+              )}
+              onClick={() => {
+                if (result.data)
+                  rememberTraceNavigation(
+                    hit.agent.address,
+                    hit.history.selection,
+                    hit.anchor,
+                    result.data.view,
+                  );
+              }}
+            >
+              {t("trace.resultLink", { history: hit.history.label })}
+            </Link>
+          </li>
+        ))}
+      </ul>
+      <PageControls
+        page={result.data}
+        pending={result.pending}
+        setCursor={setCursor}
+      />
+    </div>
+  );
+}
+
+function PageControls({
+  page,
+  pending,
+  setCursor,
+}: {
+  page?: {
+    hasBefore: boolean;
+    hasAfter: boolean;
+    beforeCursor: string | null;
+    afterCursor: string | null;
+  };
+  pending: boolean;
+  setCursor: (cursor: string | null) => void;
+}) {
+  const t = useT();
+  return (
+    <div className="mt-3 flex flex-wrap">
+      <button
+        className={button}
+        disabled={!page?.hasBefore || pending}
+        onClick={() => setCursor(page?.beforeCursor ?? null)}
+      >
+        {t("trace.previousPage")}
+      </button>
+      <button
+        className={button}
+        disabled={!page?.hasAfter || pending}
+        onClick={() => setCursor(page?.afterCursor ?? null)}
+      >
+        {t("trace.nextPage")}
+      </button>
+    </div>
+  );
+}
+
+function Coverage({ bootstrap }: { bootstrap: ReaderBootstrap }) {
+  const t = useT();
+  return (
+    <div className="space-y-4">
+      <h3 className="font-medium">{t("trace.coverage")}</h3>
+      <p className="text-sm">
+        {executionLabel(bootstrap.header.ownExecution, t)}
+      </p>
+      <ul className="space-y-2">
+        {bootstrap.header.coverage.map((coverage, index) => (
+          <li key={index}>
+            <span className="text-sm font-medium">{coverage.dimension}</span>
+            <p className="text-sm">
+              {coverage.state.kind === "available"
+                ? t("trace.available")
+                : coverage.state.reason}
+            </p>
+          </li>
+        ))}
+      </ul>
+      <dl className="grid grid-cols-2 gap-2 text-sm">
+        <dt>{t("trace.connection")}</dt>
+        <dd>
+          {bootstrap.progress.sourceConnected
+            ? t("trace.connected")
+            : t("trace.disconnected")}
+        </dd>
+        <dt>{t("trace.admitted")}</dt>
+        <dd>{bootstrap.progress.evidenceCut}</dd>
+        <dt>{t("trace.projectionReady")}</dt>
+        <dd>{bootstrap.progress.projectionCut}</dd>
+        <dt>{t("trace.searchIndexed")}</dt>
+        <dd>{bootstrap.progress.searchCut ?? "Unavailable"}</dd>
+        <dt>Accepted, history updating</dt>
+        <dd>{bootstrap.progress.pendingOutbox}</dd>
+      </dl>
+      {bootstrap.progress.fault && (
+        <p role="alert">{bootstrap.progress.fault}</p>
+      )}
+      <p className="text-xs text-ink-muted">
+        {t("trace.viewMeta", {
+          revision: bootstrap.view.viewRevision,
+          generation: bootstrap.view.generation,
+        })}
+      </p>
+    </div>
+  );
+}
+
+function ObjectInspection({
+  reference,
+  history,
+  view,
+  maximum,
+  onInspect,
+}: {
+  reference: string;
+  history: string | null;
+  view: TraceView;
+  maximum: number;
+  onInspect: (value: Inspection) => void;
+}) {
+  const t = useT();
+  const result = useTraceResource(
+    traceCacheKey(view, ["object", reference, history]),
+    (signal) => traceAPI.object(reference, view, history, signal),
+  );
+  if (result.error) return <p role="alert">{result.error.message}</p>;
+  if (!result.data) return <p role="status">{t("trace.loadingDetails")}</p>;
+  return (
+    <ObjectContent
+      detail={result.data}
+      history={history}
+      maximum={maximum}
+      onInspect={onInspect}
+    />
+  );
+}
+
+function ObjectContent({
+  detail,
+  history,
+  maximum,
+  onInspect,
+}: {
+  detail: ObjectDetail;
+  history: string | null;
+  maximum: number;
+  onInspect: (value: Inspection) => void;
+}) {
+  const t = useT();
+  const content = detail.content;
+  const choices =
+    content.kind === "operation"
+      ? [...new Set(content.results.map((result) => result.representation))]
+      : [];
+  const [selection, setSelection] = useState<Representation | null>(() =>
+    choices.includes("caller_result") ? "caller_result" : (choices[0] ?? null),
+  );
+  const [compare, setCompare] = useState(false);
+  const [compared, setCompared] = useState<Representation[]>([]);
+  return (
+    <div className="space-y-4">
+      <header>
+        <h3 className="break-words text-base font-semibold">{detail.title}</h3>
+        {detail.owner && (
+          <Link
+            className="text-sm underline"
+            href={agentUrl(detail.owner.address)}
+          >
+            {t("trace.owner", { agent: agentName(detail.owner, t) })}
+          </Link>
+        )}
+        {detail.execution && (
+          <p className="text-sm">{executionLabel(detail.execution, t)}</p>
+        )}
+        {detail.availability.kind !== "available" && (
+          <p>{detail.availability.reason}</p>
+        )}
+      </header>
+      {content.kind === "operation" ? (
+        <>
+          <p className="text-xs text-ink-muted">{content.category.kind}</p>
+          <h4 className="font-medium">{t("trace.input")}</h4>
+          {content.input.map((payload, index) => (
+            <TracePayload
+              key={index}
+              access={payload}
+              view={detail.view}
+              maximum={maximum}
+            />
+          ))}
+          <label className="block text-sm">
+            {t("trace.representation")}
+            <select
+              aria-label={t("trace.representation")}
+              className="ml-2 min-h-11 max-w-full rounded border border-line bg-canvas px-2"
+              value={selection ?? ""}
+              onChange={(event) =>
+                setSelection(event.target.value as Representation)
+              }
+            >
+              {choices.map((choice) => (
+                <option key={choice} value={choice}>
+                  {representationLabel(choice, t)}
+                </option>
+              ))}
+            </select>
+          </label>
+          {choices.length > 1 && (
+            <label className="flex min-h-11 items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={compare}
+                onChange={(event) => {
+                  setCompare(event.target.checked);
+                  setCompared(selection ? [selection] : []);
+                }}
+              />
+              {t("trace.compare")}
+            </label>
+          )}
+          {compare && (
+            <fieldset>
+              <legend className="text-sm">
+                {t("trace.chooseRepresentations")}
+              </legend>
+              {choices.map((choice) => (
+                <label
+                  key={choice}
+                  className="flex min-h-11 items-center gap-2 text-sm"
+                >
+                  <input
+                    type="checkbox"
+                    checked={compared.includes(choice)}
+                    onChange={(event) =>
+                      setCompared((previous) =>
+                        event.target.checked
+                          ? [...previous, choice]
+                          : previous.filter((value) => value !== choice),
+                      )
+                    }
+                  />
+                  {representationLabel(choice, t)}
+                </label>
+              ))}
+            </fieldset>
+          )}
+          {content.results
+            .filter((result) =>
+              compare
+                ? compared.includes(result.representation)
+                : result.representation === selection,
+            )
+            .map((result) => (
+              <section
+                key={result.reference}
+                className="space-y-2 rounded border border-line p-3"
+              >
+                <h4 className="font-medium">
+                  {result.label} · {result.disposition.replaceAll("_", " ")}
+                </h4>
+                {result.availability.kind !== "available" && (
+                  <p className="text-sm">{result.availability.reason}</p>
+                )}
+                {result.payloads.map((payload, index) => (
+                  <TracePayload
+                    key={index}
+                    access={payload}
+                    view={detail.view}
+                    maximum={maximum}
+                  />
+                ))}
+              </section>
+            ))}
+          {!content.results.length && (
+            <p className="text-sm">{t("trace.noResults")}</p>
+          )}
+          {content.resources.map((relation) => (
+            <button
+              key={relation.target}
+              className={button}
+              onClick={() =>
+                onInspect({ kind: "object", reference: relation.target })
+              }
+            >
+              {relation.label}
+            </button>
+          ))}
+          {content.resultsCursor && (
+            <ResultPages
+              reference={detail.reference}
+              history={history}
+              cursor={content.resultsCursor}
+              view={detail.view}
+              maximum={maximum}
+            />
+          )}
+          {content.resourcesCursor && (
+            <RelationPages
+              reference={detail.reference}
+              history={history}
+              cursor={content.resourcesCursor}
+              view={detail.view}
+              kind="resources"
+              onInspect={onInspect}
+            />
+          )}
+        </>
+      ) : content.kind === "measurement" ? (
+        <dl className="space-y-2 text-sm">
+          <dt>{t("trace.metric")}</dt>
+          <dd>
+            {content.metric.kind === "extension"
+              ? content.metric.name
+              : content.metric.kind.replaceAll("_", " ")}
+          </dd>
+          <dt>{t("trace.value")}</dt>
+          <dd>
+            {content.value}{" "}
+            {content.unit.kind === "currency"
+              ? content.unit.code
+              : content.unit.kind === "extension"
+                ? content.unit.name
+                : content.unit.kind}
+          </dd>
+          <dt>{t("trace.scope")}</dt>
+          <dd>{content.scope}</dd>
+          <dt>{t("trace.interpretation")}</dt>
+          <dd>{content.mode.kind}</dd>
+        </dl>
+      ) : content.kind === "evidence" ? (
+        <ul className="space-y-3">
+          {content.facts.map((fact) => (
+            <li key={fact.claimRef}>
+              <h4 className="font-medium">{fact.label}</h4>
+              <p className="text-sm">{fact.summary}</p>
+              {fact.payload && (
+                <TracePayload
+                  access={fact.payload}
+                  view={detail.view}
+                  maximum={maximum}
+                />
+              )}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <>
+          {content.kind === "context" && (
+            <>
+              <p className="text-sm">
+                {content.basis} · {content.coverage.kind}
+              </p>
+              {content.memberships.map((member) => (
+                <button
+                  key={member.target}
+                  className={button}
+                  onClick={() =>
+                    onInspect({ kind: "object", reference: member.target })
+                  }
+                >
+                  {member.label}
+                </button>
+              ))}
+              {content.membershipsCursor && (
+                <RelationPages
+                  reference={detail.reference}
+              history={history}
+                  cursor={content.membershipsCursor}
+                  view={detail.view}
+                  kind="memberships"
+                  onInspect={onInspect}
+                />
+              )}
+            </>
+          )}
+          {content.kind === "resource" && (
+            <>
+              <p className="text-sm">
+                {content.resourceKind.kind} ·{" "}
+                {content.state.kind === "available"
+                  ? t("trace.available")
+                  : content.state.reason}
+              </p>
+              {content.operationsCursor && (
+                <RelationPages
+                  reference={detail.reference}
+              history={history}
+                  cursor={content.operationsCursor}
+                  view={detail.view}
+                  kind="relations"
+                  onInspect={onInspect}
+                />
+              )}
+            </>
+          )}
+          {content.payloads.map((payload, index) => (
+            <TracePayload
+              key={index}
+              access={payload}
+              view={detail.view}
+              maximum={maximum}
+            />
+          ))}
+        </>
+      )}
+      {detail.relationsCursor && (
+        <RelationPages
+          reference={detail.reference}
+              history={history}
+          cursor={detail.relationsCursor}
+          view={detail.view}
+          kind="relations"
+          onInspect={onInspect}
+        />
+      )}
+      {detail.relations.length > 0 && (
+        <section>
+          <h4 className="font-medium">{t("trace.related")}</h4>
+          <ul>
+            {detail.relations.map((relation) => (
+              <li key={relation.target}>
+                <button
+                  className={button}
+                  onClick={() =>
+                    onInspect({ kind: "object", reference: relation.target })
+                  }
+                >
+                  {relation.label}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+    </div>
+  );
+}
+
+/** Drafts have no trace identity, but their explicitly prepared file context is usable. */
+export function StandaloneFiles() {
+  const t = useT();
+  const ui = useWorkspaceUI();
+  const visible = ui.isMobile ? ui.drawer === "files" : ui.rightOpen;
+  if (!visible) return null;
+  return (
+    <aside
+      aria-label={t("trace.files")}
+      className={`${ui.isMobile ? "fixed inset-0 z-40" : "w-96 border-l border-line"} flex min-h-0 flex-col bg-canvas`}
+    >
+      <button
+        className={button}
+        onClick={() =>
+          ui.isMobile ? ui.closeDrawer() : ui.setRightOpen(false)
+        }
+      >
+        {t("trace.backConversation")}
+      </button>
+      <ArtifactsPane />
+    </aside>
+  );
+}
+
+function RelationPages({
+  reference,
+  history,
+  cursor,
+  view,
+  kind,
+  onInspect,
+}: {
+  reference: string;
+  history: string | null;
+  cursor: string;
+  view: TraceView;
+  kind: "resources" | "memberships" | "relations";
+  onInspect: (value: Inspection) => void;
+}) {
+  const t = useT();
+  const [next, setNext] = useState<string | null>(null);
+  const result = useTraceResource(
+    next ? traceCacheKey(view, [reference, history, kind, next]) : null,
+    (signal) => traceAPI.relations(reference, view, history, kind, next!, signal),
+  );
+  return (
+    <div>
+      {result.error && <p role="alert">{result.error.message}</p>}
+      <ul>
+        {result.data?.items.map((relation) => (
+          <li key={relation.target}>
+            <button
+              className={button}
+              onClick={() =>
+                onInspect({ kind: "object", reference: relation.target })
+              }
+            >
+              {relation.label}
+            </button>
+          </li>
+        ))}
+      </ul>
+      <button
+        className={button}
+        disabled={result.pending || (next !== null && !result.data?.hasAfter)}
+        onClick={() => setNext(result.data?.afterCursor ?? cursor)}
+      >
+        {t("trace.moreSearch")} · {kind}
+      </button>
+    </div>
+  );
+}
+
+function ResultPages({
+  reference,
+  history,
+  cursor,
+  view,
+  maximum,
+}: {
+  reference: string;
+  history: string | null;
+  cursor: string;
+  view: TraceView;
+  maximum: number;
+}) {
+  const t = useT();
+  const [next, setNext] = useState<string | null>(null);
+  const result = useTraceResource(
+    next ? traceCacheKey(view, [reference, history, "results", next]) : null,
+    (signal) => traceAPI.results(reference, view, history, next!, signal),
+  );
+  return (
+    <div>
+      {result.error && <p role="alert">{result.error.message}</p>}
+      {result.data?.items.map((occurrence) => (
+        <section
+          key={occurrence.reference}
+          className="my-2 rounded border border-line p-3"
+        >
+          <h4>
+            {occurrence.label} ·{" "}
+            {representationLabel(occurrence.representation, t)}
+          </h4>
+          <p className="text-xs">
+            {occurrence.disposition.replaceAll("_", " ")}
+          </p>
+          {occurrence.availability.kind !== "available" && (
+            <p>{occurrence.availability.reason}</p>
+          )}
+          {occurrence.payloads.map((payload, index) => (
+            <TracePayload
+              key={index}
+              access={payload}
+              view={view}
+              maximum={maximum}
+            />
+          ))}
+        </section>
+      ))}
+      <button
+        className={button}
+        disabled={result.pending || (next !== null && !result.data?.hasAfter)}
+        onClick={() => setNext(result.data?.afterCursor ?? cursor)}
+      >
+        {t("trace.moreResults")}
+      </button>
+    </div>
+  );
+}

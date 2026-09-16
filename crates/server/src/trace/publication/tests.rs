@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    storage::cas::BlobStore,
+    trace::cas::BlobStore,
     trace::{
         evidence::{catalogue::CatalogueLimits, AdmissionLimits, EvidenceStore},
         generation::{ObjectUpdate, ProjectionBatch},

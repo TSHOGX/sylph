@@ -2,47 +2,19 @@ import { expect, test } from "@playwright/test";
 import { gotoReady } from "./fixtures/session";
 
 /**
- * Adopting a session an agent already has.
- *
- * # What this suite can and cannot reach, stated rather than papered over
- *
- * The E2E fixture agent has **no native store**: it is an in-process fixture, so there is
- * no vendor writing files for it, and it *refuses* `adopt` and enumerates empty on
- * purpose (`crates/adapters/src/e2e.rs` §
- * `adopt_and_watch_refuse_because_there_is_no_native_store`). Synthesizing a store would
- * make this suite assert against records Sylph itself wrote rather than against a parser,
- * which tests the fixture and retires the question.
- *
- * So a **successful adopt is not covered end to end here**, and cannot be without either
- * a real vendor CLI on the runner or a fabricated store. What is covered is everything the
- * client decides: that the surface opens and is reachable by keyboard, that an empty
- * listing reads as "nothing here" rather than as a failure, that a blocked row is shown
- * with its reason rather than hidden or offered, that choosing a row asks to *follow* the
- * store rather than snapshot it, and that the list is the combobox pattern a screen reader
- * can walk.
- *
- * That `watch` assertion reads the request body, because the flag has no rendered
- * consequence — omitting it still answers `201` and still draws a complete-looking
- * transcript, which then silently stops. `lib/adopt-request.test.ts` owns the payload's
- * shape across rows; the case here is narrower and different in kind: that a click on this
- * surface reaches the endpoint carrying it.
- *
- * The rows are supplied by intercepting `GET /sessions/enumerate`, which is the right seam
- * for exactly that reason: every assertion below is about the **client's** branch on a
- * shape the backend's own tests pin. The success path was verified by hand against the
- * real stores — 1000 `claude`, 1258 `codex`, 531 `pi` sessions readable, one `claude`
- * session adopted at 13623 events and one `codex` rollout at 3 bracketed turns — and those
- * measurements are recorded in `crates/server/src/db/ingest.rs`.
+ * Native catalogue interaction is tested at its typed API boundary. Actual capture
+ * and retained vendor interpretation are covered by `crates/server/src/trace/upload.rs`
+ * and the shared mapper/reducer corpus. This fixture never invents semantic events.
  */
 
 /** One row, with only what a picker renders. */
 function row(over: Record<string, unknown> = {}) {
   return {
-    agent: "e2e",
+    agent: "codex",
     nativeId: "11111111-2222-3333-4444-555555555555",
     workdir: "/tmp",
     fidelity: "blocks",
-    id: "local:e2e:11111111-2222-3333-4444-555555555555",
+    id: "local:codex:11111111-2222-3333-4444-555555555555",
     ...over,
   };
 }
@@ -70,10 +42,10 @@ test("the picker is reachable from the palette and lists what the machine holds"
     route.fulfill({
       json: {
         sessions: [
-          row({ title: "Fix the SSE reconnect loop", eventCount: 42 }),
+          row({ title: "Fix the SSE reconnect loop" }),
           row({
             nativeId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-            id: "local:e2e:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            id: "local:codex:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
             workdir: "/tmp/other",
           }),
         ],
@@ -101,14 +73,14 @@ test("an already-adopted row is shown with its reason rather than hidden", async
           row({ title: "Already here", blocked: "alreadyAdopted" }),
           row({
             nativeId: "no-dir",
-            id: "local:e2e:no-dir",
+            id: "local:codex:no-dir",
             title: "Nowhere to run",
             workdir: undefined,
             blocked: "noWorkdir",
           }),
           row({
             nativeId: "outside",
-            id: "local:e2e:outside",
+            id: "local:codex:outside",
             title: "Out of bounds",
             workdir: "/etc",
             blocked: "outsideRoots",
@@ -138,7 +110,9 @@ test("an already-adopted row is shown with its reason rather than hidden", async
 test("an already-adopted row opens the session instead of adopting it again", async ({
   page,
 }) => {
-  const id = "local:e2e:already-adopted-1";
+  const id = "local:codex:already-adopted-1";
+  const address = "retained-adopted-agent";
+  await page.route(`**/api/v1/sessions/${encodeURIComponent(id)}`, (route) => route.fulfill({ json: { session: { id, traceAgentRef: address } } }));
   await page.route("**/api/v1/sessions/enumerate*", (route) =>
     route.fulfill({
       json: {
@@ -161,7 +135,7 @@ test("an already-adopted row opens the session instead of adopting it again", as
   // Navigated to the session it names. Asserted on identity — the encoded triple — rather
   // than on a count or a position, because the shared journal holds whatever earlier specs
   // created.
-  await expect(page).toHaveURL(new RegExp(encodeURIComponent(id).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  await expect(page).toHaveURL(new RegExp(`/agents/${address}$`));
   expect(adopted, "an already-adopted row must not be re-adopted").toBe(false);
 });
 
@@ -292,7 +266,7 @@ test("the list is a combobox over a listbox, and the cursor is announced from th
       json: {
         sessions: [
           row({ title: "First session" }),
-          row({ nativeId: "second", id: "local:e2e:second", title: "Second session" }),
+          row({ nativeId: "second", id: "local:codex:second", title: "Second session" }),
         ],
       },
     }),

@@ -1,27 +1,25 @@
-//! Inbound envagent connection manager and canonical event ingest.
-
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-
-use anyhow::{anyhow, Context, Result};
-use sha2::{Digest, Sha256};
-use sylph_protocol::{
-    negotiate, Ack, Command, CommandOutcome, DecodedMessage, EnvironmentId, EventBatch,
-    IdempotencyPolicy, ProducerId, ProducerSeq, ServerSeq, WireMessage, ENV_PROTOCOL,
-};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, Mutex, RwLock};
-use tokio_rustls::TlsAcceptor;
-
-use crate::db::{EnvIngestResult, JournalStore};
-use crate::events::{EventHub, SeqAllocator, StreamEvent};
-use crate::models::now_ms;
-use crate::supervisor::{Outcome, TrajectoryOutcome, TrajectoryReconciler, TurnCloser};
-
+//! Outward envagent transport, current capability state and durable capture admission.
 use super::registry::{EnvironmentRegistry, EnvironmentSnapshot, PairingGrant, PairingOffer};
-
+use crate::{db::ControlStore, models::now_ms, trace::service::TraceService};
+use anyhow::{anyhow, Result};
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
+use sylph_protocol::trace::{AgentRef, IngestionScope, InventoryRef};
+use sylph_protocol::CaptureAuthorization;
+use sylph_protocol::{
+    negotiate, Command, CommandOutcome, DecodedMessage, EnvironmentId, IdempotencyPolicy,
+    WireMessage, ENV_PROTOCOL,
+};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    sync::{mpsc, Mutex, RwLock},
+};
+use tokio_rustls::TlsAcceptor;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DispatchResult {
     Sent,
@@ -29,17 +27,6 @@ pub enum DispatchResult {
     AlreadyRejected,
     UnknownNotRetried,
 }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum IngestResult {
-    Ack(Ack),
-    Nack {
-        producer_id: ProducerId,
-        expected_next: ProducerSeq,
-        reason: String,
-    },
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum RemoteCommandError {
     #[error("remote command rejected ({code}): {message}")]
@@ -95,25 +82,11 @@ pub enum BridgeError {
 struct Lease {
     epoch: u64,
     sender: mpsc::Sender<WireMessage>,
-    producer_id: ProducerId,
 }
 
-/// Metadata retained for a prepared link.
-///
-/// The envagent allocates the native identity before the server can expose a durable
-/// session, because identity is `(environment, agent, native_id)` and only the vendor
-/// mints the third part (`docs/architecture.md` § Identity).  So this record already
-/// carries a session id while the first turn is still waiting in the browser — the id
-/// exists before any row does, which is the opposite of a server-minted key and the
-/// reason a draft needs its own type at all.
 #[derive(Debug, Clone)]
 pub struct RemoteDraft {
-    /// Stable command scope for this draft. Retrying the first-turn request
-    /// must address the same envagent command rather than minting a second
-    /// non-idempotent run.
     pub draft_id: String,
-    /// Subject that created this draft. Draft handles are bearer-like opaque
-    /// ids, so every operation must bind back to this durable principal.
     pub creator_subject: String,
     pub environment: EnvironmentId,
     pub session_id: Option<sylph_protocol::SessionId>,
@@ -121,37 +94,13 @@ pub struct RemoteDraft {
     pub workdir: String,
     pub title: Option<String>,
     pub inject_identity: bool,
-    pub flags: std::collections::HashMap<String, String>,
+    pub flags: HashMap<String, String>,
     pub identity_preamble: Option<String>,
     pub permission_mode: Option<String>,
+    pub capture_authorization: CaptureAuthorization,
     pub promoting: bool,
-    pub first_turn_id: Option<String>,
+    pub first_command_id: Option<String>,
 }
-
-/// Result of a successful remote draft promotion.  Drafts are intentionally
-/// process-local, but an idempotent HTTP retry can arrive immediately after a
-/// promotion removed the live draft.  Keeping this small response cache lets
-/// that retry return the original identity instead of attempting a second
-/// non-idempotent `Run` command.
-#[derive(Debug, Clone)]
-pub struct RemotePromotionResult {
-    pub turn_id: String,
-    pub session_id: sylph_protocol::SessionId,
-}
-
-#[derive(Debug, Clone)]
-pub enum RemoteDraftClaim {
-    Missing,
-    Busy,
-    Conflict {
-        turn_id: String,
-    },
-    Claimed {
-        draft: Box<RemoteDraft>,
-        turn_id: String,
-    },
-}
-
 struct CommandWaiter {
     id: u64,
     sender: tokio::sync::oneshot::Sender<CommandOutcome>,
@@ -180,47 +129,484 @@ impl Drop for ReadRegistration {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("native persistence failed: {0}")]
-struct NativePersistenceFailure(String);
-
-/// Owns paired-environment state and the one ingress serialization point.
 #[derive(Clone)]
 pub struct EnvBridge {
     pub registry: EnvironmentRegistry,
-    store: JournalStore,
-    history: crate::storage::HistoryStore,
-    seq: SeqAllocator,
-    hub: EventHub,
+    store: ControlStore,
+    trace: Arc<TraceService>,
     leases: Arc<RwLock<HashMap<EnvironmentId, Lease>>>,
     command_policies: Arc<RwLock<HashMap<(EnvironmentId, String), IdempotencyPolicy>>>,
     command_waiters: CommandWaiters,
     read_waiters: ReadWaiters,
     next_waiter_id: Arc<AtomicU64>,
-    // Producer ordering is per environment. Retaining a sidecar on one machine
-    // must not hold the ingestion gate for every other machine.
-    ingest_gates: Arc<Mutex<HashMap<EnvironmentId, Arc<Mutex<()>>>>>,
     remote_drafts: Arc<Mutex<HashMap<String, RemoteDraft>>>,
-    remote_promotion_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
-    remote_promotion_results: Arc<Mutex<HashMap<String, RemotePromotionResult>>>,
     session_command_locks: Arc<Mutex<HashMap<sylph_protocol::SessionId, Arc<Mutex<()>>>>>,
-    remote_source_turns: Arc<Mutex<HashMap<sylph_protocol::SessionId, String>>>,
-    /// Shared terminal settlement path.  The bridge is constructed before the
-    /// supervisor (which owns the consolidator), so this is installed by
-    /// `AppState::build` once both sides exist.
-    turn_closer: Arc<RwLock<Option<TurnCloser>>>,
-    /// Applies late delegated outcomes to the turn that opened the trajectory.
-    /// Remote event batches bypass the live link drain, so they need the same
-    /// reconciler wired explicitly at startup.
-    trajectory_reconciler: Arc<RwLock<Option<TrajectoryReconciler>>>,
+    remote_promotion_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     server_epoch: u64,
 }
-
 impl EnvBridge {
-    /// Resolve and authorize a draft for a caller. A draft is mutable control
-    /// state: ownership prevents another Subject that knows the opaque handle
-    /// from using it, while the live grant check makes revocation take effect
-    /// for subsequent operations.
+    pub fn new(store: ControlStore, trace: Arc<TraceService>) -> Self {
+        Self {
+            registry: EnvironmentRegistry::new(),
+            store,
+            trace,
+            leases: Arc::new(RwLock::new(HashMap::new())),
+            command_policies: Arc::new(RwLock::new(HashMap::new())),
+            command_waiters: Arc::new(Mutex::new(HashMap::new())),
+            read_waiters: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            next_waiter_id: Arc::new(AtomicU64::new(1)),
+            remote_drafts: Arc::new(Mutex::new(HashMap::new())),
+            session_command_locks: Arc::new(Mutex::new(HashMap::new())),
+            remote_promotion_locks: Arc::new(Mutex::new(HashMap::new())),
+            server_epoch: now_ms() as u64,
+        }
+    }
+
+    async fn serve_connection(&self, stream: TcpStream) -> Result<()> {
+        let (reader, writer) = stream.into_split();
+        self.serve_io(reader, writer).await
+    }
+
+    pub async fn serve_io<R, W>(&self, mut reader: R, mut writer: W) -> Result<()>
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+        W: AsyncWrite + Unpin + Send + 'static,
+    {
+        let first = read_frame(&mut reader).await?;
+        let hello = match sylph_protocol::decode_message(&first)? {
+            DecodedMessage::Known(WireMessage::Hello {
+                protocol,
+                versions,
+                environment_id,
+                installation_id,
+                producer_id,
+                connection_epoch,
+                agents,
+                health,
+            }) => sylph_protocol::Hello {
+                protocol,
+                versions,
+                environment_id,
+                installation_id,
+                producer_id,
+                connection_epoch,
+                agents,
+                health,
+            },
+            _ => return Err(anyhow!("first envagent frame must be hello")),
+        };
+        let token: String = serde_json::from_slice(&read_frame(&mut reader).await?)?;
+        let (tx, mut rx) = mpsc::channel::<WireMessage>(64);
+        let welcome = self.register_connection(&hello, &token, tx.clone()).await?;
+        write_frame(
+            &mut writer,
+            &serde_json::to_vec(&WireMessage::Welcome {
+                protocol: welcome.protocol,
+                version: welcome.version,
+                environment_id: welcome.environment_id.clone(),
+                connection_epoch: welcome.connection_epoch,
+                server_epoch: welcome.server_epoch,
+                heartbeat_interval_ms: welcome.heartbeat_interval_ms,
+            })?,
+        )
+        .await?;
+        let output = tokio::spawn(async move {
+            while let Some(frame) = rx.recv().await {
+                write_frame(&mut writer, &serde_json::to_vec(&frame)?).await?;
+            }
+            Ok::<_, anyhow::Error>(())
+        });
+        let environment = welcome.environment_id;
+        let epoch = welcome.connection_epoch;
+        let result: Result<()> = async {
+            loop {
+                let frame = sylph_protocol::decode_message(&read_frame(&mut reader).await?)?;
+                match frame {
+                    DecodedMessage::Known(WireMessage::CommandResult {
+                        request_id,
+                        outcome,
+                        connection_epoch,
+                        idempotency,
+                    }) => {
+                        self.check_epoch(&environment, epoch, connection_epoch)
+                            .await?;
+                        self.record_command_result(
+                            &environment,
+                            &sylph_protocol::CommandResultMessage {
+                                request_id,
+                                outcome,
+                                connection_epoch,
+                                idempotency,
+                            },
+                        )
+                        .await?;
+                    }
+                    DecodedMessage::Known(WireMessage::CaptureUpload {
+                        request_id,
+                        operation,
+                        connection_epoch,
+                    }) => {
+                        self.check_epoch(&environment, epoch, connection_epoch)
+                            .await?;
+                        let outcome = self.receive_capture(&environment, operation).await;
+                        tx.send(WireMessage::CaptureReply {
+                            request_id,
+                            outcome,
+                            connection_epoch: epoch,
+                        })
+                        .await
+                        .map_err(|_| BridgeError::NotConnected)?;
+                    }
+                    DecodedMessage::Known(WireMessage::Heartbeat {
+                        connection_epoch, ..
+                    }) => {
+                        self.check_epoch(&environment, epoch, connection_epoch)
+                            .await?;
+                        if let Some(row) = self.store.environment_row(&environment).await? {
+                            self.store
+                                .set_environment_connection(
+                                    &environment,
+                                    &row.token_hash,
+                                    epoch,
+                                    true,
+                                    row.reachable_via.as_deref(),
+                                    &row.agents_json,
+                                )
+                                .await?;
+                        }
+                    }
+                    DecodedMessage::Known(WireMessage::Agents {
+                        agents,
+                        connection_epoch,
+                    }) => {
+                        self.check_epoch(&environment, epoch, connection_epoch)
+                            .await?;
+                        self.registry
+                            .update_agents(&environment, epoch, agents)
+                            .await;
+                    }
+                    DecodedMessage::Known(WireMessage::SessionControlState {
+                        session_id,
+                        lease,
+                        native_turn_id,
+                        active,
+                        connection_epoch,
+                    }) => {
+                        self.check_epoch(&environment, epoch, connection_epoch)
+                            .await?;
+                        if session_id.environment != environment {
+                            return Err(BridgeError::ProducerMismatch.into());
+                        }
+                        self.store
+                            .set_control_state(
+                                &session_id,
+                                lease.as_deref(),
+                                native_turn_id.as_deref(),
+                                active,
+                                epoch,
+                            )
+                            .await?;
+                    }
+                    DecodedMessage::Known(WireMessage::Request {
+                        session_id,
+                        request,
+                        connection_epoch,
+                    }) => {
+                        self.check_epoch(&environment, epoch, connection_epoch)
+                            .await?;
+                        if session_id.environment != environment {
+                            return Err(BridgeError::ProducerMismatch.into());
+                        }
+                        self.store
+                            .set_current_request(&session_id, &request, epoch)
+                            .await?;
+                    }
+                    DecodedMessage::Known(other) => tracing::debug!(
+                        kind = other.kind(),
+                        "unhandled current envagent notification"
+                    ),
+                    DecodedMessage::Unknown { kind, .. } => {
+                        return Err(anyhow!("unknown capture wire envelope {kind}"))
+                    }
+                }
+            }
+        }
+        .await;
+        let _ = self.disconnect(&environment, epoch).await;
+        output.abort();
+        result
+    }
+
+    async fn check_epoch(
+        &self,
+        environment: &EnvironmentId,
+        expected: u64,
+        received: u64,
+    ) -> Result<()> {
+        if expected != received
+            || self
+                .leases
+                .read()
+                .await
+                .get(environment)
+                .is_none_or(|lease| lease.epoch != expected)
+        {
+            return Err(BridgeError::StaleEpoch.into());
+        }
+        Ok(())
+    }
+
+    async fn receive_capture(
+        &self,
+        environment: &EnvironmentId,
+        operation: sylph_protocol::CaptureUpload,
+    ) -> sylph_protocol::CaptureReply {
+        use sylph_protocol::{CaptureReply, CaptureUpload};
+        let issuer = sylph_protocol::trace::Issuer::Environment(environment.clone());
+        let accepted: Result<CaptureReply> = async {
+            match operation {
+                CaptureUpload::Begin {
+                    capture,
+                    declarations,
+                } => match self
+                    .trace
+                    .uploads()
+                    .begin(&issuer, capture, declarations)
+                    .await?
+                {
+                    crate::trace::upload::BeginCapture::Pending(ticket) => {
+                        Ok(CaptureReply::Pending { ticket })
+                    }
+                    crate::trace::upload::BeginCapture::Complete(batch) => Ok(capture_reply(batch)),
+                },
+                CaptureUpload::Chunk {
+                    ticket,
+                    reference,
+                    bytes,
+                } => {
+                    self.trace
+                        .uploads()
+                        .put_chunk(&issuer, &ticket, &reference, &bytes)
+                        .await?;
+                    Ok(CaptureReply::ChunkStored)
+                }
+                CaptureUpload::Commit { ticket } => {
+                    let batch = self.trace.uploads().finish(&issuer, &ticket).await?;
+                    self.trace.notify_admission();
+                    Ok(capture_reply(batch))
+                }
+            }
+        }
+        .await;
+        match accepted {
+            Ok(reply) => reply,
+            Err(error) => CaptureReply::Rejected {
+                code: "CAPTURE_REJECTED".into(),
+                message: format!("{error:#}"),
+            },
+        }
+    }
+
+    pub async fn disconnect(&self, environment: &EnvironmentId, epoch: u64) -> Result<()> {
+        let mut leases = self.leases.write().await;
+        if leases
+            .get(environment)
+            .is_some_and(|lease| lease.epoch != epoch)
+        {
+            return Err(BridgeError::StaleEpoch.into());
+        }
+        leases.remove(environment);
+        drop(leases);
+        if let Some(row) = self.store.environment_row(environment).await? {
+            self.store
+                .clear_environment_connection_if_epoch(environment, &row.token_hash, epoch)
+                .await?;
+        }
+        self.registry.disconnect(environment, epoch).await?;
+        self.remote_drafts
+            .lock()
+            .await
+            .retain(|_, draft| &draft.environment != environment);
+        self.store.clear_environment_runtime(environment).await?;
+        let keys: Vec<_> = self
+            .command_waiters
+            .lock()
+            .await
+            .keys()
+            .filter(|(env, _)| env == environment)
+            .cloned()
+            .collect();
+        for key in keys {
+            for waiter in take_command_waiters(&self.command_waiters, &key).await {
+                let _ = waiter.sender.send(CommandOutcome::Unknown {
+                    message: Some("envagent connection closed".into()),
+                });
+            }
+        }
+        self.read_waiters
+            .lock()
+            .expect("read waiters")
+            .retain(|(env, _), _| env != environment);
+        Ok(())
+    }
+
+    pub async fn unpair(&self, environment: &EnvironmentId) -> Result<bool> {
+        let epoch = self
+            .leases
+            .read()
+            .await
+            .get(environment)
+            .map(|lease| lease.epoch);
+        if let Some(epoch) = epoch {
+            self.disconnect(environment, epoch).await?;
+        }
+        let _ = self.registry.unpair(environment).await;
+        Ok(self.store.delete_environment(environment).await?)
+    }
+
+    pub async fn revoke_subject_control(
+        &self,
+        subject: &str,
+        environment: &EnvironmentId,
+    ) -> Result<()> {
+        let sessions = self
+            .store
+            .list_sessions(&crate::db::SessionFilter {
+                environment: Some(environment.to_string()),
+                limit: 10000,
+                ..Default::default()
+            })
+            .await?;
+        for session in sessions {
+            if let Some((Some(lease), true)) = self.store.control_state(&session.id).await? {
+                if self
+                    .store
+                    .command(&lease)
+                    .await?
+                    .is_some_and(|command| command.acceptance.authorization.subject == subject)
+                {
+                    let _ = self
+                        .remote_session_command(
+                            &session.id,
+                            sylph_protocol::EnvironmentCommand::Interrupt {
+                                session_id: session.id.clone(),
+                                expected_turn_id: Some(lease),
+                            },
+                            IdempotencyPolicy::AtMostOnce,
+                        )
+                        .await;
+                }
+            }
+        }
+        let drafts: Vec<_> = self
+            .remote_drafts
+            .lock()
+            .await
+            .values()
+            .filter(|draft| &draft.environment == environment && draft.creator_subject == subject)
+            .map(|draft| draft.draft_id.clone())
+            .collect();
+        for draft in drafts {
+            self.discard_remote_draft(&draft).await;
+        }
+        Ok(())
+    }
+
+    pub fn spawn_health_reaper(self: &Arc<Self>) {
+        let bridge = Arc::downgrade(self);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+                let Some(bridge) = bridge.upgrade() else {
+                    break;
+                };
+                match bridge
+                    .store
+                    .disconnect_stale_environments(now_ms() - 45_000)
+                    .await
+                {
+                    Ok(envs) => {
+                        for env in envs {
+                            let epoch = bridge
+                                .leases
+                                .read()
+                                .await
+                                .get(&env)
+                                .map(|lease| lease.epoch);
+                            if let Some(epoch) = epoch {
+                                let _ = bridge.disconnect(&env, epoch).await;
+                            }
+                        }
+                    }
+                    Err(error) => tracing::error!(%error,"environment heartbeat sweep failed"),
+                }
+            }
+        });
+    }
+
+    pub async fn discard_remote_draft(&self, id: &str) -> Option<RemoteDraft> {
+        let draft = self.remote_drafts.lock().await.remove(id)?;
+        let _ = self
+            .dispatch_remote_operation(
+                &draft.environment,
+                sylph_protocol::EnvironmentCommand::DraftClose {
+                    draft_id: id.into(),
+                },
+                IdempotencyPolicy::AtMostOnce,
+            )
+            .await;
+        Some(draft)
+    }
+
+    pub async fn mark_draft_command(&self, id: &str, command: &str) -> Result<RemoteDraft> {
+        let mut drafts = self.remote_drafts.lock().await;
+        let draft = drafts
+            .get_mut(id)
+            .ok_or_else(|| anyhow!("draft not found"))?;
+        if draft
+            .first_command_id
+            .as_deref()
+            .is_some_and(|old| old != command)
+        {
+            return Err(anyhow!("draft already dispatched another command"));
+        }
+        draft.promoting = true;
+        draft.first_command_id = Some(command.into());
+        Ok(draft.clone())
+    }
+
+    pub async fn remote_attach(&self, session: &crate::models::Session) -> Result<CommandOutcome> {
+        let scope = IngestionScope::Agent(AgentRef::Session(session.id.clone()));
+        let epoch = self
+            .trace
+            .catalogue()
+            .evidence()
+            .authorize_scope(&scope, &[AgentRef::Session(session.id.clone())])
+            .await?;
+        self.remote_session_command(
+            &session.id,
+            sylph_protocol::EnvironmentCommand::Run {
+                capture_authorization: CaptureAuthorization { scope, epoch },
+                session_id: Some(session.id.clone()),
+                draft_id: None,
+                agent: session.id.agent.to_string(),
+                workdir: session
+                    .workdir
+                    .clone()
+                    .ok_or_else(|| anyhow!("session workdir unknown"))?,
+                flags: serde_json::from_str::<HashMap<String, String>>(&session.flags_json)?
+                    .into_iter()
+                    .collect(),
+                inject_identity: session.inject_identity,
+                identity_preamble: None,
+                permission_mode: None,
+                initial_input: None,
+                initial_turn_id: None,
+            },
+            IdempotencyPolicy::Replayable,
+        )
+        .await
+    }
     pub async fn authorize_remote_draft(
         &self,
         draft_id: &str,
@@ -244,128 +630,6 @@ impl EnvBridge {
         }
         Ok(draft)
     }
-
-    pub fn new(
-        store: JournalStore,
-        history: crate::storage::HistoryStore,
-        seq: SeqAllocator,
-        hub: EventHub,
-        registry: EnvironmentRegistry,
-    ) -> Self {
-        Self {
-            registry,
-            store,
-            history,
-            seq,
-            hub,
-            leases: Arc::new(RwLock::new(HashMap::new())),
-            command_policies: Arc::new(RwLock::new(HashMap::new())),
-            command_waiters: Arc::new(Mutex::new(HashMap::new())),
-            read_waiters: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            next_waiter_id: Arc::new(AtomicU64::new(1)),
-            ingest_gates: Arc::new(Mutex::new(HashMap::new())),
-            remote_drafts: Arc::new(Mutex::new(HashMap::new())),
-            remote_promotion_locks: Arc::new(Mutex::new(HashMap::new())),
-            remote_promotion_results: Arc::new(Mutex::new(HashMap::new())),
-            session_command_locks: Arc::new(Mutex::new(HashMap::new())),
-            remote_source_turns: Arc::new(Mutex::new(HashMap::new())),
-            turn_closer: Arc::new(RwLock::new(None)),
-            trajectory_reconciler: Arc::new(RwLock::new(None)),
-            server_epoch: now_ms() as u64,
-        }
-    }
-
-    /// Install the canonical turn settlement path after supervisor construction.
-    pub async fn set_turn_closer(&self, closer: TurnCloser) {
-        *self.turn_closer.write().await = Some(closer);
-    }
-
-    pub async fn interrupt_turn(
-        &self,
-        session_id: &sylph_protocol::SessionId,
-        turn_id: &str,
-    ) -> bool {
-        let Some(closer) = self.turn_closer.read().await.clone() else {
-            return false;
-        };
-        closer
-            .close(session_id, turn_id, Outcome::Interrupted)
-            .await
-    }
-
-    /// Journal and publish a server-authored event for a turn.
-    ///
-    /// Server-authored, so `source` is `server` rather than `agent`: a status the server
-    /// decided is not something the vendor said, and a reader that could not tell them
-    /// apart would attribute the server's own reasoning to the agent.
-    pub async fn emit_server_event(
-        &self,
-        session_id: &sylph_protocol::SessionId,
-        turn_id: &str,
-        kind: &str,
-        text: String,
-        data: Option<serde_json::Value>,
-    ) -> Result<()> {
-        let _sequence_guard = self.seq.gate().lock_owned().await;
-        let event = crate::events::StreamEvent {
-            seq: self.seq.next_inner(session_id).await?,
-            arrival_turn_id: Some(turn_id.to_string()),
-            kind: kind.to_string(),
-            phase: None,
-            stream_id: None,
-            span: None,
-            interior_state: None,
-            name: None,
-            text,
-            data,
-            is_error: false,
-            stability: "stable".into(),
-            source: "server".into(),
-            arrival_at_ms: now_ms(),
-            recorded_at_ms: None,
-            body_ref: None,
-            tool_summary: None,
-            created_at_ms: now_ms(),
-            started_at_ms: None,
-        };
-        self.store
-            .append_event(&event.to_row(session_id, turn_id))
-            .await?;
-        self.hub.publish(turn_id, event.clone()).await;
-        self.hub.publish_trace(&session_id.encode(), event).await;
-        Ok(())
-    }
-
-    /// Install the shared trajectory reconciliation path used by remote ingest.
-    pub async fn set_trajectory_reconciler(&self, reconciler: TrajectoryReconciler) {
-        *self.trajectory_reconciler.write().await = Some(reconciler);
-    }
-
-    pub fn spawn_health_reaper(&self) {
-        let bridge = self.clone();
-        tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(15));
-            loop {
-                ticker.tick().await;
-                let cutoff = now_ms() - 45_000;
-                let Ok(stale) = bridge.store.disconnect_stale_environments(cutoff).await else {
-                    continue;
-                };
-                if !stale.is_empty() {
-                    let mut leases = bridge.leases.write().await;
-                    for environment in stale {
-                        leases.remove(&environment);
-                    }
-                }
-            }
-        });
-    }
-
-    /// Serve envagent connections over the local development transport.
-    ///
-    /// The production deployment may wrap the accepted stream in TLS; the
-    /// message and acknowledgement semantics remain identical. This listener
-    /// is opt-in so existing loopback server tests do not bind an extra port.
     pub async fn serve(&self, listener: TcpListener) -> Result<()> {
         loop {
             let (stream, _peer) = listener.accept().await?;
@@ -377,10 +641,6 @@ impl EnvBridge {
             });
         }
     }
-
-    /// Serve envagents over TLS. The framed protocol is identical to the
-    /// loopback listener; only the accepted byte stream is wrapped before the
-    /// bridge performs its credential and hello handshake.
     pub async fn serve_tls(&self, listener: TcpListener, acceptor: TlsAcceptor) -> Result<()> {
         loop {
             let (stream, _peer) = listener.accept().await?;
@@ -399,759 +659,6 @@ impl EnvBridge {
             });
         }
     }
-
-    async fn serve_connection(&self, stream: TcpStream) -> Result<()> {
-        let (reader, writer) = tokio::io::split(stream);
-        self.serve_io(reader, writer).await
-    }
-
-    pub async fn serve_io<R, W>(&self, mut reader: R, mut writer: W) -> Result<()>
-    where
-        R: AsyncRead + Unpin + Send + 'static,
-        W: AsyncWrite + Unpin + Send + 'static,
-    {
-        let first = read_frame(&mut reader).await?;
-        let hello = match sylph_protocol::decode_message(&first)? {
-            DecodedMessage::Known(WireMessage::Hello {
-                protocol,
-                versions,
-                environment_id,
-                installation_id,
-                producer_id,
-                connection_epoch,
-                spool_cursors,
-                agents,
-                health,
-            }) => sylph_protocol::Hello {
-                protocol,
-                versions,
-                environment_id,
-                installation_id,
-                producer_id,
-                connection_epoch,
-                spool_cursors,
-                agents,
-                health,
-            },
-            DecodedMessage::Unknown { kind, .. } => {
-                return Err(anyhow!("first envagent frame must be hello, got {kind}"))
-            }
-            DecodedMessage::Known(other) => {
-                return Err(anyhow!(
-                    "first envagent frame must be hello, got {}",
-                    other.kind()
-                ))
-            }
-        };
-        // The credential is carried in a small preface for the TCP fixture:
-        // a real TLS deployment obtains it from the authenticated channel.
-        let credential_frame = read_frame(&mut reader).await?;
-        let credential: String = serde_json::from_slice(&credential_frame)
-            .context("decoding envagent credential preface")?;
-        let (tx, mut rx) = mpsc::channel::<WireMessage>(64);
-        let welcome = self
-            .register_connection(&hello, &credential, tx.clone())
-            .await?;
-        write_frame(
-            &mut writer,
-            &serde_json::to_vec(&WireMessage::Welcome {
-                protocol: welcome.protocol.clone(),
-                version: welcome.version,
-                environment_id: welcome.environment_id.clone(),
-                connection_epoch: welcome.connection_epoch,
-                server_epoch: welcome.server_epoch,
-                accepted_cursors: welcome.accepted_cursors.clone(),
-                max_batch_events: welcome.max_batch_events,
-                heartbeat_interval_ms: welcome.heartbeat_interval_ms,
-            })?,
-        )
-        .await?;
-
-        let writer_task = tokio::spawn(async move {
-            while let Some(message) = rx.recv().await {
-                let bytes = serde_json::to_vec(&message)?;
-                write_frame(&mut writer, &bytes).await?;
-            }
-            Ok::<(), anyhow::Error>(())
-        });
-        let environment = welcome.environment_id.clone();
-        let epoch = welcome.connection_epoch;
-        // Read receipts independently: event ingestion may wait for the session command
-        // that is itself awaiting this receipt. Never hold the wire reader behind it.
-        // Other frames retain their wire order. Overflow closes the connection; the
-        // durable producer spool replays the unacknowledged suffix after reconnect.
-        let (incoming, mut frames) = mpsc::channel(64);
-        let buffered_bytes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let queued_bytes = buffered_bytes.clone();
-        let bridge = self.clone();
-        let receipt_environment = environment.clone();
-        let reader_task = tokio::spawn(async move {
-            let result: Result<()> = async {
-                loop {
-                    let bytes = read_frame(&mut reader).await?;
-                    if let DecodedMessage::Known(WireMessage::CommandResult {
-                        request_id,
-                        outcome,
-                        connection_epoch,
-                        idempotency,
-                    }) = sylph_protocol::decode_message(&bytes)?
-                    {
-                        if connection_epoch != epoch {
-                            return Err(BridgeError::StaleEpoch.into());
-                        }
-                        bridge
-                            .record_command_result(
-                                &receipt_environment,
-                                &sylph_protocol::CommandResultMessage {
-                                    request_id,
-                                    outcome,
-                                    connection_epoch,
-                                    idempotency,
-                                },
-                            )
-                            .await?;
-                    } else {
-                        let previous = queued_bytes
-                            .fetch_add(bytes.len(), std::sync::atomic::Ordering::Relaxed);
-                        if previous.saturating_add(bytes.len()) > sylph_protocol::MAX_FRAME_BYTES {
-                            return Err(anyhow!(
-                                "envagent ingress bytes exceeded the frame budget"
-                            ));
-                        }
-                        incoming
-                            .try_send(Ok(bytes))
-                            .map_err(|_| anyhow!("envagent ingress backlog exceeded its bound"))?;
-                    }
-                }
-            }
-            .await;
-            if let Err(error) = result {
-                let _ = incoming.send(Err(error)).await;
-            }
-        });
-        let mut sync_faults = HashMap::new();
-        let result: Result<()> = async {
-            loop {
-                let bytes = match frames
-                    .recv()
-                    .await
-                    .unwrap_or_else(|| Err(anyhow!("envagent reader closed")))
-                {
-                    Ok(bytes) => bytes,
-                    Err(error) => {
-                        let _ = self.disconnect(&environment, epoch).await;
-                        writer_task.abort();
-                        return Err(error);
-                    }
-                };
-                buffered_bytes.fetch_sub(bytes.len(), std::sync::atomic::Ordering::Relaxed);
-                match sylph_protocol::decode_message(&bytes)? {
-                    DecodedMessage::Known(WireMessage::EventBatch {
-                        environment_id,
-                        producer_id,
-                        connection_epoch,
-                        events,
-                    }) => {
-                        if environment_id != environment {
-                            return Err(BridgeError::ProducerMismatch.into());
-                        }
-                        let result = self
-                            .ingest_batch(EventBatch {
-                                environment_id,
-                                producer_id,
-                                connection_epoch,
-                                events,
-                            })
-                            .await?;
-                        let response = match result {
-                            IngestResult::Ack(ack) => WireMessage::Ack {
-                                producer_id: ack.producer_id,
-                                accepted_through: ack.accepted_through,
-                                server_seq_through: ack.server_seq_through,
-                            },
-                            IngestResult::Nack {
-                                producer_id,
-                                expected_next,
-                                reason,
-                            } => WireMessage::Nack {
-                                producer_id,
-                                expected_next,
-                                reason,
-                            },
-                        };
-                        tx.send(response)
-                            .await
-                            .map_err(|_| anyhow!("envagent writer closed"))?;
-                    }
-                    DecodedMessage::Known(WireMessage::Heartbeat {
-                        connection_epoch, ..
-                    }) => {
-                        if connection_epoch != epoch {
-                            return Err(BridgeError::StaleEpoch.into());
-                        }
-                        if let Some(row) = self.store.environment_row(&environment).await? {
-                            let _ = self
-                                .store
-                                .set_environment_connection(
-                                    &environment,
-                                    &row.token_hash,
-                                    epoch,
-                                    true,
-                                    row.reachable_via.as_deref(),
-                                    &row.agents_json,
-                                )
-                                .await?;
-                        }
-                        let _ = self.registry.touch(&environment, epoch).await;
-                    }
-                    DecodedMessage::Known(WireMessage::Agents {
-                        connection_epoch,
-                        agents,
-                    }) => {
-                        if connection_epoch != epoch {
-                            return Err(BridgeError::StaleEpoch.into());
-                        }
-                        let agents_json = serde_json::to_string(&agents)?;
-                        if let Some(row) = self.store.environment_row(&environment).await? {
-                            let _ = self
-                                .store
-                                .set_environment_connection(
-                                    &environment,
-                                    &row.token_hash,
-                                    epoch,
-                                    true,
-                                    row.reachable_via.as_deref(),
-                                    &agents_json,
-                                )
-                                .await?;
-                        }
-                        let _ = self
-                            .registry
-                            .update_agents(&environment, epoch, agents)
-                            .await;
-                    }
-                    DecodedMessage::Known(WireMessage::TurnInput {
-                        session_id,
-                        turn_id,
-                        turn,
-                        producer_id,
-                        producer_seq,
-                        connection_epoch: frame_epoch,
-                    }) => {
-                        self.validate_producer_frame(
-                            &environment,
-                            epoch,
-                            frame_epoch,
-                            &producer_id,
-                        )
-                        .await?;
-                        if session_id.environment != environment {
-                            return Err(BridgeError::ProducerMismatch.into());
-                        }
-                        if let Some(cursor) = turn.source_cursor.as_ref() {
-                            tracing::debug!(
-                                session = %session_id,
-                                source = %cursor.source,
-                                offset = cursor.offset,
-                                "received adopted turn input"
-                            );
-                        }
-                        // A native input fact is a container update, not a
-                        // timeline event. The turn id is carried by the source
-                        // cursor when an adapter has one; absent that, retain the
-                        // text only in a diagnostic rather than inventing a turn.
-                        let payload_hash = hash_bytes(&serde_json::to_vec(&serde_json::json!({
-                            "sessionId": session_id,
-                            "turnId": turn_id,
-                            "turn": turn,
-                        }))?);
-                        let store = self.store.clone();
-                        let bridge = self.clone();
-                        let session_for_effect = session_id.clone();
-                        let turn_id_for_effect = turn_id.clone();
-                        let text = turn.text.clone();
-                        let recorded_at_ms = turn.recorded_at_ms.unwrap_or_else(now_ms);
-                        self.process_message(
-                            &environment,
-                            epoch,
-                            &producer_id,
-                            producer_seq,
-                            &payload_hash,
-                            &tx,
-                            move || async move {
-                                if text.trim().is_empty()
-                                    || crate::db::labels::is_native_context(&text)
-                                {
-                                    return Ok(());
-                                }
-                                let target_turn = match turn_id_for_effect {
-                                    Some(turn_id) => turn_id,
-                                    None => {
-                                        bridge
-                                            .ensure_remote_source_turn_with_origin(
-                                                &session_for_effect,
-                                                recorded_at_ms,
-                                                "user",
-                                            )
-                                            .await?
-                                    }
-                                };
-                                let _ = sqlx::query(
-                                    "UPDATE turns SET origin='user' WHERE id=? AND session_env=? \
-                                     AND session_agent=? AND session_native=? AND origin='agent'",
-                                )
-                                .bind(&target_turn)
-                                .bind(session_for_effect.environment.as_str())
-                                .bind(session_for_effect.agent.as_str())
-                                .bind(session_for_effect.native_id.as_str())
-                                .execute(store.raw_pool())
-                                .await?;
-                                let _ = store
-                                    .set_turn_request_text(&session_for_effect, &target_turn, &text)
-                                    .await?;
-                                Ok(())
-                            },
-                        )
-                        .await?;
-                    }
-                    DecodedMessage::Known(WireMessage::Edge {
-                        edge,
-                        producer_id,
-                        producer_seq,
-                        connection_epoch: frame_epoch,
-                    }) => {
-                        self.validate_producer_frame(
-                            &environment,
-                            epoch,
-                            frame_epoch,
-                            &producer_id,
-                        )
-                        .await?;
-                        if edge.parent.environment != environment
-                            || edge.child.environment != environment
-                        {
-                            return Err(BridgeError::ProducerMismatch.into());
-                        }
-                        let payload_hash = hash_bytes(&serde_json::to_vec(&serde_json::json!({
-                            "edge": edge,
-                        }))?);
-                        let store = self.store.clone();
-                        self.process_message(
-                            &environment,
-                            epoch,
-                            &producer_id,
-                            producer_seq,
-                            &payload_hash,
-                            &tx,
-                            move || async move {
-                                store.insert_session_edge(&edge).await?;
-                                Ok(())
-                            },
-                        )
-                        .await?;
-                    }
-                    DecodedMessage::Known(WireMessage::NativeBlobChunk {
-                        session_id,
-                        chunk,
-                        producer_id,
-                        producer_seq,
-                        connection_epoch: frame_epoch,
-                    }) => {
-                        self.validate_producer_frame(
-                            &environment,
-                            epoch,
-                            frame_epoch,
-                            &producer_id,
-                        )
-                        .await?;
-                        if session_id.environment != environment {
-                            return Err(BridgeError::ProducerMismatch.into());
-                        }
-                        let payload_hash = hash_bytes(&serde_json::to_vec(&serde_json::json!({
-                            "sessionId": session_id,
-                            "chunk": chunk,
-                        }))?);
-                        let history = self.history.clone();
-                        let session_key = session_id.encode();
-                        let mut persisted = false;
-                        let result = self
-                            .process_message(
-                                &environment,
-                                epoch,
-                                &producer_id,
-                                producer_seq,
-                                &payload_hash,
-                                &tx,
-                                || async {
-                                    history
-                                        .put_native_blob_chunk(&session_key, &chunk)
-                                        .await
-                                        .map_err(|e| {
-                                            NativePersistenceFailure(format!(
-                                                "could not retain native sidecar: {e:#}"
-                                            ))
-                                        })?;
-                                    persisted = true;
-                                    Ok(())
-                                },
-                            )
-                            .await;
-                        self.finish_native_delivery(
-                            result,
-                            persisted,
-                            &session_id,
-                            &producer_id,
-                            &tx,
-                            &mut sync_faults,
-                        )
-                        .await?;
-                    }
-                    DecodedMessage::Known(WireMessage::NativeRecord {
-                        session_id,
-                        record,
-                        producer_id,
-                        producer_seq,
-                        connection_epoch: frame_epoch,
-                    }) => {
-                        self.validate_producer_frame(
-                            &environment,
-                            epoch,
-                            frame_epoch,
-                            &producer_id,
-                        )
-                        .await?;
-                        if session_id.environment != environment {
-                            return Err(BridgeError::ProducerMismatch.into());
-                        }
-                        let payload_hash = hash_bytes(&serde_json::to_vec(&serde_json::json!({
-                            "sessionId": session_id,
-                            "record": record,
-                        }))?);
-                        let history = self.history.clone();
-                        let session_key = session_id.encode();
-                        let mut persisted = false;
-                        let result = self
-                            .process_message(
-                                &environment,
-                                epoch,
-                                &producer_id,
-                                producer_seq,
-                                &payload_hash,
-                                &tx,
-                                || async {
-                                    history
-                                        .put_native_record(&session_key, &record)
-                                        .await
-                                        .map_err(|e| {
-                                            NativePersistenceFailure(format!(
-                                                "could not retain native record {}:{}: {e:#}",
-                                                record.source, record.version
-                                            ))
-                                        })?;
-                                    persisted = true;
-                                    Ok(())
-                                },
-                            )
-                            .await;
-                        self.finish_native_delivery(
-                            result,
-                            persisted,
-                            &session_id,
-                            &producer_id,
-                            &tx,
-                            &mut sync_faults,
-                        )
-                        .await?;
-                    }
-                    DecodedMessage::Known(WireMessage::Request {
-                        session_id,
-                        request,
-                        producer_id,
-                        producer_seq,
-                        connection_epoch: frame_epoch,
-                    }) => {
-                        self.validate_producer_frame(
-                            &environment,
-                            epoch,
-                            frame_epoch,
-                            &producer_id,
-                        )
-                        .await?;
-                        if session_id.environment != environment {
-                            return Err(BridgeError::ProducerMismatch.into());
-                        }
-                        let payload = serde_json::to_value(&request)?;
-                        let payload_hash = hash_bytes(&serde_json::to_vec(&serde_json::json!({
-                            "sessionId": session_id,
-                            "request": payload.clone(),
-                        }))?);
-                        let hub = self.hub.clone();
-                        let session_key = session_id.encode();
-                        let store = self.store.clone();
-                        let request_for_store = request.clone();
-                        self.process_message(
-                            &environment,
-                            epoch,
-                            &producer_id,
-                            producer_seq,
-                            &payload_hash,
-                            &tx,
-                            move || async move {
-                                let turn_id = store
-                                    .running_turn_id(&session_id)
-                                    .await?
-                                    .unwrap_or_default();
-                                let pending = crate::models::PendingRequest {
-                                    id: uuid::Uuid::new_v4().to_string(),
-                                    session_id: session_id.clone(),
-                                    turn_id,
-                                    adapter_request_id: request_for_store.id.clone(),
-                                    kind: request_for_store.kind.to_string(),
-                                    tool: request_for_store.tool.clone(),
-                                    tool_use_id: request_for_store.tool_use_id.clone(),
-                                    title: request_for_store.title.clone(),
-                                    detail_json: request_for_store
-                                        .detail
-                                        .as_ref()
-                                        .map(|value| value.to_string())
-                                        .unwrap_or_else(|| "{}".into()),
-                                    options_json: serde_json::to_string(&request_for_store.options)
-                                        .unwrap_or_else(|_| "[]".into()),
-                                    form_json: request_for_store
-                                        .form
-                                        .as_ref()
-                                        .and_then(|value| serde_json::to_string(value).ok()),
-                                    default_option: request_for_store.default.clone(),
-                                    risk: request_for_store.risk.map(|value| value.to_string()),
-                                    allow_persistent: request_for_store.allow_persistent,
-                                    expires_at_ms: request_for_store.expires_at_ms,
-                                    status: "pending".into(),
-                                    chosen_option: None,
-                                    resolved_input_json: None,
-                                    resolved_by: None,
-                                    created_at_ms: now_ms(),
-                                    resolved_at_ms: None,
-                                };
-                                let stored = store.create_pending_request(&pending).await?;
-                                hub.publish_session(
-                                    &session_key,
-                                    StreamEvent {
-                                        seq: 0,
-                                        arrival_turn_id: None,
-                                        kind: "request".into(),
-                                        phase: None,
-                                        stream_id: None,
-                                        span: None,
-                                        interior_state: None,
-                                        name: Some(stored.title.clone()),
-                                        text: String::new(),
-                                        data: Some(payload),
-                                        is_error: false,
-                                        stability: "stable".into(),
-                                        source: "agent".into(),
-                                        arrival_at_ms: now_ms(),
-                                        recorded_at_ms: None,
-                                        body_ref: None,
-                                        tool_summary: None,
-                                        created_at_ms: now_ms(),
-                                        started_at_ms: None,
-                                    },
-                                )
-                                .await;
-                                Ok(())
-                            },
-                        )
-                        .await?;
-                    }
-                    DecodedMessage::Known(WireMessage::CapabilitySnapshot {
-                        session_id,
-                        facets,
-                        link,
-                        capabilities,
-                        producer_id,
-                        producer_seq,
-                        connection_epoch: frame_epoch,
-                    }) => {
-                        self.validate_producer_frame(
-                            &environment,
-                            epoch,
-                            frame_epoch,
-                            &producer_id,
-                        )
-                        .await?;
-                        if session_id.environment != environment {
-                            return Err(BridgeError::ProducerMismatch.into());
-                        }
-                        // Capability snapshots are current state, not history.
-                        // Publish the typed payload to attached clients; the
-                        // link registry remains the source of truth for commands.
-                        let payload = serde_json::json!({
-                            "facets": facets,
-                            "link": link,
-                            "capabilities": capabilities,
-                        });
-                        let payload_hash = hash_bytes(&serde_json::to_vec(&payload)?);
-                        let hub = self.hub.clone();
-                        let session_key = session_id.encode();
-                        self.process_message(
-                            &environment,
-                            epoch,
-                            &producer_id,
-                            producer_seq,
-                            &payload_hash,
-                            &tx,
-                            move || async move {
-                                hub.publish_session(
-                                    &session_key,
-                                    StreamEvent {
-                                        seq: 0,
-                                        arrival_turn_id: None,
-                                        kind: "capabilities".into(),
-                                        phase: None,
-                                        stream_id: None,
-                                        span: None,
-                                        interior_state: None,
-                                        name: None,
-                                        text: String::new(),
-                                        data: Some(payload),
-                                        is_error: false,
-                                        stability: "ephemeral".into(),
-                                        source: "agent".into(),
-                                        arrival_at_ms: now_ms(),
-                                        recorded_at_ms: None,
-                                        body_ref: None,
-                                        tool_summary: None,
-                                        created_at_ms: now_ms(),
-                                        started_at_ms: None,
-                                    },
-                                )
-                                .await;
-                                Ok(())
-                            },
-                        )
-                        .await?;
-                    }
-                    DecodedMessage::Known(WireMessage::SourceState {
-                        session_id,
-                        cursor,
-                        state,
-                        detail,
-                        producer_id,
-                        producer_seq,
-                        connection_epoch: frame_epoch,
-                    }) => {
-                        self.validate_producer_frame(
-                            &environment,
-                            epoch,
-                            frame_epoch,
-                            &producer_id,
-                        )
-                        .await?;
-                        if session_id.environment != environment {
-                            return Err(BridgeError::ProducerMismatch.into());
-                        }
-                        tracing::debug!(
-                            session = %session_id,
-                            source = %cursor.source,
-                            generation = cursor.generation,
-                            state = %state,
-                            detail = ?detail,
-                            "envagent source state"
-                        );
-                        let payload_hash = hash_bytes(&serde_json::to_vec(&serde_json::json!({
-                            "sessionId": session_id,
-                            "cursor": cursor,
-                            "state": state,
-                            "detail": detail,
-                        }))?);
-                        self.process_message(
-                            &environment,
-                            epoch,
-                            &producer_id,
-                            producer_seq,
-                            &payload_hash,
-                            &tx,
-                            || async { Ok(()) },
-                        )
-                        .await?;
-                    }
-                    DecodedMessage::Known(WireMessage::Diagnostic {
-                        code,
-                        message,
-                        producer_id,
-                        producer_seq,
-                        connection_epoch: frame_epoch,
-                        session_id,
-                        details,
-                        ..
-                    }) => {
-                        self.validate_producer_frame(
-                            &environment,
-                            epoch,
-                            frame_epoch,
-                            &producer_id,
-                        )
-                        .await?;
-                        if session_id
-                            .as_ref()
-                            .is_some_and(|id| id.environment != environment)
-                        {
-                            return Err(BridgeError::ProducerMismatch.into());
-                        }
-                        // Diagnostics are non-history messages, but their
-                        // delivery still participates in the producer spool
-                        // prefix so a later event cannot be acknowledged across
-                        // an unprocessed diagnostic.
-                        let payload_hash = hash_bytes(&serde_json::to_vec(&serde_json::json!({
-                            "code": code,
-                            "message": message,
-                            "sessionId": session_id,
-                            "details": details,
-                        }))?);
-                        self.process_message(
-                            &environment,
-                            epoch,
-                            &producer_id,
-                            producer_seq,
-                            &payload_hash,
-                            &tx,
-                            || async { Ok(()) },
-                        )
-                        .await?;
-                        if code == "source_closed" || code == "spooled_source_closed" {
-                            if let Some(session_id) = session_id {
-                                if let Some(turn_id) =
-                                    self.remote_source_turns.lock().await.remove(&session_id)
-                                {
-                                    if let Some(closer) = self.turn_closer.read().await.clone() {
-                                        closer
-                                            .close(
-                                                &session_id,
-                                                &turn_id,
-                                                Outcome::Completed { stop_reason: None },
-                                            )
-                                            .await;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    DecodedMessage::Known(other) => {
-                        tracing::debug!("ignoring envagent frame {}", other.kind());
-                    }
-                    DecodedMessage::Unknown { kind, .. } => {
-                        tracing::debug!("ignoring unknown envagent frame {kind}");
-                    }
-                }
-            }
-        }
-        .await;
-        reader_task.abort();
-        let _ = self.disconnect(&environment, epoch).await;
-        writer_task.abort();
-        result
-    }
-
     pub async fn create_pairing(&self) -> Result<PairingOffer> {
         let offer = self.registry.create_pairing().await;
         self.store
@@ -1159,11 +666,6 @@ impl EnvBridge {
             .await?;
         Ok(offer)
     }
-
-    /// Issue a one-shot capability invite for an already paired installation.
-    /// The installation credential is accepted only for its own environment;
-    /// this is the local-machine authority proof and is deliberately separate
-    /// from the browser Subject cookie.
     pub async fn create_invite(
         &self,
         environment: &EnvironmentId,
@@ -1214,8 +716,6 @@ impl EnvBridge {
             expires_at_ms,
         })
     }
-
-    /// Consume a code and persist a durable installation credential.
     pub async fn claim_pairing(
         &self,
         code: &str,
@@ -1265,9 +765,8 @@ impl EnvBridge {
             expires_at_ms: now_ms() + 365 * 24 * 60 * 60 * 1000,
         })
     }
-
     pub async fn list_environments(&self) -> Result<Vec<EnvironmentSnapshot>> {
-        // The journal keeps the last known connection for restart diagnostics, but it is
+        // The operational store keeps the last known connection for restart diagnostics, but it is
         // not the current link. A server restart cannot inherit an envagent socket, and a
         // stale `connected = 1` row otherwise makes health/settings claim reachability
         // while every command correctly fails against the empty lease map. The lease is
@@ -1276,10 +775,12 @@ impl EnvBridge {
         let mut rows = Vec::new();
         for row in self.store.list_environment_rows().await? {
             let connected = leases.contains_key(&row.id);
-            let agents = serde_json::from_str(&row.agents_json)
-                .map_err(|error| anyhow!("invalid agent inventory in journal: {error}"))?;
-            let facts = serde_json::from_str(&row.facts_json)
-                .map_err(|error| anyhow!("invalid environment facts in journal: {error}"))?;
+            let agents = serde_json::from_str(&row.agents_json).map_err(|error| {
+                anyhow!("invalid agent inventory in operational store: {error}")
+            })?;
+            let facts = serde_json::from_str(&row.facts_json).map_err(|error| {
+                anyhow!("invalid environment facts in operational store: {error}")
+            })?;
             rows.push(EnvironmentSnapshot {
                 id: row.id,
                 name: row.name,
@@ -1303,15 +804,9 @@ impl EnvBridge {
         rows.sort_by(|left, right| left.id.cmp(&right.id));
         Ok(rows)
     }
-
     pub async fn environment_connected(&self, environment: &EnvironmentId) -> bool {
         self.leases.read().await.get(environment).is_some()
     }
-
-    /// Serialize commands that affect one long-lived remote session.  In
-    /// particular, a `Send` and a turn-scoped stop must not cross on the
-    /// connection: otherwise the stop can win the database race while the
-    /// envagent still starts the cancelled input.
     pub async fn session_command_lock(
         &self,
         session_id: &sylph_protocol::SessionId,
@@ -1322,20 +817,12 @@ impl EnvBridge {
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
     }
-
     pub async fn remote_draft(&self, draft_id: &str) -> Option<RemoteDraft> {
-        self.remote_drafts
-            .lock()
-            .await
-            .get(draft_id)
-            .filter(|draft| !draft.promoting)
-            .cloned()
+        self.remote_drafts.lock().await.get(draft_id).cloned()
     }
-
     pub async fn remote_draft_known(&self, draft_id: &str) -> bool {
         self.remote_drafts.lock().await.contains_key(draft_id)
     }
-
     pub async fn remote_draft_promoting(&self, draft_id: &str) -> bool {
         self.remote_drafts
             .lock()
@@ -1343,11 +830,6 @@ impl EnvBridge {
             .get(draft_id)
             .is_some_and(|draft| draft.promoting)
     }
-
-    /// Return the per-draft promotion mutex.  The guard is held by the HTTP
-    /// promotion handler across the envagent command and canonical row writes;
-    /// this is the server-side serialization point for concurrent first-turn
-    /// requests.
     pub async fn remote_promotion_lock(&self, draft_id: &str) -> Arc<Mutex<()>> {
         let mut locks = self.remote_promotion_locks.lock().await;
         locks
@@ -1355,163 +837,6 @@ impl EnvBridge {
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
     }
-
-    pub async fn remote_promotion_result(&self, draft_id: &str) -> Option<RemotePromotionResult> {
-        self.remote_promotion_results
-            .lock()
-            .await
-            .get(draft_id)
-            .cloned()
-    }
-
-    pub async fn remember_remote_promotion(&self, draft_id: &str, result: RemotePromotionResult) {
-        self.remote_promotion_results
-            .lock()
-            .await
-            .insert(draft_id.to_string(), result);
-    }
-
-    /// Claim a draft for promotion so concurrent first-turn requests cannot
-    /// dispatch the same non-idempotent vendor input twice.
-    pub async fn claim_remote_draft(
-        &self,
-        draft_id: &str,
-        proposed_turn_id: String,
-    ) -> RemoteDraftClaim {
-        let mut drafts = self.remote_drafts.lock().await;
-        let Some(draft) = drafts.get_mut(draft_id) else {
-            return RemoteDraftClaim::Missing;
-        };
-        if draft.promoting {
-            // A caller that did not take the per-draft lock must never be
-            // allowed to dispatch the same first turn twice.  The normal HTTP
-            // path waits on that lock and then reads the cached result.
-            return RemoteDraftClaim::Busy;
-        }
-        if let Some(existing) = draft.first_turn_id.as_ref() {
-            if existing != &proposed_turn_id {
-                return RemoteDraftClaim::Conflict {
-                    turn_id: existing.clone(),
-                };
-            }
-        }
-        let turn_id = draft.first_turn_id.clone().unwrap_or(proposed_turn_id);
-        draft.promoting = true;
-        draft.first_turn_id = Some(turn_id.clone());
-        RemoteDraftClaim::Claimed {
-            draft: Box::new(draft.clone()),
-            turn_id,
-        }
-    }
-
-    pub async fn release_remote_draft_claim(&self, draft_id: &str) {
-        if let Some(draft) = self.remote_drafts.lock().await.get_mut(draft_id) {
-            draft.promoting = false;
-            // No canonical session exists when a promotion is released.  The
-            // next attempt must be able to choose its own idempotency scope;
-            // retaining this provisional id would turn every later retry into
-            // a permanent conflict after a transient envagent/DB failure.
-            draft.first_turn_id = None;
-        }
-    }
-
-    pub async fn remove_remote_draft(&self, draft_id: &str) -> Option<RemoteDraft> {
-        let draft = self.remote_drafts.lock().await.remove(draft_id);
-        if draft.is_some() {
-            // Cleanup is best effort: the server must forget the draft even when
-            // the envagent went offline, while a connected agent should also
-            // release the process it owns.
-            if let Some(draft) = draft.as_ref() {
-                if self.environment_connected(&draft.environment).await {
-                    if let Ok(request_id) =
-                        sylph_protocol::CommandRequestId::parse(format!("close-draft-{draft_id}"))
-                    {
-                        let _ = self
-                            .dispatch(
-                                &draft.environment,
-                                Command::new(
-                                    request_id,
-                                    IdempotencyPolicy::Replayable,
-                                    sylph_protocol::EnvironmentCommand::DraftClose {
-                                        draft_id: draft_id.to_string(),
-                                    },
-                                ),
-                            )
-                            .await;
-                    }
-                }
-            }
-        }
-        // The result cache is retained for idempotent retries, but the lock
-        // itself is no longer needed once the draft has been consumed.  A
-        // caller holding the lock is necessarily in this method's caller and
-        // therefore cannot race this removal.
-        self.remote_promotion_locks.lock().await.remove(draft_id);
-        draft
-    }
-
-    /// Forget server-side draft metadata without issuing a remote close. Used
-    /// only after promotion and activation have succeeded; the envagent then
-    /// owns a canonical session and must not receive a late DraftClose.
-    pub async fn forget_remote_draft(&self, draft_id: &str) -> Option<RemoteDraft> {
-        let draft = self.remote_drafts.lock().await.remove(draft_id);
-        self.remote_promotion_locks.lock().await.remove(draft_id);
-        draft
-    }
-
-    /// Discard an unpromoted remote draft and ask the envagent to release its
-    /// prepared process. This is the destructive draft path used by DELETE and
-    /// compensation after a failed first-turn request.
-    pub async fn discard_remote_draft(&self, draft_id: &str) -> Option<RemoteDraft> {
-        self.remove_remote_draft(draft_id).await
-    }
-
-    pub async fn activate_remote(&self, session_id: &sylph_protocol::SessionId) -> Result<()> {
-        let request_id = sylph_protocol::CommandRequestId::parse(format!(
-            "activate-{}",
-            uuid::Uuid::new_v4().simple()
-        ))?;
-        let outcome = self
-            .dispatch_and_wait(
-                &session_id.environment,
-                Command::new(
-                    request_id,
-                    IdempotencyPolicy::Replayable,
-                    sylph_protocol::EnvironmentCommand::Activate {
-                        session_id: session_id.clone(),
-                    },
-                ),
-                std::time::Duration::from_secs(10),
-            )
-            .await?;
-        match outcome {
-            CommandOutcome::Accepted { .. } => Ok(()),
-            CommandOutcome::Rejected { code, message } => {
-                Err(RemoteCommandError::rejected(code, message).into())
-            }
-            CommandOutcome::Unknown { message } => Err(anyhow!(
-                "remote activation outcome is unknown: {}",
-                message.unwrap_or_default()
-            )),
-        }
-    }
-
-    async fn dispatch_remote_operation(
-        &self,
-        environment: &EnvironmentId,
-        command: sylph_protocol::EnvironmentCommand,
-        idempotency: IdempotencyPolicy,
-    ) -> Result<CommandOutcome> {
-        let request_id = remote_request_id(environment, &command, idempotency)?;
-        let timeout = command_timeout(&command);
-        self.dispatch_and_wait(
-            environment,
-            Command::new(request_id, idempotency, command),
-            timeout,
-        )
-        .await
-    }
-
     pub async fn remote_draft_capabilities(
         &self,
         draft: &RemoteDraft,
@@ -1536,7 +861,6 @@ impl EnvBridge {
             )),
         }
     }
-
     pub async fn remote_draft_set_config(
         &self,
         draft: &RemoteDraft,
@@ -1565,7 +889,6 @@ impl EnvBridge {
         }
         Ok(outcome)
     }
-
     pub async fn remote_files(
         &self,
         environment: &EnvironmentId,
@@ -1616,10 +939,6 @@ impl EnvBridge {
             )),
         }
     }
-
-    /// Browse an environment's machine-local roots or one directory level.
-    /// The envagent owns path policy and filesystem access; the server only
-    /// dispatches the typed command and returns its JSON result.
     pub async fn remote_browse(
         &self,
         environment: &EnvironmentId,
@@ -1637,30 +956,16 @@ impl EnvBridge {
             )),
         }
     }
-
-    /// Dispatch a session-scoped command and normalize its result to a JSON
-    /// value for the HTTP layer.  The bridge remains the only place that knows
-    /// how a command crosses an environment lease.
     pub async fn remote_session_command(
         &self,
         session_id: &sylph_protocol::SessionId,
         command: sylph_protocol::EnvironmentCommand,
         idempotency: IdempotencyPolicy,
     ) -> Result<CommandOutcome> {
-        // Every command routed here wants a fresh request id, so this asks no
-        // classification question and must not grow one. The reads it carries
-        // (`Capabilities`, `Close`) are already classified as repeatable by
-        // `command_needs_a_fresh_request_id`; the writes
-        // (`Interrupt`, `Steer`, `Queue`, `SetConfig`, `Resolve`) are each a
-        // distinct user action, so hashing their payload would make sending one
-        // steer text twice — or setting a config back to a value it already held —
-        // collide with the earlier call and replay its stored result instead of
-        // reaching the envagent. That is the frozen-surface defect again, and
-        // `repeating_one_steer_text_dispatches_a_second_command` pins it.
-        //
-        // At-most-once protection for these does not come from the id: a retry
-        // that arrives while the original is in flight joins its waiter in
-        // `dispatch_and_wait`, and `remote_promotion_locks` serializes promotion.
+        // Independent actions receive independent request identities. Hashing
+        // their payload would incorrectly replay a repeated steer or a config
+        // change back to its earlier value. An actual retry preserves its request
+        // identity in dispatch_and_wait and follows its declared retry policy.
         let request_id = sylph_protocol::CommandRequestId::parse(format!(
             "remote-{}-{}-{}",
             session_id.environment,
@@ -1675,43 +980,6 @@ impl EnvBridge {
         )
         .await
     }
-
-    /// Re-establish a durable remote session after a server or envagent
-    /// restart.  The envagent applies path policy to the workdir it receives;
-    /// the server never canonicalizes a path belonging to another machine.
-    pub async fn remote_attach(&self, session: &crate::models::Session) -> Result<CommandOutcome> {
-        let flags = serde_json::from_str::<serde_json::Value>(&session.flags_json)
-            .ok()
-            .and_then(|value| value.as_object().cloned())
-            .map(|values| {
-                values
-                    .into_iter()
-                    .filter_map(|(key, value)| value.as_str().map(|value| (key, value.to_string())))
-                    .collect()
-            })
-            .unwrap_or_default();
-        self.remote_session_command(
-            &session.id,
-            sylph_protocol::EnvironmentCommand::Run {
-                session_id: Some(session.id.clone()),
-                draft_id: None,
-                agent: session.id.agent.to_string(),
-                workdir: session
-                    .workdir
-                    .clone()
-                    .ok_or_else(|| anyhow!("session has no recorded working directory"))?,
-                flags,
-                inject_identity: session.inject_identity,
-                identity_preamble: None,
-                permission_mode: None,
-                initial_input: None,
-                initial_turn_id: None,
-            },
-            IdempotencyPolicy::Replayable,
-        )
-        .await
-    }
-
     pub async fn close_remote_session(&self, session_id: &sylph_protocol::SessionId) -> Result<()> {
         let outcome = self
             .remote_session_command(
@@ -1731,7 +999,6 @@ impl EnvBridge {
             )),
         }
     }
-
     pub async fn remote_outcome_value(outcome: CommandOutcome) -> Result<serde_json::Value> {
         match outcome {
             CommandOutcome::Accepted { result } => Ok(result.unwrap_or_default()),
@@ -1742,9 +1009,6 @@ impl EnvBridge {
             )),
         }
     }
-
-    /// Start a remote agent session and retain the server-side draft metadata.
-    /// The envagent validates the workdir on its own machine before spawning.
     #[allow(clippy::too_many_arguments)]
     pub async fn prepare_remote(
         &self,
@@ -1759,6 +1023,19 @@ impl EnvBridge {
         permission_mode: Option<String>,
     ) -> Result<(String, String)> {
         let draft_id = format!("remote-draft-{}", uuid::Uuid::new_v4().simple());
+        let vendor = sylph_protocol::AgentName::parse(agent.clone())?;
+        let scope = IngestionScope::Inventory(InventoryRef {
+            environment: environment.clone(),
+            vendor,
+            instance: draft_id.clone(),
+        });
+        let epoch = self
+            .trace
+            .catalogue()
+            .evidence()
+            .authorize_scope(&scope, &[])
+            .await?;
+        let capture_authorization = CaptureAuthorization { scope, epoch };
         let request_id = sylph_protocol::CommandRequestId::parse(format!("prepare-{draft_id}"))?;
         let outcome = self
             .dispatch_and_wait(
@@ -1767,6 +1044,7 @@ impl EnvBridge {
                     request_id,
                     IdempotencyPolicy::AtMostOnce,
                     sylph_protocol::EnvironmentCommand::Prepare {
+                        capture_authorization: capture_authorization.clone(),
                         draft_id: draft_id.clone(),
                         agent: agent.clone(),
                         workdir: workdir.clone(),
@@ -1815,77 +1093,12 @@ impl EnvBridge {
                 identity_preamble,
                 permission_mode,
                 promoting: false,
-                first_turn_id: None,
+                first_command_id: None,
+                capture_authorization,
             },
         );
         Ok((draft_id, contained_workdir))
     }
-
-    pub async fn run_remote_initial(
-        &self,
-        draft: &RemoteDraft,
-        turn_id: &str,
-        input: sylph_protocol::WireTurnInput,
-    ) -> Result<(sylph_protocol::SessionId, String)> {
-        let request_id =
-            sylph_protocol::CommandRequestId::parse(format!("remote-run-{}", draft.draft_id))?;
-        let outcome = self
-            .dispatch_and_wait(
-                &draft.environment,
-                Command::new(
-                    request_id,
-                    IdempotencyPolicy::AtMostOnce,
-                    sylph_protocol::EnvironmentCommand::Run {
-                        session_id: None,
-                        draft_id: Some(draft.draft_id.clone()),
-                        agent: draft.agent.clone(),
-                        workdir: draft.workdir.clone(),
-                        flags: draft.flags.clone().into_iter().collect(),
-                        inject_identity: draft.inject_identity,
-                        identity_preamble: draft.identity_preamble.clone(),
-                        permission_mode: draft.permission_mode.clone(),
-                        initial_input: Some(input),
-                        initial_turn_id: Some(turn_id.to_string()),
-                    },
-                ),
-                std::time::Duration::from_secs(30),
-            )
-            .await?;
-        let result = match outcome {
-            CommandOutcome::Accepted {
-                result: Some(result),
-            } => result,
-            CommandOutcome::Accepted { result: None } => {
-                return Err(anyhow!("remote run returned no metadata"))
-            }
-            CommandOutcome::Rejected { code, message } => {
-                return Err(anyhow!("remote run rejected ({code}): {message}"))
-            }
-            CommandOutcome::Unknown { message } => {
-                return Err(anyhow!(
-                    "remote run outcome is unknown: {}",
-                    message.unwrap_or_default()
-                ))
-            }
-        };
-        let session_id: sylph_protocol::SessionId = serde_json::from_value(
-            result
-                .get("sessionId")
-                .cloned()
-                .ok_or_else(|| anyhow!("remote run returned no session id"))?,
-        )?;
-        if session_id.environment != draft.environment {
-            return Err(BridgeError::ProducerMismatch.into());
-        }
-        let workdir = result
-            .get("workdir")
-            .and_then(|value| value.as_str())
-            .ok_or_else(|| anyhow!("remote run returned no contained workdir"))?
-            .to_string();
-        Ok((session_id, workdir))
-    }
-
-    /// Authenticate and lease one active connection for an installation.
     pub async fn register_connection(
         &self,
         hello: &sylph_protocol::Hello,
@@ -1948,667 +1161,14 @@ impl EnvBridge {
                     .unwrap_or_default(),
             )
             .await;
-        self.leases.write().await.insert(
-            environment.clone(),
-            Lease {
-                epoch,
-                sender,
-                producer_id: hello.producer_id.clone(),
-            },
-        );
+        self.leases
+            .write()
+            .await
+            .insert(environment.clone(), Lease { epoch, sender });
         let mut welcome = sylph_protocol::Welcome::current(environment, epoch, self.server_epoch);
         welcome.version = version;
-        let accepted = self
-            .store
-            .env_accepted_through(&welcome.environment_id, &hello.producer_id)
-            .await?;
-        welcome
-            .accepted_cursors
-            .insert(hello.producer_id.to_string(), ProducerSeq::new(accepted));
         Ok(welcome)
     }
-
-    pub async fn disconnect(&self, environment: &EnvironmentId, epoch: u64) -> Result<()> {
-        let actual_epoch = {
-            let mut leases = self.leases.write().await;
-            match leases.get(environment) {
-                Some(lease) if lease.epoch == epoch => {
-                    leases.remove(environment);
-                    Some(epoch)
-                }
-                Some(_) => None,
-                None => Some(epoch),
-            }
-        };
-        let Some(actual_epoch) = actual_epoch else {
-            return Err(BridgeError::StaleEpoch.into());
-        };
-        let reads = {
-            let mut waiters = self
-                .read_waiters
-                .lock()
-                .expect("read waiter mutex poisoned");
-            let keys: Vec<_> = waiters
-                .keys()
-                .filter(|(env, _)| env == environment)
-                .cloned()
-                .collect();
-            keys.into_iter()
-                .filter_map(|key| waiters.remove(&key))
-                .collect::<Vec<_>>()
-        };
-        for waiter in reads {
-            let _ = waiter.send(CommandOutcome::Unknown {
-                message: Some("connection closed before read result".into()),
-            });
-        }
-        if let Some(row) = self.store.environment_row(environment).await? {
-            let _ = self
-                .store
-                .clear_environment_connection_if_epoch(environment, &row.token_hash, actual_epoch)
-                .await?;
-        }
-        let pending: Vec<(String, IdempotencyPolicy)> = self
-            .command_policies
-            .read()
-            .await
-            .iter()
-            .filter(|((env, _), _)| env == environment)
-            .map(|((_, request_id), policy)| (request_id.clone(), *policy))
-            .collect();
-        for (request_id, policy) in pending {
-            let unknown = CommandOutcome::Unknown {
-                message: Some("connection closed before command result".into()),
-            };
-            let _ = self
-                .store
-                .record_command_outcome(environment, &request_id, policy, &unknown)
-                .await;
-            if let Some(waiters) = self
-                .command_waiters
-                .lock()
-                .await
-                .remove(&(environment.clone(), request_id.clone()))
-            {
-                for waiter in waiters {
-                    let _ = waiter.sender.send(unknown.clone());
-                }
-            }
-        }
-        // Requests are server resources; announce every row whose agent died so
-        // attached clients retire stale approval panels immediately.
-        let sessions = self
-            .store
-            .list_sessions(&crate::db::store::SessionFilter {
-                environment: Some(environment.to_string()),
-                limit: 10000,
-                ..Default::default()
-            })
-            .await
-            .unwrap_or_default();
-        for session in sessions {
-            if let Ok(rows) = self.store.abandon_open_requests(&session.id).await {
-                for row in rows {
-                    self.hub
-                        .publish_session(
-                            &session.id.encode(),
-                            crate::events::StreamEvent {
-                                seq: 0,
-                                arrival_turn_id: None,
-                                kind: "request".into(),
-                                phase: None,
-                                stream_id: None,
-                                span: None,
-                                interior_state: None,
-                                name: None,
-                                text: String::new(),
-                                data: Some(serde_json::to_value(row).unwrap_or_default()),
-                                is_error: false,
-                                stability: "stable".into(),
-                                source: "server".into(),
-                                arrival_at_ms: now_ms(),
-                                recorded_at_ms: None,
-                                body_ref: None,
-                                tool_summary: None,
-                                created_at_ms: now_ms(),
-                                started_at_ms: None,
-                            },
-                        )
-                        .await;
-                }
-            }
-        }
-        let _ = self.registry.disconnect(environment, epoch).await;
-        Ok(())
-    }
-
-    pub async fn unpair(&self, environment: &EnvironmentId) -> Result<bool> {
-        self.leases.write().await.remove(environment);
-        let removed = self.store.delete_environment(environment).await?;
-        let _ = self.registry.unpair(environment).await;
-        Ok(removed)
-    }
-
-    /// Ingest a bounded batch.  Receipt insertion and event insertion share
-    /// one database transaction, so a receipt can never claim an event that was not
-    /// written; the ingest gate serializes sequence allocation across every producer
-    /// touching one session, which is what keeps `UNIQUE(session, seq)` from refusing a
-    /// write when a live turn and an adoption are both appending.
-    pub async fn ingest_batch(&self, batch: EventBatch) -> Result<IngestResult> {
-        batch
-            .validate()
-            .map_err(|error| BridgeError::InvalidBatch(error.to_string()))?;
-        let environment = batch.environment_id.clone();
-        let lease = self
-            .leases
-            .read()
-            .await
-            .get(&environment)
-            .map(|lease| (lease.epoch, lease.producer_id.clone()))
-            .ok_or(BridgeError::NotConnected)?;
-        if lease.0 != batch.connection_epoch {
-            return Err(BridgeError::StaleEpoch.into());
-        }
-        if lease.1 != batch.producer_id {
-            return Err(BridgeError::ProducerMismatch.into());
-        }
-        // Acquire in a deterministic order before sequence allocation. All commands and
-        // adapter lifecycle events for these sessions now share the same sequencer.
-        let sessions: std::collections::BTreeSet<_> = batch
-            .events
-            .iter()
-            .map(|item| item.session_id.encode())
-            .collect();
-        let mut command_guards = Vec::with_capacity(sessions.len());
-        for session in sessions {
-            let session = sylph_protocol::SessionId::decode(&session)?;
-            command_guards.push(self.session_command_lock(&session).await.lock_owned().await);
-        }
-        let _gate = self.ingest_gate(&environment).await.lock_owned().await;
-        // Remote events derive their canonical sequence from SQLite. Hold the
-        // allocator gate through that transaction and cursor update so a
-        // concurrent server-authored frame cannot reserve the same number.
-        let seq_gate = self.seq.gate();
-        let mut seq_guard = seq_gate.lock().await;
-        let mut terminal_items: Vec<(sylph_protocol::SessionId, String, sylph_protocol::Event)> =
-            Vec::new();
-        let mut accepted_through = self
-            .store
-            .env_accepted_through(&environment, &batch.producer_id)
-            .await?;
-        if batch.first_seq().get() > accepted_through.saturating_add(1) {
-            return Ok(IngestResult::Nack {
-                producer_id: batch.producer_id,
-                expected_next: ProducerSeq::new(accepted_through.saturating_add(1)),
-                reason: "producer sequence gap".into(),
-            });
-        }
-        let mut last_server = None;
-        for item in &batch.events {
-            let seq = item.producer_seq.get();
-            let payload_hash = hash_bytes(&serde_json::to_vec(item)?);
-            if seq > accepted_through.saturating_add(1) {
-                return Ok(IngestResult::Nack {
-                    producer_id: batch.producer_id,
-                    expected_next: ProducerSeq::new(accepted_through.saturating_add(1)),
-                    reason: "producer sequence gap".into(),
-                });
-            }
-            if seq <= accepted_through {
-                // A replayed item is accepted only if the receipt exists.
-                let Some(receipt) = self
-                    .store
-                    .env_receipt_detail(&environment, &batch.producer_id, item.producer_seq)
-                    .await?
-                else {
-                    return Ok(IngestResult::Nack {
-                        producer_id: batch.producer_id.clone(),
-                        expected_next: ProducerSeq::new(accepted_through),
-                        reason: "duplicate sequence has no durable receipt".into(),
-                    });
-                };
-                if receipt.payload_hash != payload_hash {
-                    return Ok(IngestResult::Nack {
-                        producer_id: batch.producer_id.clone(),
-                        expected_next: ProducerSeq::new(seq),
-                        reason: "duplicate sequence carries different payload".into(),
-                    });
-                }
-                last_server = Some(ServerSeq::new(receipt.server_seq));
-                let replay_turn_id = match item.arrival_turn_id.clone() {
-                    Some(turn_id) => Some(turn_id),
-                    None => self
-                        .remote_source_turns
-                        .lock()
-                        .await
-                        .get(&item.session_id)
-                        .cloned(),
-                };
-                if let Some(turn_id) = replay_turn_id.as_deref() {
-                    if item.event.kind == sylph_protocol::EventKind::Turn
-                        && item.event.phase == Some(sylph_protocol::Phase::Completed)
-                    {
-                        terminal_items.push((
-                            item.session_id.clone(),
-                            turn_id.to_string(),
-                            item.event.clone(),
-                        ));
-                    }
-                }
-                if !terminal_items.is_empty() {
-                    drop(seq_guard);
-                    self.settle_remote_terminals(std::mem::take(&mut terminal_items))
-                        .await;
-                    seq_guard = seq_gate.lock().await;
-                }
-                continue;
-            }
-
-            let mut row = StreamEvent::from_protocol(&item.event).to_row(&item.session_id, "");
-            // An envagent supplies arrival provenance, but the server still owns
-            // the turn namespace.  Never let a malformed or cross-session turn id
-            // settle (or appear to belong to) another session.
-            let arrival_turn_id = match item.arrival_turn_id.as_deref() {
-                Some(turn_id) => match self.store.get_turn(turn_id).await? {
-                    Some(turn) if turn.session_id == item.session_id => Some(turn_id.to_string()),
-                    _ => None,
-                },
-                None => self
-                    .remote_source_turns
-                    .lock()
-                    .await
-                    .get(&item.session_id)
-                    .cloned(),
-            };
-            let arrival_turn_id = if let Some(turn_id) = arrival_turn_id {
-                Some(turn_id)
-            } else {
-                Some(
-                    self.ensure_remote_source_turn_with_origin(
-                        &item.session_id,
-                        row.created_at_ms,
-                        if row.kind == "user" && row.span.is_none() {
-                            "user"
-                        } else {
-                            "agent"
-                        },
-                    )
-                    .await?,
-                )
-            };
-            row.turn_id = arrival_turn_id.clone();
-            let min_next_seq = self.seq.reserved_floor_inner(&item.session_id).await;
-            let ingest = self
-                .store
-                .ingest_env_event_auto(
-                    &environment,
-                    &batch.producer_id,
-                    item.producer_seq,
-                    &mut row,
-                    &payload_hash,
-                    min_next_seq,
-                )
-                .await?;
-            match ingest.result {
-                EnvIngestResult::Inserted => {
-                    // Remote ingest allocates the canonical sequence in the same
-                    // transaction as the event row. Keep server-authored producers'
-                    // in-memory allocator above that value, or the next status/error
-                    // frame can reuse the sequence and hit the journal's uniqueness
-                    // constraint.
-                    if let Ok(next_seq) = i32::try_from(ingest.server_seq.get().saturating_add(1)) {
-                        self.seq.observe_inner(&item.session_id, next_seq).await;
-                    }
-                    let published = StreamEvent::from_row(&row);
-                    if let Some(turn_id) = arrival_turn_id.as_deref() {
-                        self.hub.publish(turn_id, published.clone()).await;
-                    }
-                    self.hub
-                        .publish_trace(&row.session_id.encode(), published)
-                        .await;
-                    // Remote envagent ingest owns its own drain, so
-                    // mirror the live path's late trajectory reconciliation here.
-                    // The event is still retained on the arriving turn; the
-                    // reconciler amends the earlier provisional record in place.
-                    if item.event.kind == sylph_protocol::EventKind::Subagent
-                        && item.event.phase == Some(sylph_protocol::Phase::Completed)
-                    {
-                        if let Some(stream_id) = item.event.stream_id.as_deref() {
-                            if let Some(reconciler) =
-                                self.trajectory_reconciler.read().await.clone()
-                            {
-                                let outcome = TrajectoryOutcome {
-                                    text: &item.event.text,
-                                    is_error: item.event.is_error,
-                                    reported_on_turn_id: arrival_turn_id
-                                        .as_deref()
-                                        .unwrap_or_default(),
-                                };
-                                let _ = reconciler
-                                    .record(
-                                        &item.session_id,
-                                        stream_id,
-                                        arrival_turn_id.as_deref().unwrap_or_default(),
-                                        &outcome,
-                                    )
-                                    .await;
-                            }
-                        }
-                    }
-                    if let Some(turn_id) = arrival_turn_id.as_deref() {
-                        if item.event.kind == sylph_protocol::EventKind::Turn
-                            && item.event.phase == Some(sylph_protocol::Phase::Completed)
-                        {
-                            terminal_items.push((
-                                item.session_id.clone(),
-                                turn_id.to_string(),
-                                item.event.clone(),
-                            ));
-                            self.remote_source_turns
-                                .lock()
-                                .await
-                                .remove(&item.session_id);
-                        }
-                    }
-                    last_server = Some(ingest.server_seq);
-                }
-                EnvIngestResult::Duplicate { .. } => {
-                    last_server = Some(ingest.server_seq);
-                }
-            }
-            accepted_through = seq;
-            // A batch can cross a turn boundary. Seal before assigning the next
-            // item, otherwise the next agent-initiated turn inherits the old generation.
-            if !terminal_items.is_empty() {
-                drop(seq_guard);
-                self.settle_remote_terminals(std::mem::take(&mut terminal_items))
-                    .await;
-                seq_guard = seq_gate.lock().await;
-            }
-        }
-        drop(_gate);
-        drop(seq_guard);
-        Ok(IngestResult::Ack(Ack {
-            producer_id: batch.producer_id,
-            accepted_through: ProducerSeq::new(accepted_through),
-            server_seq_through: last_server,
-        }))
-    }
-
-    async fn settle_remote_terminals(
-        &self,
-        terminal_items: Vec<(sylph_protocol::SessionId, String, sylph_protocol::Event)>,
-    ) {
-        if let Some(closer) = self.turn_closer.read().await.clone() {
-            for (session_id, turn_id, event) in terminal_items {
-                let stop_reason = event
-                    .data
-                    .as_ref()
-                    .and_then(|data| data.get("stopReason"))
-                    .and_then(|value| value.as_str())
-                    .map(str::to_string);
-                let outcome = if event.is_error {
-                    Outcome::Failed {
-                        message: if event.text.is_empty() {
-                            "The agent reported a failure".to_string()
-                        } else {
-                            event.text.clone()
-                        },
-                    }
-                } else if stop_reason.as_deref() == Some("interrupted")
-                    || stop_reason.as_deref() == Some("aborted")
-                {
-                    Outcome::Interrupted
-                } else {
-                    Outcome::Completed { stop_reason }
-                };
-                closer.close(&session_id, &turn_id, outcome).await;
-            }
-        }
-    }
-
-    async fn ensure_remote_source_turn_with_origin(
-        &self,
-        session_id: &sylph_protocol::SessionId,
-        at_ms: i64,
-        origin: &str,
-    ) -> Result<String> {
-        if let Some(id) = self
-            .remote_source_turns
-            .lock()
-            .await
-            .get(session_id)
-            .cloned()
-        {
-            return Ok(id);
-        }
-        if let Some(id) = self.store.running_turn_id(session_id).await? {
-            self.remote_source_turns
-                .lock()
-                .await
-                .insert(session_id.clone(), id.clone());
-            return Ok(id);
-        }
-        let turn = crate::models::Turn {
-            id: format!("remote-source-turn-{}", uuid::Uuid::new_v4().simple()),
-            session_id: session_id.clone(),
-            status: "running".into(),
-            // No HTTP request opened this turn: it is the remote agent speaking
-            // after the prior turn settled, so preserve that provenance in the
-            // durable turn row just as the live link path does.
-            origin: origin.into(),
-            origin_subject: None,
-            request_text: String::new(),
-            command_invocation_id: None,
-            idempotency_key: None,
-            error_code: None,
-            error_message: None,
-            close_reason: None,
-            created_at_ms: at_ms,
-            started_at_ms: Some(at_ms),
-            completed_at_ms: None,
-            stopped_at_ms: None,
-        };
-        let id = self.store.create_turn(&turn).await?.id;
-        self.remote_source_turns
-            .lock()
-            .await
-            .insert(session_id.clone(), id.clone());
-        let _ = self
-            .store
-            .update_session_status(session_id, "running")
-            .await;
-        Ok(id)
-    }
-
-    async fn validate_producer_frame(
-        &self,
-        environment: &EnvironmentId,
-        expected_epoch: u64,
-        frame_epoch: u64,
-        producer_id: &ProducerId,
-    ) -> Result<()> {
-        if frame_epoch != expected_epoch {
-            return Err(BridgeError::StaleEpoch.into());
-        }
-        let lease = self
-            .leases
-            .read()
-            .await
-            .get(environment)
-            .map(|lease| (lease.epoch, lease.producer_id.clone()))
-            .ok_or(BridgeError::NotConnected)?;
-        if lease.0 != expected_epoch {
-            return Err(BridgeError::StaleEpoch.into());
-        }
-        if &lease.1 != producer_id {
-            return Err(BridgeError::ProducerMismatch.into());
-        }
-        Ok(())
-    }
-
-    async fn ingest_gate(&self, environment: &EnvironmentId) -> Arc<Mutex<()>> {
-        self.ingest_gates
-            .lock()
-            .await
-            .entry(environment.clone())
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone()
-    }
-
-    /// Storage failure is a synchronization fault, not evidence the agent stopped.
-    /// Nack preserves the producer prefix; command replies keep their independent path.
-    async fn finish_native_delivery(
-        &self,
-        result: Result<()>,
-        persisted: bool,
-        session: &sylph_protocol::SessionId,
-        producer: &ProducerId,
-        tx: &mpsc::Sender<WireMessage>,
-        faults: &mut HashMap<sylph_protocol::SessionId, bool>,
-    ) -> Result<()> {
-        let failed = match result {
-            Ok(()) => None,
-            Err(error) if error.is::<NativePersistenceFailure>() => Some(error.to_string()),
-            Err(error) => return Err(error),
-        };
-        let previous = match faults.get(session) {
-            Some(value) => *value,
-            None => self.store.native_sync_fault(session).await?,
-        };
-        if failed.is_some() && !previous || persisted && previous {
-            let _reservation = self.seq.gate().lock_owned().await;
-            let seq = self.seq.next_inner(session).await?;
-            let now = now_ms();
-            let row = crate::models::Event {
-                id: None,
-                session_id: session.clone(),
-                turn_id: None,
-                seq,
-                kind: if failed.is_some() { "error" } else { "status" }.into(),
-                phase: Some("completed".into()),
-                stream_id: Some("native-sync".into()),
-                span: None,
-                interior_state: None,
-                name: Some("Synchronization".into()),
-                text: failed.as_ref().map_or_else(
-                    || "Synchronization recovered.".into(),
-                    |message| format!("Synchronization paused: {message}"),
-                ),
-                data_json: r#"{"scope":"synchronization"}"#.into(),
-                is_error: failed.is_some(),
-                stability: "stable".into(),
-                source: "server".into(),
-                arrival_at_ms: now,
-                recorded_at_ms: None,
-                created_at_ms: now,
-            };
-            self.store.append_event(&row).await?;
-            self.hub
-                .publish_session(&session.encode(), StreamEvent::from_row(&row))
-                .await;
-        }
-        faults.insert(session.clone(), failed.is_some() || previous && !persisted);
-        if let Some(error) = failed {
-            if previous {
-                tracing::debug!(%error,"native retention is still blocked");
-            } else {
-                tracing::error!(%error,"native retention is blocked; producer records remain unacknowledged");
-            }
-            let through = self
-                .store
-                .env_accepted_through(&session.environment, producer)
-                .await?;
-            tx.send(WireMessage::Nack {
-                producer_id: producer.clone(),
-                expected_next: ProducerSeq::new(through + 1),
-                reason: "native persistence failed; retry the retained producer prefix".into(),
-            })
-            .await
-            .map_err(|_| anyhow!("envagent writer closed"))?;
-        }
-        Ok(())
-    }
-
-    /// Run one sequenced non-event message through the same contiguous-prefix
-    /// gate as event batches.  The receipt/hash check happens before the
-    /// callback, so an exact replay cannot publish or mutate state twice.  The
-    /// gate remains held while the callback and receipt insertion run; this is
-    /// intentionally serialized because these messages often update state in a
-    /// different table than the receipt table and SQLite cannot make that pair
-    /// one transaction for every sink (notably the native record store).
-    #[allow(clippy::too_many_arguments)]
-    async fn process_message<F, Fut>(
-        &self,
-        environment: &EnvironmentId,
-        epoch: u64,
-        producer_id: &ProducerId,
-        producer_seq: ProducerSeq,
-        payload_hash: &str,
-        tx: &mpsc::Sender<WireMessage>,
-        effect: F,
-    ) -> Result<()>
-    where
-        F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = Result<()>>,
-    {
-        self.validate_producer_frame(environment, epoch, epoch, producer_id)
-            .await?;
-        let _gate = self.ingest_gate(environment).await.lock_owned().await;
-        let accepted_before = self
-            .store
-            .env_accepted_through(environment, producer_id)
-            .await?;
-        if producer_seq.get() > accepted_before.saturating_add(1) {
-            tx.send(WireMessage::Nack {
-                producer_id: producer_id.clone(),
-                expected_next: ProducerSeq::new(accepted_before.saturating_add(1)),
-                reason: "producer sequence gap".into(),
-            })
-            .await
-            .map_err(|_| anyhow!("envagent writer closed"))?;
-            return Ok(());
-        }
-        if let Some(existing) = self
-            .store
-            .env_receipt_detail(environment, producer_id, producer_seq)
-            .await?
-        {
-            if existing.payload_hash != payload_hash {
-                return Err(BridgeError::InvalidBatch(
-                    "producer sequence was replayed with different payload".into(),
-                )
-                .into());
-            }
-            tx.send(WireMessage::Ack {
-                producer_id: producer_id.clone(),
-                accepted_through: ProducerSeq::new(accepted_before),
-                server_seq_through: None,
-            })
-            .await
-            .map_err(|_| anyhow!("envagent writer closed"))?;
-            return Ok(());
-        }
-
-        effect().await?;
-        self.store
-            .insert_env_message_receipt(environment, producer_id, producer_seq, payload_hash)
-            .await?;
-        let accepted_through = self
-            .store
-            .env_accepted_through(environment, producer_id)
-            .await?;
-        tx.send(WireMessage::Ack {
-            producer_id: producer_id.clone(),
-            accepted_through: ProducerSeq::new(accepted_through),
-            server_seq_through: None,
-        })
-        .await
-        .map_err(|_| anyhow!("envagent writer closed"))?;
-        Ok(())
-    }
-
-    /// Dispatch a command while respecting the durable ambiguity record.
     pub async fn dispatch(
         &self,
         environment: &EnvironmentId,
@@ -2676,7 +1236,6 @@ impl EnvBridge {
             .map_err(|_| BridgeError::NotConnected)?;
         Ok(DispatchResult::Sent)
     }
-
     pub async fn dispatch_and_wait(
         &self,
         environment: &EnvironmentId,
@@ -2763,7 +1322,6 @@ impl EnvBridge {
             },
         }
     }
-
     async fn dispatch_read_and_wait(
         &self,
         environment: &EnvironmentId,
@@ -2814,7 +1372,6 @@ impl EnvBridge {
             })
         })
     }
-
     pub async fn record_command_result(
         &self,
         environment: &EnvironmentId,
@@ -2874,10 +1431,24 @@ impl EnvBridge {
         }
         Ok(())
     }
+    async fn dispatch_remote_operation(
+        &self,
+        environment: &EnvironmentId,
+        command: sylph_protocol::EnvironmentCommand,
+        idempotency: IdempotencyPolicy,
+    ) -> Result<CommandOutcome> {
+        let request_id = remote_request_id(environment, &command, idempotency)?;
+        let timeout = command_timeout(&command);
+        self.dispatch_and_wait(
+            environment,
+            Command::new(request_id, idempotency, command),
+            timeout,
+        )
+        .await
+    }
 }
-
 fn is_stateless_read(command: &sylph_protocol::EnvironmentCommand) -> bool {
-    use sylph_protocol::{EnvironmentCommand, FileOperation, NativeTransferOperation};
+    use sylph_protocol::{EnvironmentCommand, FileOperation};
     matches!(
         command,
         EnvironmentCommand::Health
@@ -2898,36 +1469,8 @@ fn is_stateless_read(command: &sylph_protocol::EnvironmentCommand) -> bool {
                     | FileOperation::Stat { .. },
                 ..
             }
-            | EnvironmentCommand::NativeTransfer {
-                operation: NativeTransferOperation::Read { .. },
-                ..
-            }
     )
 }
-
-fn hash_secret(secret: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(secret.as_bytes());
-    hex::encode(hasher.finalize())
-}
-
-async fn remove_command_waiter(waiters: &CommandWaiters, key: &(EnvironmentId, String), id: u64) {
-    let mut guard = waiters.lock().await;
-    if let Some(entries) = guard.get_mut(key) {
-        entries.retain(|entry| entry.id != id);
-        if entries.is_empty() {
-            guard.remove(key);
-        }
-    }
-}
-
-async fn take_command_waiters(
-    waiters: &CommandWaiters,
-    key: &(EnvironmentId, String),
-) -> Vec<CommandWaiter> {
-    waiters.lock().await.remove(key).unwrap_or_default()
-}
-
 pub(crate) fn command_timeout(command: &sylph_protocol::EnvironmentCommand) -> std::time::Duration {
     use sylph_protocol::EnvironmentCommand;
     // Native snapshots are bounded by their data size, not an interactive handshake.
@@ -2936,12 +1479,10 @@ pub(crate) fn command_timeout(command: &sylph_protocol::EnvironmentCommand) -> s
         EnvironmentCommand::Reread { .. }
         | EnvironmentCommand::Adopt { .. }
         | EnvironmentCommand::Watch { .. }
-        | EnvironmentCommand::Enumerate { .. }
-        | EnvironmentCommand::Reproject { .. } => std::time::Duration::from_secs(300),
+        | EnvironmentCommand::Enumerate { .. } => std::time::Duration::from_secs(300),
         _ => std::time::Duration::from_secs(30),
     }
 }
-
 fn command_name(command: &sylph_protocol::EnvironmentCommand) -> &'static str {
     use sylph_protocol::EnvironmentCommand;
     match command {
@@ -2965,111 +1506,42 @@ fn command_name(command: &sylph_protocol::EnvironmentCommand) -> &'static str {
         EnvironmentCommand::Health => "health",
         EnvironmentCommand::Capabilities { .. } => "capabilities",
         EnvironmentCommand::Enumerate { .. } => "enumerate",
-        EnvironmentCommand::Activate { .. } => "activate",
         EnvironmentCommand::Close { .. } => "close",
         EnvironmentCommand::BrowseRoots => "browse-roots",
         EnvironmentCommand::BrowseTree { .. } => "browse-tree",
-        EnvironmentCommand::Reproject { .. } => "reproject",
-        EnvironmentCommand::NativeTransfer { .. } => "native-transfer",
     }
 }
-
-/// Whether each call of this command is a *new* operation, so it must not
-/// address one frozen durable result in `env_command_results`.
-///
-/// This is deliberately **not** [`IdempotencyPolicy::Replayable`], and the two
-/// must not be derived from each other even though they read as synonyms.
-/// `Replayable` answers a wire question that travels with the command — may the
-/// envagent be sent this same request id again after an ambiguous crash. This
-/// answers a server question — does a second call want a second answer.
-/// `Replayable` is the strict superset, and `Run` is the witness: `remote_attach`
-/// is replayable precisely *because* a retry must address the original command
-/// rather than start a second native session, which is the opposite of what a
-/// read wants. Collapsing the two would make one of those cases wrong.
-///
-/// The trap is that the naming invites an omission rather than a mismatch: a new
-/// read-only command reaches this file, gets `Replayable` at its call site, and
-/// nothing fails if it is never listed here — it just answers every later caller
-/// with its first answer. `DraftCapabilities` and `DraftFiles` both shipped that
-/// way, each carrying the same omission as its durable-session counterpart.
-fn command_needs_a_fresh_request_id(command: &sylph_protocol::EnvironmentCommand) -> bool {
-    use sylph_protocol::{EnvironmentCommand, FileOperation};
-    match command {
-        // A capability surface is a live reading of an agent's state, so a read
-        // after a config change must observe it. Omitting the draft form here is
-        // what made picking a model or a thinking level appear to do nothing: a
-        // draft's first read happens before any config is set, and that empty
-        // snapshot then answered every later read for the draft's whole life.
-        EnvironmentCommand::Capabilities { .. } | EnvironmentCommand::DraftCapabilities { .. } => {
-            true
-        }
-        // A listing after mkdir must observe the new entry. Mutating file
-        // operations are excluded: they carry their payload in the request id so
-        // an at-most-once retry addresses the original write.
-        EnvironmentCommand::Files { operation, .. }
-        | EnvironmentCommand::DraftFiles { operation, .. } => matches!(
-            operation,
-            FileOperation::List { .. } | FileOperation::Read { .. } | FileOperation::Stat { .. }
-        ),
-        // Not a read, but repeatable for the same reason: a session can be
-        // closed, reattached, and closed again, and the payload is only its id —
-        // so a payload-derived id would replay the first close's result and the
-        // second close would never reach the envagent.
-        EnvironmentCommand::Close { .. } => true,
-        // **The case that looks safest and is not.** A re-read touches a file and
-        // writes no vendor state, so it reads as a question — but its whole point
-        // is to observe a store that has changed since it was last asked, and its
-        // payload is only the session id, identical on every call. A
-        // payload-derived id would make the second click address the first pass's
-        // result and report counts taken before the bytes it was clicked to
-        // collect existed: a "refresh" answering from cache, which is the very
-        // defect the control exists to fix, one layer down.
-        EnvironmentCommand::Reread { .. }
-        | EnvironmentCommand::Reproject { .. }
-        | EnvironmentCommand::NativeTransfer { .. } => true,
-        _ => false,
-    }
-}
-
 fn remote_request_id(
     environment: &EnvironmentId,
     command: &sylph_protocol::EnvironmentCommand,
     _idempotency: IdempotencyPolicy,
 ) -> Result<sylph_protocol::CommandRequestId> {
-    // The command payload itself is the idempotency scope.  Hashing it keeps
-    // request ids bounded even for large file writes, while making retries of
-    // the same operation address the original durable result and changing a
-    // config value or file payload address a new operation.
-    // A command whose every call is a new operation must not reuse one cached
-    // result forever, so give it a fresh request id; its retry safety comes from
-    // the operation itself. Mutating commands retain payload-derived ids for
-    // at-most-once semantics.
-    if command_needs_a_fresh_request_id(command) {
-        return sylph_protocol::CommandRequestId::parse(format!(
-            "remote-{}-{}-{}",
-            environment,
-            command_name(command),
-            uuid::Uuid::new_v4().simple()
-        ))
-        .map_err(|error| anyhow!(error));
-    }
-    let payload = serde_json::to_vec(command).map_err(|error| anyhow!(error))?;
-    let suffix = hash_bytes(&payload);
-    sylph_protocol::CommandRequestId::parse(format!(
-        "remote-{}-{}-{}",
-        environment,
+    Ok(sylph_protocol::CommandRequestId::parse(format!(
+        "remote-{environment}-{}-{}",
         command_name(command),
-        suffix
-    ))
-    .map_err(|error| anyhow!(error))
+        uuid::Uuid::new_v4()
+    ))?)
 }
-
-fn hash_bytes(bytes: &[u8]) -> String {
+async fn take_command_waiters(
+    waiters: &CommandWaiters,
+    key: &(EnvironmentId, String),
+) -> Vec<CommandWaiter> {
+    waiters.lock().await.remove(key).unwrap_or_default()
+}
+async fn remove_command_waiter(waiters: &CommandWaiters, key: &(EnvironmentId, String), id: u64) {
+    let mut guard = waiters.lock().await;
+    if let Some(entries) = guard.get_mut(key) {
+        entries.retain(|entry| entry.id != id);
+        if entries.is_empty() {
+            guard.remove(key);
+        }
+    }
+}
+fn hash_secret(secret: &str) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(bytes);
+    hasher.update(secret.as_bytes());
     hex::encode(hasher.finalize())
 }
-
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     if left.len() != right.len() {
         return false;
@@ -3081,8 +1553,7 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
         })
         == 0
 }
-
-async fn mint_environment_id(store: &JournalStore) -> Result<EnvironmentId> {
+async fn mint_environment_id(store: &ControlStore) -> Result<EnvironmentId> {
     for _ in 0..16 {
         let raw = uuid::Uuid::new_v4().as_bytes().to_vec();
         let candidate = base32_lower(&raw);
@@ -3093,7 +1564,6 @@ async fn mint_environment_id(store: &JournalStore) -> Result<EnvironmentId> {
     }
     Err(anyhow!("could not allocate a unique environment id"))
 }
-
 fn base32_lower(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
     let mut out = String::with_capacity((bytes.len() * 8).div_ceil(5));
@@ -3112,9 +1582,6 @@ fn base32_lower(bytes: &[u8]) -> String {
     }
     out
 }
-
-const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
-
 async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Vec<u8>> {
     let length = reader.read_u32().await? as usize;
     if length == 0 || length > MAX_FRAME_BYTES {
@@ -3124,7 +1591,6 @@ async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Vec<u8>> {
     reader.read_exact(&mut payload).await?;
     Ok(payload)
 }
-
 async fn write_frame<W: AsyncWrite + Unpin>(writer: &mut W, payload: &[u8]) -> Result<()> {
     if payload.is_empty() || payload.len() > MAX_FRAME_BYTES {
         return Err(anyhow!("invalid envagent frame length {}", payload.len()));
@@ -3134,1461 +1600,27 @@ async fn write_frame<W: AsyncWrite + Unpin>(writer: &mut W, payload: &[u8]) -> R
     writer.flush().await?;
     Ok(())
 }
+const MAX_FRAME_BYTES: usize = sylph_protocol::MAX_FRAME_BYTES;
 
-#[cfg(test)]
-mod tests {
-    mod sequence;
-    use super::*;
-    mod read_commands;
-    use crate::models::Session;
-    use sylph_protocol::{AgentName, EnvironmentId, Event, EventKind, Phase, SessionId};
-
-    async fn bridge() -> (EnvBridge, tempfile::TempDir) {
-        let dir = tempfile::tempdir().unwrap();
-        let store = JournalStore::new(dir.path().join("journal.db").to_str().unwrap())
-            .await
-            .unwrap();
-        let hub = EventHub::new();
-        let seq = SeqAllocator::new(store.clone());
-        let history = crate::storage::HistoryStore::open(
-            dir.path().join("history.db").to_str().unwrap(),
-            crate::storage::cas::BlobStore::new(dir.path().join("blobs")),
-        )
-        .await
-        .unwrap();
-        let bridge = EnvBridge::new(store, history, seq, hub, EnvironmentRegistry::new());
-        (bridge, dir)
-    }
-
-    fn session(native: &str) -> SessionId {
-        SessionId::new(
-            EnvironmentId::parse("env7fk2").unwrap(),
-            AgentName::parse("claude").unwrap(),
-            sylph_protocol::NativeId::new(native),
-        )
-    }
-
-    #[tokio::test]
-    async fn native_turn_input_opens_a_user_turn() {
-        let (bridge, _dir) = bridge().await;
-        let id = session("input-origin");
-        bridge
-            .store
-            .create_session(&Session {
-                id: id.clone(),
-                workdir: Some("/tmp".into()),
-                title: None,
-                inject_identity: false,
-                fidelity: sylph_protocol::Fidelity::Messages,
-                flags_json: "{}".into(),
-                status: "idle".into(),
-                created_at_ms: 1,
-                updated_at_ms: 1,
-            })
-            .await
-            .unwrap();
-
-        let turn_id = bridge
-            .ensure_remote_source_turn_with_origin(&id, 10, "user")
-            .await
-            .unwrap();
-        let turn = bridge.store.get_turn(&turn_id).await.unwrap().unwrap();
-        assert_eq!(turn.origin, "user");
-        assert_eq!(turn.status, "running");
-    }
-
-    #[tokio::test]
-    async fn pairing_is_persisted_and_a_code_can_be_consumed_once() {
-        let (bridge, _dir) = bridge().await;
-        let offer = bridge.create_pairing().await.unwrap();
-        let grant = bridge
-            .claim_pairing(&offer.code, "test", "development", Vec::new())
-            .await
-            .unwrap();
-        assert!(grant.environment_id.as_str().len() > 10);
-        assert!(bridge
-            .claim_pairing(&offer.code, "again", "development", Vec::new())
-            .await
-            .is_err());
-        let rows = bridge.list_environments().await.unwrap();
-        assert_eq!(rows.len(), 1);
-        assert!(!rows[0].connected);
-    }
-
-    #[tokio::test]
-    async fn ingest_assigns_server_sequences_and_deduplicates_replays() {
-        let (bridge, _dir) = bridge().await;
-        let id = session("n1");
-        bridge
-            .store
-            .create_session(&Session {
-                id: id.clone(),
-                workdir: Some("/tmp".into()),
-                title: None,
-                inject_identity: false,
-                fidelity: sylph_protocol::Fidelity::Stream,
-                flags_json: "{}".into(),
-                status: "idle".into(),
-                created_at_ms: 1,
-                updated_at_ms: 1,
-            })
-            .await
-            .unwrap();
-        let (tx, _rx) = mpsc::channel(4);
-        let hello = sylph_protocol::Hello::current(
-            "install",
-            ProducerId::parse("producer").unwrap(),
-            Some(EnvironmentId::parse("env7fk2").unwrap()),
-            0,
-        );
-        // Pairing persistence is bypassed here by inserting a fixture installation.
-        bridge
-            .store
-            .upsert_environment(
-                &EnvironmentId::parse("env7fk2").unwrap(),
-                "install",
-                "fixture",
-                "development",
-                &hash_secret("token"),
-                "[]",
-            )
-            .await
-            .unwrap();
-        let welcome = bridge
-            .register_connection(&hello, "token", tx)
-            .await
-            .unwrap();
-        let event = Event::new(EventKind::Assistant, Some(Phase::Completed), 10);
-        let item = sylph_protocol::SequencedEvent::pending(
-            ProducerId::parse("producer").unwrap(),
-            ProducerSeq::new(1),
-            id.clone(),
-            event,
-            None,
-        );
-        let batch = EventBatch::new(
-            EnvironmentId::parse("env7fk2").unwrap(),
-            ProducerId::parse("producer").unwrap(),
-            welcome.connection_epoch,
-            vec![item.clone()],
-        )
-        .unwrap();
-        assert!(matches!(
-            bridge.ingest_batch(batch.clone()).await.unwrap(),
-            IngestResult::Ack(_)
-        ));
-        assert!(matches!(
-            bridge.ingest_batch(batch).await.unwrap(),
-            IngestResult::Ack(_)
-        ));
-        assert_eq!(bridge.store.max_event_seq(&id).await.unwrap(), 0);
-    }
-
-    #[tokio::test]
-    async fn a_gap_is_nacked_before_any_event_is_written() {
-        let (bridge, _dir) = bridge().await;
-        bridge
-            .store
-            .upsert_environment(
-                &EnvironmentId::parse("env7fk2").unwrap(),
-                "install",
-                "fixture",
-                "development",
-                &hash_secret("token"),
-                "[]",
-            )
-            .await
-            .unwrap();
-        let (tx, _rx) = mpsc::channel(4);
-        let hello = sylph_protocol::Hello::current(
-            "install",
-            ProducerId::parse("producer").unwrap(),
-            Some(EnvironmentId::parse("env7fk2").unwrap()),
-            0,
-        );
-        let welcome = bridge
-            .register_connection(&hello, "token", tx)
-            .await
-            .unwrap();
-        let item = sylph_protocol::SequencedEvent::pending(
-            ProducerId::parse("producer").unwrap(),
-            ProducerSeq::new(3),
-            session("n1"),
-            Event::new(EventKind::Status, None, 1),
-            None,
-        );
-        let result = bridge
-            .ingest_batch(
-                EventBatch::new(
-                    EnvironmentId::parse("env7fk2").unwrap(),
-                    ProducerId::parse("producer").unwrap(),
-                    welcome.connection_epoch,
-                    vec![item],
-                )
-                .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert!(
-            matches!(result, IngestResult::Nack { expected_next, .. } if expected_next.get() == 1)
-        );
-    }
-
-    #[tokio::test]
-    async fn dispatch_and_wait_returns_the_persisted_command_result() {
-        let (bridge, _dir) = bridge().await;
-        let environment = EnvironmentId::parse("env7fk2").unwrap();
-        bridge
-            .store
-            .upsert_environment(
-                &environment,
-                "install",
-                "fixture",
-                "development",
-                &hash_secret("token"),
-                "[]",
-            )
-            .await
-            .unwrap();
-        let (tx, mut rx) = mpsc::channel(4);
-        let hello = sylph_protocol::Hello::current(
-            "install",
-            ProducerId::parse("producer").unwrap(),
-            Some(environment.clone()),
-            0,
-        );
-        bridge
-            .register_connection(&hello, "token", tx)
-            .await
-            .unwrap();
-
-        let command = Command::new(
-            sylph_protocol::CommandRequestId::parse("request-1").unwrap(),
-            IdempotencyPolicy::Replayable,
-            sylph_protocol::EnvironmentCommand::Activate {
-                session_id: session("persisted-command"),
-            },
-        );
-        let waiter = {
-            let bridge = bridge.clone();
-            let environment = environment.clone();
-            tokio::spawn(async move {
-                bridge
-                    .dispatch_and_wait(&environment, command, std::time::Duration::from_secs(1))
-                    .await
-            })
-        };
-        let WireMessage::Command {
-            request_id,
-            idempotency,
-            ..
-        } = rx.recv().await.unwrap()
-        else {
-            panic!("dispatch must send a command frame");
-        };
-        bridge
-            .record_command_result(
-                &environment,
-                &sylph_protocol::CommandResultMessage {
-                    request_id,
-                    outcome: CommandOutcome::accepted(),
-                    connection_epoch: 1,
-                    idempotency: Some(idempotency),
+fn capture_reply(batch: crate::trace::evidence::AdmissionBatch) -> sylph_protocol::CaptureReply {
+    use sylph_protocol::{CaptureDisposition, CaptureReceipt, CaptureReply};
+    CaptureReply::Admitted {
+        receipts: batch
+            .receipts
+            .into_iter()
+            .map(|receipt| CaptureReceipt {
+                observation: receipt.observation_ref,
+                disposition: match receipt.disposition {
+                    crate::trace::evidence::ReceiptDisposition::Retained { admission_seq } => {
+                        CaptureDisposition::Retained { admission_seq }
+                    }
+                    crate::trace::evidence::ReceiptDisposition::DiscardedByDeletion {
+                        tombstone_id,
+                    } => CaptureDisposition::DiscardedByDeletion { tombstone_id },
                 },
-            )
-            .await
-            .unwrap();
-        assert!(matches!(
-            waiter.await.unwrap().unwrap(),
-            CommandOutcome::Accepted { .. }
-        ));
-    }
-
-    #[tokio::test]
-    async fn concurrent_retries_share_one_command_result_and_one_wire_dispatch() {
-        let (bridge, _dir) = bridge().await;
-        let environment = EnvironmentId::parse("env7fk2").unwrap();
-        bridge
-            .store
-            .upsert_environment(
-                &environment,
-                "install-concurrent",
-                "fixture",
-                "development",
-                &hash_secret("concurrent-token"),
-                "[]",
-            )
-            .await
-            .unwrap();
-        let (tx, mut rx) = mpsc::channel(8);
-        let hello = sylph_protocol::Hello::current(
-            "install-concurrent",
-            ProducerId::parse("producer-concurrent").unwrap(),
-            Some(environment.clone()),
-            0,
-        );
-        let welcome = bridge
-            .register_connection(&hello, "concurrent-token", tx)
-            .await
-            .unwrap();
-        let command = Command::new(
-            sylph_protocol::CommandRequestId::parse("same-request").unwrap(),
-            IdempotencyPolicy::AtMostOnce,
-            sylph_protocol::EnvironmentCommand::Interrupt {
-                session_id: session("concurrent-command"),
-                expected_turn_id: None,
-            },
-        );
-        let first = {
-            let bridge = bridge.clone();
-            let environment = environment.clone();
-            let command = command.clone();
-            tokio::spawn(async move {
-                bridge
-                    .dispatch_and_wait(&environment, command, std::time::Duration::from_secs(1))
-                    .await
             })
-        };
-        let second = {
-            let bridge = bridge.clone();
-            let environment = environment.clone();
-            tokio::spawn(async move {
-                bridge
-                    .dispatch_and_wait(&environment, command, std::time::Duration::from_secs(1))
-                    .await
-            })
-        };
-        let WireMessage::Command { request_id, .. } = rx.recv().await.unwrap() else {
-            panic!("one command frame expected");
-        };
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
-                .await
-                .is_err(),
-            "a concurrent retry must not dispatch a second frame"
-        );
-        bridge
-            .record_command_result(
-                &environment,
-                &sylph_protocol::CommandResultMessage {
-                    request_id,
-                    outcome: CommandOutcome::accepted_with_result(serde_json::json!({
-                        "ok": true
-                    })),
-                    connection_epoch: welcome.connection_epoch,
-                    idempotency: Some(IdempotencyPolicy::AtMostOnce),
-                },
-            )
-            .await
-            .unwrap();
-        assert!(matches!(
-            first.await.unwrap().unwrap(),
-            CommandOutcome::Accepted { .. }
-        ));
-        assert!(matches!(
-            second.await.unwrap().unwrap(),
-            CommandOutcome::Accepted { .. }
-        ));
-    }
-
-    #[tokio::test]
-    async fn native_retention_failure_nacks_without_closing_the_connection_or_turn() {
-        use sqlx::Connection;
-        let (bridge, dir) = bridge().await;
-        let environment = EnvironmentId::parse("envsdc2").unwrap();
-        let producer = ProducerId::parse("prodsdc2").unwrap();
-        bridge
-            .store
-            .upsert_environment(
-                &environment,
-                "install-sidecar",
-                "fixture",
-                "development",
-                &hash_secret("sidecar-token"),
-                "[]",
-            )
-            .await
-            .unwrap();
-        let session = Session {
-            id: SessionId::new(
-                environment.clone(),
-                AgentName::parse("claude").unwrap(),
-                sylph_protocol::NativeId::new("sidecar-session"),
-            ),
-            workdir: Some("/tmp".into()),
-            title: None,
-            inject_identity: false,
-            fidelity: sylph_protocol::Fidelity::Blocks,
-            flags_json: "{}".into(),
-            status: "idle".into(),
-            created_at_ms: 1,
-            updated_at_ms: 1,
-        };
-        bridge.store.create_session(&session).await.unwrap();
-        let (mut client, server) = tokio::io::duplex(32 * 1024);
-        let (reader, writer) = tokio::io::split(server);
-        let task = tokio::spawn({
-            let bridge = bridge.clone();
-            async move { bridge.serve_io(reader, writer).await }
-        });
-        let hello = sylph_protocol::Hello::current(
-            "install-sidecar",
-            producer.clone(),
-            Some(environment),
-            0,
-        );
-        write_frame(
-            &mut client,
-            &serde_json::to_vec(&WireMessage::from_hello(hello)).unwrap(),
-        )
-        .await
-        .unwrap();
-        write_frame(&mut client, &serde_json::to_vec("sidecar-token").unwrap())
-            .await
-            .unwrap();
-        let epoch = match sylph_protocol::decode_message(&read_frame(&mut client).await.unwrap())
-            .unwrap()
-        {
-            DecodedMessage::Known(WireMessage::Welcome {
-                connection_epoch, ..
-            }) => connection_epoch,
-            other => panic!("expected welcome, got {other:?}"),
-        };
-
-        let turn_id = bridge
-            .ensure_remote_source_turn_with_origin(&session.id, 10, "user")
-            .await
-            .unwrap();
-        let mut native = sqlx::SqliteConnection::connect_with(
-            &sqlx::sqlite::SqliteConnectOptions::new().filename(dir.path().join("native.db")),
-        )
-        .await
-        .unwrap();
-        sqlx::query("CREATE TRIGGER reject_retention BEFORE INSERT ON native_records BEGIN SELECT RAISE(FAIL,'injected native write failure'); END").execute(&mut native).await.unwrap();
-        let frame = WireMessage::NativeRecord {
-            session_id: session.id.clone(),
-            record: sylph_protocol::NativeRecord {
-                source: "failure.jsonl".into(),
-                version: 1,
-                raw_json: None,
-                payload: serde_json::json!({"preserved":true}),
-                blobs: vec![],
-            },
-            producer_id: producer.clone(),
-            producer_seq: ProducerSeq::new(1),
-            connection_epoch: epoch,
-        };
-        write_frame(&mut client, &serde_json::to_vec(&frame).unwrap())
-            .await
-            .unwrap();
-        let reply =
-            tokio::time::timeout(std::time::Duration::from_secs(2), read_frame(&mut client))
-                .await
-                .unwrap()
-                .unwrap();
-        assert!(
-            matches!(sylph_protocol::decode_message(&reply).unwrap(),DecodedMessage::Known(WireMessage::Nack{expected_next,..}) if expected_next.get()==1)
-        );
-        assert_eq!(
-            bridge
-                .store
-                .get_turn(&turn_id)
-                .await
-                .unwrap()
-                .unwrap()
-                .status,
-            "running"
-        );
-        assert_eq!(
-            bridge
-                .store
-                .env_accepted_through(&session.id.environment, &producer)
-                .await
-                .unwrap(),
-            0
-        );
-        assert!(bridge.store.native_sync_fault(&session.id).await.unwrap());
-        sqlx::query("DROP TRIGGER reject_retention")
-            .execute(&mut native)
-            .await
-            .unwrap();
-        for _ in 0..2 {
-            write_frame(&mut client, &serde_json::to_vec(&frame).unwrap())
-                .await
-                .unwrap();
-            let reply =
-                tokio::time::timeout(std::time::Duration::from_secs(2), read_frame(&mut client))
-                    .await
-                    .unwrap()
-                    .unwrap();
-            assert!(
-                matches!(sylph_protocol::decode_message(&reply).unwrap(),DecodedMessage::Known(WireMessage::Ack{accepted_through,..}) if accepted_through.get()==1)
-            );
-        }
-        assert_eq!(
-            bridge
-                .history
-                .native_record(&session.id.encode(), "failure.jsonl", 1)
-                .await
-                .unwrap(),
-            Some(serde_json::json!({"preserved":true}))
-        );
-        assert!(!bridge.store.native_sync_fault(&session.id).await.unwrap());
-        assert_eq!(
-            bridge
-                .store
-                .get_turn(&turn_id)
-                .await
-                .unwrap()
-                .unwrap()
-                .status,
-            "running"
-        );
-        task.abort();
-    }
-
-    #[tokio::test]
-    async fn sidecar_receipts_follow_durable_bytes_and_survive_replay() {
-        use base64::Engine;
-        let (bridge, _dir) = bridge().await;
-        let environment = EnvironmentId::parse("envsdc2").unwrap();
-        let producer = ProducerId::parse("prodsdc2").unwrap();
-        bridge
-            .store
-            .upsert_environment(
-                &environment,
-                "install-sidecar",
-                "fixture",
-                "development",
-                &hash_secret("sidecar-token"),
-                "[]",
-            )
-            .await
-            .unwrap();
-        let session = Session {
-            id: SessionId::new(
-                environment.clone(),
-                AgentName::parse("claude").unwrap(),
-                sylph_protocol::NativeId::new("sidecar-session"),
-            ),
-            workdir: Some("/tmp".into()),
-            title: None,
-            inject_identity: false,
-            fidelity: sylph_protocol::Fidelity::Blocks,
-            flags_json: "{}".into(),
-            status: "idle".into(),
-            created_at_ms: 1,
-            updated_at_ms: 1,
-        };
-        bridge.store.create_session(&session).await.unwrap();
-        let (mut client, server) = tokio::io::duplex(32 * 1024);
-        let (reader, writer) = tokio::io::split(server);
-        let task = tokio::spawn({
-            let bridge = bridge.clone();
-            async move { bridge.serve_io(reader, writer).await }
-        });
-        let hello = sylph_protocol::Hello::current(
-            "install-sidecar",
-            producer.clone(),
-            Some(environment),
-            0,
-        );
-        write_frame(
-            &mut client,
-            &serde_json::to_vec(&WireMessage::from_hello(hello)).unwrap(),
-        )
-        .await
-        .unwrap();
-        write_frame(&mut client, &serde_json::to_vec("sidecar-token").unwrap())
-            .await
-            .unwrap();
-        let epoch = match sylph_protocol::decode_message(&read_frame(&mut client).await.unwrap())
-            .unwrap()
-        {
-            DecodedMessage::Known(WireMessage::Welcome {
-                connection_epoch, ..
-            }) => connection_epoch,
-            other => panic!("expected welcome, got {other:?}"),
-        };
-        let bytes = b"sidecar bytes supplied by a different machine";
-        let chunk = sylph_protocol::NativeBlobChunk {
-            source: "root.jsonl".into(),
-            version: 1,
-            name: "remote-output".into(),
-            size: bytes.len() as u64,
-            offset: 0,
-            data: base64::engine::general_purpose::STANDARD.encode(bytes),
-            final_chunk: true,
-        };
-        let record = sylph_protocol::NativeRecord {
-            source: chunk.source.clone(),
-            version: chunk.version,
-            raw_json: Some(br#"{ "unknown": true }"#.to_vec()),
-            payload: serde_json::json!({"unknown": true}),
-            blobs: vec![sylph_protocol::NativeBlob {
-                name: chunk.name.clone(),
-                size: chunk.size,
-                bytes: None,
-                locator: None,
-                error: None,
-            }],
-        };
-        let frames = [
-            WireMessage::NativeBlobChunk {
-                session_id: session.id.clone(),
-                chunk,
-                producer_id: producer.clone(),
-                producer_seq: ProducerSeq::new(1),
-                connection_epoch: epoch,
-            },
-            WireMessage::NativeRecord {
-                session_id: session.id.clone(),
-                record,
-                producer_id: producer.clone(),
-                producer_seq: ProducerSeq::new(2),
-                connection_epoch: epoch,
-            },
-        ];
-        // Replay the native-record receipt after its staging rows have been consumed.
-        for (frame, expected) in [(&frames[0], 1), (&frames[1], 2), (&frames[1], 2)] {
-            write_frame(&mut client, &serde_json::to_vec(frame).unwrap())
-                .await
-                .unwrap();
-            let reply =
-                tokio::time::timeout(std::time::Duration::from_secs(5), read_frame(&mut client))
-                    .await
-                    .expect("the durable producer prefix must be acknowledged")
-                    .unwrap();
-            assert!(matches!(sylph_protocol::decode_message(&reply).unwrap(),
-                DecodedMessage::Known(WireMessage::Ack { accepted_through, .. }) if accepted_through.get() == expected));
-            if expected == 2 {
-                assert_eq!(
-                    bridge
-                        .history
-                        .native_blob(&session.id.encode(), "root.jsonl", 1, "remote-output")
-                        .await
-                        .unwrap(),
-                    crate::storage::NativeBlobState::Available(bytes.to_vec())
-                );
-                assert_eq!(
-                    bridge
-                        .history
-                        .native_record_bytes(&session.id.encode(), "root.jsonl", 1)
-                        .await
-                        .unwrap(),
-                    Some(br#"{ "unknown": true }"#.to_vec())
-                );
-            }
-        }
-        drop(client);
-        let _ = task.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn a_message_ack_never_skips_an_unreceived_prefix() {
-        // Drives `process_message` through the real wire (`serve_io`), the only path a
-        // producer sequence actually reaches. A prior version of this test called a
-        // second, test-only `ack_message` that had already diverged from production: on
-        // this exact gap, `process_message` sends a `Nack`, not the `Ack` the dead copy
-        // sent. Asserting on `serve_io`'s reply is asserting on what an envagent gets.
-        let (bridge, _dir) = bridge().await;
-        let environment = EnvironmentId::parse("env7fk2").unwrap();
-        let producer = ProducerId::parse("producer-message").unwrap();
-        bridge
-            .store
-            .upsert_environment(
-                &environment,
-                "install-message",
-                "fixture",
-                "development",
-                &hash_secret("message-token"),
-                "[]",
-            )
-            .await
-            .unwrap();
-
-        let (mut client, server) = tokio::io::duplex(32 * 1024);
-        let (server_reader, server_writer) = tokio::io::split(server);
-        let bridge_task = tokio::spawn({
-            let bridge = bridge.clone();
-            async move { bridge.serve_io(server_reader, server_writer).await }
-        });
-        let hello = sylph_protocol::Hello::current(
-            "install-message",
-            producer.clone(),
-            Some(environment.clone()),
-            0,
-        );
-        write_frame(
-            &mut client,
-            &serde_json::to_vec(&WireMessage::from_hello(hello)).unwrap(),
-        )
-        .await
-        .unwrap();
-        write_frame(&mut client, &serde_json::to_vec("message-token").unwrap())
-            .await
-            .unwrap();
-        let welcome =
-            sylph_protocol::decode_message(&read_frame(&mut client).await.unwrap()).unwrap();
-        let epoch = match welcome {
-            DecodedMessage::Known(WireMessage::Welcome {
-                connection_epoch, ..
-            }) => connection_epoch,
-            other => panic!("expected welcome, got {other:?}"),
-        };
-
-        // Producer sequence 3 with nothing accepted yet is a gap, not the next message.
-        write_frame(
-            &mut client,
-            &serde_json::to_vec(&WireMessage::Diagnostic {
-                level: sylph_protocol::DiagnosticLevel::Info,
-                code: "probe".into(),
-                message: "gap probe".into(),
-                session_id: None,
-                details: Default::default(),
-                producer_id: producer.clone(),
-                producer_seq: ProducerSeq::new(3),
-                connection_epoch: epoch,
-            })
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-        let reply =
-            sylph_protocol::decode_message(&read_frame(&mut client).await.unwrap()).unwrap();
-        assert!(
-            matches!(
-                reply,
-                DecodedMessage::Known(WireMessage::Nack { expected_next, .. })
-                    if expected_next.get() == 1
-            ),
-            "a gap must be nacked to the next unreceived sequence, not acked past it: {reply:?}"
-        );
-
-        drop(client);
-        let _ = bridge_task.await;
-    }
-
-    #[tokio::test]
-    async fn remote_terminal_event_settles_its_arrival_turn_and_replayed_terminal_is_idempotent() {
-        let (bridge, dir) = bridge().await;
-        let environment = EnvironmentId::parse("env7fk2").unwrap();
-        let producer = ProducerId::parse("producer-terminal").unwrap();
-        let session_id = session("remote-terminal");
-        bridge
-            .store
-            .upsert_environment(
-                &environment,
-                "install-terminal",
-                "fixture",
-                "development",
-                &hash_secret("terminal-token"),
-                "[]",
-            )
-            .await
-            .unwrap();
-        bridge
-            .store
-            .create_session(&Session {
-                id: session_id.clone(),
-                workdir: Some(dir.path().display().to_string()),
-                title: Some("remote".into()),
-                inject_identity: false,
-                fidelity: sylph_protocol::Fidelity::Stream,
-                flags_json: "{}".into(),
-                status: "running".into(),
-                created_at_ms: 1,
-                updated_at_ms: 1,
-            })
-            .await
-            .unwrap();
-        let turn_id = "remote-turn-1".to_string();
-        bridge
-            .store
-            .create_turn(&crate::models::Turn {
-                id: turn_id.clone(),
-                session_id: session_id.clone(),
-                status: "running".into(),
-                origin: "user".into(),
-                origin_subject: None,
-                request_text: "hello".into(),
-                command_invocation_id: None,
-                idempotency_key: None,
-                error_code: None,
-                error_message: None,
-                close_reason: None,
-                created_at_ms: 1,
-                started_at_ms: Some(1),
-                completed_at_ms: None,
-                stopped_at_ms: None,
-            })
-            .await
-            .unwrap();
-
-        let (tx, _rx) = mpsc::channel(8);
-        let hello = sylph_protocol::Hello::current(
-            "install-terminal",
-            producer.clone(),
-            Some(environment.clone()),
-            0,
-        );
-        let welcome = bridge
-            .register_connection(&hello, "terminal-token", tx)
-            .await
-            .unwrap();
-        let mut terminal = Event::new(EventKind::Turn, Some(Phase::Completed), 2);
-        terminal.data = Some(serde_json::json!({"stopReason": "completed"}));
-        let mut item = sylph_protocol::SequencedEvent::pending(
-            producer.clone(),
-            ProducerSeq::new(1),
-            session_id.clone(),
-            terminal,
-            None,
-        );
-        item.arrival_turn_id = Some(turn_id.clone());
-        let batch =
-            EventBatch::new(environment, producer, welcome.connection_epoch, vec![item]).unwrap();
-        bridge.ingest_batch(batch.clone()).await.unwrap();
-        let first = bridge.store.get_turn(&turn_id).await.unwrap().unwrap();
-        assert_eq!(first.status, "running");
-
-        let writer = crate::db::JournalWriter::new(bridge.store.clone());
-        let consolidator =
-            crate::storage::Consolidator::new(bridge.store.clone(), bridge.history.clone());
-        bridge
-            .set_turn_closer(crate::supervisor::TurnCloser::new(
-                bridge.store.clone(),
-                bridge.hub.clone(),
-                bridge.seq.clone(),
-                consolidator,
-                writer,
-            ))
-            .await;
-        let mut batch = batch;
-        let mut next = Event::new(EventKind::Assistant, Some(Phase::Completed), 3);
-        next.text = "A new agent-initiated turn".into();
-        batch.events.push(sylph_protocol::SequencedEvent::pending(
-            batch.producer_id.clone(),
-            ProducerSeq::new(2),
-            session_id.clone(),
-            next,
-            None,
-        ));
-        bridge.ingest_batch(batch.clone()).await.unwrap();
-        let settled = bridge.store.get_turn(&turn_id).await.unwrap().unwrap();
-        assert_eq!(settled.status, "completed");
-        assert_eq!(
-            bridge.store.session_status(&session_id).await.as_deref(),
-            Some("running")
-        );
-
-        let current = bridge
-            .store
-            .running_turn_id(&session_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_ne!(
-            current, turn_id,
-            "an event after a close in the same batch belongs to a new generation"
-        );
-        assert_eq!(
-            bridge
-                .store
-                .get_turn(&current)
-                .await
-                .unwrap()
-                .unwrap()
-                .origin,
-            "agent"
-        );
-
-        // A reconnect can replay the already committed terminal item. The
-        // receipt/hash path must accept it without reopening or duplicating the
-        // terminal transition.
-        bridge.ingest_batch(batch).await.unwrap();
-        let replayed = bridge.store.get_turn(&turn_id).await.unwrap().unwrap();
-        assert_eq!(replayed.status, "completed");
-    }
-
-    #[tokio::test]
-    async fn framed_envagent_connection_ingests_and_acknowledges_a_terminal_batch() {
-        let (bridge, dir) = bridge().await;
-        let environment = EnvironmentId::parse("env7fk2").unwrap();
-        let producer = ProducerId::parse("producer-wire").unwrap();
-        let session_id = session("wire-session");
-        bridge
-            .store
-            .upsert_environment(
-                &environment,
-                "install-wire",
-                "fixture",
-                "development",
-                &hash_secret("wire-token"),
-                "[]",
-            )
-            .await
-            .unwrap();
-        bridge
-            .store
-            .create_session(&Session {
-                id: session_id.clone(),
-                workdir: Some(dir.path().display().to_string()),
-                title: Some("wire".into()),
-                inject_identity: false,
-                fidelity: sylph_protocol::Fidelity::Stream,
-                flags_json: "{}".into(),
-                status: "running".into(),
-                created_at_ms: 1,
-                updated_at_ms: 1,
-            })
-            .await
-            .unwrap();
-        let turn_id = "wire-turn".to_string();
-        bridge
-            .store
-            .create_turn(&crate::models::Turn {
-                id: turn_id.clone(),
-                session_id: session_id.clone(),
-                status: "running".into(),
-                origin: "user".into(),
-                origin_subject: None,
-                request_text: "wire".into(),
-                command_invocation_id: None,
-                idempotency_key: None,
-                error_code: None,
-                error_message: None,
-                close_reason: None,
-                created_at_ms: 1,
-                started_at_ms: Some(1),
-                completed_at_ms: None,
-                stopped_at_ms: None,
-            })
-            .await
-            .unwrap();
-        let writer = crate::db::JournalWriter::new(bridge.store.clone());
-        let consolidator =
-            crate::storage::Consolidator::new(bridge.store.clone(), bridge.history.clone());
-        bridge
-            .set_turn_closer(crate::supervisor::TurnCloser::new(
-                bridge.store.clone(),
-                bridge.hub.clone(),
-                bridge.seq.clone(),
-                consolidator,
-                writer,
-            ))
-            .await;
-
-        let (mut client, server) = tokio::io::duplex(32 * 1024);
-        let (server_reader, server_writer) = tokio::io::split(server);
-        let bridge_task = tokio::spawn({
-            let bridge = bridge.clone();
-            async move { bridge.serve_io(server_reader, server_writer).await }
-        });
-        let hello = sylph_protocol::Hello::current(
-            "install-wire",
-            producer.clone(),
-            Some(environment.clone()),
-            0,
-        );
-        write_frame(
-            &mut client,
-            &serde_json::to_vec(&WireMessage::from_hello(hello)).unwrap(),
-        )
-        .await
-        .unwrap();
-        write_frame(&mut client, &serde_json::to_vec("wire-token").unwrap())
-            .await
-            .unwrap();
-        let welcome =
-            sylph_protocol::decode_message(&read_frame(&mut client).await.unwrap()).unwrap();
-        let epoch = match welcome {
-            DecodedMessage::Known(WireMessage::Welcome {
-                connection_epoch, ..
-            }) => connection_epoch,
-            other => panic!("expected welcome, got {other:?}"),
-        };
-        let mut event = Event::new(EventKind::Turn, Some(Phase::Completed), 2);
-        event.data = Some(serde_json::json!({"stopReason": "completed"}));
-        let mut item = sylph_protocol::SequencedEvent::pending(
-            producer.clone(),
-            ProducerSeq::new(1),
-            session_id.clone(),
-            event,
-            None,
-        );
-        item.arrival_turn_id = Some(turn_id.clone());
-        let batch = EventBatch::new(environment, producer, epoch, vec![item]).unwrap();
-        write_frame(
-            &mut client,
-            &serde_json::to_vec(&WireMessage::from_event_batch(batch)).unwrap(),
-        )
-        .await
-        .unwrap();
-        let response =
-            sylph_protocol::decode_message(&read_frame(&mut client).await.unwrap()).unwrap();
-        assert!(matches!(
-            response,
-            DecodedMessage::Known(WireMessage::Ack { accepted_through, .. })
-                if accepted_through.get() == 1
-        ));
-        assert_eq!(
-            bridge
-                .store
-                .get_turn(&turn_id)
-                .await
-                .unwrap()
-                .unwrap()
-                .status,
-            "completed"
-        );
-        drop(client);
-        let _ = bridge_task.await;
-    }
-
-    #[tokio::test]
-    async fn an_unattributed_remote_terminal_opens_one_reachable_turn_container() {
-        let (bridge, dir) = bridge().await;
-        let environment = EnvironmentId::parse("env7fk2").unwrap();
-        let producer = ProducerId::parse("producer-source").unwrap();
-        let session_id = session("remote-source");
-        bridge
-            .store
-            .upsert_environment(
-                &environment,
-                "install-source",
-                "fixture",
-                "development",
-                &hash_secret("source-token"),
-                "[]",
-            )
-            .await
-            .unwrap();
-        bridge
-            .store
-            .create_session(&Session {
-                id: session_id.clone(),
-                workdir: Some(dir.path().display().to_string()),
-                title: Some("source".into()),
-                inject_identity: false,
-                fidelity: sylph_protocol::Fidelity::Blocks,
-                flags_json: "{}".into(),
-                status: "idle".into(),
-                created_at_ms: 1,
-                updated_at_ms: 1,
-            })
-            .await
-            .unwrap();
-        let (tx, _rx) = mpsc::channel(8);
-        let hello = sylph_protocol::Hello::current(
-            "install-source",
-            producer.clone(),
-            Some(environment.clone()),
-            0,
-        );
-        let welcome = bridge
-            .register_connection(&hello, "source-token", tx)
-            .await
-            .unwrap();
-        let writer = crate::db::JournalWriter::new(bridge.store.clone());
-        let consolidator =
-            crate::storage::Consolidator::new(bridge.store.clone(), bridge.history.clone());
-        bridge
-            .set_turn_closer(crate::supervisor::TurnCloser::new(
-                bridge.store.clone(),
-                bridge.hub.clone(),
-                bridge.seq.clone(),
-                consolidator.clone(),
-                writer,
-            ))
-            .await;
-        let terminal = Event::new(EventKind::Turn, Some(Phase::Completed), 42);
-        let item = sylph_protocol::SequencedEvent::pending(
-            producer.clone(),
-            ProducerSeq::new(1),
-            session_id.clone(),
-            terminal,
-            Some(sylph_protocol::SourceCursor::new("native.jsonl", 1, 42).unwrap()),
-        );
-        bridge
-            .ingest_batch(
-                EventBatch::new(
-                    environment.clone(),
-                    producer.clone(),
-                    welcome.connection_epoch,
-                    vec![item.clone()],
-                )
-                .unwrap(),
-            )
-            .await
-            .unwrap();
-        let turns = bridge.store.list_turns(&session_id, 10).await.unwrap();
-        assert_eq!(turns.len(), 1);
-        assert_eq!(turns[0].status, "completed");
-        // The contract is durable attribution, not which tier won the race
-        // with this read. Explicitly finish consolidation before inspecting it.
-        consolidator.sweep().await;
-        let events = bridge.history.turn_blocks(&turns[0].id).await.unwrap();
-        assert!(events.iter().any(|event| event.kind == "turn"));
-        assert!(events.iter().all(|event| event.turn_id == turns[0].id));
-        bridge
-            .ingest_batch(
-                EventBatch::new(environment, producer, welcome.connection_epoch, vec![item])
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            bridge
-                .store
-                .list_turns(&session_id, 10)
-                .await
-                .unwrap()
-                .len(),
-            1
-        );
-    }
-
-    #[tokio::test]
-    async fn a_remote_draft_cannot_be_claimed_twice_while_promoting() {
-        let (bridge, _dir) = bridge().await;
-        let environment = EnvironmentId::parse("env7fk2").unwrap();
-        bridge.remote_drafts.lock().await.insert(
-            "remote-draft-test".into(),
-            RemoteDraft {
-                draft_id: "remote-draft-test".into(),
-                creator_subject: "bootstrap".into(),
-                environment,
-                session_id: None,
-                agent: "claude".into(),
-                workdir: "/tmp".into(),
-                title: None,
-                inject_identity: false,
-                flags: Default::default(),
-                identity_preamble: None,
-                permission_mode: None,
-                promoting: false,
-                first_turn_id: None,
-            },
-        );
-        assert!(matches!(
-            bridge
-                .claim_remote_draft("remote-draft-test", "turn-1".into())
-                .await,
-            RemoteDraftClaim::Claimed { .. }
-        ));
-        assert!(matches!(
-            bridge
-                .claim_remote_draft("remote-draft-test", "turn-1".into())
-                .await,
-            RemoteDraftClaim::Busy
-        ));
-    }
-
-    /// Register a connected environment and return the frames the bridge writes
-    /// to it, so a test can answer a command the way an envagent would.
-    async fn connected_environment(
-        bridge: &EnvBridge,
-        environment: &EnvironmentId,
-        install: &str,
-    ) -> mpsc::Receiver<WireMessage> {
-        bridge
-            .store
-            .upsert_environment(
-                environment,
-                install,
-                "fixture",
-                "development",
-                &hash_secret("token"),
-                "[]",
-            )
-            .await
-            .unwrap();
-        let (tx, rx) = mpsc::channel(8);
-        let hello = sylph_protocol::Hello::current(
-            install,
-            ProducerId::parse(install).unwrap(),
-            Some(environment.clone()),
-            0,
-        );
-        bridge
-            .register_connection(&hello, "token", tx)
-            .await
-            .unwrap();
-        rx
-    }
-
-    /// Answer the next command frame the bridge sends with `result`, and return
-    /// the request id it addressed.
-    async fn answer_next_command(
-        bridge: &EnvBridge,
-        environment: &EnvironmentId,
-        rx: &mut mpsc::Receiver<WireMessage>,
-        result: serde_json::Value,
-    ) -> sylph_protocol::CommandRequestId {
-        let WireMessage::Command {
-            request_id,
-            idempotency,
-            ..
-        } = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
-            .await
-            .expect("the bridge should write a command frame")
-            .expect("the command channel should stay open")
-        else {
-            panic!("expected a command frame");
-        };
-        bridge
-            .record_command_result(
-                environment,
-                &sylph_protocol::CommandResultMessage {
-                    request_id: request_id.clone(),
-                    outcome: CommandOutcome::accepted_with_result(result),
-                    connection_epoch: 1,
-                    idempotency: Some(idempotency),
-                },
-            )
-            .await
-            .unwrap();
-        request_id
-    }
-
-    fn draft_capability_surface(model: &str) -> serde_json::Value {
-        serde_json::json!({"capabilities": {"commands": [], "config": [
-            {"id": "model", "value": model}
-        ]}})
-    }
-
-    /// A draft's capability surface is read once before any config is set, so a
-    /// frozen answer is indistinguishable from a real one: it names the agent's
-    /// own defaults. Two reads with a config change between them are the only way
-    /// to observe the difference, which is why one call could not.
-    #[tokio::test]
-    async fn a_second_draft_capability_read_observes_a_config_change() {
-        let (bridge, _dir) = bridge().await;
-        let environment = EnvironmentId::parse("env7fk2").unwrap();
-        let mut rx = connected_environment(&bridge, &environment, "install-draft-caps").await;
-        let draft = RemoteDraft {
-            draft_id: "remote-draft-caps".into(),
-            creator_subject: "bootstrap".into(),
-            environment: environment.clone(),
-            session_id: None,
-            agent: "claude".into(),
-            workdir: "/tmp".into(),
-            title: None,
-            inject_identity: false,
-            flags: Default::default(),
-            identity_preamble: None,
-            permission_mode: None,
-            promoting: false,
-            first_turn_id: None,
-        };
-        bridge
-            .remote_drafts
-            .lock()
-            .await
-            .insert(draft.draft_id.clone(), draft.clone());
-
-        // The first read is the one a client makes right after creating a draft,
-        // before any model has been picked.
-        let first = {
-            let bridge = bridge.clone();
-            let draft = draft.clone();
-            tokio::spawn(async move { bridge.remote_draft_capabilities(&draft).await })
-        };
-        let first_request = answer_next_command(
-            &bridge,
-            &environment,
-            &mut rx,
-            draft_capability_surface("default"),
-        )
-        .await;
-        assert_eq!(
-            first.await.unwrap().unwrap()["capabilities"]["config"][0]["value"],
-            "default"
-        );
-
-        // The user picks a model. The envagent now holds a different surface.
-        let second = {
-            let bridge = bridge.clone();
-            let draft = draft.clone();
-            tokio::spawn(async move { bridge.remote_draft_capabilities(&draft).await })
-        };
-        let second_request = answer_next_command(
-            &bridge,
-            &environment,
-            &mut rx,
-            draft_capability_surface("sonnet"),
-        )
-        .await;
-        assert_eq!(
-            second.await.unwrap().unwrap()["capabilities"]["config"][0]["value"],
-            "sonnet",
-            "the second read must report what the envagent holds now, not the \
-             empty surface frozen before any config was set"
-        );
-        assert_ne!(
-            first_request.as_str(),
-            second_request.as_str(),
-            "two reads of one draft must address two commands, or the second \
-             never reaches the envagent at all"
-        );
-    }
-
-    /// Same defect, same draft-shaped command: a listing frozen at its first
-    /// answer cannot show a file written afterwards.
-    #[tokio::test]
-    async fn a_second_draft_file_listing_observes_a_new_entry() {
-        let (bridge, _dir) = bridge().await;
-        let environment = EnvironmentId::parse("env7fk2").unwrap();
-        let mut rx = connected_environment(&bridge, &environment, "install-draft-files").await;
-        let list = || sylph_protocol::FileOperation::List {
-            relative: ".".into(),
-        };
-
-        let first = {
-            let bridge = bridge.clone();
-            let environment = environment.clone();
-            tokio::spawn(async move {
-                bridge
-                    .remote_files(
-                        &environment,
-                        Some("remote-draft-files".into()),
-                        None,
-                        list(),
-                    )
-                    .await
-            })
-        };
-        answer_next_command(
-            &bridge,
-            &environment,
-            &mut rx,
-            serde_json::json!({"entries": ["a.txt"]}),
-        )
-        .await;
-        assert_eq!(first.await.unwrap().unwrap()["entries"][0], "a.txt");
-
-        let second = {
-            let bridge = bridge.clone();
-            let environment = environment.clone();
-            tokio::spawn(async move {
-                bridge
-                    .remote_files(
-                        &environment,
-                        Some("remote-draft-files".into()),
-                        None,
-                        list(),
-                    )
-                    .await
-            })
-        };
-        answer_next_command(
-            &bridge,
-            &environment,
-            &mut rx,
-            serde_json::json!({"entries": ["a.txt", "b.txt"]}),
-        )
-        .await;
-        let listing = second.await.unwrap().unwrap();
-        assert_eq!(
-            listing["entries"].as_array().map(Vec::len),
-            Some(2),
-            "a draft listing after a write must observe the new entry"
-        );
-    }
-
-    /// A steer is a user action, not a query: sending the same text twice must
-    /// reach the envagent twice. A payload-derived request id would make the
-    /// second one address the first one's stored result and silently vanish.
-    #[tokio::test]
-    async fn repeating_one_steer_text_dispatches_a_second_command() {
-        let (bridge, _dir) = bridge().await;
-        let environment = EnvironmentId::parse("env7fk2").unwrap();
-        let mut rx = connected_environment(&bridge, &environment, "install-steer").await;
-        let session_id = SessionId::new(
-            environment.clone(),
-            AgentName::parse("claude").unwrap(),
-            sylph_protocol::NativeId::new("steer-session"),
-        );
-        let steer = || sylph_protocol::EnvironmentCommand::Steer {
-            session_id: session_id.clone(),
-            text: "focus on the parser".into(),
-            expected_turn_id: None,
-        };
-
-        let mut request_ids = Vec::new();
-        for _ in 0..2 {
-            let task = {
-                let bridge = bridge.clone();
-                let session_id = session_id.clone();
-                let command = steer();
-                tokio::spawn(async move {
-                    bridge
-                        .remote_session_command(&session_id, command, IdempotencyPolicy::AtMostOnce)
-                        .await
-                })
-            };
-            request_ids.push(
-                answer_next_command(&bridge, &environment, &mut rx, serde_json::json!({})).await,
-            );
-            assert!(matches!(
-                task.await.unwrap().unwrap(),
-                CommandOutcome::Accepted { .. }
-            ));
-        }
-        assert_ne!(
-            request_ids[0].as_str(),
-            request_ids[1].as_str(),
-            "the same steer text sent twice must be two commands"
-        );
-    }
-
-    /// Two re-reads of one session are two commands, not one replayed answer.
-    ///
-    /// A re-read reads a file and writes no vendor state, so it looks like the kind of
-    /// question that may safely address its own earlier result — and if it were treated that
-    /// way, its request id would be hashed from a payload that is *identical on every call*.
-    /// The second click would then resolve to the first pass's durable outcome and report
-    /// counts taken before the bytes it was clicked to collect existed: a refresh returning a
-    /// cached answer, which is the defect the endpoint was added to remove.
-    ///
-    /// Asserted on the ids rather than on an observed dispatch, because the id is the whole
-    /// mechanism: equal ids *are* the replay.
-    #[test]
-    fn re_reading_twice_mints_two_request_ids_rather_than_replaying_one() {
-        let session = session("native-1");
-        let command = sylph_protocol::EnvironmentCommand::Reread {
-            session_id: session.clone(),
-            agent: "claude".to_string(),
-            native_id: session.native_id.clone(),
-        };
-
-        assert!(
-            command_needs_a_fresh_request_id(&command),
-            "a re-read whose payload is its idempotency scope replays the previous pass"
-        );
-
-        // The id the bridge actually mints, twice. These must differ, and that is the
-        // whole property: equal ids *are* the replay, because the second call would
-        // resolve to the first pass's durable outcome in `env_command_results`.
-        let minted_once = remote_request_id(
-            &session.environment,
-            &command,
-            IdempotencyPolicy::AtMostOnce,
-        )
-        .unwrap();
-        let minted_again = remote_request_id(
-            &session.environment,
-            &command,
-            IdempotencyPolicy::AtMostOnce,
-        )
-        .unwrap();
-        assert_ne!(
-            minted_once.as_str(),
-            minted_again.as_str(),
-            "a re-read's payload is identical on every call, so a payload-derived id \
-             would report the counts of a pass that ran before the bytes it was \
-             clicked to collect existed"
-        );
+            .collect(),
+        accepted_through: batch.accepted_through,
+        evidence_cut: batch.evidence_cut,
     }
 }

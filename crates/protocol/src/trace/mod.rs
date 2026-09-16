@@ -9,6 +9,7 @@ pub mod control;
 pub mod identity;
 pub mod objects;
 pub mod scope;
+pub mod read;
 
 pub use capture::*;
 pub use claims::*;
@@ -16,3 +17,4 @@ pub use control::*;
 pub use identity::*;
 pub use objects::*;
 pub use scope::*;
+pub use read::*;

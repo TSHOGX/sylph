@@ -13,26 +13,9 @@ import {
   formAnswer,
   initialFormState,
   isFormComplete,
-  requestFormOf,
   selectMode,
   type RequestForm,
 } from "@/lib/request-form";
-import type { PendingRequest } from "@/lib/api-types";
-
-function request(formJson?: string): PendingRequest {
-  return {
-    id: "r1",
-    sessionId: "s1",
-    turnId: "t1",
-    kind: "choice",
-    title: "Two questions",
-    detailJson: "{}",
-    optionsJson: JSON.stringify([{ id: "submit", label: "Submit" }]),
-    formJson,
-    status: "pending",
-    createdAtMs: 1,
-  };
-}
 
 const TWO_FIELDS: RequestForm = {
   fields: [
@@ -53,36 +36,6 @@ const TWO_FIELDS: RequestForm = {
     },
   ],
 };
-
-describe("requestFormOf", () => {
-  it("parses a declared form", () => {
-    const form = requestFormOf(request(JSON.stringify(TWO_FIELDS)));
-    expect(form?.fields).toHaveLength(2);
-    expect(form?.fields[0].id).toBe("q:0");
-  });
-
-  it("reports no form when the request declared none", () => {
-    // Which is what keeps every approval on the older detail-rendering path.
-    expect(requestFormOf(request())).toBeNull();
-  });
-
-  it("degrades to no form rather than throwing on malformed JSON", () => {
-    // A dialog that cannot render leaves the agent blocked with nothing to answer,
-    // while a dialog with only its options is still answerable.
-    expect(requestFormOf(request("{not json"))).toBeNull();
-    expect(requestFormOf(request(JSON.stringify({ fields: "nope" })))).toBeNull();
-  });
-
-  it("drops a field it cannot render rather than the whole form", () => {
-    const mixed = JSON.stringify({
-      fields: [
-        { type: "wormhole", id: "x" },
-        { type: "text", id: "why", label: "Why?" },
-      ],
-    });
-    expect(requestFormOf(request(mixed))?.fields).toHaveLength(1);
-  });
-});
 
 describe("selectMode", () => {
   it("treats a field with no mode as single-select", () => {

@@ -1,5 +1,5 @@
 use super::*;
-use crate::{storage::cas::BlobStore, trace::evidence::AdmissionLimits};
+use crate::{trace::cas::BlobStore, trace::evidence::AdmissionLimits};
 use sylph_protocol::{
     trace::{Capture, SourceLocator, SourcePosition, SourceRef, TimeBasis, TimeEvidence, TimeUnit},
     SessionId,
@@ -787,4 +787,27 @@ async fn deleted_abandoned_derived_uploads_do_not_exhaust_the_next_epochs_capaci
         catalogue.finish_upload(&old).await,
         Err(CatalogueError::DeletedScope)
     ));
+}
+
+#[tokio::test]
+async fn readonly_scope_validation_rejects_deletion_and_a_mismatched_scope() {
+    let fixture = Fixture::new().await;
+    assert!(fixture
+        .catalogue
+        .scope_is_readable(&fixture.proof())
+        .await
+        .unwrap());
+    let wrong = ScopeProof {
+        scope: IngestionScope::Agent(AgentRef::Session(
+            SessionId::decode("env7fk2:codex:other").unwrap(),
+        )),
+        epoch: fixture.epoch.clone(),
+    };
+    assert!(!fixture.catalogue.scope_is_readable(&wrong).await.unwrap());
+    fixture.evidence.delete_scope(&fixture.scope).await.unwrap();
+    assert!(!fixture
+        .catalogue
+        .scope_is_readable(&fixture.proof())
+        .await
+        .unwrap());
 }

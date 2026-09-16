@@ -32,13 +32,8 @@ pub struct Config {
     pub config_path: PathBuf,
 
     pub data_dir: PathBuf,
-    /// The hot tier: unconsolidated turns. Named for what it holds rather than
-    /// when it is read — see [`crate::db`].
-    pub journal_path: String,
-    /// Consolidated history. Derived from the data directory rather than
-    /// configured: workload databases share one authority and one root, rather
-    /// than being independent stores a user chooses between.
-    pub history_path: String,
+    /// Durable operational policy and immutable command outbox.
+    pub control_path: PathBuf,
     /// Root of the content-addressed blob store.
     pub blobs_dir: PathBuf,
 
@@ -102,8 +97,7 @@ impl Config {
             port: resolved.port.value,
             home: resolved.home.clone(),
             config_path: resolved.config_path.clone(),
-            journal_path: data_dir.join("journal.db").display().to_string(),
-            history_path: data_dir.join("history.db").display().to_string(),
+            control_path: data_dir.join("control.db"),
             blobs_dir: data_dir.join("blobs"),
             data_dir,
             soul_path: resolved.soul.value.as_deref().and_then(readable_soul),
@@ -425,8 +419,7 @@ mod tests {
         let config = Config::from_resolved(&resolved_in(tmp.path()));
 
         let data = config.data_dir.display().to_string();
-        assert!(config.journal_path.starts_with(&data));
-        assert!(config.history_path.starts_with(&data));
+        assert!(config.control_path.starts_with(&data));
         assert!(config.blobs_dir.starts_with(&config.data_dir));
     }
 }

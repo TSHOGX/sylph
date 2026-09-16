@@ -1,15 +1,11 @@
-//! Persistence helpers for the envagent bridge.
-
-use crate::error::{Error, Result};
-use crate::models::now_ms;
-use crate::models::Event;
-use sqlx::Row;
-use sylph_protocol::{
-    CommandOutcome, EnvironmentId, IdempotencyPolicy, ProducerId, ProducerSeq, ServerSeq,
-    SessionEdge, SessionId,
+//! Environment credentials, connection leases and durable command transport outcomes.
+use super::ControlStore;
+use crate::{
+    error::{Error, Result},
+    models::now_ms,
 };
-
-use super::JournalStore;
+use sqlx::Row;
+use sylph_protocol::{CommandOutcome, EnvironmentId, IdempotencyPolicy};
 
 #[derive(Debug, Clone)]
 pub struct EnvironmentRow {
@@ -26,28 +22,7 @@ pub struct EnvironmentRow {
     pub facts_json: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EnvIngestResult {
-    Inserted,
-    Duplicate { server_seq: u64 },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EnvIngestOutcome {
-    pub result: EnvIngestResult,
-    pub server_seq: ServerSeq,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EnvReceipt {
-    pub server_seq: u64,
-    pub payload_hash: String,
-}
-
-impl JournalStore {
-    /// Persist machine facts reported by the owning envagent. Facts are opaque
-    /// key/value metadata; the envagent is the authority because only it can
-    /// inspect the OS user, home, and browse roots on that machine.
+impl ControlStore {
     pub async fn update_environment_facts(
         &self,
         id: &EnvironmentId,
@@ -103,236 +78,6 @@ impl JournalStore {
         Ok(disconnected)
     }
 
-    pub async fn list_session_edges(
-        &self,
-        session: Option<&SessionId>,
-    ) -> Result<Vec<SessionEdge>> {
-        let rows = if let Some(session) = session {
-            sqlx::query(
-                "SELECT parent_env, parent_agent, parent_native, child_env, child_agent, child_native, relation \
-                 FROM session_edges WHERE (parent_env = ? AND parent_agent = ? AND parent_native = ?) \
-                    OR (child_env = ? AND child_agent = ? AND child_native = ?)",
-            )
-            .bind(session.environment.as_str())
-            .bind(session.agent.as_str())
-            .bind(session.native_id.as_str())
-            .bind(session.environment.as_str())
-            .bind(session.agent.as_str())
-            .bind(session.native_id.as_str())
-            .fetch_all(self.read_pool())
-            .await
-            .map_err(Error::Database)?
-        } else {
-            sqlx::query(
-                "SELECT parent_env, parent_agent, parent_native, child_env, child_agent, child_native, relation \
-                 FROM session_edges",
-            )
-            .fetch_all(self.read_pool())
-            .await
-            .map_err(Error::Database)?
-        };
-        rows.into_iter()
-            .map(|row| {
-                let parent = SessionId::new(
-                    EnvironmentId::parse(
-                        row.try_get::<String, _>("parent_env")
-                            .map_err(Error::Database)?,
-                    )
-                    .map_err(|error| Error::Internal(error.to_string()))?,
-                    sylph_protocol::AgentName::parse(
-                        row.try_get::<String, _>("parent_agent")
-                            .map_err(Error::Database)?,
-                    )
-                    .map_err(|error| Error::Internal(error.to_string()))?,
-                    sylph_protocol::NativeId::new(
-                        row.try_get::<String, _>("parent_native")
-                            .map_err(Error::Database)?,
-                    ),
-                );
-                let child = SessionId::new(
-                    EnvironmentId::parse(
-                        row.try_get::<String, _>("child_env")
-                            .map_err(Error::Database)?,
-                    )
-                    .map_err(|error| Error::Internal(error.to_string()))?,
-                    sylph_protocol::AgentName::parse(
-                        row.try_get::<String, _>("child_agent")
-                            .map_err(Error::Database)?,
-                    )
-                    .map_err(|error| Error::Internal(error.to_string()))?,
-                    sylph_protocol::NativeId::new(
-                        row.try_get::<String, _>("child_native")
-                            .map_err(Error::Database)?,
-                    ),
-                );
-                let relation = match row
-                    .try_get::<String, _>("relation")
-                    .map_err(Error::Database)?
-                    .as_str()
-                {
-                    "delegation" => sylph_protocol::SessionEdgeRelation::Delegation,
-                    "fork" => sylph_protocol::SessionEdgeRelation::Fork,
-                    other => {
-                        return Err(Error::Internal(format!(
-                            "unknown session edge relation {other}"
-                        )))
-                    }
-                };
-                SessionEdge::new(parent, child, relation)
-                    .map_err(|error| Error::Internal(error.to_string()))
-            })
-            .collect()
-    }
-
-    /// Allocate a canonical sequence and persist the event/receipt atomically.
-    ///
-    /// Remote ingest cannot reserve a number in the in-memory allocator first:
-    /// a failed transaction would leave a gap that a reconnect could never
-    /// explain. The sequence is derived while the same write transaction is
-    /// open and is returned alongside the deduplication result.
-    pub async fn ingest_env_event_auto(
-        &self,
-        environment: &EnvironmentId,
-        producer: &ProducerId,
-        producer_seq: ProducerSeq,
-        event: &mut Event,
-        payload_hash: &str,
-        min_next_seq: i32,
-    ) -> Result<EnvIngestOutcome> {
-        if &event.session_id.environment != environment {
-            return Err(Error::InvalidRequest(
-                "event session environment does not match the authenticated envagent".into(),
-            ));
-        }
-        let mut tx = self
-            .raw_pool()
-            .begin_with("BEGIN IMMEDIATE")
-            .await
-            .map_err(Error::Database)?;
-        let producer_seq_i64 = i64::try_from(producer_seq.get())
-            .map_err(|_| Error::InvalidRequest("producer sequence is too large".into()))?;
-        if let Some(existing) = sqlx::query(
-            "SELECT server_seq, payload_hash FROM env_event_receipts \
-             WHERE environment_id = ? AND producer_id = ? AND producer_seq = ?",
-        )
-        .bind(environment.as_str())
-        .bind(producer.as_str())
-        .bind(producer_seq_i64)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(Error::Database)?
-        {
-            let existing_hash: String =
-                existing.try_get("payload_hash").map_err(Error::Database)?;
-            if existing_hash != payload_hash {
-                tx.rollback().await.map_err(Error::Database)?;
-                return Err(Error::InvalidRequest(
-                    "producer sequence was replayed with different payload".into(),
-                ));
-            }
-            let existing: i64 = existing.try_get("server_seq").map_err(Error::Database)?;
-            tx.rollback().await.map_err(Error::Database)?;
-            let server_seq = u64::try_from(existing)
-                .map(ServerSeq::new)
-                .map_err(|_| Error::Internal("negative server sequence in receipt".into()))?;
-            return Ok(EnvIngestOutcome {
-                result: EnvIngestResult::Duplicate {
-                    server_seq: server_seq.get(),
-                },
-                server_seq,
-            });
-        }
-        let durable_next: i64 = sqlx::query_scalar(
-            "SELECT next_event_seq FROM sessions WHERE environment = ? AND agent = ? AND native_id = ?",
-        )
-        .bind(event.session_id.environment.as_str())
-        .bind(event.session_id.agent.as_str())
-        .bind(event.session_id.native_id.as_str())
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(Error::Database)?;
-        let next = durable_next.max(i64::from(min_next_seq));
-        let server_seq = ServerSeq::new(
-            u64::try_from(next).map_err(|_| Error::Internal("server sequence overflow".into()))?,
-        );
-        event.seq = i32::try_from(next)
-            .map_err(|_| Error::Internal("server sequence exceeds journal range".into()))?;
-        sqlx::query(
-            "INSERT INTO events (
-                session_env, session_agent, session_native, turn_id, seq, kind,
-                phase, stream_id, span, interior_state, name, text, data_json,
-                is_error, stability, source, arrival_at_ms, recorded_at_ms, created_at_ms
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(event.session_id.environment.as_str())
-        .bind(event.session_id.agent.as_str())
-        .bind(event.session_id.native_id.as_str())
-        .bind(&event.turn_id)
-        .bind(event.seq)
-        .bind(&event.kind)
-        .bind(&event.phase)
-        .bind(&event.stream_id)
-        .bind(&event.span)
-        .bind(&event.interior_state)
-        .bind(&event.name)
-        .bind(&event.text)
-        .bind(&event.data_json)
-        .bind(event.is_error)
-        .bind(&event.stability)
-        .bind("agent")
-        .bind(event.arrival_at_ms)
-        .bind(event.recorded_at_ms)
-        .bind(event.created_at_ms)
-        .execute(&mut *tx)
-        .await
-        .map_err(Error::Database)?;
-        super::project_event(&mut tx, event).await?;
-        sqlx::query(
-            "INSERT INTO env_event_receipts (
-                environment_id, producer_id, producer_seq, session_env,
-                session_agent, session_native, server_seq, payload_hash, accepted_at_ms
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(environment.as_str())
-        .bind(producer.as_str())
-        .bind(producer_seq_i64)
-        .bind(event.session_id.environment.as_str())
-        .bind(event.session_id.agent.as_str())
-        .bind(event.session_id.native_id.as_str())
-        .bind(i64::try_from(server_seq.get()).unwrap_or(i64::MAX))
-        .bind(payload_hash)
-        .bind(now_ms())
-        .execute(&mut *tx)
-        .await
-        .map_err(Error::Database)?;
-        tx.commit().await.map_err(Error::Database)?;
-        Ok(EnvIngestOutcome {
-            result: EnvIngestResult::Inserted,
-            server_seq,
-        })
-    }
-
-    pub async fn set_turn_request_text(
-        &self,
-        session: &SessionId,
-        turn_id: &str,
-        text: &str,
-    ) -> Result<bool> {
-        let result = sqlx::query(
-            "UPDATE turns SET request_text = ? \
-             WHERE id = ? AND session_env = ? AND session_agent = ? AND session_native = ?",
-        )
-        .bind(text)
-        .bind(turn_id)
-        .bind(session.environment.as_str())
-        .bind(session.agent.as_str())
-        .bind(session.native_id.as_str())
-        .execute(self.raw_pool())
-        .await
-        .map_err(Error::Database)?;
-        Ok(result.rows_affected() == 1)
-    }
-
     pub async fn delete_environment(&self, id: &EnvironmentId) -> Result<bool> {
         let result = sqlx::query("DELETE FROM env_installations WHERE environment_id = ?")
             .bind(id.as_str())
@@ -340,102 +85,6 @@ impl JournalStore {
             .await
             .map_err(Error::Database)?;
         Ok(result.rows_affected() == 1)
-    }
-
-    /// Atomically append a canonical event and its producer receipt.
-    ///
-    /// The receipt and event share one transaction so a crash cannot leave
-    /// the server with a deduplication marker but no journal row (or the
-    /// inverse, which would replay the event under a new server sequence).
-    pub async fn ingest_env_event(
-        &self,
-        environment: &EnvironmentId,
-        producer: &ProducerId,
-        producer_seq: ProducerSeq,
-        server_seq: ServerSeq,
-        event: &Event,
-        payload_hash: &str,
-    ) -> Result<EnvIngestResult> {
-        if &event.session_id.environment != environment {
-            return Err(Error::InvalidRequest(
-                "event session environment does not match the authenticated envagent".into(),
-            ));
-        }
-        let mut tx = self
-            .raw_pool()
-            .begin_with("BEGIN IMMEDIATE")
-            .await
-            .map_err(Error::Database)?;
-        let producer_seq_i64 = i64::try_from(producer_seq.get())
-            .map_err(|_| Error::InvalidRequest("producer sequence is too large".into()))?;
-        if let Some(existing) = sqlx::query_scalar::<_, i64>(
-            "SELECT server_seq FROM env_event_receipts \
-             WHERE environment_id = ? AND producer_id = ? AND producer_seq = ?",
-        )
-        .bind(environment.as_str())
-        .bind(producer.as_str())
-        .bind(producer_seq_i64)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(Error::Database)?
-        {
-            tx.rollback().await.map_err(Error::Database)?;
-            return Ok(EnvIngestResult::Duplicate {
-                server_seq: u64::try_from(existing).unwrap_or(0),
-            });
-        }
-
-        sqlx::query(
-            "INSERT INTO events (
-                session_env, session_agent, session_native, turn_id, seq, kind,
-                phase, stream_id, span, interior_state, name, text, data_json,
-                is_error, stability, source, arrival_at_ms, recorded_at_ms, created_at_ms
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(event.session_id.environment.as_str())
-        .bind(event.session_id.agent.as_str())
-        .bind(event.session_id.native_id.as_str())
-        .bind(&event.turn_id)
-        .bind(event.seq)
-        .bind(&event.kind)
-        .bind(&event.phase)
-        .bind(&event.stream_id)
-        .bind(&event.span)
-        .bind(&event.interior_state)
-        .bind(&event.name)
-        .bind(&event.text)
-        .bind(&event.data_json)
-        .bind(event.is_error)
-        .bind(&event.stability)
-        .bind("agent")
-        .bind(event.arrival_at_ms)
-        .bind(event.recorded_at_ms)
-        .bind(event.created_at_ms)
-        .execute(&mut *tx)
-        .await
-        .map_err(Error::Database)?;
-
-        super::project_event(&mut tx, event).await?;
-        sqlx::query(
-            "INSERT INTO env_event_receipts (
-                environment_id, producer_id, producer_seq, session_env,
-                session_agent, session_native, server_seq, payload_hash, accepted_at_ms
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(environment.as_str())
-        .bind(producer.as_str())
-        .bind(producer_seq_i64)
-        .bind(event.session_id.environment.as_str())
-        .bind(event.session_id.agent.as_str())
-        .bind(event.session_id.native_id.as_str())
-        .bind(i64::try_from(server_seq.get()).unwrap_or(i64::MAX))
-        .bind(payload_hash)
-        .bind(now_ms())
-        .execute(&mut *tx)
-        .await
-        .map_err(Error::Database)?;
-        tx.commit().await.map_err(Error::Database)?;
-        Ok(EnvIngestResult::Inserted)
     }
 
     pub async fn put_pairing(&self, code_hash: &str, expires_at_ms: i64) -> Result<()> {
@@ -450,9 +99,6 @@ impl JournalStore {
         Ok(())
     }
 
-    /// Consume a pairing code exactly once.  Returning false means either
-    /// unknown, expired, or already consumed; callers deliberately do not
-    /// distinguish those cases to avoid turning codes into an oracle.
     pub async fn consume_pairing(&self, code_hash: &str) -> Result<bool> {
         let result = sqlx::query(
             "UPDATE env_pairings SET used_at_ms = ? \
@@ -467,7 +113,6 @@ impl JournalStore {
         Ok(result.rows_affected() == 1)
     }
 
-    /// Store a one-shot capability invite issued by the owning envagent.
     pub async fn put_invite(
         &self,
         code_hash: &str,
@@ -491,13 +136,6 @@ impl JournalStore {
         Ok(())
     }
 
-    /// Atomically redeem an invite for a Subject grant.
-    ///
-    /// The invite row is consumed only when all five properties hold: the
-    /// supplied environment scope, a grantable capability, a live expiry,
-    /// an unused row, and issuer provenance that still belongs to the named
-    /// installation.  The grant insert and code consumption share one
-    /// transaction, so a failed grant cannot burn a code.
     pub async fn redeem_invite(
         &self,
         code_hash: &str,
@@ -608,7 +246,9 @@ impl JournalStore {
         row.map(|row| {
             let raw_id: String = row.try_get("environment_id").map_err(Error::Database)?;
             let id = EnvironmentId::parse(raw_id).map_err(|error| {
-                Error::Internal(format!("invalid environment id in journal: {error}"))
+                Error::Internal(format!(
+                    "invalid environment id in operational store: {error}"
+                ))
             })?;
             let epoch: i64 = row.try_get("connection_epoch").map_err(Error::Database)?;
             Ok(EnvironmentRow {
@@ -644,7 +284,9 @@ impl JournalStore {
             .map(|row| {
                 let raw_id: String = row.try_get("environment_id").map_err(Error::Database)?;
                 let id = EnvironmentId::parse(raw_id).map_err(|error| {
-                    Error::Internal(format!("invalid environment id in journal: {error}"))
+                    Error::Internal(format!(
+                        "invalid environment id in operational store: {error}"
+                    ))
                 })?;
                 let epoch: i64 = row.try_get("connection_epoch").map_err(Error::Database)?;
                 Ok(EnvironmentRow {
@@ -694,13 +336,6 @@ impl JournalStore {
         Ok(result.rows_affected() == 1)
     }
 
-    /// Atomically acquire the next connection epoch for an installation.
-    ///
-    /// Registration used to read `connection_epoch`, add one in Rust, then
-    /// write it back. Two simultaneous envagent connections could therefore
-    /// receive the same epoch and either socket could later pass the stale
-    /// writer check. The increment and credential check belong in one SQL
-    /// statement so each lease has a unique monotonic epoch.
     pub async fn lease_environment_connection(
         &self,
         id: &EnvironmentId,
@@ -730,10 +365,6 @@ impl JournalStore {
             .transpose()
     }
 
-    /// Mark a lease disconnected only if it is still the lease identified by
-    /// `epoch`.  This is the disconnect-side compare-and-set counterpart to
-    /// `set_environment_connection`: an old socket must not clobber a newer
-    /// reconnect that reused the same installation credential.
     pub async fn clear_environment_connection_if_epoch(
         &self,
         id: &EnvironmentId,
@@ -845,285 +476,11 @@ impl JournalStore {
         .map_err(Error::Database)?;
         raw.map(|raw| {
             serde_json::from_str(&raw).map_err(|error| {
-                Error::Internal(format!("invalid command outcome in journal: {error}"))
+                Error::Internal(format!(
+                    "invalid command outcome in operational store: {error}"
+                ))
             })
         })
         .transpose()
-    }
-
-    /// Insert a producer receipt and return whether it was new.  The bridge
-    /// calls this before assigning a canonical server sequence.
-    pub async fn env_receipt(
-        &self,
-        environment: &EnvironmentId,
-        producer: &ProducerId,
-        producer_seq: ProducerSeq,
-    ) -> Result<Option<u64>> {
-        let seq = i64::try_from(producer_seq.get())
-            .map_err(|_| Error::InvalidRequest("producer sequence is too large".into()))?;
-        let value: Option<i64> = sqlx::query_scalar(
-            "SELECT server_seq FROM env_event_receipts \
-             WHERE environment_id = ? AND producer_id = ? AND producer_seq = ?",
-        )
-        .bind(environment.as_str())
-        .bind(producer.as_str())
-        .bind(seq)
-        .fetch_optional(self.read_pool())
-        .await
-        .map_err(Error::Database)?;
-        Ok(value.and_then(|value| u64::try_from(value).ok()))
-    }
-
-    pub async fn env_receipt_detail(
-        &self,
-        environment: &EnvironmentId,
-        producer: &ProducerId,
-        producer_seq: ProducerSeq,
-    ) -> Result<Option<EnvReceipt>> {
-        let seq = i64::try_from(producer_seq.get())
-            .map_err(|_| Error::InvalidRequest("producer sequence is too large".into()))?;
-        let row = sqlx::query(
-            "SELECT server_seq, payload_hash FROM env_event_receipts \
-             WHERE environment_id = ? AND producer_id = ? AND producer_seq = ?",
-        )
-        .bind(environment.as_str())
-        .bind(producer.as_str())
-        .bind(seq)
-        .fetch_optional(self.read_pool())
-        .await
-        .map_err(Error::Database)?;
-        row.map(|row| {
-            Ok(EnvReceipt {
-                server_seq: u64::try_from(
-                    row.try_get::<i64, _>("server_seq")
-                        .map_err(Error::Database)?,
-                )
-                .unwrap_or(0),
-                payload_hash: row.try_get("payload_hash").map_err(Error::Database)?,
-            })
-        })
-        .transpose()
-    }
-
-    pub async fn env_accepted_through(
-        &self,
-        environment: &EnvironmentId,
-        producer: &ProducerId,
-    ) -> Result<u64> {
-        // This prefix is advanced by the receipt insert trigger in the same
-        // transaction as the frame. Reading all receipts here made every native
-        // import quadratic and kept the ingestion gate occupied while sorting.
-        let accepted: i64 = sqlx::query_scalar(
-            "SELECT COALESCE((SELECT accepted_through FROM env_producer_cursors
-             WHERE environment_id = ? AND producer_id = ?), 0)",
-        )
-        .bind(environment.as_str())
-        .bind(producer.as_str())
-        .fetch_one(self.read_pool())
-        .await
-        .map_err(Error::Database)?;
-        u64::try_from(accepted).map_err(|_| Error::Internal("negative producer cursor".into()))
-    }
-
-    pub async fn insert_env_receipt(
-        &self,
-        environment: &EnvironmentId,
-        producer: &ProducerId,
-        producer_seq: ProducerSeq,
-        session: &SessionId,
-        server_seq: ServerSeq,
-        payload_hash: &str,
-    ) -> Result<bool> {
-        let result = sqlx::query(
-            "INSERT OR IGNORE INTO env_event_receipts \
-             (environment_id, producer_id, producer_seq, session_env, session_agent, \
-              session_native, server_seq, payload_hash, accepted_at_ms) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(environment.as_str())
-        .bind(producer.as_str())
-        .bind(i64::try_from(producer_seq.get()).unwrap_or(i64::MAX))
-        .bind(session.environment.as_str())
-        .bind(session.agent.as_str())
-        .bind(session.native_id.as_str())
-        .bind(i64::try_from(server_seq.get()).unwrap_or(i64::MAX))
-        .bind(payload_hash)
-        .bind(now_ms())
-        .execute(self.raw_pool())
-        .await
-        .map_err(Error::Database)?;
-        Ok(result.rows_affected() == 1)
-    }
-
-    pub async fn insert_env_message_receipt(
-        &self,
-        environment: &EnvironmentId,
-        producer: &ProducerId,
-        producer_seq: ProducerSeq,
-        payload_hash: &str,
-    ) -> Result<bool> {
-        let result = sqlx::query(
-            "INSERT OR IGNORE INTO env_event_receipts (
-                environment_id, producer_id, producer_seq, session_env,
-                session_agent, session_native, server_seq, payload_hash, accepted_at_ms
-             ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)",
-        )
-        .bind(environment.as_str())
-        .bind(producer.as_str())
-        .bind(i64::try_from(producer_seq.get()).unwrap_or(i64::MAX))
-        .bind(environment.as_str())
-        .bind("__message__")
-        .bind("__message__")
-        .bind(payload_hash)
-        .bind(now_ms())
-        .execute(self.raw_pool())
-        .await
-        .map_err(Error::Database)?;
-        Ok(result.rows_affected() == 1)
-    }
-
-    pub async fn insert_session_edge(&self, edge: &SessionEdge) -> Result<bool> {
-        let result = sqlx::query(
-            "INSERT OR IGNORE INTO session_edges \
-             (parent_env, parent_agent, parent_native, child_env, child_agent, child_native, \
-              relation, source, created_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(edge.parent.environment.as_str())
-        .bind(edge.parent.agent.as_str())
-        .bind(edge.parent.native_id.as_str())
-        .bind(edge.child.environment.as_str())
-        .bind(edge.child.agent.as_str())
-        .bind(edge.child.native_id.as_str())
-        .bind(edge.relation.as_str())
-        // The edge is a server-owned read model. The envagent supplied
-        // provenance, but it cannot author the server's relationship policy.
-        .bind("server")
-        .bind(now_ms())
-        .execute(self.raw_pool())
-        .await
-        .map_err(Error::Database)?;
-        Ok(result.rows_affected() == 1)
-    }
-}
-
-#[cfg(test)]
-mod receipt_tests {
-    use super::*;
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    };
-
-    async fn store() -> (JournalStore, tempfile::TempDir) {
-        let dir = tempfile::tempdir().unwrap();
-        let store = JournalStore::new(dir.path().join("journal.db").to_str().unwrap())
-            .await
-            .unwrap();
-        (store, dir)
-    }
-
-    #[tokio::test]
-    async fn producer_confirmation_stops_at_gaps_and_survives_rollback_and_reopen() {
-        let (store, dir) = store().await;
-        let env = EnvironmentId::parse("envtest").unwrap();
-        let producer = ProducerId::parse("producer-test").unwrap();
-        for (seq, accepted) in [(3, 0), (1, 1), (2, 3), (2, 3)] {
-            store
-                .insert_env_message_receipt(&env, &producer, ProducerSeq::new(seq), "hash")
-                .await
-                .unwrap();
-            assert_eq!(
-                store.env_accepted_through(&env, &producer).await.unwrap(),
-                accepted
-            );
-        }
-        let other = ProducerId::parse("other-producer").unwrap();
-        assert_eq!(store.env_accepted_through(&env, &other).await.unwrap(), 0);
-        let mut tx = store
-            .raw_pool()
-            .begin_with("BEGIN IMMEDIATE")
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO env_event_receipts(environment_id,producer_id,producer_seq,session_env,session_agent,session_native,server_seq,payload_hash,accepted_at_ms)
-            VALUES('envtest','producer-test',4,'envtest','__message__','__message__',0,'hash',1)")
-            .execute(&mut *tx).await.unwrap();
-        tx.rollback().await.unwrap();
-        assert_eq!(
-            store.env_accepted_through(&env, &producer).await.unwrap(),
-            3
-        );
-        store.read_pool().close().await;
-        store.raw_pool().close().await;
-        let reopened = JournalStore::new(dir.path().join("journal.db").to_str().unwrap())
-            .await
-            .unwrap();
-        assert_eq!(
-            reopened
-                .env_accepted_through(&env, &producer)
-                .await
-                .unwrap(),
-            3
-        );
-    }
-
-    async fn measured_cursor(
-        store: &JournalStore,
-        env: &EnvironmentId,
-        producer: &ProducerId,
-    ) -> usize {
-        let steps = Arc::new(AtomicUsize::new(0));
-        let mut connections = Vec::new();
-        // Install on every reader so pool scheduling cannot hide a catalogue scan.
-        for _ in 0..store.read_pool().options().get_max_connections() {
-            let mut conn = store.read_pool().acquire().await.unwrap();
-            let count = steps.clone();
-            conn.lock_handle()
-                .await
-                .unwrap()
-                .set_progress_handler(1, move || {
-                    count.fetch_add(1, Ordering::Relaxed);
-                    true
-                });
-            connections.push(conn);
-        }
-        drop(connections);
-        steps.store(0, Ordering::Relaxed);
-        store.env_accepted_through(env, producer).await.unwrap();
-        let measured = steps.load(Ordering::Relaxed);
-        let mut connections = Vec::new();
-        for _ in 0..store.read_pool().options().get_max_connections() {
-            let mut conn = store.read_pool().acquire().await.unwrap();
-            conn.lock_handle().await.unwrap().remove_progress_handler();
-            connections.push(conn);
-        }
-        measured
-    }
-
-    #[tokio::test]
-    async fn acknowledging_a_frame_does_not_rescan_the_producer_history() {
-        let (store, _dir) = store().await;
-        let env = EnvironmentId::parse("envtest").unwrap();
-        let producer = ProducerId::parse("producer-test").unwrap();
-        store
-            .insert_env_message_receipt(&env, &producer, ProducerSeq::new(1), "hash")
-            .await
-            .unwrap();
-        let small = measured_cursor(&store, &env, &producer).await;
-        for seq in 2..=1000 {
-            store
-                .insert_env_message_receipt(&env, &producer, ProducerSeq::new(seq), "hash")
-                .await
-                .unwrap();
-        }
-        let large = measured_cursor(&store, &env, &producer).await;
-        eprintln!("Receipt cursor VM steps: first={small}, with 1000 receipts={large}");
-        assert!(
-            large < small * 3,
-            "acknowledgement must not grow with producer history: {small} -> {large}"
-        );
-        assert_eq!(
-            store.env_accepted_through(&env, &producer).await.unwrap(),
-            1000
-        );
     }
 }

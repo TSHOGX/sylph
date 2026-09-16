@@ -33,7 +33,7 @@ pub enum RequestKind {
 impl RequestKind {
     /// The wire spelling, which is also what the journal's `kind` column stores.
     ///
-    /// One function, for the same reason [`crate::EventKind::as_str`] is one: a storage
+    /// One function so a storage
     /// write and a wire frame must not be able to disagree about the spelling.
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -400,11 +400,9 @@ pub struct RequestOption {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Request {
-    /// The agent's own id for this ask, which a resolution must echo back.
-    ///
-    /// Scoped to one session's adapter. The server mints its own id for the journal
-    /// row a client addresses, because a client-supplied adapter id is a way to answer
-    /// a request that was never raised (`models/request.rs`).
+    /// The adapter reports its native request id. The envagent scopes that id to the
+    /// held process before publication and reverses the mapping for a resolution.
+    /// Reconnecting one process preserves the public id; a successor cannot reuse it.
     pub id: String,
     pub kind: RequestKind,
     /// The agent's own id for the tool call this concerns, when there is one.

@@ -174,6 +174,7 @@ pub async fn unpair(
     {
         return Err(crate::error::Error::SessionNotFound);
     }
+    state.trace.notify_access_changed();
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -210,10 +211,16 @@ pub async fn revoke_grant(
     if !revoked {
         return Err(crate::error::Error::SessionNotFound);
     }
+    state.trace.notify_access_changed();
     let _ = state
         .store
         .revoke_subject_work(&target_subject, environment.as_str())
         .await?;
+    state
+        .env_bridge
+        .revoke_subject_control(&target_subject, &environment)
+        .await
+        .map_err(|e| crate::error::Error::Internal(e.to_string()))?;
     Ok(StatusCode::NO_CONTENT)
 }
 

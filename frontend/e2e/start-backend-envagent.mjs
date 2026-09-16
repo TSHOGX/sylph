@@ -80,6 +80,8 @@ const serverBin = path.join(targetDir, "debug", "sylph-server");
 const agentBin = path.join(targetDir, "debug", "sylph-envagent");
 
 const children = new Set();
+let fixtureConfirmed = false;
+const fixtureBanner = "Fixture adapters enabled: codex (no vendor processes)";
 const restartMarker = path.join(envHome, "restart-agent");
 const restartReceipt = path.join(envHome, "restart-complete");
 let agentProcess;
@@ -96,11 +98,22 @@ let stopping = false;
  * backend logs through Playwright's reporter.
  */
 function launch(command, args, extraEnv = {}) {
+  if (command === agentBin) fixtureConfirmed = false;
   const child = spawn(command, args, {
     cwd: repo,
     env: { ...process.env, ...extraEnv },
-    stdio: ["ignore", "inherit", "inherit"],
+    stdio: ["ignore", command === agentBin ? "pipe" : "inherit", command === agentBin ? "pipe" : "inherit"],
   });
+  if (command === agentBin) {
+    for (const [stream, output] of [[child.stdout, process.stdout], [child.stderr, process.stderr]]) {
+      let tail = "";
+      stream.on("data", (bytes) => {
+        output.write(bytes);
+        tail = (tail + bytes.toString()).slice(-4096);
+        if (tail.includes(fixtureBanner)) fixtureConfirmed = true;
+      });
+    }
+  }
   children.add(child);
   child.once("exit", (code, signal) => {
     children.delete(child);
@@ -291,10 +304,10 @@ async function waitForConnectedEnvironment() {
     const cookie = response.headers["set-cookie"]?.[0]?.split(";", 1)[0];
     const environments = await request("GET", "/api/v1/environments", { cookie });
     const rows = environments.value?.environments ?? [];
-    if (rows.some((row) => row.connected && row.agents?.some((agent) => agent.name === "e2e" && agent.available))) return;
+    if (fixtureConfirmed && rows.some((row) => row.connected && row.agents?.some((agent) => agent.name === "codex" && agent.available))) return;
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
-  throw new Error("paired envagent did not report a connected e2e agent");
+  throw new Error("paired envagent did not report a connected fixture codex agent");
 }
 
 // Stdout readiness replaces Playwright's health-URL check, including its occupied-port
@@ -319,7 +332,7 @@ try {
   await pair();
   agentProcess = startAgent();
   await waitForConnectedEnvironment();
-  console.log("[e2e] paired envagent is connected and reports the e2e adapter");
+  console.log("[e2e] paired envagent is connected and reports the fixture codex adapter");
   // A browser fault-injection spec can request a real process restart by creating
   // this marker. Polling keeps the control local and avoids adding a product API.
   setInterval(async () => {

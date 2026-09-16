@@ -1,50 +1,7 @@
-//! The `codex` adapter. **New work rather than a port**: there has never been a codex
-//! adapter in this repo, so there was no Python to carry across — and no ported defects
-//! either. Every shape below was read off a printed payload.
-//!
-//! `docs/agents.md` § `codex` is the governing spec, and `docs/measurements/codex/` holds
-//! the re-runnable probes and redacted frames behind it. [`measured_facts`] indexes the
-//! vendor facts this module is built on, each stated at the code that acts on it — they
-//! are the ones whose violation is silent, so a reader arriving from the document lands
-//! on the measurement rather than on prose.
-//!
-//! # One file, three halves
-//!
-//! [`appserver`] holds the live control surface — the JSON-RPC method names, the approval
-//! decision enums, and the config validation this vendor makes the adapter's job.
-//! [`native`] reads `~/.codex/sessions/`. The split is the one `claude` and `pi` already
-//! make, and for the same measured reason: a mistranslation does not raise, so the pure
-//! half has to be assertable without a process.
-//!
-//! # Three event vocabularies, and nothing shared between them
-//!
-//! This vendor spells the same concepts three ways, and *an adapter reading one while
-//! mapping names learned from another gets nothing, silently*:
-//!
-//! | Source | Spelling | Example |
-//! | --- | --- | --- |
-//! | app-server | slash + camelCase | `item/completed`, `commandExecution` |
-//! | `exec --json` | dot + snake_case | `item.completed`, `command_execution` |
-//! | rollout JSONL | `type` / `payload` | `response_item` / `custom_tool_call` |
-//! | *projection SQLite* | camelCase, re-shaped | `commandExecution`, `agentThreadId` |
-//!
-//! There are in fact **four**, which is the first correction: the `thread_history_*.sqlite`
-//! projection re-cases and re-shapes the same items again (`item_json` flattens
-//! `AgentMessage.content[{type:"Text"}]` to a scalar `text`, and joins
-//! `CommandExecution.command` from a `Vec<String>` into one string), so nothing there can
-//! be deserialized with the rollout's types.
-//!
-//! **So no name constant is shared between the halves of this module.** [`appserver`] names
-//! its own methods and item types; [`native`] names its own record and item types; and the
-//! `exec --json` vocabulary is deliberately absent, because nothing here drives that
-//! surface. A shared table would be one rename away from reading a legitimate payload as
-//! absent.
-//!
-//! # What this adapter does not do
-//!
-//! No `commands`: codex has **no command concept at all**, so the facet is empty and a
-//! client must not present that as a failure (`sylph_protocol::LinkFacets` — an empty
-//! capability surface means "Sylph cannot reach it" only where reaching is possible).
+//! Codex process control and native source discovery. `appserver` owns the measured
+//! control methods, `live` holds the process, and `native` enumerates source locators.
+//! `docs/unified-trace-codex.md` governs semantic mapping from retained evidence;
+//! `docs/agents.md` owns the vendor control contract and measured CLI behavior.
 
 pub mod appserver;
 pub mod live;
@@ -53,9 +10,8 @@ pub mod native;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use sylph_protocol::{
-    Adapter, AgentInfo, Capability, EventStream, Facet, FlagSpec, LinkFacets, NativeId,
-    NativeRecord, NativeSummary, RequestedNativeId, RunSpec, Session, StoreFilter,
-    UnavailableReason,
+    Adapter, AgentInfo, Capability, Facet, FlagSpec, LinkFacets, NativeId, NativeSummary,
+    RequestedNativeId, RunSpec, Session, StoreFilter, UnavailableReason,
 };
 
 /// The name this adapter answers to, and the `PATH` binary that decides availability.
@@ -131,43 +87,6 @@ pub const SANDBOX_MODES: &[&str] = &["read-only", "workspace-write", "danger-ful
 /// behavioural switch wearing an effort's clothing; offering it is right, and so is not
 /// treating it as the top of a ladder.
 pub const SPAWN_EFFORT_CHOICES: &[&str] = &["low", "medium", "high", "xhigh", "max", "ultra"];
-
-/// The measured facts this adapter is built on, each of which a reader would otherwise get
-/// wrong from the vendor's own types.
-///
-/// Stated here because every one of them **fails silently**: the parse succeeds and produces
-/// a plausible record. `docs/agents.md` § `codex` carries them as prose; this is the
-/// index from the code side.
-///
-/// 1. **The era discriminant is `session_meta.payload.history_mode`, never `cli_version`.**
-///    One CLI version appears in both eras, and the store holds files written by the newest
-///    version present in the *old* vocabulary — so a version comparison picks the wrong
-///    parser on a file the vendor still produces. Absence of the field reads as legacy.
-///    See [`native::Era`].
-/// 2. **The two content streams are mutually exclusive per file**, so "both must be read" is
-///    right about the store and wrong about a record. Reading both in a paginated file
-///    double-counts every assistant message. Only the oldest files hold both.
-///    See [`native::Era`].
-/// 3. **`SubAgentActivity.kind` is `started` or `interacted` only.** `interrupted` and
-///    `completed` are declared and never emitted, so **a delegation has no close record
-///    here** and its end must come from the turn containing it.
-/// 4. **`agent_thread_id` is the *other party*, not the child.** In a parent's rollout it
-///    names the child; in the child's own rollout an `interacted` record names the
-///    **parent**. Mapping it to `span` unconditionally inverts the edge, producing a tree
-///    that is backwards rather than incomplete — and nothing downstream can detect that.
-///    See [`native::delegation_edge`].
-/// 5. **`CollabAgentToolCall` carries no lineage.** Its `receiver_thread_ids` and
-///    `agents_states` are empty and its `status` is a *wait's*, not a delegate's. It marks
-///    a barrier.
-/// 6. **`custom_tool_call` does not supersede `function_call`.** Both appear in the same
-///    files, and `function_call` is still how every collaboration tool is issued, so
-///    switching shapes on a version stops reading the calls that matter.
-/// 7. **The `spawn_agent` brief is ciphertext** in current versions, so a delegation's name
-///    is unrecoverable from the parent's record and must be omitted rather than guessed.
-///    See [`native::BRIEF_IS_CIPHERTEXT`].
-pub const fn measured_facts() -> &'static str {
-    "seven measured facts; each is stated at the code that acts on it"
-}
 
 /// The `codex` adapter.
 #[derive(Debug, Clone, Default)]
@@ -400,29 +319,23 @@ impl Adapter for CodexAdapter {
     ///
     /// **This vendor reports its own id**, so the one thing this must not do is answer with
     /// a session whose `native_id` Sylph chose or synthesized — see [`live::run`].
-    async fn run(&self, spec: RunSpec) -> Result<Box<dyn Session>> {
+    async fn run(
+        &self,
+        spec: RunSpec,
+        capture: std::sync::Arc<dyn sylph_protocol::RawCaptureSink>,
+    ) -> Result<Box<dyn Session>> {
         if !Self::is_installed() {
             return Err(anyhow!(
                 "the `codex` CLI is not on this machine's PATH; install codex-cli to use \
                  this agent"
             ));
         }
-        live::run(spec).await
+        live::run(spec, capture).await
     }
 
-    async fn adopt(&self, id: &NativeId) -> Result<EventStream> {
-        native::adopt(id)
-    }
-
-    async fn reproject(&self, records: Vec<NativeRecord>) -> Result<EventStream> {
-        let messages = live::reproject_frames(&records.iter().collect::<Vec<_>>()).await?;
-        Ok(Box::pin(futures::stream::iter(
-            messages.into_iter().map(Ok),
-        )))
-    }
-
-    async fn watch(&self, id: &NativeId) -> Result<EventStream> {
-        native::watch(id)
+    async fn native_sources(&self, id: &NativeId) -> Result<Vec<sylph_protocol::NativeSource>> {
+        let id = id.clone();
+        tokio::task::spawn_blocking(move || native::sources(&id)).await?
     }
 
     async fn enumerate(&self, filter: &StoreFilter) -> Result<Vec<NativeSummary>> {
@@ -462,47 +375,6 @@ async fn version() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn retained_reprojection_keeps_native_and_live_messages() {
-        use futures::TryStreamExt;
-        use serde_json::json;
-        use sylph_protocol::SessionMessage;
-        let record = |source: &str, version, payload| NativeRecord {
-            source: source.to_string(),
-            version,
-            payload,
-            raw_json: None,
-            blobs: Vec::new(),
-        };
-        let records = vec![
-            record(
-                "root.jsonl",
-                1,
-                json!({"type":"session_meta","payload":{"id":"mixed","history_mode":"paginated"}}),
-            ),
-            record(
-                "root.jsonl",
-                2,
-                json!({"type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","id":"native-item","content":[{"type":"Text","text":"native answer"}]}}}),
-            ),
-            record(
-                "live/stdout/run.jsonl",
-                1,
-                json!({"method":"item/completed","params":{"threadId":"mixed","turnId":"live-turn","item":{"type":"agentMessage","id":"live-item","text":"live answer"}}}),
-            ),
-        ];
-        let messages: Vec<_> = CodexAdapter
-            .reproject(records)
-            .await
-            .unwrap()
-            .try_collect()
-            .await
-            .unwrap();
-        for expected in ["native answer", "live answer"] {
-            assert!(messages.iter().any(|message| matches!(message, SessionMessage::Event(event) if event.text == expected)), "missing {expected}: {messages:?}");
-        }
-    }
 
     #[test]
     fn native_store_observation_does_not_advertise_control() {

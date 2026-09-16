@@ -67,7 +67,7 @@ test("both sidebars toggle by keyboard and the state persists across navigation"
   await createSession(page);
 
   const left = page.getByRole("complementary", { name: "Workspaces" });
-  const right = page.getByRole("complementary", { name: "Work panel" });
+  const right = page.getByRole("complementary", { name: "Trace inspector" });
 
   await expect(left).toBeVisible();
   // The Artifacts pane starts hidden: it is only useful once a file is chosen.
@@ -82,7 +82,7 @@ test("both sidebars toggle by keyboard and the state persists across navigation"
   // Persisted in localStorage, so a reload keeps the layout the user chose.
   await page.reload();
   await expect(page.getByRole("complementary", { name: "Workspaces" })).toBeHidden();
-  await expect(page.getByRole("complementary", { name: "Work panel" })).toBeVisible();
+  await expect(page.getByRole("complementary", { name: "Trace inspector" })).toBeVisible();
 
   await page.keyboard.press("ControlOrMeta+b");
   await expect(page.getByRole("complementary", { name: "Workspaces" })).toBeVisible();
@@ -107,7 +107,7 @@ test("the command palette opens, filters, and runs an action", async ({ page }) 
   await expect(dialog).toBeHidden();
   // The palette dispatches through the same path as the shortcut, so running the
   // command must have the same effect as pressing the key.
-  await expect(page.getByRole("complementary", { name: "Work panel" })).toBeVisible();
+  await expect(page.getByRole("complementary", { name: "Trace inspector" })).toBeVisible();
 });
 
 /**
@@ -153,105 +153,23 @@ test("the palette groups commands, and the cursor skips the headings", async ({ 
   await expect(dialog.getByRole("option").first()).toBeEnabled();
 });
 
-test("global search finds a session and opens it", async ({ page }) => {
-  await createSession(page);
-  const sessionUrl = page.url();
-
-  // A second session, so search has to choose between them rather than matching
-  // whatever happens to be first.
-  await createSession(page, { title: "Findable needle session" });
-
-  await page.goto(sessionUrl);
-  // The shortcut listener is attached by an effect, so it does not exist until
-  // hydration finishes. Waiting for a client-rendered control first avoids
-  // pressing the key into a page that is still static markup — a real race on a
-  // cold load, not a test artifact.
-  await expect(page.getByLabel("Message", { exact: true })).toBeVisible();
-  await page.keyboard.press("ControlOrMeta+k");
-
-  const dialog = page.getByRole("dialog");
-  await expect(dialog).toBeVisible();
-  await dialog.getByRole("combobox").fill("needle");
-
-  const first = dialog.getByRole("option").first();
-  await expect(first).toContainText(/Findable needle session/);
-  await page.keyboard.press("Enter");
-
-  await expect(dialog).toBeHidden();
-  await expect(page.getByRole("heading", { level: 1 })).toContainText(
-    "Findable needle session",
-  );
+test("global search finds a retained message and opens its addressed conversation", async ({ page }) => {
+  const { installTraceFixture, message, openTrace, MAIN_AGENT } = await import("./fixtures/trace");
+  await installTraceFixture(page, [message(3, "A retained hit outside the visible window")]); await openTrace(page);
+  await page.keyboard.press("ControlOrMeta+k"); const dialog = page.getByRole("dialog");
+  await dialog.getByRole("textbox", { name: "Search retained conversations" }).fill("needle");
+  await dialog.getByRole("button", { name: "Search", exact: true }).click();
+  await expect(dialog.getByText("A retained hit outside the visible window", { exact: true })).toBeVisible();
+  await dialog.getByRole("link", { name: "Open this retained result", exact: true }).click();
+  await expect(page).toHaveURL(new RegExp(`/agents/${MAIN_AGENT}.*anchor=`)); await expect(dialog).toHaveCount(0);
 });
 
-/**
- * An index hit shows why it matched.
- *
- * The excerpt is the only text on such a row that contains the query: the server ranked
- * the hit by full-text search over the transcript, text the browser never loaded, so a
- * row showing just a title and a path is a result the user cannot account for.
- *
- * Interception rather than a real indexed session, and that is a deliberate limit
- * stated rather than hidden: the FTS index is the server's, so a spec cannot make one
- * match without depending on the indexing pipeline. What is under test here is the
- * client's rendering of a hit — which is what the defect would be in.
- *
- * The payload is the *new* shape: a hit carries a whole session rather than an archive
- * row, so there is no `available` flag, no `cwd`/`title` pair flattened onto the hit,
- * and no `sessionId` that is set only for an already-imported row. Every hit opens.
- */
-test("an index hit renders its match excerpt, which is the only text carrying the query", async ({
-  page,
-}) => {
-  await createSession(page);
-
-  await page.route("**/api/v1/search?*", (route) =>
-    route.fulfill({
-      json: {
-        results: [
-          {
-            session: {
-              id: "env7fk2:claude:9bdacb6e-0000-4000-8000-000000000001",
-              environment: "env7fk2",
-              environmentName: "laptop",
-              agent: "claude",
-              nativeId: "9bdacb6e-0000-4000-8000-000000000001",
-              workdir: "/tmp/indexed-project",
-              title: "Notes",
-              injectIdentity: true,
-              fidelity: "messages",
-              flagsJson: "{}",
-              status: "idle",
-              createdAtMs: 1_700_000_000_000,
-              updatedAtMs: 1_700_000_060_000,
-            },
-            bestMatch: { seq: 4, excerpt: "the supervisor deadlocked on the\nsettle sweep" },
-            hits: 3,
-          },
-        ],
-      },
-    }),
-  );
-
-  await expect(page.getByLabel("Message", { exact: true })).toBeVisible();
-  await page.keyboard.press("ControlOrMeta+k");
-  const dialog = page.getByRole("dialog");
-  // Two characters is the threshold below which the index is not queried at all: FTS5
-  // is 174-260ms where every other read is sub-millisecond.
-  await dialog.getByRole("combobox", { name: /search query/i }).fill("deadlock");
-
-  const hit = dialog.getByRole("option").filter({ hasText: "Notes" });
-  // Collapsed whitespace: an excerpt spanning lines in the transcript is one line here,
-  // and a raw newline inside a truncating row renders as a gap of arbitrary width.
-  await expect(hit).toContainText("the supervisor deadlocked on the settle sweep");
-  // The path is still its own line, not displaced by the snippet: `/tmp/x` and
-  // `/tmp/x-old` are distinguishable only by it.
-  await expect(hit).toContainText("/tmp/indexed-project");
-  // The fidelity marker rides along, because a hit renders the session it carries — so
-  // a coarse record is recognizable before it is opened. `exact` because Playwright
-  // matches text as a case-insensitive substring and this row also holds the word
-  // "messages" nowhere else, which is precisely the collision that has bitten here
-  // three times.
-  await expect(hit.getByText("messages", { exact: true })).toBeVisible();
+test("a global index hit keeps its retained excerpt and checkpoint visible", async ({ page }) => {
+  const { installTraceFixture, openTrace } = await import("./fixtures/trace"); await installTraceFixture(page); await openTrace(page);
+  await page.keyboard.press("ControlOrMeta+k"); const dialog = page.getByRole("dialog");
+  await dialog.getByRole("textbox", { name: "Search retained conversations" }).fill("deadlock"); await dialog.getByRole("button", { name: "Search", exact: true }).click();
+  await expect(dialog.getByText("A retained hit outside the visible window", { exact: true })).toBeVisible();
+  await expect(dialog.getByText(/Matched Current history at retained view 1/)).toBeVisible();
 });
 
 test("Escape closes an overlay and returns focus to its opener", async ({ page }) => {
@@ -298,7 +216,7 @@ test("the Artifacts pane browses the workspace and previews a file", async ({ pa
   await createSession(page);
 
   await page.keyboard.press("ControlOrMeta+Backslash");
-  const pane = page.getByRole("complementary", { name: "Work panel" });
+  const pane = page.getByRole("complementary", { name: "Trace inspector" });
   await expect(pane).toBeVisible();
 
   // The session runs in `/tmp`, which the backend serves as the tree root. The
@@ -373,7 +291,7 @@ test("Quick Sessions creates a session from its menu with no dialog", async ({ p
   await page.getByLabel("Message", { exact: true }).fill("persist this draft");
   await page.getByRole("button", { name: "Send", exact: true }).click();
   // Only promotion creates the identity triple and the durable row.
-  await expect(page).toHaveURL(/\/sessions\/(?!draft\/)[^/]+/);
+  await expect(page).toHaveURL(/\/agents\/[^/]+/);
 
   // Created in the fixed Quick Start directory, so it joins that group rather than
   // spawning a workspace of its own.
@@ -649,7 +567,7 @@ test("no configuration can push Send outside the composer", async ({ page }) => 
   expect(after!.x + after!.width).toBeLessThanOrEqual(formBox!.x + formBox!.width + 1);
 });
 
-test("the agent is switchable from the add menu until the first turn, then fixed", async ({
+test("the add menu keeps the native agent fixed after session creation", async ({
   page,
 }) => {
   await createSession(page);
@@ -661,7 +579,7 @@ test("the agent is switchable from the add menu until the first turn, then fixed
   await page.getByRole("button", { name: "Add", exact: true }).click();
   const menu = page.getByRole("menu", { name: "Add" });
   await expect(menu).toBeVisible();
-  await expect(menu.getByText(/Agent.*e2e|e2e/)).toBeVisible();
+  await expect(menu.getByText(/Agent.*codex/)).toBeVisible();
   await page.keyboard.press("Escape");
 
   const composer = page.getByLabel("Message", { exact: true });
@@ -675,7 +593,7 @@ test("the agent is switchable from the add menu until the first turn, then fixed
   // disappears reads as a bug.
   await page.getByRole("button", { name: "Add", exact: true }).click();
   const after = page.getByRole("menu", { name: "Add" });
-  await expect(after.getByText("Agent: e2e")).toBeVisible();
+  await expect(after.getByText("Agent: codex")).toBeVisible();
   await expect(after.getByText("fixed")).toBeVisible();
 });
 
@@ -749,7 +667,8 @@ test("the sidebar marks the session named by the route as current", async ({ pag
   // because a row's text is its workdir and its agent — neither of which is unique once a
   // run has created a hundred sessions, which is the accumulation `AGENTS.md` warns
   // against counting on.
-  const current = sidebar.locator(`a[href="/sessions/${encodeURIComponent(sessionId)}"]`);
+  const metadata = await (await page.request.get(`/api/v1/sessions/${encodeURIComponent(sessionId)}`)).json();
+  const current = sidebar.locator(`a[href="/agents/${encodeURIComponent(metadata.session.traceAgentRef)}"]`);
   await expect(current).toHaveAttribute("aria-current", "page");
 
   // And only that one, or "current" would mean nothing.

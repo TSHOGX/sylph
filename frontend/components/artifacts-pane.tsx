@@ -48,6 +48,7 @@ import { ApiError, api, type FileEntry } from "@/lib/api";
 import { formatBytes, formatRelative } from "@/lib/format";
 import { iconFor, type FileIconName } from "@/lib/file-kind";
 import { useSessionIdParam } from "@/lib/use-session-id-param";
+import { useTraceFocus } from "@/lib/trace-focus";
 import { useWorkspaceUI } from "@/lib/workspace-ui";
 import { useT, type Translate } from "@/lib/i18n";
 import { ContextMenu, MenuButton, type MenuItem } from "@/components/ui/menu";
@@ -110,7 +111,9 @@ const filePositions = new Map<string, { toggled: Set<string>; collapsed: Set<str
 export function ArtifactsPane() {
   // Decoded, or the file endpoints receive a double-encoded id and the pane reports
   // "Could not list the working directory" — see `use-session-id-param`.
-  const routeSessionId = useSessionIdParam();
+  const draftId = useSessionIdParam();
+  const focused = useTraceFocus();
+  const routeSessionId = focused?.context?.sessionId ?? draftId;
   const { artifact } = useWorkspaceUI();
   const sessionId = artifact?.sessionId ?? routeSessionId;
   // Expansion and file operations belong to one session. The shell survives

@@ -72,7 +72,7 @@ impl Default for CaptureLimits {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CaptureAuthorization {
     pub epoch: IngestionEpoch,
     pub subjects: Vec<AgentRef>,
@@ -84,6 +84,7 @@ pub struct CaptureAuthorization {
 pub struct RegisteredSource {
     pub reference: SourceRef,
     pub locator: PathBuf,
+    pub identity_record_ordinal: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -207,6 +208,50 @@ impl FileIdentity {
     }
 }
 
+/// A snapshot is bounded before allocation and checked twice. Vendors may rewrite a
+/// file in place without a lock; a torn read remains a retry, never a settled revision.
+fn read_snapshot(path: &Path, maximum: usize) -> Result<Option<(Vec<u8>, String)>> {
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let before = file.metadata()?;
+    if !before.is_file() {
+        return Err(invalid("snapshot source is not a regular file"));
+    }
+    if before.len() > maximum as u64 {
+        return Err(CaptureSpoolError::RecordLimit(maximum));
+    }
+    let mut bytes = Vec::with_capacity(before.len() as usize);
+    (&mut file)
+        .take(maximum as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > maximum {
+        return Err(CaptureSpoolError::RecordLimit(maximum));
+    }
+    let digest = blake3::hash(&bytes);
+    file.seek(SeekFrom::Start(0))?;
+    let mut verifier = blake3::Hasher::new();
+    let copied = std::io::copy(&mut (&mut file).take(maximum as u64 + 1), &mut verifier)?;
+    let after = file.metadata()?;
+    let current = std::fs::metadata(path).map_err(|_| CaptureSpoolError::ChangedDuringRead)?;
+    let identity = FileIdentity::of(&before);
+    if copied != bytes.len() as u64
+        || before.len() != copied
+        || verifier.finalize() != digest
+        || FileIdentity::of(&after) != identity
+        || FileIdentity::of(&current) != identity
+        || after.len() != copied
+        || current.len() != copied
+        || before.modified().ok() != after.modified().ok()
+        || after.modified().ok() != current.modified().ok()
+    {
+        return Err(CaptureSpoolError::ChangedDuringRead);
+    }
+    Ok(Some((bytes, serde_json::to_string(&identity)?)))
+}
+
 impl CaptureRegistry {
     /// One acquisition runtime gets one execution epoch; reconnect keeps this object.
     /// Old epochs remain in the durable queue and are drained independently on restart.
@@ -294,9 +339,302 @@ impl CaptureRegistry {
         Ok(RegisteredSource {
             reference: SourceRef::decode(&reference).map_err(invalid)?,
             locator: path,
+            identity_record_ordinal: None,
         })
     }
 
+    pub async fn source_locator(&self,source:&SourceRef)->Result<Option<PathBuf>> {
+        let path:Option<String>=sqlx::query_scalar("SELECT locator FROM capture_sources WHERE source_ref=?").bind(source.encode()).fetch_optional(&self.spool.readers).await?;Ok(path.map(PathBuf::from))
+    }
+
+    /// Keep a small part of the configured spool available for process/capture-loss
+    /// evidence after ordinary capture reaches backpressure. The ceiling is still the
+    /// configured total, and no observed-only native process is stopped by this policy.
+    fn capacity(&self, transport: TransportKind) -> u64 {
+        if matches!(
+            transport,
+            TransportKind::Supervisor | TransportKind::SourceState
+        ) {
+            self.spool.max_bytes
+        } else {
+            self.spool.max_bytes - self.spool.max_bytes.saturating_div(8).min(64 * 1024)
+        }
+    }
+
+    /// Retain one exact runtime frame before vendor parsing or reply routing.
+    /// Stream keys include the process incarnation and are stable across reconnect.
+    pub async fn capture_frame(
+        &self,
+        stream: &str,
+        transport: TransportKind,
+        bytes: Vec<u8>,
+        authorization: CaptureAuthorization,
+    ) -> Result<ObservationRef> {
+        self.capture_frame_with_attachments(stream, transport, bytes, vec![], authorization)
+            .await
+    }
+
+    pub async fn capture_frame_with_attachments(
+        &self,
+        stream: &str,
+        transport: TransportKind,
+        bytes: Vec<u8>,
+        attachments: Vec<sylph_protocol::trace::CaptureAttachment>,
+        authorization: CaptureAuthorization,
+    ) -> Result<ObservationRef> {
+        if stream.is_empty() || bytes.len() > self.limits.max_record_bytes {
+            return Err(invalid("invalid or oversized runtime frame"));
+        }
+        let source = SourceRef {
+            issuer: self.issuer.clone(),
+            instance: format!("runtime:{stream}"),
+        };
+        let source_key = source.encode();
+        let issuer = serde_json::to_string(&self.issuer)?;
+        let mut tx = self.spool.pool.begin_with("BEGIN IMMEDIATE").await?;
+        sqlx::query("INSERT INTO capture_sources(source_ref,issuer_json,namespace,locator) VALUES(?,?,?,?) ON CONFLICT DO NOTHING")
+            .bind(&source_key).bind(&issuer).bind("runtime").bind(stream).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO capture_generations(source_ref,generation,reason,prefix_digest) VALUES(?,0,'runtime',?) ON CONFLICT DO NOTHING")
+            .bind(&source_key).bind(blake3::hash(&[]).to_hex().as_str()).execute(&mut *tx).await?;
+        let ordinal:i64=sqlx::query_scalar("UPDATE capture_generations SET next_ordinal=next_ordinal+1 WHERE source_ref=? AND generation=0 RETURNING next_ordinal-1")
+            .bind(&source_key).fetch_one(&mut *tx).await?;
+        let mut item = self.prepare(
+            &authorization,
+            SourcePosition {
+                source,
+                generation: 0,
+                locator: SourceLocator::Frame {
+                    ordinal: unsigned(ordinal)?,
+                },
+            },
+            bytes,
+        )?;
+        item.capture.transport_kind = transport;
+        item.capture.attachments = attachments;
+        item.capture.validate().map_err(invalid)?;
+        let sequence:i64=sqlx::query_scalar("UPDATE capture_producers SET next_seq=next_seq+1 WHERE issuer_json=? AND producer_id=? AND producer_epoch=? AND next_seq<9223372036854775807 RETURNING next_seq-1")
+            .bind(&issuer).bind(&self.producer_id).bind(&self.producer_epoch).fetch_one(&mut *tx).await?;
+        item.capture.observation_ref.producer_seq = unsigned(sequence)?;
+        let incoming = item_size(&item)?;
+        let used = unsigned(
+            sqlx::query_scalar("SELECT bytes FROM spool_usage WHERE singleton=1")
+                .fetch_one(&mut *tx)
+                .await?,
+        )?;
+        if used.saturating_add(incoming) > self.capacity(transport) {
+            return Err(SpoolError::Overflow {
+                used,
+                incoming,
+                maximum: self.capacity(transport),
+            }
+            .into());
+        }
+        self.insert(&mut tx, &item).await?;
+        tx.commit().await?;
+        Ok(item.capture.observation_ref)
+    }
+
+    pub async fn capture_snapshot(
+        &self,
+        source: &RegisteredSource,
+        authorization: CaptureAuthorization,
+    ) -> Result<CapturePass> {
+        self.capture_snapshot_as(source, authorization, TransportKind::NativeSnapshot)
+            .await
+    }
+    pub async fn capture_snapshot_as(
+        &self,
+        source: &RegisteredSource,
+        authorization: CaptureAuthorization,
+        transport: TransportKind,
+    ) -> Result<CapturePass> {
+        let reservation = self.reserve(&source.reference).await;
+        let _held = reservation.lock().await;
+        let path = self
+            .policy
+            .contain_write_target(&source.locator)
+            .map_err(invalid)?;
+        let maximum = self.limits.max_record_bytes;
+        let snapshot = tokio::task::spawn_blocking(move || read_snapshot(&path, maximum))
+            .await
+            .map_err(invalid)??;
+        let cursor = self.cursor(source, &authorization.epoch).await?;
+        let Some((bytes, identity)) = snapshot else {
+            sqlx::query(
+                "UPDATE capture_sources SET absent=1,revision=revision+1 WHERE source_ref=?",
+            )
+            .bind(source.reference.encode())
+            .execute(&self.spool.pool)
+            .await?;
+            return Ok(CapturePass {
+                observations: vec![],
+                generation: cursor.generation,
+                complete_offset: cursor.offset,
+                pending_tail_bytes: 0,
+                source_missing: true,
+                generation_changed: false,
+            });
+        };
+        self.commit_snapshot(source, authorization, cursor, bytes, identity, transport)
+            .await
+    }
+
+    /// Serialize a vendor-supported read transaction as a typed acquisition snapshot.
+    /// The caller retains every column and supplies its observed database file identity.
+    pub async fn capture_database_snapshot(
+        &self,
+        source: &RegisteredSource,
+        authorization: CaptureAuthorization,
+        bytes: Vec<u8>,
+        identity: String,
+    ) -> Result<CapturePass> {
+        if bytes.len() > self.limits.max_record_bytes {
+            return Err(CaptureSpoolError::RecordLimit(self.limits.max_record_bytes));
+        }
+        let reservation = self.reserve(&source.reference).await;
+        let _held = reservation.lock().await;
+        let cursor = self.cursor(source, &authorization.epoch).await?;
+        self.commit_snapshot(
+            source,
+            authorization,
+            cursor,
+            bytes,
+            identity,
+            TransportKind::NativeDatabase,
+        )
+        .await
+    }
+
+    async fn commit_snapshot(
+        &self,
+        source: &RegisteredSource,
+        authorization: CaptureAuthorization,
+        cursor: Cursor,
+        bytes: Vec<u8>,
+        identity: String,
+        transport: TransportKind,
+    ) -> Result<CapturePass> {
+        let digest = blake3::hash(&bytes).to_hex().to_string();
+        if !cursor.absent
+            && cursor.identity.as_deref() == Some(&identity)
+            && cursor.prefix_digest == digest
+            && cursor.offset == bytes.len() as u64
+        {
+            return Ok(CapturePass {
+                observations: vec![],
+                generation: cursor.generation,
+                complete_offset: cursor.offset,
+                pending_tail_bytes: 0,
+                source_missing: false,
+                generation_changed: false,
+            });
+        }
+        let generation = if cursor.absent
+            || cursor
+                .identity
+                .as_ref()
+                .is_some_and(|previous| previous != &identity || cursor.prefix_digest != digest)
+        {
+            cursor
+                .generation
+                .checked_add(1)
+                .ok_or_else(|| invalid("source generation exhausted"))?
+        } else {
+            cursor.generation
+        };
+        let mut item = self.prepare(
+            &authorization,
+            SourcePosition {
+                source: source.reference.clone(),
+                generation,
+                locator: SourceLocator::Snapshot {
+                    revision: generation.to_string(),
+                },
+            },
+            bytes.clone(),
+        )?;
+        item.capture.transport_kind = transport;
+        let mut tx = self.spool.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let source_key = source.reference.encode();
+        let issuer = serde_json::to_string(&self.issuer)?;
+        let changed=sqlx::query("UPDATE capture_sources SET revision=revision+1,generation=?,absent=0 WHERE source_ref=? AND revision=?").bind(signed(generation)?).bind(&source_key).bind(cursor.revision).execute(&mut *tx).await?;
+        if changed.rows_affected() != 1 {
+            return Err(CaptureSpoolError::ReservationChanged);
+        }
+        sqlx::query("INSERT INTO capture_generations(source_ref,generation,predecessor,reason,prefix_digest) VALUES(?,?,?,'snapshot',?) ON CONFLICT DO NOTHING").bind(&source_key).bind(signed(generation)?).bind(signed(cursor.generation)?).bind(&digest).execute(&mut *tx).await?;
+        let sequence:i64=sqlx::query_scalar("UPDATE capture_producers SET next_seq=next_seq+1 WHERE issuer_json=? AND producer_id=? AND producer_epoch=? RETURNING next_seq-1").bind(&issuer).bind(&self.producer_id).bind(&self.producer_epoch).fetch_one(&mut *tx).await?;
+        item.capture.observation_ref.producer_seq = unsigned(sequence)?;
+        let incoming = item_size(&item)?;
+        let used = unsigned(
+            sqlx::query_scalar("SELECT bytes FROM spool_usage WHERE singleton=1")
+                .fetch_one(&mut *tx)
+                .await?,
+        )?;
+        if used.saturating_add(incoming) > self.capacity(transport) {
+            return Err(SpoolError::Overflow {
+                used,
+                incoming,
+                maximum: self.capacity(transport),
+            }
+            .into());
+        }
+        self.insert(&mut tx, &item).await?;
+        sqlx::query("INSERT INTO capture_snapshot_revisions(source_ref,generation,ingestion_epoch,capture_json) VALUES(?,?,?,?) ON CONFLICT DO NOTHING")
+            .bind(&source_key).bind(signed(generation)?).bind(authorization.epoch.as_str()).bind(serde_json::to_string(&item.capture)?).execute(&mut *tx).await?;
+        sqlx::query("UPDATE capture_generations SET file_identity=?,complete_offset=?,next_ordinal=1,prefix_digest=? WHERE source_ref=? AND generation=?").bind(&identity).bind(bytes.len()as i64).bind(digest).bind(&source_key).bind(signed(generation)?).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO capture_epoch_progress(source_ref,generation,ingestion_epoch,complete_offset,next_ordinal) VALUES(?,?,?,?,1) ON CONFLICT(source_ref,generation,ingestion_epoch) DO UPDATE SET complete_offset=excluded.complete_offset,next_ordinal=1")
+            .bind(&source_key).bind(signed(generation)?).bind(authorization.epoch.as_str()).bind(bytes.len()as i64).execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(CapturePass {
+            observations: vec![item.capture.observation_ref],
+            generation,
+            complete_offset: bytes.len() as u64,
+            pending_tail_bytes: 0,
+            source_missing: false,
+            generation_changed: generation != cursor.generation,
+        })
+    }
+
+    /// The source cursor and generation come from the same committed spool row, including
+    /// complete records whose vendor kind has no semantic mapper.
+    pub async fn source_extent(
+        &self,
+        source: &RegisteredSource,
+        epoch: &IngestionEpoch,
+    ) -> Result<(u64, u64, u64, u64, bool)> {
+        let cursor = self.cursor(source, epoch).await?;
+        Ok((
+            cursor.generation,
+            cursor.ordinal,
+            cursor.offset,
+            cursor.tail.len() as u64,
+            cursor.absent,
+        ))
+    }
+
+    pub async fn snapshot_capture(
+        &self,
+        source: &SourceRef,
+        generation: u64,
+        epoch: &IngestionEpoch,
+    ) -> Result<Option<Capture>> {
+        let value:Option<String>=sqlx::query_scalar("SELECT capture_json FROM capture_snapshot_revisions WHERE source_ref=? AND generation=? AND ingestion_epoch=?")
+            .bind(source.encode()).bind(signed(generation)?).bind(epoch.as_str()).fetch_optional(&self.spool.readers).await?;
+        value
+            .map(|value| serde_json::from_str(&value).map_err(CaptureSpoolError::from))
+            .transpose()
+    }
+
+    pub async fn source_proof(
+        &self,
+        source: &SourceRef,
+        generation: u64,
+    ) -> Result<Option<ObservationRef>> {
+        let value:Option<String>=sqlx::query_scalar("SELECT observation_json FROM capture_source_proofs WHERE source_ref=? AND generation=?").bind(source.encode()).bind(signed(generation)?).fetch_optional(&self.spool.readers).await?;
+        value
+            .map(|value| serde_json::from_str(&value).map_err(CaptureSpoolError::from))
+            .transpose()
+    }
     async fn reserve(&self, source: &SourceRef) -> Arc<Mutex<()>> {
         let key = source.encode();
         let mut reservations = self.reservations.lock().await;
@@ -484,18 +822,24 @@ impl CaptureRegistry {
         let used = unsigned(used)?.saturating_sub(old_tail_length as u64);
         if used
             .checked_add(incoming)
-            .is_none_or(|sum| sum > self.spool.max_bytes)
+            .is_none_or(|sum| sum > self.capacity(TransportKind::NativeJsonl))
         {
             return Err(SpoolError::Overflow {
                 used,
                 incoming,
-                maximum: self.spool.max_bytes,
+                maximum: self.capacity(TransportKind::NativeJsonl),
             }
             .into());
         }
         for item in &prepared {
             self.insert(&mut tx, item).await?;
         }
+        if let Some(first) = prepared.iter().find(|item| matches!(item.capture.source_position.locator,
+            SourceLocator::Jsonl { record_ordinal, .. } if Some(record_ordinal) == source.identity_record_ordinal)) {
+            sqlx::query("INSERT INTO capture_source_proofs(source_ref,generation,observation_json) VALUES(?,?,?) ON CONFLICT DO NOTHING")
+            .bind(&source_key).bind(signed(generation)?).bind(serde_json::to_string(&first.capture.observation_ref)?).execute(&mut *tx).await?;
+        }
+
         sqlx::query("INSERT INTO capture_epoch_progress (source_ref,generation,ingestion_epoch,complete_offset,next_ordinal,tail) VALUES (?,?,?,?,?,?) ON CONFLICT(source_ref,generation,ingestion_epoch) DO UPDATE SET complete_offset=excluded.complete_offset,next_ordinal=excluded.next_ordinal,tail=excluded.tail")
             .bind(&source_key).bind(signed(generation)?).bind(authorization.epoch.as_str()).bind(signed(acquired.offset)?).bind(signed(acquired.ordinal)?).bind(&acquired.tail).execute(&mut *tx).await?;
         sqlx::query("UPDATE capture_generations SET file_identity=?,complete_offset=?,next_ordinal=?,prefix_digest=? WHERE source_ref=? AND generation=?")
@@ -632,12 +976,34 @@ impl CaptureRegistry {
     /// Large records can be exported without loading their entire body. Each
     /// returned manifest is immutable until its terminal receipt releases the queue.
     pub async fn pending_metadata(&self, maximum: usize) -> Result<Vec<QueuedCaptureMetadata>> {
+        self.pending_metadata_through(maximum, None).await
+    }
+    pub async fn pending_frontiers(&self) -> Result<Vec<ObservationRef>> {
+        let rows=sqlx::query("SELECT producer_id,producer_epoch,max(producer_seq) AS through FROM capture_queue WHERE issuer_json=? GROUP BY producer_id,producer_epoch")
+            .bind(serde_json::to_string(&self.issuer)?).fetch_all(&self.spool.readers).await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(ObservationRef {
+                    issuer: self.issuer.clone(),
+                    producer_id: row.try_get("producer_id")?,
+                    producer_epoch: row.try_get("producer_epoch")?,
+                    producer_seq: unsigned(row.try_get("through")?)?,
+                })
+            })
+            .collect()
+    }
+    pub async fn pending_metadata_through(
+        &self,
+        maximum: usize,
+        through: Option<&[ObservationRef]>,
+    ) -> Result<Vec<QueuedCaptureMetadata>> {
         if maximum == 0 || maximum > self.limits.max_records {
             return Err(invalid("invalid capture read item limit"));
         }
         let mut tx = self.spool.readers.begin().await?;
-        let rows=sqlx::query("SELECT producer_id,producer_epoch,producer_seq,metadata_bytes FROM capture_queue WHERE issuer_json=? ORDER BY producer_id,producer_epoch,producer_seq LIMIT ?")
-            .bind(serde_json::to_string(&self.issuer)?).bind(maximum as i64).fetch_all(&mut *tx).await?;
+        let limits = through.map(serde_json::to_string).transpose()?;
+        let rows=sqlx::query("SELECT producer_id,producer_epoch,producer_seq,metadata_bytes FROM capture_queue q WHERE issuer_json=? AND (? IS NULL OR EXISTS(SELECT 1 FROM json_each(?) p WHERE json_extract(p.value,'$.producerId')=q.producer_id AND json_extract(p.value,'$.producerEpoch')=q.producer_epoch AND q.producer_seq<=json_extract(p.value,'$.producerSeq'))) ORDER BY producer_id,producer_epoch,producer_seq LIMIT ?")
+            .bind(serde_json::to_string(&self.issuer)?).bind(&limits).bind(&limits).bind(maximum as i64).fetch_all(&mut *tx).await?;
         let mut result = Vec::new();
         let mut used = 0usize;
         for row in rows {

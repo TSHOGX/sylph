@@ -20,7 +20,7 @@ use sylph_protocol::trace::{
     IngestionScope,
 };
 
-use crate::storage::cas::BlobStore;
+use crate::trace::cas::BlobStore;
 
 pub mod catalogue;
 

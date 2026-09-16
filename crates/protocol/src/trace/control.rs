@@ -99,12 +99,20 @@ pub enum OperationalFact {
     },
     Dispatched {
         command_id: String,
+        input_revision: String,
         attempt: u64,
         authorization: AuthorizationReceipt,
     },
     Delivery {
         command_id: String,
+        input_revision: String,
         fact: DeliveryFact,
+    },
+    Revised {
+        command_id: String,
+        previous_revision: String,
+        input: SubmittedRevision,
+        authorization: AuthorizationReceipt,
     },
     IdentityBound {
         command_id: String,
@@ -144,10 +152,11 @@ mod tests {
 
     #[test]
     fn operational_delivery_fact_keeps_lexical_receipt_bytes() {
-        let wire = r#"{"kind":"delivery","command_id":"command-a","fact":{"kind":"consumed","revision":"submitted-v1","receipt":"e30NCg=="}}"#;
+        let wire = r#"{"kind":"delivery","command_id":"command-a","input_revision":"submitted-v1","fact":{"kind":"consumed","revision":"submitted-v1","receipt":"e30NCg=="}}"#;
         let fact: OperationalFact = serde_json::from_str(wire).unwrap();
         let OperationalFact::Delivery {
             command_id,
+            input_revision: _,
             fact: DeliveryFact::Consumed { revision, receipt },
         } = &fact
         else {

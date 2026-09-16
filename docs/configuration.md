@@ -26,10 +26,12 @@ roots and no privileged code path.
 ├── config.toml          Settings. Hand-edited. Seeded fully commented on first run.
 ├── SOUL.md              The identity preamble. Yours to edit; seeded from the bundle.
 ├── data/                Everything durable. This is what to back up.
-│   ├── journal.db       The journal: sessions, turns, in-flight events.
-│   ├── native.db        Lossless native records and staged sidecars.
-│   ├── history.db       Consolidated history, and the FTS index over it.
-│   ├── blobs/           Content-addressed payloads, referenced by history.db.
+│   ├── control.db       Subjects, grants, Sessions and immutable command outbox.
+│   ├── evidence.db      Capture observations, receipts and publication catalogue.
+│   ├── trace.lock       Exclusive product archive ownership during recovery and GC.
+│   ├── trace-*.db       Rebuildable semantic generations.
+│   ├── search/          Generation-specific search indexes and result jobs.
+│   ├── blobs/           Immutable typed payloads and manifest chunks.
 │   └── attachments/     Files staged for a turn, by session and turn id.
 ├── scratch/             Where Quick Start sessions run.
 └── logs/                Server output, when started by a supervisor.
@@ -40,7 +42,7 @@ roots and no privileged code path.
 └── spool.db             Events not yet acked by the server. Bounded; ack-gated.
 ```
 
-`data/` is one subtree so backup is one path: `journal.db`, `native.db`, `history.db`, and `blobs/`
+`data/` is one subtree so backup is one path: control, evidence, trace/search generations and `blobs/`
 are one store split for SQLite's sake, and `attachments/` is referenced by turns inside
 it. Copying `data/` copies a consistent whole.
 

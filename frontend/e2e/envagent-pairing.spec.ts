@@ -28,7 +28,7 @@ test("reports the paired envagent inventory", async ({ page }) => {
       (environment) =>
         environment.origin === "self-installed" &&
         environment.connected &&
-        environment.agents.some((agent) => agent.name === "e2e" && agent.available),
+        environment.agents.some((agent) => agent.name === "codex" && agent.available),
     ),
     "the browser must observe the separately paired envagent and its inventory",
   ).toBe(true);

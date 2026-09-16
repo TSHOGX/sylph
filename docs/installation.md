@@ -17,7 +17,7 @@ is settled by [ADR-0006](adr/0006-environment-authority-and-capability-grants.md
 ## Requirements
 
 - macOS (the LaunchAgent path is macOS-specific; the rest is portable)
-- Rust 1.85+ and Node.js 22.5+, needed to build — not to run
+- Rust 1.89+ and Node.js 22.5+, needed to build — not to run
 - The agent CLIs you want — `claude`, `codex`, `pi` — on the `PATH` of each machine
   running an **envagent**, not on the server's
 

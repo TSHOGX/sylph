@@ -1,8 +1,8 @@
 //! One module per vendor CLI, each implementing [`sylph_protocol::Adapter`].
 //!
 //! `docs/agents.md` is the governing spec and holds the measurement behind every quirk
-//! these modules carry. `docs/session-protocol.md` §§ "An adapter is a trait, with three
-//! modes" and "What the adapter owns, and what it must not" govern the contract.
+//! these modules carry. `docs/session-protocol.md` §§ "The acquisition and control contract"
+//! and "What the adapter owns, and what it must not" govern the contract.
 //!
 //! # Availability is `PATH`, and that is the whole check
 //!

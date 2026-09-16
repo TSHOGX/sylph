@@ -174,12 +174,12 @@ fn migrate(args: &[String]) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Refuse rather than merge. Two journals cannot be combined — session ids are
+    // Distinct archives cannot be merged by copying files: session identities are
     // unique per store and the blob index would reference rows that are not there
     // — so a silent overwrite would destroy whichever one the user cared about.
-    if to.join("journal.db").exists() && !force {
+    if to.join("control.db").exists() && !force {
         anyhow::bail!(
-            "{} already holds a journal. Move it aside, or pass --force to replace it.",
+            "{} already holds a control database. Move it aside, or pass --force to replace it.",
             to.display()
         );
     }
@@ -188,17 +188,18 @@ fn migrate(args: &[String]) -> anyhow::Result<()> {
     let mut copied = Vec::new();
     // Named rather than globbed, so a stray file in an old data directory is not
     // carried into the new one. The `-wal` and `-shm` files come along because a
-    // journal copied without them can lose the tail of its last transaction.
+    // WAL database copied without them can lose committed transactions.
     for name in [
-        "journal.db",
-        "journal.db-wal",
-        "journal.db-shm",
-        "native.db",
-        "native.db-wal",
-        "native.db-shm",
-        "history.db",
-        "history.db-wal",
-        "history.db-shm",
+        "control.db",
+        "control.db-wal",
+        "control.db-shm",
+        "evidence.db",
+        "evidence.db-wal",
+        "evidence.db-shm",
+        "projections",
+        "search",
+        "blobs",
+        "attachments",
     ] {
         let source = from.join(name);
         if source.is_file() {
@@ -207,21 +208,17 @@ fn migrate(args: &[String]) -> anyhow::Result<()> {
         }
     }
 
-    let blobs = from.join("blobs");
-    if blobs.is_dir() {
-        let count = copy_tree(&blobs, &to.join("blobs"))?;
-        copied.push(format!("blobs/ ({count} blobs)"));
-    }
-
-    let attachments = from.join("attachments");
-    if attachments.is_dir() {
-        let count = copy_tree(&attachments, &to.join("attachments"))?;
-        copied.push(format!("attachments/ ({count} files)"));
+    for name in ["blobs", "attachments", "projections", "search"] {
+        let source = from.join(name);
+        if source.is_dir() {
+            let count = copy_tree(&source, &to.join(name))?;
+            copied.push(format!("{name}/ ({count} files)"));
+        }
     }
 
     if copied.is_empty() {
         anyhow::bail!(
-            "Nothing to migrate: {} holds no journal, native records, history, blobs, or attachments.",
+            "Nothing to migrate: {} holds no control, evidence, projections, blobs, or attachments.",
             from.display()
         );
     }
@@ -302,7 +299,7 @@ async fn serve() -> anyhow::Result<()> {
 
     // The archive-availability line that used to sit here is gone with the separate
     // store. There is no external binary whose presence could be reported: history is
-    // `history.db` beside the journal, which either opened during `AppState::build` or
+    // the evidence archive, which either opened during `AppState::build` or
     // failed the startup outright. `AppState::build` logs which agents this build can
     // run, which is the fact that replaced it — and `GET /api/v1/environments` is where
     // per-machine availability is reported (`docs/environments.md`).

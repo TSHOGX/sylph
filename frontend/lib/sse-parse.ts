@@ -60,18 +60,20 @@ export interface SSEDecoder {
   push(chunk: string): SSEFrame[];
 }
 
-export function createSSEDecoder(): SSEDecoder {
+export function createSSEDecoder(maximumBytes = Number.POSITIVE_INFINITY): SSEDecoder {
   /** Bytes seen but not yet forming a complete line. */
   let pending = "";
   let dataLines: string[] = [];
   let eventName = "";
   let lastId: string | undefined;
   let retry: number | undefined;
+  let frameBytes = 0;
 
   function reset() {
     dataLines = [];
     eventName = "";
     retry = undefined;
+    frameBytes = 0;
   }
 
   function takeLine(): string | null {
@@ -97,9 +99,12 @@ export function createSSEDecoder(): SSEDecoder {
   return {
     push(chunk: string): SSEFrame[] {
       pending += chunk;
+      if (Number.isFinite(maximumBytes) && new TextEncoder().encode(pending).length > maximumBytes) throw new Error("SSE buffer exceeded its byte limit");
       const frames: SSEFrame[] = [];
 
       for (let line = takeLine(); line !== null; line = takeLine()) {
+        frameBytes += new TextEncoder().encode(line).length;
+        if (frameBytes > maximumBytes) throw new Error("SSE frame exceeded its byte limit");
         // Blank line: dispatch. A frame with no data carries nothing to render,
         // so it is dropped rather than surfaced as an empty event.
         if (line === "") {

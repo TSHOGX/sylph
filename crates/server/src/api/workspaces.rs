@@ -14,7 +14,7 @@ use axum::{
 };
 use serde::Serialize;
 
-use crate::{db::store::SessionFilter, error::Result, middleware::auth::SubjectId, AppState};
+use crate::{db::SessionFilter, error::Result, middleware::auth::SubjectId, AppState};
 
 /// One working directory that has at least one session, or is the Quick Start
 /// directory. `path` is absolute: the sidebar shortens it for display, but

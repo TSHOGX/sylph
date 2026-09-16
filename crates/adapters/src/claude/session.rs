@@ -49,22 +49,20 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
-use futures::StreamExt;
 use serde_json::{json, Map, Value};
 use tokio::sync::{mpsc, Mutex};
-use tracing::{debug, warn};
+use tracing::warn;
 
 use sylph_protocol::{
-    AdapterError, CapabilityFacets, ConfigOption, EventStream, NativeId, NativeRecord,
-    RequestedNativeId, Resolution, RunSpec, Session, SessionCapabilities, SessionMessage,
-    TurnInput,
+    AdapterError, CapabilityFacets, ConfigOption, ControlStream, NativeId, RequestedNativeId,
+    Resolution, RunSpec, Session, SessionCapabilities, SessionMessage, TurnInput,
 };
 
 use super::requests::{answer_payload, ask_from, AskKind};
 use super::surface::{capabilities_from, config_from, models_from};
-use super::{Correlation, SETTABLE_PERMISSION_MODES, SUPPORTED_DIALOG_KINDS};
-use crate::now_ms;
+use super::{SETTABLE_PERMISSION_MODES, SUPPORTED_DIALOG_KINDS};
 use crate::process::{Child, Line, Spawn};
+use sylph_protocol::{trace::ObservationRef, ControlNotice, RawCaptureSink};
 
 /// The vendor refused a control it understood.
 ///
@@ -293,24 +291,15 @@ struct Shared {
     pending_model: Mutex<Option<String>>,
     /// Stops the bundle follower when the live session closes.
     closed: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    /// One root correlation state shared by stdout and the native bundle reader.
-    ///
-    /// Native-only task facts can arrive from the file after stdout has already emitted the
-    /// surrounding turn. Sharing this state makes the two producers one merger and lets a
-    /// duplicate close be discarded by trajectory identity rather than by timing.
-    root_correlation: std::sync::Arc<std::sync::Mutex<Correlation>>,
-    /// Stable source key for raw records observed on this live stdout stream. A fresh key per
-    /// process prevents a resumed/relinked process from colliding with an earlier stream's
-    /// version ordinal while still making every stdout projection losslessly retainable.
-    stdout_source: String,
-    stdout_version: std::sync::atomic::AtomicU64,
+    identity_evidence: std::sync::RwLock<Vec<ObservationRef>>,
+    active: std::sync::atomic::AtomicBool,
 }
 
 /// A live `claude` session.
 pub struct ClaudeSession {
     control: Arc<Control>,
     shared: Arc<Shared>,
-    /// Yielded **once** by [`Session::events`]. A second call is a bug rather than a second
+    /// Yielded **once** by [`Session::messages`]. A second call is a bug rather than a second
     /// subscription: two consumers of one vendor's stdio would each see half the turn.
     stream: Mutex<Option<mpsc::Receiver<Result<SessionMessage>>>>,
     /// The identity preamble's temporary file, removed on [`Session::close`].
@@ -339,304 +328,155 @@ async fn pump(
     shared: Arc<Shared>,
 ) {
     while let Some(line) = lines.recv().await {
-        let (payload, raw) = match line {
-            Ok(line) => (line.value, line.raw),
+        let line = match line {
+            Ok(line) => line,
             Err(error) => {
-                // Reported, not fatal — a vendor may print a banner, and one malformed line
-                // must not fail a turn. `Child` already guarantees the stream continues.
                 if out.send(Err(error)).await.is_err() {
-                    return;
+                    break;
                 }
                 continue;
             }
         };
-
+        let payload = &line.value;
         match payload.get("type").and_then(Value::as_str) {
-            // **Anything reaching here is not ours.** A reply to something this side sent was
-            // taken by `Child`'s read loop and never entered this stream — that is what
-            // [`reply_id`] is for. What is left is a `control_response` the CLI *forwarded*,
-            // for a request another client issued; its own logs describe exactly that ("not
-            // an answer to it"). Named and dropped rather than passed to `translate`, which
-            // would ignore it anyway: an explicit branch is what says the case was
-            // considered, where a fall-through reads as an oversight.
-            Some("control_response") => {
-                debug!(
-                    request_id = payload
-                        .get("response")
-                        .and_then(|body| body.get("request_id"))
-                        .and_then(|id| id.as_str())
-                        .unwrap_or("?"),
-                    "a control_response this session did not ask for"
-                );
-            }
             Some("control_request") => {
-                let Some(vendor_id) = payload
-                    .get("request_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                else {
+                let Some(id) = payload.get("request_id").and_then(Value::as_str) else {
                     continue;
                 };
-                match ask_from(&payload) {
-                    Some(ask) => {
-                        shared.asks.lock().await.insert(vendor_id, ask.kind);
-                        if out
-                            .send(Ok(SessionMessage::Request(ask.request)))
-                            .await
-                            .is_err()
-                        {
-                            return;
-                        }
+                if let Some(ask) = ask_from(payload) {
+                    shared.asks.lock().await.insert(id.into(), ask.kind);
+                    if out
+                        .send(Ok(SessionMessage::Request(ask.request)))
+                        .await
+                        .is_err()
+                    {
+                        break;
                     }
-                    None => {
-                        // Answered rather than ignored, so claude is never left blocking on
-                        // a subtype this adapter does not model. An `error` here is the
-                        // vendor's own vocabulary for "the host cannot do this".
-                        let subtype = payload
-                            .get("request")
-                            .and_then(|request| request.get("subtype"))
-                            .and_then(Value::as_str)
-                            .unwrap_or("unknown")
-                            .to_string();
-                        warn!(subtype, "unhandled vendor request subtype");
-                        let _ = control
-                            .reply(
-                                &vendor_id,
-                                "error",
-                                Value::String(format!(
-                                    "'{subtype}' is not supported by the Sylph adapter"
-                                )),
-                            )
-                            .await;
-                    }
+                } else {
+                    let _ = control
+                        .reply(
+                            id,
+                            "error",
+                            Value::String(format!(
+                                "Unsupported vendor request subtype {}",
+                                payload
+                                    .pointer("/request/subtype")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("unknown")
+                            )),
+                        )
+                        .await;
                 }
             }
-            _ => {
-                // The event and its source record travel through one bounded channel in this
-                // order. A downstream raw-retention failure therefore stops this producer
-                // before the normalized event can be journaled or published. The bundle reader
-                // remains a separate source for native-only files, but stdout no longer has the
-                // P0 gap where it could publish an event with no retained source at all.
-                if !send_stdout_record(&out, &shared, &payload, raw).await {
-                    return;
-                }
+            Some("system") if payload.get("subtype").and_then(Value::as_str) == Some("init") => {
                 if let Some(id) = payload
                     .get("session_id")
                     .and_then(Value::as_str)
-                    .filter(|id| !id.trim().is_empty())
+                    .filter(|id| !id.is_empty())
                 {
-                    if let Ok(mut native) = shared.native_id.write() {
-                        *native = Some(NativeId::new(id));
+                    let native = NativeId::new(id);
+                    *shared.native_id.write().unwrap() = Some(native.clone());
+                    shared
+                        .identity_evidence
+                        .write()
+                        .unwrap()
+                        .push(line.observation.clone());
+                    if out
+                        .send(Ok(SessionMessage::Control(ControlNotice::Identity {
+                            native_id: native,
+                            evidence: line.observation,
+                        })))
+                        .await
+                        .is_err()
+                    {
+                        break;
                     }
                 }
-                let emission = match shared.root_correlation.lock() {
-                    Ok(mut correlation) => Ok(correlation.translate(&payload, now_ms())),
-                    Err(_) => Err(()),
-                };
-                let emission = match emission {
-                    Ok(emission) => emission,
-                    Err(()) => {
-                        let _ = out
-                            .send(Err(anyhow::anyhow!(
-                                "claude root correlation state was poisoned"
-                            )))
-                            .await;
-                        return;
-                    }
-                };
-                let observed_model = emission.observed_model;
-                if let Some(ref model) = observed_model {
-                    *shared.observed_model.lock().await = Some(model.clone());
-                    // A real vendor report supersedes a locally pending set.
+                if let Some(model) = payload.get("model").and_then(Value::as_str) {
+                    *shared.observed_model.lock().await = Some(model.into());
                     *shared.pending_model.lock().await = None;
                 }
-                if emission.refresh_capabilities || observed_model.is_some() {
-                    // **Spawned, never awaited here.** This task is the only reader of the
-                    // reply it is about to wait for, so awaiting inline would deadlock the
-                    // whole session on its own `initialize`. `commands_changed` carries only
-                    // that *something* changed, so the surface has to be re-read rather than
-                    // reconstructed from the notification.
-                    let control = control.clone();
-                    let shared = shared.clone();
-                    let out = out.clone();
-                    tokio::spawn(async move {
-                        match refreshed_surface(&control, &shared).await {
-                            Ok(surface) => {
-                                let facets = CapabilityFacets {
-                                    commands: Some(surface.commands),
-                                    subagents: Some(surface.subagents),
-                                    config: Some(surface.config),
-                                    permission_mode: surface.permission_mode,
-                                    context_window: surface.context_window,
-                                };
-                                let _ = out.send(Ok(SessionMessage::Capabilities(facets))).await;
-                            }
-                            // Reported and not fatal: a session whose command list went
-                            // stale is worse than one that could not refresh it, and the
-                            // previous surface is still the last thing the vendor said.
-                            Err(error) => warn!(%error, "failed to refresh claude's surface"),
-                        }
-                    });
-                }
-                for message in emission.messages {
-                    if out.send(Ok(message)).await.is_err() {
-                        return;
+                refresh_capabilities(&out, &control, &shared);
+            }
+            Some("commands_changed") => refresh_capabilities(&out, &control, &shared),
+            Some("system")
+                if payload.get("subtype").and_then(Value::as_str) == Some("commands_changed") =>
+            {
+                refresh_capabilities(&out, &control, &shared)
+            }
+            Some("stream_event")
+                if payload.get("parent_tool_use_id").is_none_or(Value::is_null) =>
+            {
+                if payload.pointer("/event/type").and_then(Value::as_str) == Some("message_start")
+                    && !shared
+                        .active
+                        .swap(true, std::sync::atomic::Ordering::AcqRel)
+                {
+                    let native = shared.native_id.read().unwrap().clone();
+                    if let Some(native_id) = native {
+                        let _ = out
+                            .send(Ok(SessionMessage::Control(ControlNotice::Active {
+                                native_id,
+                                native_turn_id: None,
+                            })))
+                            .await;
                     }
                 }
             }
+            Some("result") if payload.get("parent_tool_use_id").is_none_or(Value::is_null) => {
+                shared
+                    .active
+                    .store(false, std::sync::atomic::Ordering::Release);
+                let native = shared.native_id.read().unwrap().clone();
+                if let Some(native_id) = native {
+                    let _ = out
+                        .send(Ok(SessionMessage::Control(ControlNotice::Settled {
+                            native_id,
+                            native_turn_id: None,
+                        })))
+                        .await;
+                }
+            }
+            _ => {}
         }
     }
-
-    // stdout closed: the vendor is gone. **The stream simply ends**, which is what a
-    // `Stream` already expresses — there is no exit code an in-process adapter can report,
-    // and `SessionMessage` deliberately has no `Closed` variant.
-    //
-    // But a turn still open when that happens must not end in silence: a turn with no
-    // content and no error says the same thing whether the model failed, the agent chose
-    // not to answer, or the process died. So the one case that needs explaining gets an
-    // `Err` before the end, which is where `Adapter::run`'s contract puts a failure that
-    // needs explaining.
     shared
         .closed
         .store(true, std::sync::atomic::Ordering::Release);
-    let turn_is_open = shared
-        .root_correlation
-        .lock()
-        .map(|correlation| correlation.turn_is_open())
-        .unwrap_or(false);
-    if turn_is_open {
+    if shared.active.load(std::sync::atomic::Ordering::Acquire) {
         let _ = out
             .send(Err(control
                 .child
-                .error("claude exited while a turn was still running")
+                .error("Claude process ended while an observed interval was still running")
                 .await))
             .await;
     }
 }
 
-/// Emit one lossless raw envelope before any normalized message derived from it.
-async fn send_stdout_record(
+fn refresh_capabilities(
     out: &mpsc::Sender<Result<SessionMessage>>,
-    shared: &Shared,
-    payload: &Value,
-    raw: Vec<u8>,
-) -> bool {
-    let version = shared
-        .stdout_version
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        .saturating_add(1);
-    out.send(Ok(SessionMessage::NativeRecord(NativeRecord {
-        source: shared.stdout_source.clone(),
-        version,
-        raw_json: Some(raw),
-        payload: payload.clone(),
-        blobs: Vec::new(),
-    })))
-    .await
-    .is_ok()
-}
-
-/// Follow Claude's on-disk bundle while the live stdout pump is running.
-///
-/// The root transcript is intentionally skipped by `watch_live`: stdout already carries
-/// the root at stream fidelity. The follower waits for `system/init` to reveal the native
-/// id (for `New` sessions), retries a bundle that has not been flushed yet, and then keeps
-/// forwarding newly-created delegate/journal files until the session closes.
-async fn bundle_pump(
-    out: mpsc::Sender<Result<SessionMessage>>,
-    shared: Arc<Shared>,
-    baseline: super::native::BundleBaseline,
+    control: &Arc<Control>,
+    shared: &Arc<Shared>,
 ) {
-    let mut current: Option<NativeId> = None;
-    let mut stream: Option<EventStream> = None;
-    let mut consecutive_failures = 0u32;
-
-    loop {
-        let native = shared.native_id.read().ok().and_then(|id| id.clone());
-
-        // **Only update `current` when `watch_live` succeeds.** The old code set `current`
-        // before attempting to create the stream, so a failed `watch_live()` on a native id
-        // that has not been flushed yet would latch permanently: `native == current` on the
-        // next poll, no retry, and the bundle reader never starts — while stdout continues
-        // working and nothing reports an error.
-        //
-        // Now: on failure, `current` stays `None` and the next poll retries. On success,
-        // state and stream move together. This is safe to retry indefinitely because
-        // `watch_live` is idempotent — it opens read-only cursors over immutable history.
-        if native != current {
-            if let Some(ref id) = native {
-                match super::native::watch_live(
-                    id,
-                    baseline.clone(),
-                    shared.root_correlation.clone(),
-                    shared.closed.clone(),
-                ) {
-                    Ok(new_stream) => {
-                        current = Some(id.clone());
-                        stream = Some(new_stream);
-                        consecutive_failures = 0;
-                    }
-                    Err(error) => {
-                        consecutive_failures += 1;
-
-                        // Log on first failure and every 10th thereafter to avoid flooding,
-                        // but always track the count so diagnostics can surface it.
-                        if consecutive_failures == 1 || consecutive_failures.is_multiple_of(10) {
-                            tracing::debug!(
-                                native_id = %id,
-                                consecutive_failures,
-                                error = %error,
-                                "bundle reader failed to start, will retry"
-                            );
-                        }
-
-                        stream = None;
-                    }
-                }
-            } else {
-                // Native id was cleared (session restart or error); reset state.
-                current = None;
-                stream = None;
-                consecutive_failures = 0;
+    let control = control.clone();
+    let shared = shared.clone();
+    let out = out.clone();
+    tokio::spawn(async move {
+        match refreshed_surface(&control, &shared).await {
+            Ok(surface) => {
+                let _ = out
+                    .send(Ok(SessionMessage::Capabilities(CapabilityFacets {
+                        commands: Some(surface.commands),
+                        subagents: Some(surface.subagents),
+                        config: Some(surface.config),
+                        permission_mode: surface.permission_mode,
+                        context_window: surface.context_window,
+                    })))
+                    .await;
             }
+            Err(error) => warn!(%error,"could not refresh Claude capabilities"),
         }
-
-        if let Some(bundle) = stream.as_mut() {
-            tokio::select! {
-                item = bundle.next() => {
-                    match item {
-                        Some(Ok(message)) => {
-                            if out.send(Ok(message)).await.is_err() {
-                                return;
-                            }
-                        }
-                        Some(Err(error)) => {
-                            if out.send(Err(error)).await.is_err() {
-                                return;
-                            }
-                        }
-                        None => {
-                            if shared.closed.load(std::sync::atomic::Ordering::Acquire) {
-                                return;
-                            }
-                            // `watch_live` normally stays open for the session's lifetime;
-                            // a transient file error should not disable the reader forever.
-                            // Clear both `stream` and `current` so the next poll retries
-                            // `watch_live` from scratch.
-                            stream = None;
-                            current = None;
-                        }
-                    }
-                }
-                _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
-            }
-        } else {
-            if shared.closed.load(std::sync::atomic::Ordering::Acquire) {
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
-    }
+    });
 }
 
 /// Re-read the whole surface from the vendor.
@@ -674,8 +514,8 @@ async fn refreshed_surface(control: &Control, shared: &Shared) -> Result<Session
 /// mistake diagnosable: `claude` exits 1 at parse time for a bad `--permission-mode`, so a
 /// session that never initializes is the only evidence, and reporting it as a timeout sent
 /// the investigation to the link layer while the cause sat in one argv entry.
-pub async fn run(spec: RunSpec) -> Result<Box<dyn Session>> {
-    run_with(&[super::AGENT_NAME.to_string()], spec).await
+pub async fn run(spec: RunSpec, capture: Arc<dyn RawCaptureSink>) -> Result<Box<dyn Session>> {
+    run_with(&[super::AGENT_NAME.to_string()], spec, capture).await
 }
 
 /// [`run`], with the program that answers named separately.
@@ -691,29 +531,15 @@ pub async fn run(spec: RunSpec) -> Result<Box<dyn Session>> {
 /// `["sh", "/tmp/peer.sh"]`. Everything after them is the argv
 /// [`super::ClaudeAdapter::argv_for`] built, unchanged — which is deliberate: a test peer
 /// therefore receives the real command line and a test can assert on it.
-pub async fn run_with(launcher: &[String], spec: RunSpec) -> Result<Box<dyn Session>> {
+pub async fn run_with(
+    launcher: &[String],
+    spec: RunSpec,
+    capture: Arc<dyn RawCaptureSink>,
+) -> Result<Box<dyn Session>> {
     let native_id = match &spec.native_id {
         RequestedNativeId::Dictate(id) | RequestedNativeId::Resume(id) => Some(id.clone()),
         RequestedNativeId::New => None,
     };
-    // Capture the resume boundary before the process can write. Waiting for `system/init`
-    // makes the snapshot late: the resumed turn may already have created a delegate, which
-    // would then be mistaken for historical bytes and skipped permanently.
-    let mut bundle_baseline = match &spec.native_id {
-        RequestedNativeId::Resume(id) => super::native::capture_live_baseline(id)?,
-        RequestedNativeId::Dictate(_) | RequestedNativeId::New => {
-            super::native::BundleBaseline::default()
-        }
-    };
-    // Resume history must be installed before either producer can emit. The bundle follower
-    // used to hydrate on its first poll, which let a fast stdout frame observe an empty root
-    // correlation and race the baseline into a different semantic order.
-    let root_correlation = std::sync::Arc::new(std::sync::Mutex::new(Correlation::new()));
-    if let RequestedNativeId::Resume(id) = &spec.native_id {
-        bundle_baseline =
-            super::native::hydrate_live_baseline(id, bundle_baseline, &root_correlation)?;
-    }
-
     let (mut argv, warnings) = super::ClaudeAdapter::argv_for(&spec);
     for warning in warnings {
         // Loudly, because the user asked for one policy and gets another, and only this
@@ -753,31 +579,32 @@ pub async fn run_with(launcher: &[String], spec: RunSpec) -> Result<Box<dyn Sess
         launcher.remove(0)
     };
     launcher.extend(argv);
-    let (child, lines) = Child::spawn(Spawn {
-        program,
-        args: launcher,
-        cwd: spec.workdir.clone(),
-        env: HashMap::new(),
-        // An envagent started from inside another agent session inherits that session's
-        // authentication environment: two `CLAUDE_CODE_*` switches that disable this CLI's
-        // own keychain login, and an `ANTHROPIC_BASE_URL` redirecting where a credential is
-        // sent. Left in place, every turn refuses with `Not logged in` while the developer's
-        // own terminal reports a valid login — and removing only the switches turns that
-        // into a `401`. Only an unambiguously broken combination is removed, and never
-        // silently — `super::hostauth` owns that judgement, the measurements, and the report.
-        env_remove: super::hostauth::sanitize_inherited_env(),
-        // See [`reply_id`], and this module's header for what each of its three conditions
-        // prevents. The short form: the id is nested, the vendor raises requests on this
-        // same channel, and the channel carries other clients' replies too.
-        reply_id: Some(Box::new(reply_id)),
-    })
+    let (child, lines) = Child::spawn(
+        Spawn {
+            program,
+            args: launcher,
+            cwd: spec.workdir.clone(),
+            env: HashMap::new(),
+            // An envagent started from inside another agent session inherits that session's
+            // authentication environment: two `CLAUDE_CODE_*` switches that disable this CLI's
+            // own keychain login, and an `ANTHROPIC_BASE_URL` redirecting where a credential is
+            // sent. Left in place, every turn refuses with `Not logged in` while the developer's
+            // own terminal reports a valid login — and removing only the switches turns that
+            // into a `401`. Only an unambiguously broken combination is removed, and never
+            // silently — `super::hostauth` owns that judgement, the measurements, and the report.
+            env_remove: super::hostauth::sanitize_inherited_env(),
+            // See [`reply_id`], and this module's header for what each of its three conditions
+            // prevents. The short form: the id is nested, the vendor raises requests on this
+            // same channel, and the channel carries other clients' replies too.
+            reply_id: Some(Box::new(reply_id)),
+        },
+        capture,
+    )
     .await?;
 
     let control = Arc::new(Control { child });
     let shared = Arc::new(Shared {
         native_id: std::sync::RwLock::new(native_id.clone()),
-        root_correlation,
-        stdout_source: format!("live/stdout/{}.jsonl", uuid::Uuid::new_v4()),
         pending_model: Mutex::new(spec.flags.get("model").cloned()),
         ..Shared::default()
     });
@@ -785,7 +612,6 @@ pub async fn run_with(launcher: &[String], spec: RunSpec) -> Result<Box<dyn Sess
     // would make the pump's backpressure part of what a duration measures.
     let (tx, rx) = mpsc::channel(1024);
     tokio::spawn(pump(lines, tx.clone(), control.clone(), shared.clone()));
-    tokio::spawn(bundle_pump(tx.clone(), shared.clone(), bundle_baseline));
 
     // The handshake that turns a process into a session. This is where the project's real
     // command list comes from, and where the dialog kinds are declared — the declaration is
@@ -964,6 +790,10 @@ impl Session for ClaudeSession {
         self.shared.native_id.read().ok().and_then(|id| id.clone())
     }
 
+    async fn identity_evidence(&self) -> Vec<ObservationRef> {
+        self.shared.identity_evidence.read().unwrap().clone()
+    }
+
     async fn capabilities(&self) -> Result<SessionCapabilities> {
         refreshed_surface(&self.control, &self.shared).await
     }
@@ -972,7 +802,7 @@ impl Session for ClaudeSession {
     ///
     /// Returns when the agent has **accepted** it, not when it has finished: this CLI's
     /// stdin stays open for the session's life, so a write is the acceptance and the
-    /// outcome arrives on [`Session::events`] as a `result`.
+    /// outcome arrives on [`Session::messages`] as a `result`.
     ///
     /// # What a client observes if the CLI never answers, and why nothing is invented here
     ///
@@ -1041,8 +871,10 @@ impl Session for ClaudeSession {
         self.send(turn).await?;
         let deadline = tokio::time::Instant::now() + crate::process::REPLY_TIMEOUT;
         loop {
-            if let Some(native) = self.native_id() {
-                return Ok(native);
+            if !self.shared.identity_evidence.read().unwrap().is_empty() {
+                if let Some(native) = self.native_id() {
+                    return Ok(native);
+                }
             }
             if tokio::time::Instant::now() >= deadline {
                 return Err(anyhow!(
@@ -1165,7 +997,7 @@ impl Session for ClaudeSession {
             .await
     }
 
-    fn events(&mut self) -> Option<EventStream> {
+    fn messages(&mut self) -> Option<ControlStream> {
         // `try_lock` because this is the sync method on an otherwise async trait, and the
         // lock is uncontended by construction: `&mut self` means nothing else holds this
         // session. Taking the receiver is what makes a second call answer `None`.
@@ -1259,9 +1091,10 @@ fn prefix_paths(paths: &[&String], text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::StreamExt;
     use std::collections::BTreeMap;
     use std::time::Duration;
-    use sylph_protocol::{EventKind, Phase, RefusalCode, RequestKind};
+    use sylph_protocol::{RefusalCode, RequestKind};
 
     /// A scripted `claude` peer: real stdio, real framing, no vendor and no tokens.
     ///
@@ -1494,6 +1327,7 @@ done
                 log.to_string_lossy().to_string(),
             ],
             spec,
+            crate::process::test_capture(),
         )
         .await?;
         Ok(Peer {
@@ -1604,7 +1438,7 @@ done
         let mut peer = peer_with("collides", COLLIDES, spec("collides"))
             .await
             .unwrap();
-        let stream = peer.session.events().unwrap();
+        let stream = peer.session.messages().unwrap();
 
         // The reply must be the vendor's confirmation, not the approval.
         let refreshed = peer
@@ -2003,7 +1837,7 @@ done
         let mut peer = peer_with("model-observed", MODEL_PEER, spec("model-observed"))
             .await
             .expect("the peer initializes");
-        let stream = peer.session.events().expect("the stream yields once");
+        let stream = peer.session.messages().expect("the stream yields once");
 
         // The picker must immediately show the selection even though Claude's
         // set_model acknowledgement carries no value.
@@ -2046,84 +1880,6 @@ done
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         panic!("system/init did not replace the pending model selection");
-    }
-
-    /// A prepared Claude process can expose capabilities before it has a native id.  The
-    /// first real user turn is the adapter-owned boundary that waits for the vendor's id;
-    /// events emitted while that wait is in flight remain on the stream for the caller.
-    #[tokio::test]
-    async fn an_initial_turn_returns_the_vendor_id_and_keeps_early_events() {
-        let mut unnamed = spec("initial-id");
-        unnamed.native_id = RequestedNativeId::New;
-        let mut peer = peer_with("initial-id", MODEL_PEER, unnamed)
-            .await
-            .expect("the peer initializes");
-        assert!(peer.session.native_id().is_none());
-        let stream = peer.session.events().expect("the stream yields once");
-
-        let native = peer
-            .session
-            .send_initial(TurnInput {
-                text: "first turn".into(),
-                ..Default::default()
-            })
-            .await
-            .expect("the first turn reports its native id");
-        assert_eq!(native.as_str(), "claude-model-observed");
-        assert_eq!(
-            peer.session.native_id().as_ref().map(NativeId::as_str),
-            Some("claude-model-observed")
-        );
-
-        let messages = collect(stream, |message| {
-            matches!(message, SessionMessage::Event(event)
-                if event.kind == EventKind::Turn && event.phase == Some(Phase::Completed))
-        })
-        .await;
-        assert!(
-            messages.iter().any(|message| matches!(message,
-                SessionMessage::Event(event) if event.kind == EventKind::Turn && event.phase == Some(Phase::Completed))),
-            "the result emitted while waiting for the id must remain available"
-        );
-    }
-
-    /// Every live stdout projection is preceded by the raw vendor envelope that produced it.
-    /// This is the adapter-side half of the lossless-ingest contract: if the server cannot
-    /// retain the raw record, it sees that failure before it can journal the normalized event.
-    #[tokio::test]
-    async fn live_stdout_retains_raw_before_projecting_the_event() {
-        let mut peer = peer("raw-before-event").await;
-        let stream = peer.session.events().expect("the stream yields once");
-        peer.session
-            .send(TurnInput {
-                text: "raw ordering".into(),
-                ..Default::default()
-            })
-            .await
-            .expect("the vendor accepts the turn");
-
-        let messages = collect(stream, |message| {
-            matches!(
-                message,
-                SessionMessage::Event(event)
-                    if event.kind == EventKind::Turn && event.phase == Some(Phase::Completed)
-            )
-        })
-        .await;
-        let first_event = messages
-            .iter()
-            .position(|message| matches!(message, SessionMessage::Event(_)))
-            .expect("the peer emits a normalized event");
-        assert!(
-            first_event > 0,
-            "the normalized event must not be the first message on the stream"
-        );
-        assert!(
-            messages[..first_event]
-                .iter()
-                .any(|message| matches!(message, SessionMessage::NativeRecord(_))),
-            "a raw stdout envelope must precede the first normalized event"
-        );
     }
 
     /// The same rule where the vendor answers success **with a different value**.
@@ -2170,39 +1926,6 @@ done
         );
     }
 
-    /// A turn returns on **acceptance**, and the vendor receives it as a `user` message.
-    #[tokio::test]
-    async fn a_turn_is_accepted_and_written_as_a_user_message() {
-        let mut peer = peer("send").await;
-        let stream = peer.session.events().expect("the stream yields once");
-        peer.session
-            .send(TurnInput {
-                text: "hi".into(),
-                ..Default::default()
-            })
-            .await
-            .unwrap();
-
-        let user = peer.user_message().await;
-        assert_eq!(user["message"]["role"], json!("user"));
-        assert_eq!(user["message"]["content"], json!("hi"));
-
-        // And the turn's own events arrive, ending in a close — a turn that opened and
-        // never closed is the silence the protocol forbids.
-        let events = collect(stream, |message| {
-            matches!(message, SessionMessage::Event(event)
-                if event.kind == EventKind::Turn && event.phase == Some(Phase::Completed))
-        })
-        .await;
-        assert!(
-            events
-                .iter()
-                .any(|message| matches!(message, SessionMessage::Event(event)
-                if event.kind == EventKind::Assistant && event.text == "hello")),
-            "the assistant's prose must reach the stream: {events:?}"
-        );
-    }
-
     /// A prompt command becomes the turn's text, because its output is durable history.
     /// A **control** command never reaches here: it resolves against typed config.
     #[tokio::test]
@@ -2222,47 +1945,13 @@ done
         assert_eq!(user["message"]["content"], json!("/verify backend"));
     }
 
-    /// **A reply is not an event.** A `control_response` must wake its caller and leave the
-    /// stream, or a `set_model` acknowledgement appears in the transcript.
-    #[tokio::test]
-    async fn a_control_reply_never_reaches_the_event_stream() {
-        let mut peer = peer("no-leak").await;
-        let stream = peer.session.events().unwrap();
-        peer.session
-            .set_config("model", json!("sonnet"))
-            .await
-            .unwrap();
-        peer.session
-            .send(TurnInput {
-                text: "hi".into(),
-                ..Default::default()
-            })
-            .await
-            .unwrap();
-
-        let messages = collect(stream, |message| {
-            matches!(message, SessionMessage::Event(event)
-                if event.kind == EventKind::Turn && event.phase == Some(Phase::Completed))
-        })
-        .await;
-        for message in &messages {
-            if let SessionMessage::Event(event) = message {
-                assert_ne!(
-                    event.kind,
-                    EventKind::Status,
-                    "a control reply must not surface as an event: {event:?}"
-                );
-            }
-        }
-    }
-
     /// The stream yields **once**: two consumers of one vendor's stdio would each see half
     /// the turn, and fan-out is the server's job.
     #[tokio::test]
     async fn the_event_stream_is_yielded_once() {
         let mut peer = peer("once").await;
-        assert!(peer.session.events().is_some());
-        assert!(peer.session.events().is_none());
+        assert!(peer.session.messages().is_some());
+        assert!(peer.session.messages().is_none());
     }
 
     /// A vendor request becomes a [`sylph_protocol::Request`], and the answer reaches the
@@ -2270,7 +1959,7 @@ done
     #[tokio::test]
     async fn a_vendor_permission_is_forwarded_and_answered_in_its_own_shape() {
         let mut peer = peer("approve").await;
-        let stream = peer.session.events().unwrap();
+        let stream = peer.session.messages().unwrap();
         peer.session
             .send(TurnInput {
                 text: "ASKME".into(),
@@ -2318,7 +2007,7 @@ done
     #[tokio::test]
     async fn an_approval_answer_sends_no_tool_name_field() {
         let mut peer = peer("no-toolname").await;
-        let stream = peer.session.events().unwrap();
+        let stream = peer.session.messages().unwrap();
         peer.session
             .send(TurnInput {
                 text: "ASKME".into(),
@@ -2373,7 +2062,7 @@ done
         let mut peer = peer_with("odd-dialog", ODD_DIALOG, spec("odd-dialog"))
             .await
             .unwrap();
-        let stream = peer.session.events().unwrap();
+        let stream = peer.session.messages().unwrap();
         peer.session
             .send(TurnInput {
                 text: "go".into(),
@@ -2408,7 +2097,7 @@ done
     #[tokio::test]
     async fn a_question_answer_reaches_the_vendor_under_answers() {
         let mut peer = peer("question").await;
-        let stream = peer.session.events().unwrap();
+        let stream = peer.session.messages().unwrap();
         peer.session
             .send(TurnInput {
                 text: "QUESTION".into(),
@@ -2440,7 +2129,7 @@ done
     #[tokio::test]
     async fn a_second_resolution_is_refused_rather_than_sent_twice() {
         let mut peer = peer("twice").await;
-        let stream = peer.session.events().unwrap();
+        let stream = peer.session.messages().unwrap();
         peer.session
             .send(TurnInput {
                 text: "ASKME".into(),
@@ -2502,7 +2191,7 @@ done
     #[tokio::test]
     async fn an_unmodelled_vendor_request_is_answered_with_an_error() {
         let mut peer = peer("future").await;
-        let _stream = peer.session.events().unwrap();
+        let _stream = peer.session.messages().unwrap();
         peer.session
             .send(TurnInput {
                 text: "FUTURE".into(),
@@ -2525,7 +2214,7 @@ done
     #[tokio::test]
     async fn a_commands_changed_notification_causes_a_reread_of_the_surface() {
         let mut peer = peer("changed").await;
-        let stream = peer.session.events().unwrap();
+        let stream = peer.session.messages().unwrap();
         peer.session
             .send(TurnInput {
                 text: "CHANGED".into(),
@@ -2679,7 +2368,7 @@ done
         let mut peer = peer_with("mid-turn", DIES_MID_TURN, spec("mid-turn"))
             .await
             .unwrap();
-        let mut stream = peer.session.events().unwrap();
+        let mut stream = peer.session.messages().unwrap();
         peer.session
             .send(TurnInput {
                 text: "hi".into(),
@@ -2688,7 +2377,6 @@ done
             .await
             .unwrap();
 
-        use futures::StreamExt;
         let mut explained = None;
         while let Some(item) = stream.next().await {
             if let Err(error) = item {
@@ -2758,10 +2446,9 @@ exit 0
     ///
     /// Bounded so a broken adapter fails the test rather than hanging the suite.
     async fn collect(
-        mut stream: EventStream,
+        mut stream: ControlStream,
         until: impl Fn(&SessionMessage) -> bool,
     ) -> Vec<SessionMessage> {
-        use futures::StreamExt;
         let mut seen = Vec::new();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
@@ -2781,7 +2468,7 @@ exit 0
     }
 
     /// The first request the stream carries.
-    async fn first_request(stream: EventStream) -> Option<sylph_protocol::Request> {
+    async fn first_request(stream: ControlStream) -> Option<sylph_protocol::Request> {
         collect(stream, |message| {
             matches!(message, SessionMessage::Request(_))
         })

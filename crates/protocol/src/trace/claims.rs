@@ -87,6 +87,7 @@ pub enum CoverageDimension {
     rename_all_fields = "camelCase"
 )]
 pub enum CoverageInterval {
+    CapturedPrefix {source:SourceRef,generation:u64,complete_records:u64,complete_bytes:u64},
     Source {
         first: SourcePosition,
         through: SourcePosition,

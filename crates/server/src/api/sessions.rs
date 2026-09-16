@@ -1,39 +1,208 @@
-//! Sessions: listing, reading, starting, adopting, and patching.
-
-use crate::models::now_ms;
+//! Native session metadata and environment-owned session lifecycle.
+use crate::{
+    db::SessionFilter,
+    env::bridge::RemoteCommandError,
+    error::{Error, Result},
+    middleware::auth::SubjectId,
+    models::{now_ms, AdoptSessionRequest, CreateSessionRequest, Session},
+    AppState,
+};
 use axum::{
     extract::{Extension, Path, Query, State},
     http::StatusCode,
     Json,
 };
 use serde::{Deserialize, Serialize};
-use sylph_protocol::{AgentName, EnvironmentId, NativeId, SessionId};
-
-use crate::middleware::auth::SubjectId;
-use crate::{
-    db::store::SessionFilter,
-    env::bridge::RemoteCommandError,
-    error::{Error, Result},
-    events::StreamEvent,
-    models::{AdoptSessionRequest, CreateSessionRequest, Session, Turn},
-    AppState,
+use sylph_protocol::trace::{AgentRef, IngestionScope};
+use sylph_protocol::{
+    AgentName, CaptureAuthorization, EnvironmentCommand, EnvironmentId, IdempotencyPolicy,
+    NativeId, SessionId,
 };
 
-/// Decode a session id out of a path segment, or refuse it.
-///
-/// # Why every handler goes through this
-///
-/// A path segment is the encoded triple (`docs/api/README.md` § A session id in a
-/// path), and a malformed one is a **400 rather than a 404**: the request is
-/// unintelligible, not pointing at something absent. Collapsing the two would tell a
-/// client with a typo'd id that the session does not exist, which sends the
-/// investigation to the wrong layer — and a client that had corrupted an id would see
-/// the same answer as one asking about deleted work.
-///
-/// It is a function rather than an extractor because the failure has to carry the
-/// decoder's own reason (`sylph_protocol::IdentityError` names which of the three
-/// parts is wrong), and an extractor's rejection cannot reach [`Error`] without
-/// flattening that.
+pub(crate) async fn authorize(
+    state: &AppState,
+    subject: &str,
+    id: &SessionId,
+    capability: &str,
+) -> Result<()> {
+    if !state
+        .store
+        .has_capability(subject, id.environment.as_str(), capability)
+        .await?
+    {
+        return Err(Error::Forbidden(format!(
+            "{capability} capability required"
+        )));
+    }
+    Ok(())
+}
+
+pub async fn adopt(
+    State(state): State<AppState>,
+    Extension(subject): Extension<SubjectId>,
+    Json(request): Json<AdoptSessionRequest>,
+) -> Result<(StatusCode, Json<SessionResponse>)> {
+    let environment = require_environment(&state, &request.environment).await?;
+    let agent =
+        AgentName::parse(&request.agent).map_err(|e| Error::InvalidRequest(e.to_string()))?;
+    if request.native_id.trim().is_empty() {
+        return Err(Error::InvalidRequest(
+            "native identity must not be empty".into(),
+        ));
+    }
+    let id = SessionId::new(environment, agent, NativeId::new(&request.native_id));
+    authorize(&state, &subject.0, &id, "observe").await?;
+    if state.store.get_session(&id).await?.is_some() {
+        return Err(Error::SessionAlreadyPresent);
+    }
+    let scope = IngestionScope::Agent(AgentRef::Session(id.clone()));
+    let epoch = match state
+        .trace
+        .catalogue()
+        .evidence()
+        .authorize_scope(&scope, &[AgentRef::Session(id.clone())])
+        .await
+    {
+        Ok(epoch) => epoch,
+        Err(crate::trace::evidence::EvidenceError::Suppressed) => state
+            .trace
+            .catalogue()
+            .evidence()
+            .readopt_scope(&scope, &[AgentRef::Session(id.clone())])
+            .await
+            .map_err(|e| Error::Internal(e.to_string()))?,
+        Err(error) => return Err(Error::Internal(error.to_string())),
+    };
+    let capture_authorization = CaptureAuthorization { scope, epoch };
+    let command = if request.watch {
+        EnvironmentCommand::Watch {
+            capture_authorization,
+            session_id: id.clone(),
+            agent: request.agent.clone(),
+            native_id: id.native_id.clone(),
+            turn_id: None,
+        }
+    } else {
+        EnvironmentCommand::Adopt {
+            capture_authorization,
+            session_id: id.clone(),
+            agent: request.agent.clone(),
+            native_id: id.native_id.clone(),
+            turn_id: None,
+        }
+    };
+    let outcome = state
+        .env_bridge
+        .remote_session_command(&id, command, IdempotencyPolicy::AtMostOnce)
+        .await
+        .map_err(|e| Error::LinkFailed(e.to_string()))?;
+    let value = crate::env::EnvBridge::remote_outcome_value(outcome)
+        .await
+        .map_err(|e| Error::LinkFailed(e.to_string()))?;
+    let workdir = value
+        .get("workdir")
+        .and_then(|v| v.as_str())
+        .ok_or(Error::NativeSessionNotResumable)?
+        .to_owned();
+    let title = request.title.or_else(|| {
+        value
+            .get("title")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+    });
+    let fidelity = value
+        .get("fidelity")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| Error::Internal(e.to_string()))?
+        .unwrap_or(sylph_protocol::Fidelity::Messages);
+    let session = Session {
+        id,
+        workdir: Some(workdir),
+        title,
+        inject_identity: request.inject_identity,
+        fidelity,
+        flags_json: "{}".into(),
+        status: "idle".into(),
+        created_at_ms: now_ms(),
+        updated_at_ms: now_ms(),
+    };
+    let session = state.store.create_session(&session).await?;
+    state.trace.notify_admission();
+    Ok((StatusCode::CREATED, Json(SessionResponse { session })))
+}
+
+pub async fn reread(
+    State(state): State<AppState>,
+    Extension(subject): Extension<SubjectId>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>> {
+    let id = decode_id(&id)?;
+    authorize(&state, &subject.0, &id, "observe").await?;
+    state
+        .store
+        .get_session(&id)
+        .await?
+        .ok_or(Error::SessionNotFound)?;
+    let scope = IngestionScope::Agent(AgentRef::Session(id.clone()));
+    let epoch = state
+        .trace
+        .catalogue()
+        .evidence()
+        .authorize_scope(&scope, &[AgentRef::Session(id.clone())])
+        .await
+        .map_err(|e| Error::Internal(e.to_string()))?;
+    let command = EnvironmentCommand::Reread {
+        capture_authorization: CaptureAuthorization { scope, epoch },
+        session_id: id.clone(),
+        agent: id.agent.to_string(),
+        native_id: id.native_id.clone(),
+    };
+    let outcome = state
+        .env_bridge
+        .remote_session_command(&id, command, IdempotencyPolicy::AtMostOnce)
+        .await
+        .map_err(|e| Error::LinkFailed(e.to_string()))?;
+    let result = crate::env::EnvBridge::remote_outcome_value(outcome)
+        .await
+        .map_err(|e| Error::LinkFailed(e.to_string()))?;
+    state.trace.notify_admission();
+    Ok(Json(result))
+}
+
+pub async fn delete(
+    State(state): State<AppState>,
+    Extension(subject): Extension<SubjectId>,
+    Path(id): Path<String>,
+) -> Result<StatusCode> {
+    let id = decode_id(&id)?;
+    authorize(&state, &subject.0, &id, "control").await?;
+    let lock = state.env_bridge.session_command_lock(&id).await;
+    let _guard = lock.lock().await;
+    state
+        .trace
+        .catalogue()
+        .evidence()
+        .delete_scope(&IngestionScope::Agent(AgentRef::Session(id.clone())))
+        .await
+        .map_err(|e| Error::Internal(e.to_string()))?;
+    state.trace.notify_access_changed();
+    state
+        .exporter
+        .run_once()
+        .await
+        .map_err(|e| Error::Internal(e.to_string()))?;
+    state
+        .store
+        .erase_agent_input(&AgentRef::Session(id.clone()))
+        .await
+        .map_err(|e| Error::Internal(e.to_string()))?;
+    state.store.suppress_session(&id).await?;
+    let _ = state.env_bridge.close_remote_session(&id).await;
+    state.trace.notify_admission();
+    Ok(StatusCode::NO_CONTENT)
+}
 pub fn decode_id(encoded: &str) -> Result<SessionId> {
     SessionId::decode(encoded).map_err(|error| Error::InvalidRequest(error.to_string()))
 }
@@ -119,80 +288,6 @@ pub struct SessionResponse {
 }
 
 #[derive(Serialize)]
-pub struct SessionEdgesResponse {
-    pub edges: Vec<sylph_protocol::SessionEdge>,
-}
-
-/// GET /api/v1/sessions/{id}/edges
-pub async fn edges(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Json<SessionEdgesResponse>> {
-    let id = decode_id(&id)?;
-    state
-        .store
-        .get_session(&id)
-        .await?
-        .ok_or(Error::SessionNotFound)?;
-    Ok(Json(SessionEdgesResponse {
-        edges: state.store.list_session_edges(Some(&id)).await?,
-    }))
-}
-
-/// Journal the typed ancestry edge an adopted session's vendor recorded.
-///
-/// # Why this is not a column on the session row
-///
-/// It was, and `sessions.parent_session` is gone because a string cannot carry relation
-/// type, provenance, and more than one edge at once (ADR-0001 § 2). The column was also
-/// never read: it was written by both adopt paths, serialized as `parentSession`, and no
-/// reader anywhere consumed it — a field that only ever wrote is indistinguishable from a
-/// working one, which is why it survived.
-///
-/// # Nothing is written when the relation is unknown
-///
-/// `parent_relation` is `None` where a vendor names a parent without saying how, and this
-/// writes no edge for that case. A guessed `delegation` would render a fork as a folded
-/// count and a guessed `fork` would replay a prefix that was never shared, and neither is
-/// withdrawable once journaled — a later fix to this function cannot tell a guessed row
-/// from a real one. An unrecorded relation is the honest flat view.
-///
-/// # Failure is logged, not returned
-///
-/// The child row is already committed and the adopt succeeded. Ancestry is a read model
-/// (`session_edges` is documented as one), re-derivable by re-adopting, so failing the
-/// request here would refuse a session that exists over a decoration that does not.
-async fn record_adopted_lineage(
-    state: &AppState,
-    child: &sylph_protocol::SessionId,
-    parent_native_id: Option<&NativeId>,
-    relation: Option<sylph_protocol::SessionEdgeRelation>,
-) {
-    let (Some(parent_native_id), Some(relation)) = (parent_native_id, relation) else {
-        return;
-    };
-    // A vendor's parent id is on the same machine and from the same vendor by
-    // construction: it is a pointer within one native store.
-    let parent = sylph_protocol::SessionId::new(
-        child.environment.clone(),
-        child.agent.clone(),
-        parent_native_id.clone(),
-    );
-    // A store that names a session as its own parent is malformed, not a self-edge to
-    // journal. `SessionEdge::new` refuses it, and that refusal is the whole check.
-    let edge = match sylph_protocol::SessionEdge::new(parent, child.clone(), relation) {
-        Ok(edge) => edge,
-        Err(error) => {
-            tracing::warn!("Ignoring {child}'s recorded ancestry: {error}");
-            return;
-        }
-    };
-    if let Err(error) = state.store.insert_session_edge(&edge).await {
-        tracing::warn!("Could not journal {child}'s {relation} edge: {error:#}");
-    }
-}
-
-#[derive(Serialize)]
 pub struct PreparedSessionResponse {
     /// Opaque, process-local handle. It is intentionally not a SessionId and is not
     /// accepted by history/listing endpoints.
@@ -227,438 +322,6 @@ pub async fn get(
     Ok(Json(SessionResponse { session }))
 }
 
-/// One turn together with its durable events, oldest event first.
-#[derive(Serialize)]
-pub struct TurnWithEvents {
-    turn: Turn,
-    events: Vec<StreamEvent>,
-}
-
-#[derive(Serialize)]
-pub struct HistoryResponse {
-    turns: Vec<TurnWithEvents>,
-    #[serde(rename = "hasMore")]
-    has_more: bool,
-    #[serde(rename = "nextCursor", skip_serializing_if = "Option::is_none")]
-    next_cursor: Option<String>,
-    #[serde(rename = "snapshotSeq")]
-    snapshot_seq: i32,
-}
-
-#[derive(Deserialize)]
-pub struct HistoryQuery {
-    turn_id: Option<String>,
-    #[serde(default = "default_history_limit")]
-    limit: i64,
-    cursor: Option<String>,
-}
-
-fn default_history_limit() -> i64 {
-    100
-}
-
-fn turn_cursor(turn: &Turn) -> String {
-    format!("{}:{}", turn.created_at_ms, turn.id)
-}
-
-/// GET /api/v1/sessions/{id}/turns — durable conversation history.
-///
-/// The SSE endpoint covers a single turn, which is enough to watch work happen but
-/// loses everything on reload. This returns the whole session so the conversation
-/// survives a refresh.
-///
-/// Only journal rows are read, never the ephemeral projection: `delta` events are
-/// transient by protocol and their text is already contained in the matching
-/// `completed` event, so replaying both would duplicate every token.
-pub async fn export_turns(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Query(query): Query<HistoryQuery>,
-) -> Result<Json<HistoryResponse>> {
-    let id = decode_id(&id)?;
-    // 404 rather than an empty list, so a mistyped id is distinguishable from a
-    // session that genuinely has no turns yet.
-    state
-        .store
-        .get_session(&id)
-        .await?
-        .ok_or(Error::SessionNotFound)?;
-
-    let limit = query.limit.clamp(1, 500);
-
-    // `list_turns` orders newest-first for the session list; a transcript reads
-    // oldest-first.
-    // Capture before the page so a concurrent arrival may be replayed twice but can
-    // never be skipped between reading history and opening the trace connection.
-    let snapshot_seq = state.store.max_event_seq(&id).await?;
-    let mut turns = if let Some(turn_id) = query.turn_id.as_deref() {
-        let turn = state
-            .store
-            .get_turn(turn_id)
-            .await?
-            .ok_or(Error::TurnNotFound)?;
-        if turn.session_id != id {
-            return Err(Error::TurnNotFound);
-        }
-        vec![turn]
-    } else {
-        state
-            .store
-            .list_turns_page(&id, query.cursor.as_deref(), limit + 1)
-            .await?
-    };
-    let has_more = turns.len() > limit as usize;
-    if has_more {
-        turns.truncate(limit as usize);
-    }
-    let next_cursor = if has_more {
-        turns.last().map(turn_cursor)
-    } else {
-        None
-    };
-    turns.reverse();
-
-    let mut out = Vec::with_capacity(turns.len());
-    for turn in turns {
-        // Live snapshots retain producer phase and stability. Applying the terminal
-        // fold to an open block calls it `incomplete` and stable, collapsing reasoning
-        // in the browser before its completed event exists. Only sealed turns fold;
-        // both sealed storage tiers still use the same projection and time anchors.
-        let journalled = state.store.turn_events_for_consolidation(&turn.id).await?;
-        let hot_seqs = journalled
-            .iter()
-            .map(|event| event.seq)
-            .collect::<std::collections::HashSet<_>>();
-        // A terminal turn may receive a late tail while its earlier snapshot is
-        // already archived. Choosing either tier would hide the other half. Read
-        // journal first, then history, and prefer the exact hot versions during
-        // publication overlap; the same ordering protects on-demand node bodies.
-        let mut merged = state
-            .history
-            .turn_block_summaries(&turn.id)
-            .await
-            .map_err(|error| Error::Internal(format!("could not read transcript: {error:#}")))?
-            .iter()
-            .filter(|summary| !hot_seqs.contains(&summary.block.seq))
-            .map(block_summary_to_event)
-            .map(|event| (event.seq, event))
-            .collect::<std::collections::BTreeMap<_, _>>();
-        let hot: Vec<StreamEvent> = if !turn.is_terminal() {
-            journalled
-                .iter()
-                .map(StreamEvent::from_row)
-                .map(bound_event)
-                .collect()
-        } else {
-            crate::storage::history::consolidate(&journalled)
-                .iter()
-                .map(block_to_event)
-                .map(bound_event)
-                .collect()
-        };
-        merged.extend(hot.into_iter().map(|event| (event.seq, event)));
-        let events = merged.into_values().collect();
-        out.push(TurnWithEvents { turn, events });
-    }
-
-    Ok(Json(HistoryResponse {
-        turns: out,
-        has_more,
-        next_cursor,
-        snapshot_seq,
-    }))
-}
-
-/// Turn metadata for control state; transcript content uses the node endpoint.
-pub async fn history(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Query(query): Query<HistoryQuery>,
-) -> Result<Json<serde_json::Value>> {
-    let id = decode_id(&id)?;
-    state
-        .store
-        .get_session(&id)
-        .await?
-        .ok_or(Error::SessionNotFound)?;
-    let rows = sqlx::query("SELECT id,status FROM turns WHERE session_env=? AND session_agent=? AND session_native=? ORDER BY created_at_ms DESC,id DESC LIMIT ?")
-        .bind(id.environment.as_str()).bind(id.agent.as_str()).bind(id.native_id.as_str())
-        .bind(query.limit.clamp(1,40)).fetch_all(state.store.read_pool()).await?;
-    use sqlx::Row;
-    let turns = rows
-        .into_iter()
-        .map(|row| {
-            Ok(serde_json::json!({"turn": {
-                "id": row.try_get::<String,_>("id")?, "status": row.try_get::<String,_>("status")?
-            }}))
-        })
-        .collect::<std::result::Result<Vec<_>, sqlx::Error>>()?;
-    Ok(Json(serde_json::json!({"turns": turns})))
-}
-
-#[derive(Deserialize)]
-pub struct NodesQuery {
-    around: Option<i32>,
-    #[serde(default)]
-    parent: String,
-    cursor: Option<String>,
-    #[serde(default)]
-    changes: bool,
-    limit: Option<i64>,
-}
-
-/// Direct children only, from the same projection before and after archiving.
-pub async fn nodes(
-    State(state): State<AppState>,
-    Extension(subject): Extension<SubjectId>,
-    Path(id): Path<String>,
-    Query(query): Query<NodesQuery>,
-) -> Result<impl axum::response::IntoResponse> {
-    let id = decode_id(&id)?;
-    state
-        .store
-        .get_session(&id)
-        .await?
-        .ok_or(Error::SessionNotFound)?;
-    if !state
-        .store
-        .has_capability(&subject.0, id.environment.as_str(), "observe")
-        .await?
-    {
-        return Err(Error::SessionNotFound);
-    }
-    let page = if let Some(seq) = query.around {
-        state.store.node_window(&id.encode(), seq).await?
-    } else {
-        state
-            .store
-            .node_page(
-                &id.encode(),
-                &query.parent,
-                query.cursor.as_deref(),
-                query.changes,
-                query.limit.unwrap_or(crate::db::timeline::PAGE_NODES),
-            )
-            .await?
-    };
-    let timing = format!(
-        "node_pool;dur={:.3},node_read;dur={:.3}",
-        page.work.pool_wait_us as f64 / 1000.0,
-        page.work.projection_us as f64 / 1000.0
-    );
-    Ok(([("Server-Timing", timing)], Json(page)))
-}
-
-#[derive(Deserialize)]
-pub struct NodeSearchQuery {
-    q: String,
-}
-
-/// Explicit search uses the retained full-text index, never a scan of node previews.
-pub async fn search_nodes(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Query(query): Query<NodeSearchQuery>,
-) -> Result<Json<serde_json::Value>> {
-    let id = decode_id(&id)?;
-    state
-        .store
-        .get_session(&id)
-        .await?
-        .ok_or(Error::SessionNotFound)?;
-    let hits = state
-        .store
-        .search_nodes(&state.history, &id, &query.q)
-        .await?;
-    Ok(Json(
-        serde_json::json!({"hits":hits.into_iter().map(|(seq,excerpt)|serde_json::json!({"seq":seq,"excerpt":excerpt})).collect::<Vec<_>>()}),
-    ))
-}
-
-/// A prompt body is owned by its turn; ordinary nodes reuse the event body resource.
-pub async fn node_body(
-    State(state): State<AppState>,
-    Extension(subject): Extension<SubjectId>,
-    Path((id, node)): Path<(String, String)>,
-) -> Result<Json<serde_json::Value>> {
-    let session = decode_id(&id)?;
-    if !state
-        .store
-        .has_capability(&subject.0, session.environment.as_str(), "observe")
-        .await?
-    {
-        return Err(Error::SessionNotFound);
-    }
-    if let Some(turn_id) = node.strip_prefix("p:") {
-        let turn = state
-            .store
-            .get_turn(turn_id)
-            .await?
-            .ok_or(Error::TurnNotFound)?;
-        if turn.session_id != session {
-            return Err(Error::SessionNotFound);
-        }
-        return Ok(Json(serde_json::json!({"text": turn.request_text})));
-    }
-    let (node, hot, seqs) = state.store.node_body_snapshot(&session, &node).await?;
-    if node.event.body_ref.is_none() {
-        return Ok(Json(
-            serde_json::json!({"text":node.event.text,"data":node.event.data}),
-        ));
-    }
-    Ok(Json(
-        crate::storage::node_body::resolve(&state.history, &session, &node, hot, seqs).await?,
-    ))
-}
-
-/// Render a bounded history summary without hydrating the complete body.
-fn block_summary_to_event(summary: &crate::storage::history::BlockSummary) -> StreamEvent {
-    let mut event = block_to_event(&summary.block);
-    event.text = summary.block.text.clone();
-    event.data = summary.block.data.clone();
-    event.body_ref = summary.has_body.then_some(crate::events::BodyRef {
-        seq: summary.block.seq,
-        text_bytes: summary.text_bytes,
-        data_bytes: summary.data_bytes,
-    });
-    event
-}
-
-/// Keep the default history response bounded even while a turn is still in the journal.
-fn bound_event(mut event: StreamEvent) -> StreamEvent {
-    let text_bytes = event.text.len() as u64;
-    let data_bytes = event.data.as_ref().map_or(0, |data| data.to_string().len()) as u64;
-    let text_large = text_bytes as usize > crate::storage::history::BLOCK_PREVIEW_BYTES;
-    let data_large = data_bytes as usize > crate::storage::history::BLOCK_PREVIEW_BYTES;
-    if text_large {
-        event.text = crate::storage::history::text_preview(&event.text);
-    }
-    if data_large {
-        event.data = crate::storage::history::data_preview(event.data.as_ref());
-    }
-    if text_large || data_large {
-        event.body_ref = Some(crate::events::BodyRef {
-            seq: event.seq,
-            text_bytes,
-            data_bytes,
-        });
-    }
-    event
-}
-
-/// Fetch one full event body after a bounded timeline preview.
-pub async fn body(
-    State(state): State<AppState>,
-    Extension(subject): Extension<SubjectId>,
-    Path((id, seq)): Path<(String, i32)>,
-) -> Result<Json<serde_json::Value>> {
-    let session_id = decode_id(&id)?;
-    state
-        .store
-        .get_session(&session_id)
-        .await?
-        .ok_or(Error::SessionNotFound)?;
-    if !state
-        .store
-        .has_capability(&subject.0, session_id.environment.as_str(), "observe")
-        .await?
-    {
-        return Err(Error::SessionNotFound);
-    }
-    // Read the journal first. Publication writes history before deleting journal
-    // rows, so this order cannot observe a hole at the archive boundary.
-    let rows = state.store.event_body_rows(&session_id, seq).await?;
-    if !rows.is_empty() {
-        let blocks = crate::storage::history::consolidate(&rows);
-        if let Some(block) = blocks.iter().find(|b| b.seq == seq) {
-            return Ok(Json(
-                serde_json::json!({"text": block.text, "data": block.data}),
-            ));
-        }
-        if let Some(row) = rows.iter().find(|r| r.seq == seq) {
-            return Ok(Json(
-                serde_json::json!({"text": row.text, "data": row.data()}),
-            ));
-        }
-    }
-    let block = state
-        .history
-        .block(&session_id.encode(), seq)
-        .await
-        .map_err(|error| Error::Internal(format!("could not read event body: {error:#}")))?
-        .ok_or(Error::SessionNotFound)?;
-    Ok(Json(
-        serde_json::json!({"text": block.text, "data": block.data}),
-    ))
-}
-
-/// Render a consolidated block as the event a client expects.
-///
-/// A timeline renders stable events, and a block *is* a stable event plus how it
-/// streamed — so the folded deltas are deliberately not expanded here. Replay is a
-/// separate operation for a client that wants the arrival sequence; a transcript read
-/// wants the settled value.
-pub fn block_to_event(block: &crate::storage::Block) -> StreamEvent {
-    StreamEvent {
-        seq: block.seq,
-        arrival_turn_id: Some(block.turn_id.clone()),
-        kind: block.kind.clone(),
-        phase: block.phase.clone(),
-        stream_id: block.stream_id.clone(),
-        span: block.span.clone(),
-        interior_state: block
-            .interior_state
-            .as_deref()
-            .and_then(parse_interior_state),
-        name: block.name.clone(),
-        text: block.text.clone(),
-        data: block.data.clone(),
-        is_error: block.is_error,
-        stability: "stable".to_string(),
-        source: block.source.clone(),
-        arrival_at_ms: block.arrival_at_ms,
-        recorded_at_ms: block.recorded_at_ms,
-        created_at_ms: block.created_at_ms,
-        // The block already carries this; it was simply never published. Without it a
-        // settled block reports only when it closed, so every duration computed from
-        // durable history was a reconstruction from whatever the interior happened to
-        // forward — exact for a chatty delegate, a lower bound for a quiet one, and
-        // absent entirely for one that forwarded nothing.
-        // The anchor is retained for both clock domains. The renderer chooses recorded
-        // start/end when `recordedAtMs` exists, otherwise arrival start/end for a stream
-        // record; block/message fidelity gates native arrival stamps before arithmetic.
-        started_at_ms: Some(block.started_at_ms),
-        tool_summary: None,
-        body_ref: if block.text.len() > crate::storage::history::BLOCK_PREVIEW_BYTES
-            || block.data.as_ref().is_some_and(|data| {
-                data.to_string().len() > crate::storage::history::BLOCK_PREVIEW_BYTES
-            }) {
-            Some(crate::events::BodyRef {
-                seq: block.seq,
-                text_bytes: block.text.len() as u64,
-                data_bytes: block
-                    .data
-                    .as_ref()
-                    .map_or(0, |data| data.to_string().len() as u64),
-            })
-        } else {
-            None
-        },
-    }
-}
-
-fn parse_interior_state(value: &str) -> Option<sylph_protocol::InteriorState> {
-    sylph_protocol::InteriorState::parse(value)
-}
-
-/// POST /api/v1/sessions
-///
-/// **This starts an agent and returns an in-memory draft.** It does not reserve a row.
-///
-/// A session has no identity until an agent has assigned one
-/// (`docs/architecture.md` § Identity), so the draft is kept only by the link manager.
-/// The first real turn atomically writes the session and turn; discarding the draft
-/// closes the process without leaving any history behind.
 pub async fn create(
     State(state): State<AppState>,
     Extension(subject): Extension<SubjectId>,
@@ -813,7 +476,7 @@ pub async fn prepared_get(
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UpdateSessionRequest {
     /// Complete replacement flag set. Absent leaves flags untouched; an empty map
     /// clears them.
@@ -949,8 +612,6 @@ pub struct NativeSessionRow {
     pub started_at_ms: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ended_at_ms: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub event_count: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_native_id: Option<String>,
     /// Which relationship [`Self::parent_native_id`] is, when the vendor's key says.
@@ -1195,7 +856,7 @@ pub async fn enumerate(
                 title: summary.title,
                 started_at_ms: summary.started_at_ms,
                 ended_at_ms: summary.ended_at_ms,
-                event_count: summary.event_count,
+
                 parent_native_id: summary.parent_native_id.map(|id| id.to_string()),
                 parent_relation: summary.parent_relation,
                 fidelity: summary.fidelity,
@@ -1214,490 +875,4 @@ pub async fn enumerate(
         sessions: page,
         next_cursor: (next < total).then(|| next.to_string()),
     }))
-}
-
-/// POST /api/v1/sessions/adopt
-///
-/// Bring in a session an agent already has, from that agent's own native store.
-///
-/// # What is derived from the store rather than from the request
-///
-/// The **workdir**, the **fidelity**, and the fallback **title**. A client supplies the
-/// triple, `watch`, and two settable preferences, and nothing else it sends decides
-/// where an agent may run.
-///
-/// # The recorded workdir is bounded exactly like a created one
-///
-/// Not belt-and-braces. A machine's store holds every session any agent ever ran there,
-/// so an unbounded adopt is a **general way to start an agent anywhere**: find a session
-/// that ran in the target directory, adopt it, send a turn. That the path came from the
-/// store rather than from the request changes who chose it, not what happens next — so
-/// this goes through the envagent's own containment check, which canonicalizes on the
-/// machine that owns the path. The server records the path returned by that command and
-/// never checks a remote path against its own filesystem (`docs/architecture.md` § Filesystem exposure).
-///
-/// # `fidelity` is what the vendor's store holds, never `stream`
-///
-/// Read per session from the adapter's own summary rather than per agent, because a
-/// store can hold both: a session truncated mid-write, or one whose early turns predate a
-/// vendor's flush change, yields less than the agent's headline fidelity promises
-/// (`sylph_protocol::NativeSummary::fidelity`). No care recovers a timing that was never
-/// written.
-///
-/// Native user input arrives as `TurnInputFact`, independently of timeline events.
-/// It supplies the turn's question and the opening-ask fallback used by
-/// [`crate::db::labels`]. The lossless native record also keeps injected context;
-/// that context must not replace the question shown on a turn.
-///
-/// # Ingestion, and why `watch` does not block the response
-///
-/// `watch: false` is drained **before** the `201`, so a client that reads the transcript
-/// the moment it gets a response finds it there. `watch: true` follows the store as it
-/// grows and has no end to wait for; the envagent owns that long-lived source and emits
-/// its events over the bridge.
-pub async fn adopt(
-    State(state): State<AppState>,
-    Extension(subject): Extension<SubjectId>,
-    Json(req): Json<AdoptSessionRequest>,
-) -> Result<(StatusCode, Json<SessionResponse>)> {
-    let environment = require_environment(&state, &req.environment).await?;
-    if !state
-        .store
-        .has_capability(&subject.0, environment.as_str(), "control")
-        .await?
-    {
-        return Err(Error::Forbidden("control capability required".into()));
-    }
-    let agent = req.agent.trim().to_string();
-
-    let requested_agent = AgentName::parse(agent.clone())
-        .map_err(|error| Error::InvalidRequest(error.to_string()))?;
-    let requested_native = NativeId::new(req.native_id.trim());
-    let requested_session_id = SessionId::new(
-        environment.clone(),
-        requested_agent.clone(),
-        requested_native.clone(),
-    );
-    let _session_command_guard = state
-        .env_bridge
-        .session_command_lock(&requested_session_id)
-        .await
-        .lock_owned()
-        .await;
-    if req.native_id.trim().is_empty() {
-        return Err(Error::InvalidRequest(
-            "Adopting a session needs the agent's own session id.".into(),
-        ));
-    }
-    let remote_session_id = requested_session_id.clone();
-    if state.store.get_session(&remote_session_id).await?.is_some() {
-        return Err(Error::SessionAlreadyPresent);
-    }
-    let request_id =
-        sylph_protocol::CommandRequestId::parse(format!("adopt-{}", uuid::Uuid::new_v4().simple()))
-            .map_err(|error| Error::InvalidRequest(error.to_string()))?;
-    let native_id_for_command = remote_session_id.native_id.clone();
-    let command_kind = if req.watch {
-        sylph_protocol::EnvironmentCommand::Watch {
-            session_id: SessionId::new(
-                environment.clone(),
-                AgentName::parse(agent.clone())
-                    .map_err(|error| Error::InvalidRequest(error.to_string()))?,
-                native_id_for_command.clone(),
-            ),
-            agent: agent.clone(),
-            native_id: native_id_for_command.clone(),
-            turn_id: None,
-        }
-    } else {
-        sylph_protocol::EnvironmentCommand::Adopt {
-            session_id: SessionId::new(
-                environment.clone(),
-                AgentName::parse(agent.clone())
-                    .map_err(|error| Error::InvalidRequest(error.to_string()))?,
-                native_id_for_command.clone(),
-            ),
-            agent: agent.clone(),
-            native_id: native_id_for_command.clone(),
-            turn_id: None,
-        }
-    };
-    let command = sylph_protocol::Command::new(
-        request_id,
-        sylph_protocol::IdempotencyPolicy::Replayable,
-        command_kind,
-    );
-    let timeout = crate::env::bridge::command_timeout(&command.command);
-    let outcome = state
-        .env_bridge
-        .dispatch_and_wait(&environment, command, timeout)
-        .await
-        .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
-    let result = match outcome {
-        sylph_protocol::CommandOutcome::Accepted {
-            result: Some(value),
-        } => value,
-        sylph_protocol::CommandOutcome::Accepted { result: None } => {
-            return Err(Error::LinkFailed("remote adopt returned no session".into()))
-        }
-        sylph_protocol::CommandOutcome::Rejected { code, message } => {
-            return Err(match code.as_str() {
-                "NATIVE_SESSION_NOT_FOUND" => {
-                    Error::NativeSessionNotFound(native_id_for_command.to_string())
-                }
-                "AGENT_UNKNOWN" => Error::InvalidRequest(format!("Unknown agent: {agent}")),
-                "NATIVE_SESSION_NOT_RESUMABLE" => Error::NativeSessionNotResumable,
-                "POLICY_VIOLATION" => Error::Forbidden(message),
-                _ => Error::LinkFailed(format!("{code}: {message}")),
-            })
-        }
-        sylph_protocol::CommandOutcome::Unknown { message } => {
-            return Err(Error::LinkFailed(format!(
-                "remote adopt outcome is unknown: {}",
-                message.unwrap_or_default()
-            )))
-        }
-    };
-    let session_id: SessionId = serde_json::from_value(
-        result
-            .get("sessionId")
-            .cloned()
-            .ok_or_else(|| Error::LinkFailed("remote adopt returned no session id".into()))?,
-    )
-    .map_err(|error| Error::LinkFailed(format!("remote adopt returned invalid id: {error}")))?;
-    if session_id != requested_session_id {
-        return Err(Error::LinkFailed(
-            "remote adopt returned a different session identity".into(),
-        ));
-    }
-    // Native history may not record a working directory. Preserve that fact as
-    // NULL; guessing a path would claim where future agent code may run.
-    let workdir = result
-        .get("workdir")
-        .and_then(|value| value.as_str())
-        .filter(|value| !value.trim().is_empty())
-        .map(str::to_string);
-    let now = now_ms();
-    let record = Session {
-        id: session_id.clone(),
-        workdir,
-        title: req.title.or_else(|| {
-            result
-                .get("title")
-                .and_then(|value| value.as_str())
-                .map(str::to_string)
-        }),
-        inject_identity: req.inject_identity,
-        fidelity: result
-            .get("fidelity")
-            .cloned()
-            .and_then(|value| serde_json::from_value(value).ok())
-            .unwrap_or(sylph_protocol::Fidelity::Messages),
-        flags_json: "{}".into(),
-        status: "idle".into(),
-        // Lineage is a typed edge, written after the row exists (ADR-0001 § 2).
-        created_at_ms: result
-            .get("startedAtMs")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(now),
-        updated_at_ms: result
-            .get("endedAtMs")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(now),
-    };
-    let stored = match state.store.create_session(&record).await {
-        Ok(stored) => stored,
-        Err(error) => {
-            let _ = state.env_bridge.close_remote_session(&session_id).await;
-            return Err(error);
-        }
-    };
-    record_adopted_lineage(
-        &state,
-        &session_id,
-        result
-            .get("parentNativeId")
-            .and_then(|value| value.as_str())
-            .map(NativeId::new)
-            .as_ref(),
-        result
-            .get("parentRelation")
-            .cloned()
-            .and_then(|value| serde_json::from_value(value).ok()),
-    )
-    .await;
-    if req.watch {
-        if let Err(error) = state.env_bridge.activate_remote(&session_id).await {
-            let _ = state.env_bridge.close_remote_session(&session_id).await;
-            return Err(Error::LinkFailed(format!("{error:#}")));
-        }
-    } else {
-        let transfer =
-            serde_json::from_value(result.get("transfer").cloned().ok_or_else(|| {
-                Error::LinkFailed("remote adopt returned no transcript transfer".into())
-            })?)
-            .map_err(|error| {
-                Error::LinkFailed(format!(
-                    "remote adopt returned an invalid transfer: {error}"
-                ))
-            })?;
-        let pass = super::native_transfer::download(&state, &session_id, transfer)
-            .await
-            .map_err(|error| {
-                Error::LinkFailed(format!("could not download adopted transcript: {error:#}"))
-            })?;
-        let read_errors = pass.read_errors;
-        let report = state
-            .ingest
-            .drain(&session_id, pass.stream())
-            .await
-            .map_err(|error| {
-                Error::LinkFailed(format!("could not retain adopted transcript: {error:#}"))
-            })?;
-        if read_errors + report.read_errors > 0 {
-            return Err(Error::LinkFailed(format!(
-                "native transcript contains {} unreadable records",
-                read_errors + report.read_errors
-            )));
-        }
-    }
-    Ok((
-        StatusCode::CREATED,
-        Json(SessionResponse { session: stored }),
-    ))
-}
-
-/// What one re-read pass added, as the endpoint reports it.
-///
-/// Four counts rather than a boolean, because the interesting states are not "worked" and
-/// "failed". A pass that examined 412 events and added none is the ordinary answer to
-/// "anything new?", and it must be distinguishable from a pass that could not read the
-/// store at all — which is an error with its own status, never a quiet zero
-/// (`docs/api/sessions.md` § `POST /api/v1/sessions/{id}/reread`).
-#[derive(Debug, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RereadReport {
-    /// Events the adapter emitted, before suppression.
-    ///
-    /// **`ingested + already_held` may be less than this, by design.** A turn's opening
-    /// bracket survives in neither storage tier, so a pass that finds nothing new after
-    /// one declines to write it and cannot claim it was already held either — it is
-    /// examined and nothing else (`crate::db::IngestReport::already_held`).
-    pub examined: usize,
-    /// Events new to the journal, now added.
-    pub ingested: usize,
-    /// Events a previous pass had already journaled.
-    pub already_held: usize,
-    /// Items the adapter could not read. The pass continues past each.
-    pub read_errors: usize,
-}
-
-#[derive(Debug, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RereadResponse {
-    pub reread: RereadReport,
-}
-
-/// POST /api/v1/sessions/{id}/reread
-///
-/// Re-parse the vendor's native store for a session Sylph already holds, ingesting
-/// whatever the journal lacks. One pass, on demand.
-///
-/// # This is not adopt, and not watch
-///
-/// `adopt` refuses a session that already has a row — `SESSION_ALREADY_PRESENT` is exactly
-/// this case — and `watch` installs a follower that lives past the response. A re-read
-/// targets a row that exists, runs once, and leaves no follower behind.
-///
-/// # `fidelity` is not touched
-///
-/// A record's resolution belongs to the source that wrote it, so re-reading the same store
-/// cannot raise or lower it. Nothing here writes the column, and that is the assertion:
-/// re-deriving it from a second pass would let a partial read downgrade a session, which a
-/// renderer reads as permission to stop drawing a waterfall it had been drawing.
-pub async fn reread(
-    State(state): State<AppState>,
-    Extension(subject): Extension<SubjectId>,
-    Path(id): Path<String>,
-) -> Result<Json<RereadResponse>> {
-    let session_id = decode_id(&id)?;
-    if !state
-        .store
-        .has_capability(&subject.0, session_id.environment.as_str(), "observe")
-        .await?
-    {
-        return Err(Error::SessionNotFound);
-    }
-    // The row must exist: this operation extends a transcript rather than creating one.
-    // `404` distinguishes "you named nothing" from the *other* `404` below, which is the
-    // vendor having dropped what Sylph still holds.
-    state
-        .store
-        .get_session(&session_id)
-        .await?
-        .ok_or(Error::SessionNotFound)?;
-
-    // One re-read at a time per session. Two concurrent passes would each read the same
-    // suppression snapshot, so both would find the same tail new and both would write it —
-    // producing the duplicate the snapshot exists to prevent, and only under a double
-    // click.
-    let _guard = state
-        .env_bridge
-        .session_command_lock(&session_id)
-        .await
-        .lock_owned()
-        .await;
-
-    let agent = session_id.agent.to_string();
-
-    // Unconditionally through the bridge. Milestone 1 deleted the in-process
-    // adapter seam, so there is no privileged machine here -- not even the one
-    // the server runs on (`docs/environments.md` § Self-installed). The local
-    // branch this replaced could not compile against that layout.
-    let outcome = state
-        .env_bridge
-        .remote_session_command(
-            &session_id,
-            sylph_protocol::EnvironmentCommand::Reread {
-                session_id: session_id.clone(),
-                agent: agent.clone(),
-                native_id: session_id.native_id.clone(),
-            },
-            // Never `Replayable`. A re-read exists to observe a store that has changed
-            // since it was last asked, so a replayed answer is a stale one presented as
-            // fresh.
-            sylph_protocol::IdempotencyPolicy::AtMostOnce,
-        )
-        .await
-        .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
-    let value = match outcome {
-        sylph_protocol::CommandOutcome::Accepted { result } => result.unwrap_or_default(),
-        sylph_protocol::CommandOutcome::Rejected { code, message } => {
-            // The envagent could not find the session in the vendor's store. That is
-            // the store having been pruned under a row Sylph still holds, which has its
-            // own code because it means Sylph's copy is now the only one.
-            if message.contains("was not found") {
-                return Err(Error::NativeSessionNotFound(
-                    session_id.native_id.as_str().to_string(),
-                ));
-            }
-            return Err(Error::Internal(format!("{code}: {message}")));
-        }
-        sylph_protocol::CommandOutcome::Unknown { message } => {
-            return Err(Error::LinkFailed(format!(
-                "remote re-read outcome is unknown: {}",
-                message.unwrap_or_default()
-            )))
-        }
-    };
-    let transfer: sylph_protocol::NativeTransfer =
-        serde_json::from_value(value).map_err(|error| {
-            Error::Internal(format!("remote re-read transfer was malformed: {error}"))
-        })?;
-    let downloaded = crate::api::native_transfer::download(&state, &session_id, transfer)
-        .await
-        .map_err(|error| {
-            Error::Internal(format!("could not download native re-read: {error:#}"))
-        })?;
-    let read_errors = downloaded.read_errors;
-    Ok(Json(
-        ingest_reread_pass(&state, &session_id, downloaded.stream(), read_errors).await?,
-    ))
-}
-
-/// Re-project native envelopes already retained by Sylph, without consulting the vendor store.
-pub async fn reproject(
-    State(state): State<AppState>,
-    Extension(subject): Extension<SubjectId>,
-    Path(id): Path<String>,
-) -> Result<Json<RereadResponse>> {
-    let session_id = decode_id(&id)?;
-    if !state
-        .store
-        .has_capability(&subject.0, session_id.environment.as_str(), "observe")
-        .await?
-    {
-        return Err(Error::SessionNotFound);
-    }
-    state
-        .store
-        .get_session(&session_id)
-        .await?
-        .ok_or(Error::SessionNotFound)?;
-
-    // Re-projection must be a validate-then-replace operation. The current ingest path is
-    // append-oriented and cannot stage a complete projection across the journal and history
-    // databases, so allowing this endpoint to continue would append corrected events beside
-    // stale ones and make a successful response corrupt the transcript. Refuse explicitly
-    // until a transactional replacement path exists; a clear 501 is safer than a plausible
-    // duplicate history.
-    Err(Error::NotImplemented(
-        "re-project is unavailable until validate-then-replace publication is implemented"
-            .to_string(),
-    ))
-}
-
-/// Ingest a pass an envagent parsed.
-///
-/// The whole of [`reread`]'s ingest, since every environment reaches its adapters through
-/// an envagent. The envagent answers with the whole pass because suppression is the
-/// server's — only the server knows what its journal holds — so the messages are
-/// re-assembled into a stream and put through one ingest path. A second path for the same
-/// operation would be a second place for the container, sequence, and dedup rules to
-/// diverge.
-async fn ingest_reread_pass(
-    state: &AppState,
-    session_id: &sylph_protocol::SessionId,
-    stream: sylph_protocol::EventStream,
-    read_errors: usize,
-) -> Result<RereadResponse> {
-    let report = state
-        .ingest
-        .reread(session_id, stream)
-        .await
-        .map_err(|error| {
-            Error::Internal(format!(
-                "Could not retain that native session losslessly: {error:#}"
-            ))
-        })?;
-    Ok(RereadResponse {
-        reread: RereadReport {
-            // The pass's own count, not `events + already_held`. A turn opener the pass
-            // declined to write is in neither of those, so the sum would under-report the
-            // store by however many brackets bracketed nothing
-            // (`crate::db::IngestReport::examined`).
-            examined: report.examined,
-            ingested: report.events,
-            already_held: report.already_held,
-            // The envagent's own read errors, not this ingest's: the parse happened there,
-            // so that is where an unreadable record was seen.
-            read_errors: read_errors + report.read_errors,
-        },
-    })
-}
-
-/// The reading outline shares the observe gate with execution nodes.
-pub async fn conversation(
-    State(state): State<AppState>, Extension(subject): Extension<SubjectId>,
-    Path(id): Path<String>, Query(query): Query<NodesQuery>,
-) -> Result<Json<serde_json::Value>> {
-    let id=decode_id(&id)?;
-    state.store.get_session(&id).await?.ok_or(Error::SessionNotFound)?;
-    if !state.store.has_capability(&subject.0,id.environment.as_str(),"observe").await? {return Err(Error::SessionNotFound);}
-    Ok(Json(state.store.conversation_page(&id.encode(),&query.parent,query.cursor.as_deref(),query.changes,query.limit.unwrap_or(40)).await?))
-}
-
-#[derive(Deserialize)]
-pub struct DelegationsQuery { #[serde(default)] q:String, cursor:Option<String>, limit:Option<i64> }
-
-/// A complete catalogue is independent from the reader's loaded tree windows.
-pub async fn delegations(
-    State(state): State<AppState>, Extension(subject): Extension<SubjectId>,
-    Path(id): Path<String>, Query(query): Query<DelegationsQuery>,
-)->Result<Json<serde_json::Value>>{
-    let id=decode_id(&id)?;
-    state.store.get_session(&id).await?.ok_or(Error::SessionNotFound)?;
-    if !state.store.has_capability(&subject.0,id.environment.as_str(),"observe").await? {return Err(Error::SessionNotFound);}
-    if query.q.len()>1024 {return Err(Error::InvalidRequest("delegation search is too long".into()));}
-    Ok(Json(state.store.delegation_page(&id.encode(),&subject.0,&query.q,query.cursor.as_deref(),query.limit.unwrap_or(40)).await?))
 }

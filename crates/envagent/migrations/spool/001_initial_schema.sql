@@ -1,35 +1,6 @@
--- Disposable spool schema, checked on every open. No compatibility path.
-CREATE TABLE spool_events (
-  producer_id TEXT NOT NULL,
-  producer_seq INTEGER NOT NULL,
-  kind TEXT NOT NULL DEFAULT 'event',
-  session_id TEXT NOT NULL,
-  arrival_turn_id TEXT,
-  payload BLOB NOT NULL,
-  source_cursor TEXT,
-  recorded_at_ms INTEGER,
-  PRIMARY KEY (producer_id, producer_seq)
-);
--- The primary key already indexes producer order.
-CREATE TABLE spool_usage (
-  singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
-  bytes INTEGER NOT NULL CHECK(bytes >= 0)
-);
-INSERT INTO spool_usage VALUES(1, 0);
-CREATE TRIGGER spool_usage_insert AFTER INSERT ON spool_events BEGIN
-  UPDATE spool_usage SET bytes = bytes + length(NEW.payload) WHERE singleton = 1;
-END;
-CREATE TRIGGER spool_usage_delete AFTER DELETE ON spool_events BEGIN
-  UPDATE spool_usage SET bytes = bytes - length(OLD.payload) WHERE singleton = 1;
-END;
-CREATE TABLE spool_acks (
-  producer_id TEXT PRIMARY KEY,
-  acked_through INTEGER NOT NULL DEFAULT -1
-);
-CREATE TABLE spool_sequences (
-  producer_id TEXT PRIMARY KEY,
-  next_seq INTEGER NOT NULL DEFAULT 1
-);
+-- Durable capture registry and its ack-gated lexical queue share one writer.
+CREATE TABLE spool_usage(singleton INTEGER PRIMARY KEY CHECK(singleton=1),bytes INTEGER NOT NULL CHECK(bytes>=0));
+INSERT INTO spool_usage VALUES(1,0);
 
 -- Source progress and queued captures share this writer. No complete cursor can
 -- advance without the exact lexical payload and its fixed authorization epoch.
@@ -128,3 +99,20 @@ CREATE TABLE capture_receipts (
   receipt_json TEXT NOT NULL,
   PRIMARY KEY(issuer_json,producer_id,producer_epoch,producer_seq)
 );
+
+CREATE TABLE capture_source_proofs(source_ref TEXT NOT NULL,generation INTEGER NOT NULL,observation_json TEXT NOT NULL,PRIMARY KEY(source_ref,generation));
+
+-- Operational command deduplication is independent of lexical capture receipt identity.
+-- A NULL outcome records an attempt that may already have reached the vendor.
+CREATE TABLE command_attempts (
+  request_id TEXT PRIMARY KEY,
+  fingerprint TEXT NOT NULL,
+  outcome_json TEXT
+);
+
+CREATE TABLE capture_snapshot_revisions(source_ref TEXT NOT NULL,generation INTEGER NOT NULL,ingestion_epoch TEXT NOT NULL,capture_json TEXT NOT NULL,PRIMARY KEY(source_ref,generation,ingestion_epoch));
+CREATE TABLE capture_attachment_scans(observation_key TEXT PRIMARY KEY);
+CREATE TABLE capture_attachment_watches(parent_key TEXT NOT NULL,locator TEXT NOT NULL,parent_slot TEXT NOT NULL,watch_json TEXT NOT NULL,last_state TEXT,last_checked INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(parent_key,locator,parent_slot));
+
+CREATE TABLE native_source_inventory(session_key TEXT NOT NULL,ingestion_epoch TEXT NOT NULL,locator TEXT NOT NULL,source_json TEXT NOT NULL,PRIMARY KEY(session_key,ingestion_epoch,locator));
+CREATE TABLE captured_source_states(session_key TEXT NOT NULL,source_key TEXT NOT NULL,ingestion_epoch TEXT NOT NULL,state_json TEXT NOT NULL,authorization_json TEXT NOT NULL,PRIMARY KEY(session_key,source_key,ingestion_epoch));

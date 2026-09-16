@@ -54,7 +54,6 @@ export type ShortcutAction =
   | "toggleRightSidebar"
   | "openSettings"
   | "stopTurn"
-  | "collapseAll"
   | "findInSession";
 
 export interface Settings {
@@ -120,8 +119,7 @@ export const DEFAULT_SHORTCUTS: Record<string, ShortcutAction> = {
   "Mod+\\": "toggleRightSidebar",
   "Mod+,": "openSettings",
   "Mod+.": "stopTurn",
-  "Mod+f": "findInSession",
-  "Shift+c": "collapseAll",
+  "Mod+Shift+f": "findInSession",
 };
 
 export const DEFAULT_SETTINGS: Settings = {

@@ -134,6 +134,13 @@ export function CommandPalette() {
         run: () => runAction("stopTurn"),
       },
       {
+        id: "find-in-agent",
+        label: t("trace.findCurrentAgent"),
+        group: t("palette.group.session"),
+        action: "findInSession",
+        run: () => runAction("findInSession"),
+      },
+      {
         id: "search",
         label: t("palette.cmd.search"),
         group: t("palette.group.navigation"),
@@ -172,13 +179,6 @@ export function CommandPalette() {
         action: "toggleRightSidebar",
         keywords: "files preview",
         run: () => runAction("toggleRightSidebar"),
-      },
-      {
-        id: "collapse-all",
-        label: t("palette.cmd.collapseAll"),
-        group: t("palette.group.view"),
-        action: "collapseAll",
-        run: () => runAction("collapseAll"),
       },
       {
         id: "density",

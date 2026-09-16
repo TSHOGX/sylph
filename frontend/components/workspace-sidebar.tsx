@@ -28,11 +28,10 @@ import { useMemo, useState, useSyncExternalStore } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type Session } from "@/lib/api";
 import { formatRelative, sessionLabel, shortenHome } from "@/lib/format";
-import { refreshRereadsTheStore } from "@/lib/refresh-transcript";
 import { liveSessionsQuery } from "@/lib/sessions-query";
 import { workspacesQuery } from "@/lib/workspaces-query";
 import { relayName, useEnvironments, type Environments } from "@/lib/environments";
-import { useSessionIdParam } from "@/lib/use-session-id-param";
+import { useTraceFocus } from "@/lib/trace-focus";
 import { useT } from "@/lib/i18n";
 import { useSettings, workspaceRefKey } from "@/lib/settings";
 import dynamic from "next/dynamic";
@@ -99,7 +98,7 @@ export function WorkspaceSidebar() {
   // decide which row is current. Read raw, that comparison is silently always false and
   // the active row never highlights, with nothing erroring anywhere
   // (`use-session-id-param`).
-  const activeId = useSessionIdParam();
+  const activeId = useTraceFocus()?.context?.sessionId;
   const [picking, setPicking] = useState(false);
   const storedImportRaw = useSyncExternalStore(
     () => () => undefined,
@@ -620,21 +619,10 @@ function SessionRow({
       label: t("sidebar.copyWorkspacePath"),
       onSelect: () => void navigator.clipboard.writeText(session.workdir).catch(() => {}),
     },
-    ...(refreshRereadsTheStore(session.fidelity) ? [{
-      // **Invalidating the cache is not a refresh of the record**, and treating it as one
-      // is the defect this entry used to be. A refetch re-reads what Sylph already
-      // holds, so a session adopted from a terminal could never gain a line the vendor
-      // appended afterwards — no amount of clicking reached the store
-      // (`docs/environments.md` § Re-reading a session Sylph already holds). So the
-      // server is asked to parse the vendor's store again, and only then is the cache
-      // invalidated, so whatever the pass ingested is what the refetch renders.
-      //
-      // Which records that re-read applies to is `refreshRereadsTheStore`, which owns the
-      // reasoning and is tested on the decision — a `stream` record is the one a re-read
-      // cannot improve, and both ways of getting it wrong are clicks that look successful.
+    {
       label: t("sidebar.refreshTranscript"),
       onSelect: () => rereadSession(session.id, sessionLabel(session)),
-    }] : []),
+    },
   ];
 
   const relay = relayName(session.environment, environments);
@@ -642,7 +630,7 @@ function SessionRow({
   return (
     <li className="group/row relative">
       <Link
-        href={`/sessions/${encodeURIComponent(session.id)}`}
+        href={`/agents/${encodeURIComponent(session.traceAgentRef)}`}
         aria-current={active ? "page" : undefined}
         onContextMenu={(event) => {
           event.preventDefault();

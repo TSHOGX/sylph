@@ -14,10 +14,10 @@ describe("submission identity", () => {
   it("retries an unacknowledged submission without merging a later identical message", () => {
     let sequence = 0;
     const identity = createSubmissionIdentity(() => String(++sequence));
-    const first = identity.key({ text: "same message", turnId: "one" });
-    expect(identity.key({ text: "same message", turnId: "one" })).toBe(first);
+    const first = identity.key({ text: "same message", operationRef: "one" });
+    expect(identity.key({ text: "same message", operationRef: "one" })).toBe(first);
     identity.accepted(first);
-    expect(identity.key({ text: "same message", turnId: "one" })).not.toBe(first);
+    expect(identity.key({ text: "same message", operationRef: "one" })).not.toBe(first);
   });
 
   it("does not retire a newer submission when an older response arrives", () => {
@@ -27,6 +27,6 @@ describe("submission identity", () => {
     const newer = identity.key({ text: "new" });
     identity.accepted(old);
     expect(identity.key({ text: "new" })).toBe(newer);
-    expect(identity.key({ text: "new", turnId: "next" })).not.toBe(newer);
+    expect(identity.key({ text: "new", operationRef: "next" })).not.toBe(newer);
   });
 });

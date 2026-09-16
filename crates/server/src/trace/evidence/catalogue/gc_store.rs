@@ -151,7 +151,7 @@ impl EvidenceCatalogue {
 
     pub(crate) async fn gc_release_retired_pins(&self, now_ms: i64, limit: usize) -> Result<usize> {
         let mut tx = self.evidence.writer.begin_with("BEGIN IMMEDIATE").await?;
-        let rows=sqlx::query("SELECT p.owner_id,p.payload_ref,p.scope_epoch FROM trace_payload_pins p JOIN trace_generations g ON g.generation=p.owner_id WHERE p.owner_kind='generation' AND g.state IN ('retained','cancelled','retired') AND NOT EXISTS(SELECT 1 FROM trace_view_leases l WHERE l.generation=g.generation AND l.state IN ('pending','active') AND l.expires_at_ms>?) ORDER BY p.owner_id,p.payload_ref,p.scope_epoch LIMIT ?")
+        let rows=sqlx::query("SELECT p.owner_id,p.payload_ref,p.scope_epoch FROM trace_payload_pins p JOIN trace_generations g ON g.generation=p.owner_id WHERE p.owner_kind='generation' AND g.state IN ('retained','cancelled','retired') AND NOT EXISTS(SELECT 1 FROM trace_revision_pins r WHERE r.generation=g.generation) AND NOT EXISTS(SELECT 1 FROM trace_view_leases l WHERE l.generation=g.generation AND l.state IN ('pending','active') AND l.expires_at_ms>?) ORDER BY p.owner_id,p.payload_ref,p.scope_epoch LIMIT ?")
             .bind(now_ms).bind(limit as i64).fetch_all(&mut *tx).await?;
         for row in &rows {
             let owner: String = row.try_get("owner_id")?;

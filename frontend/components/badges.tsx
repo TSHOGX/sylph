@@ -1,4 +1,4 @@
-import type { Fidelity, TurnStatus } from "@/lib/api-types";
+import type { Fidelity } from "@/lib/api-types";
 import { BlocksFidelityIcon, MessagesFidelityIcon, RelayIcon } from "@/components/icons";
 
 /**
@@ -75,68 +75,6 @@ export function EnvironmentChip({
     >
       {relayed && <RelayIcon size={9} />}
       {name}
-    </span>
-  );
-}
-
-/**
- * Turn status, by outcome.
- *
- * `stopping` shares the warning hue with `interrupted` but is the only *transient*
- * status among them, so it also gets the pulsing dot that `running` has — the
- * distinction that matters to a reader is "is this still moving", and hue alone
- * cannot say that. It previously used amber against `interrupted`'s orange, two
- * adjacent hues that were indistinguishable at badge size and carried no meaning
- * a reader could recover.
- *
- * `settling` takes `running`'s hue rather than a hue of its own. The agent's work is over
- * and the server is closing the record, which is a distinction about Sylph's internals —
- * giving it a fourth colour would spend a reader's attention on something they cannot act
- * on. What it must not do is read as *finished*, hence the moving dot.
- *
- * It is close to unreachable here, and is present because the `Record` demands it rather
- * than as defensive padding: this badge draws on history entries, a settling turn is the
- * live turn, and the live turn is filtered out of that list until history absorbs it. The
- * exhaustive type is what makes that a deliberate answer instead of a `??` fallback nobody
- * chose — and it is why adding a status to `TurnStatus` fails the build here.
- *
- * Every badge carries a border. A 10% tint is nearly invisible against a dark
- * canvas without one, which is what the tokens resolve to in dark mode.
- */
-const TURN_STATUS_STYLES: Record<TurnStatus, string> = {
-  queued: "border-line bg-hover text-ink-soft",
-  running: "border-info-line bg-info-bg text-info",
-  stopping: "border-warning-line bg-warning-bg text-warning",
-  settling: "border-info-line bg-info-bg text-info",
-  completed: "border-success-line bg-success-bg text-success",
-  failed: "border-danger-line bg-danger-bg text-danger",
-  cancelled: "border-line bg-active text-ink-muted",
-  interrupted: "border-warning-line bg-warning-bg text-warning",
-};
-
-/** The statuses whose badge carries a moving dot: the turn is not done yet. */
-const IN_FLIGHT: ReadonlySet<TurnStatus> = new Set<TurnStatus>([
-  "running",
-  "stopping",
-  "settling",
-]);
-
-export function TurnStatusBadge({ status }: { status: TurnStatus }) {
-  return (
-    <span
-      className={`inline-flex items-center gap-1.5 rounded-md border px-1.5 py-0.5 text-2xs font-medium ${
-        TURN_STATUS_STYLES[status] ?? "border-line bg-hover text-ink-soft"
-      }`}
-    >
-      {IN_FLIGHT.has(status) && (
-        <span
-          aria-hidden="true"
-          className={`h-1.5 w-1.5 animate-pulse rounded-full ${
-            status === "stopping" ? "bg-warning-solid" : "bg-info-solid"
-          }`}
-        />
-      )}
-      {status}
     </span>
   );
 }

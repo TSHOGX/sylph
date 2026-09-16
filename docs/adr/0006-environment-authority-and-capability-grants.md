@@ -111,14 +111,10 @@ envagent could admit Subjects to environments it does not own.
 ### 7. Revocation reaches work already in flight, through a field of its own
 
 Revoking a grant takes effect in three stages: new control is refused; the caller's
-`authorization` reports `not_granted`; and a vendor operation already dispatched and not
-recallable leaves its trajectory `abandoned`, on a turn carrying
-`close_reason = grant_revoked`.
-
-The two levels are distinct and this decision's first draft merged them. `abandoned` is a
-trajectory outcome, not one of the turn's four terminal statuses
-(`docs/database-schema.md` § turns), so the turn carries the reason and the trajectory
-carries the outcome.
+`authorization` reports `not_granted`; and already-dispatched work retains the control
+revocation/interruption request separately from its observed vendor outcome. A request
+to stop is not proof of termination. Execution reason and observation availability remain
+distinct under `docs/unified-trace-foundation.md` § Independent lifecycle claims.
 
 **The middle stage is not the `control` facet, and that correction is load-bearing.** The
 first draft of this decision moved the facet to unavailable, reusing the vocabulary

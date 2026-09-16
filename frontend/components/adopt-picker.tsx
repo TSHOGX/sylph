@@ -193,7 +193,7 @@ export function AdoptPicker({
       void queryClient.invalidateQueries({ queryKey: ["native-sessions"] });
       void queryClient.invalidateQueries({ queryKey: ["workspaces"] });
       onClose();
-      router.push(`/sessions/${encodeURIComponent(session.id)}`);
+      router.push(`/agents/${encodeURIComponent(session.traceAgentRef)}`);
     },
     // Deliberately no `onError` beyond the default: the error is rendered below. A mutation
     // with no error path turns any backend refusal into a phantom UI bug — the cached list
@@ -244,7 +244,7 @@ export function AdoptPicker({
         onSelect: () => {
           if (blocked === "alreadyAdopted") {
             onClose();
-            router.push(`/sessions/${encodeURIComponent(row.id)}`);
+            void api.sessions.get(row.id).then(({ session }) => router.push(`/agents/${encodeURIComponent(session.traceAgentRef)}`));
             return;
           }
           if (blocked) return;
@@ -424,15 +424,9 @@ function rowLabel(row: NativeSessionRow, t: Translate): string {
   return t("adopt.untitled", { id: row.nativeId.slice(0, 8) });
 }
 
-/**
- * The trailing column: why a row is blocked, or how big it is.
- *
- * A reason outranks a size, because a row a user cannot act on needs to say so before it
- * says anything else.
- */
+/** The actual reason this native session cannot be adopted. */
 function rowMeta(row: NativeSessionRow, t: Translate): string | undefined {
   if (row.blocked) return blockedLabel(row.blocked, t);
-  if (row.eventCount != null) return t("adopt.events", { count: row.eventCount });
   return undefined;
 }
 

@@ -1,51 +1,49 @@
 import { expect, test } from "@playwright/test";
-import { createSession } from "./fixtures/session";
+import { installTraceFixture, message, openTrace } from "./fixtures/trace";
 
-test("collapsed execution shows live activity before the final reply exists", async ({
+test("transport EOF does not terminate an observed activation", async ({
   page,
 }) => {
-  await createSession(page);
-  await page.getByLabel("Message", { exact: true }).fill("paced please");
-  await page.getByRole("button", { name: "Send", exact: true }).click();
-  const group = page
-    .locator("[data-node-id] > button[aria-expanded=false]")
-    .filter({ hasText: /Thinking/ })
-    .last();
-  await expect(group).toBeVisible({ timeout: 8000 });
-  await expect(group.locator("[data-running-activity]")).toBeVisible();
-  await expect(page.getByText("Reasoning step one.")).toHaveCount(0);
-  await expect(page.getByText("Hello from the E2E runner.")).toBeHidden();
-  await group.click();
-  const thinking = page
-    .locator("[data-node-id] > button[aria-expanded=false]")
-    .filter({ hasText: /^Thinking/ })
-    .last();
-  await thinking.click();
-  await expect(page.getByText(/Reasoning step one\./)).toBeVisible();
-  await expect(page.getByText("Hello from the E2E runner.")).toBeVisible({
-    timeout: 10000,
-  });
-  await expect(
-    page.locator("[data-node-id] [data-running-activity]"),
-  ).toHaveCount(0);
+  const state = await installTraceFixture(page, [
+    message(0, "Still observed working"),
+  ]);
+  state.mainHeader.ownExecution = {
+    reference: "activation",
+    state: { kind: "observed_active", lastObservedAtMs: 100 },
+    durations: [],
+  };
+  await openTrace(page);
+  await expect
+    .poll(() => state.reads.filter((read) => read.includes("/changes?")).length)
+    .toBeGreaterThan(1);
+  await expect(page.getByText(/Current history · Working/)).toBeVisible();
+  await expect(page.getByText(/Current history · Completed/)).toHaveCount(0);
 });
 
-test("active summaries name the running file without loading the call body", async ({
+test("an explicit reset reloads around the retained object without resending a command", async ({
   page,
 }) => {
-  await createSession(page);
-  await page.getByLabel("Message", { exact: true }).fill("paced please");
-  await page.getByRole("button", { name: "Send", exact: true }).click();
+  const state = await installTraceFixture(page, [
+    message(0, "Retained before reset"),
+  ]);
+  await openTrace(page);
+  await page.getByRole("button", { name: "Evidence and details" }).focus();
+  await page.route("**/api/v1/trace/changes?*", (route) =>
+    route.fulfill({
+      contentType: "text/event-stream",
+      body: `data: ${JSON.stringify({ kind: "reset_required", reason: "Replay checkpoint expired" })}\n\n`,
+    }),
+  );
   await expect(
-    page
-      .locator("[data-node-id] > button")
-      .filter({ hasText: /src\/paced.rs/ }),
-  ).toBeVisible({ timeout: 8000 });
-  await expect(
-    page.getByRole("region", { name: "Read tool call" }),
-  ).toHaveCount(0);
-  await expect(page.getByText("Hello from the E2E runner.")).toBeHidden();
-  await expect(page.getByText("Hello from the E2E runner.")).toBeVisible({
-    timeout: 10000,
-  });
+    page.getByText("Replay checkpoint expired", { exact: true }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Refresh around this item" }).click();
+  await expect
+    .poll(() =>
+      state.reads.some((read) =>
+        read.includes("around=opaque-main-agent-anchor-0"),
+      ),
+    )
+    .toBe(true);
+  expect(state.commands).toHaveLength(0);
 });

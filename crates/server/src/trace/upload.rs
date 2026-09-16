@@ -8,11 +8,9 @@ use super::evidence::{
     catalogue::{CatalogueError, EvidenceCatalogue},
     AdmissionBatch, CapturePreflight, EvidenceError, EvidenceStore,
 };
-use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use sylph_protocol::trace::{
-    Capture, Issuer, ObservationRef, PayloadKind, PayloadManifest, PayloadRef,
-};
+use sylph_protocol::trace::{Capture, Issuer, PayloadKind, PayloadRef};
+use sylph_protocol::{CaptureUploadTicket, PayloadDeclaration};
 
 #[derive(Debug, Clone)]
 pub struct UploadLimits {
@@ -56,38 +54,6 @@ pub enum UploadError {
     Limit(&'static str),
 }
 pub type Result<T> = std::result::Result<T, UploadError>;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(
-    tag = "kind",
-    rename_all = "snake_case",
-    rename_all_fields = "camelCase",
-    deny_unknown_fields
-)]
-pub enum PayloadDeclaration {
-    Bytes {
-        reference: PayloadRef,
-        length: u64,
-    },
-    Manifest {
-        reference: PayloadRef,
-        manifest: PayloadManifest,
-    },
-}
-impl PayloadDeclaration {
-    pub fn reference(&self) -> &PayloadRef {
-        match self {
-            Self::Bytes { reference, .. } | Self::Manifest { reference, .. } => reference,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct CaptureUploadTicket {
-    pub id: String,
-    pub observation: ObservationRef,
-}
 
 #[derive(Debug, Clone)]
 pub enum BeginCapture {
@@ -179,15 +145,21 @@ impl CaptureUploads {
         if bytes.len() > self.evidence().limits().max_chunk_bytes {
             return Err(UploadError::Limit("chunk bytes"));
         }
-        let expected = self
+        let (expected, admitted) = self
             .catalogue
-            .capture_chunk_length(issuer, ticket, reference)
+            .capture_chunk_status(issuer, ticket, reference)
             .await?;
         if expected != bytes.len() as u64
             || reference.kind() != PayloadKind::Bytes
             || blake3::hash(bytes).to_hex().as_str() != reference.digest()
         {
             return Err(UploadError::BytesMismatch);
+        }
+        // A concurrent finisher or lost response may leave this ticket already
+        // admitted. Verify the exact declared bytes above, then reuse that durable
+        // transfer proof without staging the payload again.
+        if admitted {
+            return Ok(());
         }
         if self.evidence().stage_payload(bytes).await? != *reference {
             return Err(UploadError::BytesMismatch);

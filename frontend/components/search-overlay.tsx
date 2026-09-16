@@ -1,225 +1,139 @@
 "use client";
-
-/**
- * `Cmd+K`: find a session and jump to it.
- *
- * **One store, so one kind of result.** Search and listings both name durable sessions
- * from the server-owned store. A hit can simply be opened; there is no import step or
- * second id space to reconcile.
- *
- * What is worth recording is that the deduplication was not merely redundant, it was
- * a hazard: it compared a live row's remembered archive id against a hit's id across
- * two disjoint id spaces, and a wrong comparison there produces **no error at any
- * layer** — the sets simply never intersect, every component behaves impeccably, and
- * the feature silently shows one conversation twice. With identity as
- * `(environment, agent, nativeId)` throughout, that comparison cannot be written.
- *
- * Two sources still feed the list, but they are the same *kind* of row and are
- * combined rather than ranked apart:
- *
- * - **The cached listing, filtered locally.** Instant, and it is what makes an empty
- *   query useful — the recent sessions, which is what a picker opened by muscle memory
- *   wants.
- * - **`GET /search`, for text inside transcripts the browser never loaded.** Debounced
- *   and gated on a real query, because FTS5 is orders of magnitude slower than every other read here
- *   is sub-millisecond. That is not politeness: bound to keystrokes it is a load
- *   generator.
- *
- * A session matched locally *and* by the index is one row, deduplicated by id — which
- * is now a safe comparison, since both sides carry the same id.
- */
-
-import { useRouter } from "next/navigation";
-import { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { api, type Session } from "@/lib/api";
-import { formatRelative, sessionLabel, shortenHome } from "@/lib/format";
-import { liveSessionsQuery } from "@/lib/sessions-query";
-import { workspacesQuery } from "@/lib/workspaces-query";
-import { relayName, useEnvironments } from "@/lib/environments";
-import { fuzzyRank } from "@/lib/fuzzy";
-import { useDebounced } from "@/lib/use-debounced";
-import { useWorkspaceUI } from "@/lib/workspace-ui";
 import { useT } from "@/lib/i18n";
-import { EnvironmentChip, FidelityMarker } from "@/components/badges";
-import { Overlay } from "@/components/overlay";
-import {
-  SelectFilter,
-  SelectRows,
-  SelectScroll,
-  useSelectList,
-} from "@/components/ui/select-list";
-import type { SelectChoice } from "@/lib/select-list";
+import Link from "next/link";
+import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { liveSessionsQuery } from "@/lib/sessions-query";
+import { useWorkspaceUI } from "@/lib/workspace-ui";
+import { useTraceResource } from "@/lib/use-trace-resource";
+import { rememberTraceNavigation } from "@/lib/trace-cache";
+import { traceAPI } from "@/lib/trace-api";
+import { agentName, agentUrl, type TraceView } from "@/lib/trace-types";
+import { sessionLabel } from "@/lib/format";
+import { Overlay } from "./overlay";
 
-/** Rows with no query: recent sessions, which is what muscle memory wants. */
-const RECENT_ROWS = 8;
-
-/** Cap per source, so one cannot bury the other. */
-const PER_SOURCE = 12;
-
-/** One row: a session, plus the transcript excerpt that matched it, when one did. */
-interface Hit {
-  session: Session;
-  /** Only ever set by the index — a local match is on the label, which is visible. */
-  excerpt?: string;
-  seq?: number;
-}
-
+/** Global search consumes normalized, snapshot-scoped hits, never vendor event sequences. */
 export function SearchOverlay() {
   const t = useT();
-  const router = useRouter();
   const { closeOverlay } = useWorkspaceUI();
-
-  /**
-   * The query lives here, not in the list.
-   *
-   * It has to: it drives a debounced request to the backend, so this component reads
-   * it, and the ranking below is the caller's own for the reason spelled out at
-   * `useSelectList`'s `external` option — index hits are ordered by a full-text score
-   * over transcripts the browser never loaded. The cursor still belongs to the list,
-   * which is the half that had two owners before.
-   */
+  const [text, setText] = useState("");
   const [query, setQuery] = useState("");
-  const debounced = useDebounced(query);
-
-  // The same declaration the sidebar and the start screen use, so opening search
-  // reads their cache entry instead of issuing a listing of its own. This used to
-  // hand-write the key and the limit, which deduped only as long as both spellings
-  // happened to agree.
-  const sessionsQuery = useQuery(liveSessionsQuery());
-
-  const workspacesResult = useQuery(workspacesQuery());
-
-  const environments = useEnvironments();
-
-  // Gated on a query worth a full-text scan. Two characters rather than one,
-  // matching `docs/api/sessions.md` § Search: a single letter matches most of a real
-  // store and answers a question nobody asked.
-  const indexQuery = useQuery({
-    queryKey: ["search", debounced],
-    queryFn: () => api.search(debounced, PER_SOURCE),
-    enabled: debounced.trim().length >= 2,
-  });
-
-  const hits = useMemo<Hit[]>(() => {
-    const sessions = sessionsQuery.data?.sessions ?? [];
-    const local: Hit[] = (
-      query.trim()
-        ? fuzzyRank(sessions, query, (session) => [
-            sessionLabel(session),
-            session.agent,
-            session.workdir,
-          ]).map((result) => result.item)
-        : sessions.slice(0, RECENT_ROWS)
-    )
-      .slice(0, PER_SOURCE)
-      .map((session) => ({ session }));
-
-    // Deduplicated by session id, which is the comparison that used to be
-    // unwritable. Local rows come first and win, because a row already in cache
-    // carries the same session and its label matched something the user can see.
-    const seen = new Set(local.map((hit) => hit.session.id));
-    const indexed: Hit[] = (indexQuery.data?.results ?? [])
-      .filter((result) => !seen.has(result.session.id))
-      .slice(0, PER_SOURCE)
-      .map((result) => ({
-        session: result.session,
-        excerpt: result.bestMatch?.excerpt?.replace(/\s+/g, " "),
-        seq: result.bestMatch?.seq,
-      }));
-
-    return [...local, ...indexed];
-  }, [sessionsQuery.data, indexQuery.data, query]);
-
-  const homes = useMemo(() => new Map((workspacesResult.data?.workspaces ?? []).map((w) => [w.environment, w.home])), [workspacesResult.data]);
-
-  const items = useMemo<SelectChoice[]>(
-    () =>
-      hits.map(({ session, excerpt, seq }) => ({
-        label: sessionLabel(session),
-        detail: `${session.agent}${
-          session.workdir ? ` · ${shortenHome(session.workdir, homes.get(session.environment))}` : ""
-        }`,
-        // Why this row is here at all, when the match was inside the transcript: the
-        // index matched words the title does not contain, so without the snippet the
-        // row is a label that has nothing to do with what was typed.
-        excerpt,
-        meta: (
-          <span className="flex items-center gap-1.5">
-            <FidelityMarker value={session.fidelity} />
-            {environments.showEnvironment && (
-              <EnvironmentChip
-                name={environments.nameOf(session.environment) ?? session.environment}
-                reachableVia={relayName(session.environment, environments)}
-              />
-            )}
-            {formatRelative(session.updatedAtMs)}
-          </span>
-        ),
-        // Every hit opens. There is no import step and no second destination, which
-        // is what deleted this surface's mutation, its pending badge, and its error
-        // footer along with the archive.
-        onSelect: () => {
-          closeOverlay();
-          router.push(`/sessions/${encodeURIComponent(session.id)}${seq === undefined ? "" : `?seq=${seq}`}`);
-        },
-      })),
-    [hits, homes, environments, closeOverlay, router],
+  const [cursor, setCursor] = useState<string | null>(null);
+  const [searchView, setSearchView] = useState<TraceView | null>(null);
+  const recent = useQuery(liveSessionsQuery());
+  const result = useTraceResource(
+    query ? `global-search:${query}:${cursor ?? ""}` : null,
+    (signal) =>
+      traceAPI.globalSearch(query, cursor, signal, searchView).then((page) => {
+        setSearchView(page.view);
+        return page;
+      }),
+    0,
+    false,
   );
-
-  // `searchable: true` and `external`: the field is the surface's whole point, and the
-  // ranking is this component's. No `onClose` — a row navigates, and Escape belongs to
-  // `Overlay`.
-  const list = useSelectList(items, {
-    searchable: true,
-    external: { query, setQuery },
-  });
-
   return (
-    <Overlay title={t("search.title")} onClose={closeOverlay} describedBy="search-hint">
-      <SelectFilter
-        list={list}
-        name={t("search.results")}
-        // Not "Filter results": this query reaches an index over transcripts that were
-        // never sent to the browser, so it searches rather than narrows, and the name a
-        // screen reader reads has to say which.
-        label={t("search.field")}
-        placeholder={t("search.placeholder")}
-        size="roomy"
-        trailing={
-          indexQuery.isFetching ? (
-            <span className="shrink-0 text-3xs text-ink-muted">
-              {t("search.searching")}
-            </span>
-          ) : undefined
-        }
-      />
-
-      <SelectScroll list={list} label={t("search.results")} fill>
-        {list.rows.length === 0 ? (
-          <p className="px-3 py-6 text-center text-xs text-ink-muted">
-            {query.trim() ? t("search.none") : t("search.empty")}
-          </p>
-        ) : (
-          <SelectRows list={list} />
-        )}
-      </SelectScroll>
-
-      <footer
-        id="search-hint"
-        className="flex shrink-0 items-center justify-between gap-2 border-t border-line bg-sunken px-3 py-1.5 text-3xs text-ink-muted"
+    <Overlay title={t("trace.findConversations")} onClose={closeOverlay} autoFocus>
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          setQuery(text.trim());
+          setCursor(null);
+          setSearchView(null);
+        }}
+        className="flex gap-2 p-3"
       >
-        <span>{t("search.keys")}</span>
-        {/* A failed index read is reported rather than swallowed. It used to be an
-            "archive unavailable" note, which was a different claim — that an optional
-            external process was absent. This one is an actual failure, so it says so
-            and the locally-matched rows above it are still usable. */}
-        {indexQuery.error && (
-          <span role="alert" className="text-warning">
-            {t("search.indexFailed")}
-          </span>
+        <input
+          aria-label={t("trace.searchConversations")}
+          value={text}
+          onChange={(event) => setText(event.target.value)}
+          className="min-h-11 min-w-0 flex-1 rounded border border-line bg-canvas px-3 text-base"
+          placeholder={t("trace.searchConversations")}
+        />
+        <button className="min-h-11 rounded border border-line px-3 focus-ring">
+          {t("trace.search")}
+        </button>
+      </form>
+      <div className="max-h-[65dvh] overflow-auto p-3">
+        {query ? (
+          <>
+            {result.pending && (
+              <p role="status">{t("trace.searchingHistory")}</p>
+            )}
+            {result.error && <p role="alert">{result.error.message}</p>}
+            <ul className="space-y-3">
+              {result.data?.items.map((hit) => (
+                <li
+                  key={`${hit.agent.address}:${hit.anchor}`}
+                  className="rounded border border-line p-3"
+                >
+                  <h3 className="text-sm font-medium">
+                    {agentName(hit.agent, t)}
+                  </h3>
+                  <p className="my-2 whitespace-pre-wrap text-sm">
+                    {hit.excerpt}
+                  </p>
+                  <Link
+                    className="inline-block min-h-11 py-2 text-sm underline focus-ring"
+                    href={agentUrl(
+                      hit.agent.address,
+                      hit.history.selection,
+                      hit.anchor,
+                    )}
+                    onClick={() => {
+                      if (result.data)
+                        rememberTraceNavigation(
+                          hit.agent.address,
+                          hit.history.selection,
+                          hit.anchor,
+                          result.data.view,
+                        );
+                      closeOverlay();
+                    }}
+                  >
+                    {t("trace.openResult")}
+                  </Link>
+                  <p className="text-xs text-ink-muted">
+                    Matched {hit.history.label} at retained view{" "}
+                    {result.data?.view.viewRevision}
+                  </p>
+                </li>
+              ))}
+            </ul>
+            {result.data && (
+              <p className="my-2 text-xs text-ink-muted">
+                {result.data.total.scope} ·{" "}
+                {result.data.total.complete
+                  ? "Complete index scope"
+                  : "Partial index coverage"}
+              </p>
+            )}
+            <button
+              className="min-h-11 rounded px-3 focus-ring"
+              disabled={!result.data?.hasAfter || result.pending}
+              onClick={() => setCursor(result.data?.afterCursor ?? null)}
+            >
+              {t("trace.moreSearch")}
+            </button>
+          </>
+        ) : (
+          <>
+            <h3 className="mb-2 text-sm font-medium">{t("trace.recent")}</h3>
+            <ul>
+              {recent.data?.sessions.slice(0, 12).map((session) => (
+                <li key={session.id}>
+                  <Link
+                    className="block min-h-11 rounded px-2 py-2 text-sm hover:bg-hover focus-ring"
+                    href={agentUrl(session.traceAgentRef)}
+                    onClick={closeOverlay}
+                  >
+                    {sessionLabel(session)}
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          </>
         )}
-      </footer>
+      </div>
     </Overlay>
   );
 }

@@ -557,14 +557,18 @@ impl CaptureAttachment {
 #[serde(rename_all = "snake_case")]
 pub enum TransportKind {
     LiveStdout,
+    LiveStdin,
     LiveStderr,
     NativeJsonl,
     NativeSnapshot,
     NativeDatabase,
     Sidecar,
+    PayloadBytes,
     Control,
     Supervisor,
     SourceInventory,
+    SourceAttachment,
+    SourceState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

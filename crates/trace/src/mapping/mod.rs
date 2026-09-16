@@ -8,6 +8,8 @@ use sylph_protocol::trace::*;
 pub mod claude;
 pub mod codex;
 pub mod inventory;
+pub mod attachment;
+pub mod observation;
 pub mod pi;
 pub mod server;
 
@@ -19,6 +21,10 @@ pub mod server;
     rename_all_fields = "camelCase"
 )]
 pub enum ArchiveRequest {
+    ContinueHistory,
+    HistorySource { source:SourceRef, generation:u64 },
+    CapturedPayload {parent:ObservationRef,slot:String},
+    AttachmentTarget {parent:ObservationRef,slot:String,locator:String},
     Object {
         object_ref: AnyObjectRef,
     },
@@ -65,12 +71,26 @@ pub struct MapperState {
     pub values: BTreeMap<String, serde_json::Value>,
 }
 
+#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
+pub struct CapturedPayloadBinding {
+    pub parent:ObservationRef,
+    pub slot:String,
+    pub attachment:CaptureAttachment,
+    pub evidence:Vec<ObservationRef>,
+}
+#[derive(Debug,Clone,PartialEq,Eq)]
+pub struct CapturedPayload {pub bindings:Vec<CapturedPayloadBinding>,pub bytes:Option<Vec<u8>>,pub limited:bool}
+pub fn captured_payload_key(parent:&ObservationRef,slot:&str)->String {serde_json::to_string(&(parent,slot)).expect("typed captured payload key")}
+
 /// Only evidence-proved inventory and correlation data may populate this context.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ArchiveContext {
+    pub captured_payloads:BTreeMap<String,CapturedPayload>,
     pub agents: BTreeMap<AgentRef, AgentThread>,
     pub correlations: BTreeMap<String, AnyObjectRef>,
     pub source_prefixes: BTreeMap<SourceRef, Vec<SourceExtent>>,
+    pub source_definitions: BTreeMap<(SourceRef,u64), codex::history::RecordedSource>,
+    pub history_records: codex::history::HistoryRecords,
     pub observations: std::collections::BTreeSet<ObservationRef>,
     pub correlation_evidence: BTreeMap<String, Vec<ObservationRef>>,
     pub history_entries: BTreeMap<EntryRef, HistoryEntry>,
@@ -78,6 +98,7 @@ pub struct ArchiveContext {
     pub source_owners: BTreeMap<(SourceRef, u64), SourceOwner>,
     pub object_evidence: BTreeMap<AnyObjectRef, Vec<ObservationRef>>,
     pub observation_sources: BTreeMap<ObservationRef, SourcePosition>,
+    pub result_operations:BTreeMap<ResultRef,OperationRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,6 +126,7 @@ pub struct MapInput<'a> {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MapOutput {
+    pub capture_payload_bindings:Vec<CapturedPayloadBinding>,
     pub claims: Vec<Claim>,
     pub payloads: Vec<DerivedPayload>,
     pub state: MapperState,
@@ -114,6 +136,9 @@ pub struct MapOutput {
     pub correlation_evidence: BTreeMap<String, Vec<ObservationRef>>,
     pub bound_agents: Vec<AgentRef>,
     pub source_owners: Vec<SourceOwnership>,
+    pub source_definitions: Vec<codex::history::RecordedSource>,
+    pub history_records: Vec<codex::history::HistoryRecord>,
+    pub continuation_state: Option<MapperState>,
 }
 
 /// A source without an evidenced agent can still report why mapping is unavailable.
@@ -128,6 +153,8 @@ pub struct MappingDiagnostic {
 pub fn correlation_key(agent: &AgentRef, namespace: &str, key: &[String]) -> String {
     serde_json::to_string(&(agent, namespace, key)).expect("typed correlation key serialization")
 }
+
+pub fn attachment_key(parent:&ObservationRef,slot:&str,locator:&str)->String {serde_json::to_string(&("source-attachment",parent,slot,locator)).expect("typed attachment relation key")}
 
 pub fn command_identity_key(issuer: &Issuer, command_id: &str) -> String {
     serde_json::to_string(&("command_identity", issuer, command_id))

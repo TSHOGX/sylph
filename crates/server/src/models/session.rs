@@ -9,7 +9,7 @@ use sylph_protocol::{AgentName, EnvironmentId, Fidelity, NativeId, SessionId};
 /// # Why a decode error rather than a lossy fallback
 ///
 /// [`EnvironmentId::parse`] and [`AgentName::parse`] can both fail, and a failure
-/// here means the journal holds a row whose key is not a well-formed identity. That
+/// here means the operational store holds a row whose key is not a well-formed identity. That
 /// is a corrupt store, so it surfaces as a `sqlx` decode error naming the column —
 /// loudly, at the one moment someone is looking.
 ///
@@ -96,8 +96,12 @@ mod session_id_fields {
     use serde::{Deserializer, Serializer};
 
     pub fn serialize<S: Serializer>(id: &SessionId, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut map = serializer.serialize_map(Some(4))?;
+        let mut map = serializer.serialize_map(Some(5))?;
         map.serialize_entry("id", &id.encode())?;
+        map.serialize_entry(
+            "traceAgentRef",
+            &sylph_protocol::trace::AgentRef::Session(id.clone()).encode(),
+        )?;
         map.serialize_entry("environment", id.environment.as_str())?;
         map.serialize_entry("agent", id.agent.as_str())?;
         map.serialize_entry("nativeId", id.native_id.as_str())?;

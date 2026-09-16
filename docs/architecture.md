@@ -20,7 +20,7 @@ are tracked in [roadmap.md](roadmap.md#unified-trace-foundation-review).
                   │  HTTP + SSE, same origin
         ┌─────────▼──────────────────────────────┐
         │  sylph-server  (+ web, same origin)    │
-        │  sessions · turns · links · policy     │
+        │  sessions · controls · links · policy  │
         │  control · evidence · projections      │
         │  THE authoritative record              │
         └─────────▲──────────────────────────────┘

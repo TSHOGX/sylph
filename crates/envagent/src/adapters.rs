@@ -27,9 +27,8 @@ use sylph_protocol::Adapter;
 ///
 /// # This is a test seam, **not** a plug-in point
 ///
-/// It has exactly two implementations and is meant to: [`LinkedAdapters`] in production
-/// and the server's integration suite's mock. **Do not add a third to load user-supplied
-/// adapters.** There is deliberately no adapter directory — the escape hatch for "a
+/// Production uses [`LinkedAdapters`]; tests substitute controlled sources. User-supplied
+/// adapters are not loaded. There is deliberately no adapter directory — the escape hatch for "a
 /// vendor changed faster than the shipped adapter" is upgrading the envagent on that one
 /// machine (`docs/configuration.md`) — and a trait shaped like an extension point is an
 /// invitation to put one back.

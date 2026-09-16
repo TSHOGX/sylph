@@ -47,7 +47,8 @@ fn control_scope(
     let command_id = match fact {
         OperationalFact::Accepted { command } => &command.command_id,
         OperationalFact::Dispatched { command_id, .. }
-        | OperationalFact::Delivery { command_id, .. } => command_id,
+        | OperationalFact::Delivery { command_id, .. }
+        | OperationalFact::Revised {command_id,..} => command_id,
         OperationalFact::IdentityBound { .. } => unreachable!(),
     };
     if let OperationalFact::Accepted { command } = fact {
@@ -174,7 +175,7 @@ impl SemanticMapper for ServerMapper {
                 }
                 let missing: Vec<_> = source_evidence
                     .iter()
-                    .filter(|reference| !input.archive.observations.contains(*reference))
+                    .filter(|reference| !input.archive.observations.contains(*reference)||!input.archive.observation_sources.contains_key(*reference))
                     .cloned()
                     .collect();
                 if !missing.is_empty() {
@@ -209,6 +210,9 @@ impl SemanticMapper for ServerMapper {
                 }
                 let key = command_identity_key(&input.capture.observation_ref.issuer, &command_id);
                 output.bound_agents.push(agent_ref.clone());
+                for observation in &source_evidence {if let Some(position)=input.archive.observation_sources.get(observation) {
+                    output.source_owners.push(super::SourceOwnership {source:position.source.clone(),generation:position.generation,owner:super::SourceOwner {agent:agent_ref.clone(),evidence:vec![observation.clone(),input.canonical_observation.clone()],rule:"server/native-identity-binding".into()}});
+                }}
                 output
                     .correlations
                     .insert(key.clone(), AnyObjectRef::Agent(agent_ref));
@@ -254,8 +258,8 @@ impl SemanticMapper for ServerMapper {
                 output.payloads.push(submitted);
                 let correlation = correlation_key(
                     scope,
-                    "sylph.command",
-                    std::slice::from_ref(&command.command_id),
+                    "sylph.command.revision",
+                    &[command.command_id.clone(),command.input.revision.clone()],
                 );
                 output.correlation_evidence.insert(
                     correlation.clone(),
@@ -335,30 +339,14 @@ impl SemanticMapper for ServerMapper {
                             message,
                             representation: Representation::Submitted,
                             form: RevisionForm::Complete,
-                            parts: vec![ContentPart {
-                                media_type: Some(command.input.media_type.clone()),
-                                encoding: submitted_encoding,
-                                part_ref: MessagePartRef::native(
-                                    scope.clone(),
-                                    "sylph.command.part",
-                                    vec![
-                                        command.command_id.clone(),
-                                        command.input.revision,
-                                        "0".into(),
-                                    ],
-                                )
-                                .unwrap(),
-                                kind: if command.input.media_type.starts_with("text/") {
-                                    ContentKind::Text
-                                } else {
-                                    ContentKind::Attachment
-                                },
-                                payload,
-                            }],
+                            parts: match submitted_parts(&input,scope,&command.command_id,&command.input,&mut output.payloads) {
+                                Ok(parts)=>parts,
+                                Err(reason)=>{output.diagnostics.push(MappingDiagnostic {evidence:vec![input.canonical_observation.clone()],code:DiagnosticCode::DecodeFailure,message:reason});return output;}
+                            },
                         }),
                     },
                 );
-                let delivery = delivery(scope, &command.command_id);
+                let delivery = delivery(scope, &command.command_id,&command.input.revision);
                 output
                     .correlations
                     .insert(correlation, AnyObjectRef::Delivery(delivery.clone()));
@@ -397,6 +385,21 @@ impl SemanticMapper for ServerMapper {
                     );
                 }
             }
+            OperationalFact::Revised {command_id,previous_revision,input:revision,authorization}=>{
+                let author=Author::Human {subject:Some(authorization.subject)};
+                let message=MessageRef::native(scope.clone(),"sylph.command.message",vec![command_id.clone()]).unwrap();
+                let revision_ref=MessageRevisionRef::native(scope.clone(),"sylph.command.revision",vec![command_id.clone(),revision.revision.clone()]).unwrap();
+                let parts=submitted_parts(&input,scope,&command_id,&revision,&mut output.payloads);
+                let parts=match parts {Ok(parts)=>parts,Err(reason)=>{add("server/invalid-revision",diagnostic(scope,DiagnosticCode::DecodeFailure,&reason));return output;}};
+                add("server/submitted-message",Fact::Declare {object:TraceObject::Message(Message {message_ref:message.clone(),author:author.clone(),protocol_role:None,purpose:MessagePurpose::TaskInput,production:None})});
+                add("server/submitted-revision",Fact::Declare {object:TraceObject::MessageRevision(MessageRevision {revision_ref:revision_ref.clone(),message,representation:Representation::Submitted,form:RevisionForm::Correction {replaces:MessageRevisionRef::native(scope.clone(),"sylph.command.revision",vec![command_id.clone(),previous_revision.clone()]).unwrap()},parts})});
+                let delivery=delivery(scope,&command_id,&revision.revision);
+                add("server/previous-queue-cancelled",Fact::DeliveryStage {delivery:self::delivery(scope,&command_id,&previous_revision),stage:DeliveryStage::Cancelled {reason:Some("Queued input was revised before dispatch".into())}});
+                add("server/revised-delivery",Fact::Declare {object:TraceObject::Delivery(Delivery {delivery_ref:delivery.clone(),sender:author,recipient:Recipient::Agent {agent:OwnerRef::Agent {agent:scope.clone()}},message_revision:revision_ref,route:DeliveryRoute::ServerCommand {command_id:command_id.clone()}})});
+                add("server/revised-queue",Fact::DeliveryStage {delivery:delivery.clone(),stage:DeliveryStage::Queued});
+                let key=correlation_key(scope,"sylph.command.revision",&[command_id,revision.revision]);
+                output.correlations.insert(key.clone(),AnyObjectRef::Delivery(delivery));output.correlation_evidence.insert(key,vec![input.canonical_observation.clone()]);
+            }
             OperationalFact::Dispatched { command_id, .. } => {
                 // A transport attempt establishes neither receiver acceptance nor
                 // execution. Its exact operational fact remains retained evidence.
@@ -411,7 +414,7 @@ impl SemanticMapper for ServerMapper {
                     );
                 }
             }
-            OperationalFact::Delivery { command_id, fact } => {
+            OperationalFact::Delivery { command_id, input_revision, fact } => {
                 if command_id.is_empty() {
                     add(
                         "server/invalid-delivery",
@@ -424,12 +427,12 @@ impl SemanticMapper for ServerMapper {
                     return output;
                 }
                 let key =
-                    correlation_key(scope, "sylph.command", std::slice::from_ref(&command_id));
+                    correlation_key(scope, "sylph.command.revision", &[command_id.clone(),input_revision.clone()]);
                 let Some(target) = input.archive.correlations.get(&key) else {
                     output.requests.push(ArchiveRequest::Correlation {
                         agent: scope.clone(),
-                        namespace: "sylph.command".into(),
-                        key: vec![command_id],
+                        namespace: "sylph.command.revision".into(),
+                        key: vec![command_id,input_revision],
                     });
                     return output;
                 };
@@ -529,11 +532,11 @@ impl SemanticMapper for ServerMapper {
     }
 }
 
-fn delivery(scope: &AgentRef, command_id: &str) -> DeliveryRef {
+fn delivery(scope: &AgentRef, command_id: &str,input_revision:&str) -> DeliveryRef {
     DeliveryRef::native(
         scope.clone(),
         "sylph.command.delivery",
-        vec![command_id.into()],
+        vec![command_id.into(),input_revision.into()],
     )
     .unwrap()
 }
@@ -545,6 +548,32 @@ fn operation(scope: &AgentRef, command_id: &str) -> OperationRef {
         vec![command_id.into()],
     )
     .unwrap()
+}
+
+fn submitted_parts(input:&MapInput<'_>,scope:&AgentRef,command_id:&str,revision:&SubmittedRevision,payloads:&mut Vec<super::DerivedPayload>)->Result<Vec<ContentPart>,String> {
+    use base64::Engine;
+    let mut bodies=Vec::new();
+    if revision.media_type=="application/vnd.sylph.input+json" {
+        let value:serde_json::Value=serde_json::from_slice(&revision.bytes).map_err(|error|error.to_string())?;
+        if let Some(text)=value.get("text").and_then(serde_json::Value::as_str) {bodies.push((text.as_bytes().to_vec(),"text/plain".to_owned(),ContentKind::Text,PayloadEncoding::Utf8,"/text".to_owned()));}
+        let attachments=value.get("attachments").and_then(serde_json::Value::as_array).ok_or_else(||"Multipart input omits attachments array".to_owned())?;
+        for (index,attachment) in attachments.iter().enumerate() {
+            let mime=attachment.get("type").and_then(serde_json::Value::as_str).ok_or_else(||"Attachment omits its MIME type".to_owned())?;
+            let data=attachment.get("data").and_then(serde_json::Value::as_str).ok_or_else(||"Attachment omits bytes".to_owned())?;
+            let bytes=base64::engine::general_purpose::STANDARD.decode(data).map_err(|error|error.to_string())?;
+            let kind=if mime.starts_with("image/"){ContentKind::Image}else if mime.starts_with("audio/"){ContentKind::Audio}else if mime.starts_with("video/"){ContentKind::Video}else{ContentKind::Attachment};
+            bodies.push((bytes,mime.into(),kind,PayloadEncoding::Binary,format!("/attachments/{index}/data")));
+        }
+    } else {
+        let encoding=if std::str::from_utf8(&revision.bytes).is_ok(){PayloadEncoding::Utf8}else{PayloadEncoding::Binary};
+        bodies.push((revision.bytes.clone(),revision.media_type.clone(),if revision.media_type.starts_with("text/"){ContentKind::Text}else{ContentKind::Attachment},encoding,"/command/input/bytes".into()));
+    }
+    let mut parts=Vec::new();
+    for (index,(bytes,mime,kind,encoding,selector)) in bodies.into_iter().enumerate() {
+        let payload=derived_payload_with_media(input,bytes,selector,"server/base64-submitted-bytes",mime.clone(),encoding);
+        parts.push(ContentPart {part_ref:MessagePartRef::native(scope.clone(),"sylph.command.part",vec![command_id.into(),revision.revision.clone(),index.to_string()]).map_err(|error|error.to_string())?,kind,payload:payload.reference.clone(),media_type:Some(mime),encoding});payloads.push(payload);
+    }
+    Ok(parts)
 }
 
 fn diagnostic(scope: &AgentRef, code: DiagnosticCode, message: &str) -> Fact {

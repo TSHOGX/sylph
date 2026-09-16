@@ -130,7 +130,6 @@ describe("reserved combos", () => {
       "toggleRightSidebar",
       "openSettings",
       "stopTurn",
-      "collapseAll",
       "findInSession",
     ]) {
       expect(bound.has(action as never), `${action} has no default binding`).toBe(true);

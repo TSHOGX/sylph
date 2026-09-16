@@ -113,33 +113,9 @@ export interface FormAnswer {
   notes?: Record<string, string>;
 }
 
-/**
- * Parse a request's declared form. `null` when it declared none, which means the
- * older `detail`-rendering path — right for an approval, whose subject is one
- * proposed tool input.
- *
- * Never throws. A malformed form renders as no form rather than breaking the dialog
- * that has to display it, matching `requestDetail`/`requestOptions`: the request is
- * still answerable through its options, and refusing to render leaves the agent
- * blocked over a display concern.
- */
+/** Request forms arrive as typed fields, with no second JSON or vendor parsing layer. */
 export function requestFormOf(request: PendingRequest): RequestForm | null {
-  if (!request.formJson) return null;
-  try {
-    const parsed = JSON.parse(request.formJson);
-    if (!parsed || typeof parsed !== "object") return null;
-    const fields = (parsed as RequestForm).fields;
-    if (!Array.isArray(fields)) return null;
-    const usable = fields.filter(
-      (field) =>
-        field &&
-        typeof field.id === "string" &&
-        (field.type === "select" || field.type === "text"),
-    );
-    return usable.length > 0 ? { fields: usable } : null;
-  } catch {
-    return null;
-  }
+  return request.form ?? null;
 }
 
 export function selectMode(field: SelectField): "one" | "many" {

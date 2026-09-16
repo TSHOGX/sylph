@@ -1,0 +1,555 @@
+//! Shared product trace runtime: durable stores, projection, publication and read leases.
+
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
+use sylph_protocol::trace::*;
+use sylph_trace::mapping::{self, SemanticMapper};
+use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, RwLock, Semaphore};
+
+use super::{
+    cas::BlobStore,
+    evidence::catalogue::{CatalogueLimits, EvidenceCatalogue, ViewLease},
+    evidence::{AdmissionLimits, EvidenceStore},
+    gc::{GcLimits, TraceGarbageCollector},
+    generation::{GenerationManifest, GenerationStore, QueryLimits},
+    publication::{PublicationCoordinator, PublicationLimits},
+    search::{SearchError, SearchLimits},
+    upload::{CaptureUploads, UploadLimits},
+    worker::{ProjectionWorker, WorkerLimits, WorkerProgress},
+};
+mod search;
+#[cfg(test)]
+mod tests;
+
+#[derive(Clone)]
+pub struct TraceService {
+    root: PathBuf,
+    _archive_lock: Arc<std::fs::File>,
+    evidence: EvidenceStore,
+    catalogue: EvidenceCatalogue,
+    uploads: CaptureUploads,
+    worker: ProjectionWorker,
+    publication: PublicationCoordinator,
+    generations: Arc<RwLock<BTreeMap<String, Arc<GenerationStore>>>>,
+    wake: Arc<Notify>,
+    projection: Arc<Mutex<()>>,
+    progress: Arc<RwLock<ServiceProgress>>,
+    limits: ReadLimits,
+    queries: QueryLimits,
+    changes: tokio::sync::watch::Sender<u64>,
+    searches: Arc<RwLock<BTreeMap<String, Arc<super::search::SearchStore>>>>,
+    search_wake: Arc<Notify>,
+    search_gate: Arc<Mutex<()>>,
+    search_limits: SearchLimits,
+    search_queries: Arc<Semaphore>,
+    recovery: Arc<RwLock<Option<String>>>,
+    gc: TraceGarbageCollector,
+}
+
+/// A newly reserved view belongs to its request until the successful response
+/// retains it. Failed/cancelled requests release their reservation automatically;
+/// borrowing an existing client view never transfers ownership to the request.
+pub struct LeaseGuard {
+    view: ViewLease,
+    release: Option<LeaseRelease>,
+}
+impl std::fmt::Debug for LeaseGuard {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LeaseGuard")
+            .field("snapshot", &self.view.snapshot)
+            .finish()
+    }
+}
+impl std::ops::Deref for LeaseGuard {
+    type Target = ViewLease;
+    fn deref(&self) -> &Self::Target {
+        &self.view
+    }
+}
+impl LeaseGuard {
+    pub fn retain(&self) {
+        if let Some(release) = &self.release {
+            release.armed.store(false, Ordering::Relaxed);
+        }
+    }
+}
+struct LeaseRelease {
+    catalogue: EvidenceCatalogue,
+    subject: String,
+    token: String,
+    armed: AtomicBool,
+}
+impl Drop for LeaseRelease {
+    fn drop(&mut self) {
+        if !self.armed.load(Ordering::Relaxed) {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let catalogue = self.catalogue.clone();
+        let subject = self.subject.clone();
+        let token = self.token.clone();
+        runtime.spawn(async move {
+            if let Err(error) = catalogue.expire_lease(&subject, &token).await {
+                tracing::debug!(%error,"failed request view release could not finish");
+            }
+        });
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum TraceServiceError {
+    #[error("Trace projection is recovering from retained evidence: {0}")]
+    Recovering(String),
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ServiceProgress {
+    pub worker: WorkerProgress,
+    pub fault: Option<String>,
+}
+
+impl TraceService {
+    pub async fn open(root: &Path) -> anyhow::Result<Self> {
+        tokio::fs::create_dir_all(root).await?;
+        // Recovery resets process-owned publication/GC guards. An advisory file
+        // lock, retained for the entire service lifetime, proves no other product
+        // writer can still commit into the old generation during that reset.
+        let archive_lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(root.join("trace.lock"))?;
+        archive_lock.try_lock().map_err(|error| {
+            anyhow::anyhow!("Trace archive is already open by another server: {error}")
+        })?;
+        let admission = AdmissionLimits::default();
+        let queries = QueryLimits::default();
+        let evidence = EvidenceStore::open(
+            root.join("evidence.db"),
+            BlobStore::new(root.join("blobs")),
+            admission.clone(),
+        )
+        .await?;
+        let catalogue = EvidenceCatalogue::new(evidence.clone(), CatalogueLimits::default())?;
+        let uploads = CaptureUploads::new(catalogue.clone(), UploadLimits::default())?;
+        let worker =
+            ProjectionWorker::new(evidence.clone(), catalogue.clone(), WorkerLimits::default())?;
+        let publication = PublicationCoordinator::new(
+            catalogue.clone(),
+            root.to_path_buf(),
+            PublicationLimits {
+                queries: queries.clone(),
+                ..PublicationLimits::default()
+            },
+        )?;
+        let limits = ReadLimits {
+            max_items: queries.max_items,
+            max_summary_bytes: queries.max_summary_bytes,
+            max_preview_bytes: queries.max_preview_bytes,
+            max_payload_bytes: admission.max_chunk_bytes,
+            max_change_items: queries.max_batch_changes,
+            max_mounted_rows: 200,
+            max_metadata_cache_bytes: 16 * 1024 * 1024,
+            max_payload_cache_bytes: 32 * 1024 * 1024,
+            max_hidden_locations: 10,
+            max_visible_interests: 16,
+        };
+        let (changes, _) = tokio::sync::watch::channel(0);
+        let search_limits = SearchLimits::default();
+        let gc = TraceGarbageCollector::new(catalogue.clone(), GcLimits::default())?;
+        let service = Self {
+            root: root.into(),
+            _archive_lock: Arc::new(archive_lock),
+            evidence,
+            catalogue,
+            uploads,
+            worker,
+            publication,
+            generations: Arc::new(RwLock::new(BTreeMap::new())),
+            wake: Arc::new(Notify::new()),
+            projection: Arc::new(Mutex::new(())),
+            progress: Arc::new(RwLock::new(ServiceProgress::default())),
+            limits,
+            queries,
+            changes,
+            searches: Arc::new(RwLock::new(BTreeMap::new())),
+            search_wake: Arc::new(Notify::new()),
+            search_gate: Arc::new(Mutex::new(())),
+            search_queries: Arc::new(Semaphore::new(search_limits.max_concurrent_queries)),
+            search_limits,
+            recovery: Arc::new(RwLock::new(None)),
+            gc,
+        };
+        service.uploads.recover_interrupted_writes().await?;
+        service.gc.recover_interrupted_pass().await?;
+        // Abandoned private work is disposable, never an alternative active
+        // generation. Cancel it before a new rebuild can consume the job bound.
+        for ticket in service.catalogue.pending_builds().await? {
+            service
+                .catalogue
+                .cancel_build(&ticket, "startup discarded unpublished work")
+                .await?;
+        }
+        match service.publication.recover_active(&service.worker).await {
+            Ok(Some(active)) => {
+                service
+                    .generations
+                    .write()
+                    .await
+                    .insert(active.manifest().generation.clone(), Arc::new(active));
+            }
+            Ok(None) => {
+                service.rebuild().await?;
+            }
+            Err(error @ super::publication::PublicationError::Catalogue(_)) => {
+                return Err(error.into())
+            }
+            Err(error) => {
+                let message = format!("{error:#}");
+                if let Some(generation) = service.catalogue.pointer().await?.generation {
+                    service
+                        .catalogue
+                        .cancel_generation_views(&generation)
+                        .await?;
+                }
+                tracing::error!(%error, "published trace unavailable; rebuilding from retained evidence");
+                *service.recovery.write().await = Some(message.clone());
+                service.progress.write().await.fault = Some(message);
+                service.notify_admission();
+            }
+        }
+        Ok(service)
+    }
+
+    pub fn evidence(&self) -> &EvidenceStore {
+        &self.evidence
+    }
+    pub fn catalogue(&self) -> &EvidenceCatalogue {
+        &self.catalogue
+    }
+    pub fn uploads(&self) -> &CaptureUploads {
+        &self.uploads
+    }
+    pub fn worker(&self) -> &ProjectionWorker {
+        &self.worker
+    }
+    pub fn limits(&self) -> &ReadLimits {
+        &self.limits
+    }
+    pub fn notify_access_changed(&self) {
+        self.changes
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
+    }
+
+    pub fn notify_admission(&self) {
+        self.wake.notify_one();
+    }
+    pub async fn progress(&self) -> ServiceProgress {
+        self.progress.read().await.clone()
+    }
+    pub fn try_search_permit(&self) -> Result<OwnedSemaphorePermit, SearchError> {
+        self.search_queries
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| SearchError::Limit("concurrent search queries"))
+    }
+
+    pub async fn require_available(&self) -> anyhow::Result<()> {
+        if let Some(reason) = self.recovery.read().await.as_ref() {
+            return Err(TraceServiceError::Recovering(reason.clone()).into());
+        }
+        Ok(())
+    }
+
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.changes.subscribe()
+    }
+
+    pub fn spawn(self: &Arc<Self>) {
+        let weak = Arc::downgrade(self);
+        let wake = self.wake.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {_=wake.notified()=>{},_=tokio::time::sleep(std::time::Duration::from_secs(1))=>{}}
+                let Some(service) = weak.upgrade() else {
+                    break;
+                };
+                let projected = service.clone();
+                let result = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()?;
+                    runtime.block_on(projected.project_pending())
+                })
+                .await
+                .unwrap_or_else(|error| Err(error.into()));
+                if let Err(error) = result {
+                    let message = format!("{error:#}");
+                    let mut progress = service.progress.write().await;
+                    if progress.fault.as_ref() == Some(&message) {
+                        tracing::debug!(error=%error,"trace projection remains stalled");
+                    } else {
+                        tracing::error!(error=%error,"trace projection stalled; evidence remains retained");
+                    }
+                    progress.fault = Some(message);
+                }
+            }
+        });
+        let weak = Arc::downgrade(self);
+        let wake = self.search_wake.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {_=wake.notified()=>{},_=tokio::time::sleep(std::time::Duration::from_secs(5))=>{}}
+                let Some(service) = weak.upgrade() else {
+                    break;
+                };
+                // One serialized search pass owns tokenization and source scanning on
+                // a blocking worker; it never occupies an async request executor.
+                match tokio::task::spawn_blocking(move || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()?;
+                    runtime.block_on(service.index_pending())
+                })
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => tracing::debug!(%error,"trace search remains indexing"),
+                    Err(error) => tracing::error!(%error,"trace search worker failed"),
+                }
+            }
+        });
+        let weak = Arc::downgrade(self);
+        tokio::spawn(async move {
+            let mut last_fault = None;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                let Some(service) = weak.upgrade() else {
+                    break;
+                };
+                let result = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()?;
+                    runtime.block_on(async {
+                        let now = crate::models::now_ms();
+                        service.retire_searches(now).await?;
+                        Ok(service.gc.run_once(now).await?)
+                    })
+                })
+                .await
+                .unwrap_or_else(|error| Err(error.into()));
+                match result {
+                    Ok(progress) => {
+                        tracing::debug!(?progress, "trace collection pass completed");
+                        last_fault = None;
+                    }
+                    Err(error) => {
+                        let message = error.to_string();
+                        if last_fault.as_ref() == Some(&message) {
+                            tracing::debug!(%error, "trace collection remains stalled");
+                        } else {
+                            tracing::error!(%error, "trace collection stalled");
+                        }
+                        last_fault = Some(message);
+                    }
+                }
+            }
+        });
+    }
+
+    pub async fn project_pending(&self) -> anyhow::Result<()> {
+        let _gate = self.projection.lock().await;
+        if self.recovery.read().await.is_some() {
+            self.rebuild_locked(true).await?;
+            *self.recovery.write().await = None;
+            self.progress.write().await.fault = None;
+        }
+        if !self.catalogue.active_visibility_is_current().await? {
+            // Deletion changes membership without advancing admission. Replaying a
+            // private generation removes suppressed objects and search membership
+            // atomically while old leased snapshots keep their visibility checks.
+            self.rebuild_locked(false).await?;
+        }
+        let generation = self.active().await?;
+        let checkpoint = generation.checkpoint().await?;
+        let cut = self.evidence.evidence_cut().await?;
+        if cut > checkpoint.snapshot.evidence_cut {
+            let worker = self
+                .worker
+                .catch_up(&generation, checkpoint.fence_token, cut)
+                .await?;
+            *self.progress.write().await = ServiceProgress {
+                worker,
+                fault: None,
+            };
+            self.changes
+                .send_modify(|revision| *revision = revision.wrapping_add(1));
+            self.search_wake.notify_one();
+        }
+        Ok(())
+    }
+
+    pub async fn active(&self) -> anyhow::Result<Arc<GenerationStore>> {
+        self.require_available().await?;
+        let pointer = self.catalogue.pointer().await?;
+        let generation = pointer
+            .generation
+            .ok_or_else(|| anyhow::anyhow!("No trace generation is published"))?;
+        self.generation(&generation).await
+    }
+
+    pub async fn generation(&self, generation: &str) -> anyhow::Result<Arc<GenerationStore>> {
+        self.require_available().await?;
+        if let Some(store) = self.generations.read().await.get(generation) {
+            return Ok(store.clone());
+        }
+        let mut generations = self.generations.write().await;
+        if let Some(store) = generations.get(generation) {
+            return Ok(store.clone());
+        }
+        let ready = self.catalogue.ready_generation(generation).await?;
+        let store = Arc::new(
+            GenerationStore::open(
+                self.root.join(&ready.relative_file),
+                ready.manifest,
+                self.queries.clone(),
+            )
+            .await?,
+        );
+        generations.insert(generation.into(), store.clone());
+        Ok(store)
+    }
+
+    pub async fn lease_guard(
+        &self,
+        subject: &str,
+        token: Option<&str>,
+    ) -> anyhow::Result<LeaseGuard> {
+        self.require_available().await?;
+        let now = crate::models::now_ms();
+        if let Some(token) = token {
+            return Ok(LeaseGuard {
+                view: self.catalogue.resolve_lease(subject, token, now).await?,
+                release: None,
+            });
+        }
+        let pending = self.catalogue.begin_lease(subject, now, 120_000).await?;
+        let release = self.pending_release(subject, &pending.lease_id);
+        let generation = self.generation(&pending.generation).await?;
+        let checkpoint = generation.checkpoint().await?;
+        let view = self
+            .catalogue
+            .finish_lease(&pending, &checkpoint.snapshot, now)
+            .await?;
+        Ok(LeaseGuard {
+            view,
+            release: Some(release),
+        })
+    }
+
+    pub async fn lease_at_snapshot(
+        &self,
+        subject: &str,
+        snapshot: &super::generation::Snapshot,
+    ) -> anyhow::Result<LeaseGuard> {
+        self.require_available().await?;
+        let now = crate::models::now_ms();
+        let pending = self.catalogue.begin_lease(subject, now, 120_000).await?;
+        let release = self.pending_release(subject, &pending.lease_id);
+        let view = self.catalogue.finish_lease(&pending, snapshot, now).await?;
+        Ok(LeaseGuard {
+            view,
+            release: Some(release),
+        })
+    }
+
+    pub async fn release_lease(&self, subject: &str, token: &str) -> anyhow::Result<()> {
+        self.catalogue.expire_lease(subject, token).await?;
+        Ok(())
+    }
+
+    fn pending_release(&self, subject: &str, token: &str) -> LeaseRelease {
+        LeaseRelease {
+            catalogue: self.catalogue.clone(),
+            subject: subject.into(),
+            token: token.into(),
+            armed: AtomicBool::new(true),
+        }
+    }
+
+    pub async fn rebuild(&self) -> anyhow::Result<String> {
+        let _gate = self.projection.lock().await;
+        self.require_available().await?;
+        self.rebuild_locked(false).await
+    }
+
+    async fn rebuild_locked(&self, recovery: bool) -> anyhow::Result<String> {
+        let generation = format!("trace-{}", uuid::Uuid::new_v4());
+        let manifest = GenerationManifest {
+            generation: generation.clone(),
+            semantic_schema: "trace-1".into(),
+            mapper_builds: [
+                ("server", mapping::server::ServerMapper.build()),
+                ("codex", mapping::codex::CodexMapper.build()),
+                ("claude", mapping::claude::ClaudeMapper.build()),
+                ("pi", mapping::pi::PiMapper.build()),
+                ("inventory", mapping::inventory::InventoryMapper.build()),
+                ("attachment", mapping::attachment::AttachmentMapper.build()),
+                (
+                    "observation",
+                    mapping::observation::ObservationMapper.build(),
+                ),
+            ]
+            .into_iter()
+            .map(|(vendor, build)| (vendor.into(), build.into()))
+            .collect(),
+            reducer_build: "trace-reducer-1".into(),
+            capture_inventory_build: "source-inventory-1".into(),
+            encoding_build: "typed-blake3-1".into(),
+        };
+        let (ticket, private) = self
+            .publication
+            .begin_build(manifest, crate::models::now_ms())
+            .await?;
+        let result = if recovery {
+            self.publication
+                .recover_unavailable(&ticket, &private, &self.worker)
+                .await
+        } else {
+            let old = if self.catalogue.pointer().await?.generation.is_some() {
+                Some(self.active().await?)
+            } else {
+                None
+            };
+            self.publication
+                .publish(&ticket, &private, old.as_deref(), &self.worker)
+                .await
+        };
+        if let Err(error) = result {
+            self.catalogue
+                .cancel_build(&ticket, &error.to_string())
+                .await?;
+            return Err(error.into());
+        }
+        self.generations
+            .write()
+            .await
+            .insert(generation.clone(), Arc::new(private));
+        self.changes
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
+        self.notify_admission();
+        self.search_wake.notify_one();
+        Ok(generation)
+    }
+}

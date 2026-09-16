@@ -1,270 +1,174 @@
 import { expect, test } from "@playwright/test";
-import { runExecution, openExecutionGroups } from "./fixtures/execution";
+import {
+  installTraceFixture,
+  message,
+  openTrace,
+  MAIN_AGENT,
+  payload,
+  traceView,
+  agentLink,
+} from "./fixtures/trace";
 
-test("completed work exposes its answer and bounded tool disclosures", async ({
+test("unknown authorship stays readable without becoming human input or an invented activation", async ({
   page,
 }) => {
-  await runExecution(page, "exercise tools please");
-  await expect(page.getByText("Hello from the E2E runner.")).toBeVisible();
-  const summary = page.locator(".reading-work > button").first();
-  await expect(summary).toBeVisible();
-  await summary.click();
-  if ((await summary.getAttribute("aria-expanded")) === "false")
-    await summary.click();
-  const group = page
-    .locator("[data-node-id] > button[aria-expanded]")
-    .filter({ hasText: /file reads/ })
-    .first();
-  await expect(group).toBeVisible();
-  await group.click();
-  await expect(page.locator("[data-tool-window]").first()).toBeVisible();
-  const bounds = await page.locator("[data-tool-window]").first().boundingBox();
-  expect(bounds!.height).toBeLessThanOrEqual(420);
+  const row = message(0, "Source did not identify this author");
+  if (row.content.kind !== "message") throw new Error("message fixture");
+  row.content.author = { kind: "unknown" };
+  await installTraceFixture(page, [row]);
+  await openTrace(page);
   await expect(
-    page
-      .locator(".reading-bubble")
-      .filter({ hasText: "exercise tools please" }),
-  ).toContainText("exercise tools please");
-});
-
-test("delegation opens beside the conversation and returns to the full catalogue", async ({
-  page,
-}) => {
-  const { sessionId, turnId } = await runExecution(
-    page,
-    "delegate this please",
-  );
-  await openExecutionGroups(page, sessionId, turnId);
-  const entry = page
-    .getByRole("region", { name: "Explore delegation" })
-    .getByRole("button")
-    .first();
-  await expect(entry).toBeVisible();
-  await entry.click();
-  const panel = page.getByLabel("Work panel", { exact: true }).first();
-  await expect(
-    panel.getByRole("tab", { name: "Subagents", exact: true }),
-  ).toHaveAttribute("aria-selected", "true");
-  await panel.getByRole("button", { name: "All subagents" }).click();
-  await expect(
-    panel.getByRole("button", { name: "Verify Failed", exact: true }),
+    page.getByRole("heading", { name: "Input · source unknown" }),
   ).toBeVisible();
-  await expect(page.getByText("Fanning out to two agents.")).toBeVisible();
-});
-
-test("hundreds of calls stay bounded and the catalogue remains complete", async ({
-  page,
-}) => {
-  const mounted: number[] = [];
-  for (const count of [50, 500]) {
-    const { sessionId, turnId } = await runExecution(
-      page,
-      `reading benchmark ${count}`,
-    );
-    const response = await page.request.get(
-      `/api/v1/sessions/${encodeURIComponent(sessionId)}/conversation`,
-    );
-    const outline = await response.json();
-    const work = outline.nodes.find(
-      (node: { turnId: string; event: { kind: string } }) =>
-        node.turnId === turnId && node.event.kind === "work",
-    );
-    expect(work.reads).toBe(count);
-    const summary = page.locator(
-      `[data-node-id=${JSON.stringify(work.id)}] > button`,
-    );
-    await summary.click();
-    if ((await summary.getAttribute("aria-expanded")) === "false")
-      await summary.click();
-    const group = page.getByRole("button", {
-      name: `${count} file reads`,
-      exact: true,
-    });
-    await group.click();
-    const window = page
-      .locator("[data-tool-window]")
-      .filter({ hasText: `module_${count - 1}` });
-    await expect(window).toBeVisible();
-    expect((await window.boundingBox())!.height).toBeLessThanOrEqual(420);
-    mounted.push(await window.locator("[data-node-id]").count());
-    expect(mounted.at(-1)).toBeLessThan(30);
-    const showPanel = page.getByRole("button", {
-      name: "Show work panel",
-    });
-    if (await showPanel.isVisible()) await showPanel.click();
-    await page.getByRole("button", { name: "Subagents", exact: true }).click();
-    const panel = page.getByRole("complementary", { name: "Work panel" });
-    await expect(
-      panel.getByRole("heading", { name: "Finished · 25" }),
-    ).toBeVisible();
-    await panel.getByRole("searchbox").fill("Audit 24");
-    await panel
-      .getByRole("button", { name: "Audit 24 Completed", exact: true })
-      .click();
-    await expect(
-      panel.getByText("The delegated inspection is complete.", { exact: true }),
-    ).toBeVisible();
-    await panel.getByRole("button", { name: "All subagents" }).click();
-    await expect(panel.getByRole("searchbox")).toHaveValue("Audit 24");
-  }
-  expect(Math.abs(mounted[0] - mounted[1])).toBeLessThanOrEqual(3);
-  console.log(
-    `tool_window_measurement ${JSON.stringify({ sizes: [50, 500], mounted })}`,
-  );
-});
-
-test("reading layouts fit desktop and narrow viewports in both themes", async ({
-  page,
-}, info) => {
-  await runExecution(page, "reading benchmark 50");
   await expect(
-    page.getByRole("button", { name: "Stop", exact: true }),
+    page.getByText("Source did not identify this author", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Completed", exact: true }),
   ).toHaveCount(0);
-  for (const colorScheme of ["light", "dark"] as const) {
-    await page.emulateMedia({ colorScheme });
-    for (const width of [1440, 1280, 1024, 768, 390]) {
-      await page.setViewportSize({ width, height: 900 });
-      const work = page.locator(".reading-work > button").first();
-      if ((await work.getAttribute("aria-expanded")) === "true")
-        await work.click();
-      await page.locator("main [data-scroller]").evaluate((element) => {
-        element.scrollTop = 0;
-      });
-      await expect(
-        page.getByText(
-          "Inspection complete. The workspace is ready for review.",
-          { exact: true },
-        ),
-      ).toBeVisible();
-      expect(
-        await page.evaluate(
-          () => document.documentElement.scrollWidth > window.innerWidth,
-        ),
-      ).toBe(false);
-      const path = info.outputPath(`reading-${width}-${colorScheme}.png`);
-      await page.screenshot({ path });
-      await info.attach(`reading-${width}-${colorScheme}`, {
-        path,
-        contentType: "image/png",
-      });
-    }
-  }
 });
 
-test("work-panel navigation preserves the draft and supports keyboard tabs and maximize", async ({
-  page,
-}, info) => {
-  await page.setViewportSize({ width: 1440, height: 900 });
-  const { sessionId, turnId } = await runExecution(
-    page,
-    "delegate this please",
-  );
-  await expect(
-    page.getByRole("button", { name: "Stop", exact: true }),
-  ).toHaveCount(0);
-  const { openExecutionGroups } = await import("./fixtures/execution");
-  await openExecutionGroups(page, sessionId, turnId);
-  await page
-    .getByLabel("Message", { exact: true })
-    .fill("Keep this unsent draft");
-  await page
-    .getByRole("region", { name: "Explore delegation" })
-    .getByRole("button")
-    .first()
-    .click();
-  let panel = page.getByRole("complementary", { name: "Work panel" });
-  await expect(
-    panel.getByRole("button", { name: "All subagents" }),
-  ).toBeVisible();
-  await page.screenshot({ path: info.outputPath("subagent-detail.png") });
-  await panel.getByRole("button", { name: "All subagents" }).click();
-  await expect(
-    panel.getByRole("button", { name: "Verify Failed", exact: true }),
-  ).toBeVisible();
-  await page.screenshot({ path: info.outputPath("subagent-directory.png") });
-  const subagents = panel.getByRole("tab", { name: "Subagents", exact: true });
-  await subagents.focus();
-  await page.keyboard.press("ArrowLeft");
-  await expect(subagents).toHaveAttribute("aria-selected", "true");
-  await page.keyboard.press("Enter");
-  await expect(
-    panel.getByRole("tab", { name: "Files", exact: true }),
-  ).toHaveAttribute("aria-selected", "true");
-  await subagents.click();
-  await panel.getByRole("button", { name: "Maximize panel" }).click();
-  const full = page.getByRole("dialog", { name: "Work panel" });
-  await expect(full).toBeVisible();
-  await full.getByRole("button", { name: "Restore panel" }).click();
-  panel = page.getByRole("complementary", { name: "Work panel" });
-  await expect(panel.getByRole("searchbox")).toBeVisible();
-  await page.setViewportSize({ width: 1024, height: 900 });
-  const narrow = page.getByRole("dialog", { name: "Work panel" });
-  await expect(narrow).toBeVisible();
-  const bounds = (await narrow.boundingBox())!;
-  expect(bounds.x).toBeGreaterThan(0);
-  await page.mouse.click(bounds.x / 2, 120);
-  await expect(narrow).toBeHidden();
-  await expect(page.getByLabel("Message", { exact: true })).toHaveValue(
-    "Keep this unsent draft",
-  );
-});
-
-test("full tool details follow arguments that arrive after inspection opens", async ({
+test("equal text in separate deliveries keeps separate reading occurrences", async ({
   page,
 }) => {
-  const { sessionId, turnId } = await runExecution(
-    page,
-    "exercise tools please",
-  );
-  await openExecutionGroups(page, sessionId, turnId);
-  const base = `/api/v1/sessions/${encodeURIComponent(sessionId)}`;
-  const roots = (await (await page.request.get(`${base}/nodes`)).json()).nodes;
-  const group = roots.find(
-    (node: { turnId: string; reads: number }) =>
-      node.turnId === turnId && node.reads > 0,
-  );
-  const calls = (
-    await (
-      await page.request.get(
-        `${base}/nodes?parent=${encodeURIComponent(group.id)}`,
-      )
-    ).json()
-  ).nodes;
-  const call = calls.find(
-    (node: { event: { kind: string; name?: string } }) =>
-      node.event.kind === "tool_call" && node.event.name === "Read",
-  );
-  let arrived = false;
-  await page.route(
-    (url) =>
-      url.pathname.endsWith("/nodes") &&
-      url.searchParams.get("parent") === call.id,
-    async (route) => {
-      const response = await route.fetch();
-      const payload = await response.json();
-      const parent = payload.parentNode;
-      parent.revision += arrived ? 1001 : 1000;
-      parent.bodyRevision = parent.revision;
-      payload.snapshot = Math.max(payload.snapshot, parent.revision);
-      parent.event = {
-        ...parent.event,
-        bodyRef: undefined,
-        data: undefined,
-        text: arrived ? "Arguments arrived while this panel was open." : "",
-      };
-      await route.fulfill({ json: payload });
+  await installTraceFixture(page, [
+    message(0, "Equal retained text"),
+    message(1, "Equal retained text"),
+  ]);
+  await openTrace(page);
+  await expect(
+    page.getByText("Equal retained text", { exact: true }),
+  ).toHaveCount(2);
+  await expect(page.locator("[data-trace-address]")).toHaveCount(2);
+});
+
+test("submitted and conversation representations are labelled separately in operation details", async ({
+  page,
+}) => {
+  const row = message(0, "Inspect this operation");
+  const state = await installTraceFixture(page, [row]);
+  const runtime = {
+    ...payload("runtime", row.anchor),
+    representation: "runtime" as const,
+  };
+  const returned = {
+    ...payload("returned", row.anchor),
+    representation: "caller_result" as const,
+  };
+  state.details.set(row.anchor, {
+    view: traceView(),
+    reference: row.anchor,
+    title: "Retained operation",
+    owner: agentLink(),
+    execution: null,
+    availability: { kind: "available" },
+    content: {
+      kind: "operation",
+      category: { kind: "tool", namespace: null, name: "shell" },
+      input: [],
+      results: [
+        {
+          reference: "result-runtime",
+          disposition: "progress",
+          representation: "runtime",
+          label: "Runtime observation",
+          payloads: [runtime],
+          availability: { kind: "available" },
+        },
+        {
+          reference: "result-returned",
+          disposition: "final_return",
+          representation: "caller_result",
+          label: "Returned value",
+          payloads: [returned],
+          availability: { kind: "available" },
+        },
+      ],
+      resultsCursor: null,
+      resources: [],
+      resourcesCursor: null,
     },
+    relations: [],
+    relationsCursor: null,
+    coverage: [],
+  });
+  state.bodies.set("runtime", "Complete runtime bytes");
+  state.bodies.set("returned", "Shortened caller result");
+  await openTrace(page);
+  await page.getByRole("button", { name: "Evidence and details" }).click();
+  await expect(page.getByLabel("Representation", { exact: true })).toHaveValue(
+    "caller_result",
   );
-  await page.getByRole("button", { name: /Read · src\/lib.rs/ }).click();
   await page
-    .getByRole("button", { name: "Open full details", exact: true })
+    .getByRole("button", { name: "Read returned to caller", exact: true })
     .click();
-  const panel = page.getByRole("complementary", { name: "Work panel" });
   await expect(
-    panel.getByText("No tool input has been recorded yet.", { exact: true }),
+    page.getByText("Shortened caller result", { exact: true }),
   ).toBeVisible();
-  arrived = true;
-  await expect(panel).toContainText(
-    "Arguments arrived while this panel was open.",
+  expect(
+    state.reads.filter((read) => read.includes("/payloads/runtime")),
+  ).toHaveLength(0);
+  await page
+    .getByLabel("Representation", { exact: true })
+    .selectOption("runtime");
+  await page
+    .getByRole("button", { name: "Read runtime output", exact: true })
+    .click();
+  await expect(
+    page.getByText("Complete runtime bytes", { exact: true }),
+  ).toBeVisible();
+});
+
+test("search reaches unloaded content and opens the retained search view", async ({
+  page,
+}) => {
+  const state = await installTraceFixture(
+    page,
+    Array.from({ length: 120 }, (_, index) => message(index)),
   );
+  await openTrace(page);
+  await page.getByRole("button", { name: "Find in this agent" }).click();
+  await page.getByLabel("Find in Main agent").fill("unloaded");
+  await page.getByRole("button", { name: "Search retained history" }).click();
+  await expect(
+    page.getByText("A retained hit outside the visible window", {
+      exact: true,
+    }),
+  ).toBeVisible();
+  await page
+    .getByRole("link", { name: "Open Current history around this item" })
+    .click();
+  await expect(page).toHaveURL(new RegExp(`${MAIN_AGENT}.*anchor=`));
+  await expect
+    .poll(() =>
+      state.reads.some(
+        (read) =>
+          read.includes("around=opaque-main-agent-anchor-3") &&
+          read.includes("at_snapshot=view-1"),
+      ),
+    )
+    .toBe(true);
+});
+
+test("removing payload access clears protected reading state", async ({
+  page,
+}) => {
+  const row = message(0, "Protected preview");
+  if (row.content.kind !== "message") throw new Error("message fixture");
+  row.content.parts[0].previewTruncated = true;
+  const state = await installTraceFixture(page, [row]);
+  await openTrace(page);
+  state.failPayload = true;
+  await page
+    .getByRole("button", {
+      name: "Read recorded conversation result",
+      exact: true,
+    })
+    .click();
+  await expect(
+    page.getByText("Protected preview", { exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByText(/Access changed\. Open this conversation/),
+  ).toBeVisible();
 });

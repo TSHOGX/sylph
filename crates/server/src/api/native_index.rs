@@ -153,7 +153,7 @@ mod tests {
             title: None,
             started_at_ms: None,
             ended_at_ms: None,
-            event_count: None,
+
             source_revision: None,
             parent_native_id: None,
             parent_relation: None,

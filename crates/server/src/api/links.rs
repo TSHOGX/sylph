@@ -1,97 +1,15 @@
-//! Endpoints for a session's live agent: its capabilities, and the questions it
-//! is waiting on.
-//!
-//! These are the surfaces v1 could not have had. What a session can do is read
-//! from a live link rather than from a static descriptor, and an approval is a
-//! resource a client resolves rather than a message it happened to witness.
-
-use axum::extract::{Extension, Path, Query, State};
-use axum::http::StatusCode;
-use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::response::IntoResponse;
-use axum::Json;
-use serde::Deserialize;
-use std::convert::Infallible;
-use tokio_stream::StreamExt;
-use tokio_stream::{self as stream, wrappers::BroadcastStream};
-
-use sylph_protocol::SessionId;
-
-use crate::error::{Error, Result};
-use crate::link_state::LinkState;
-use crate::middleware::auth::SubjectId;
-use crate::models::{ControlRequest, PendingRequest, ResolveRequest};
-use crate::AppState;
-
-pub(crate) async fn record_control(
-    state: &AppState,
-    subject: &str,
-    session_id: &SessionId,
-    kind: &str,
-    text: String,
-    target_turn_id: Option<String>,
-    idempotency_key: Option<String>,
-) -> Result<ControlRequest> {
-    if let Some(key) = idempotency_key.as_deref() {
-        if let Some(existing) = state
-            .store
-            .find_control_request_by_idempotency(session_id, key)
-            .await?
-        {
-            if existing.kind != kind
-                || existing.text != text
-                || existing.origin_subject != subject
-                || existing.target_turn_id != target_turn_id
-            {
-                return Err(Error::InvalidRequest(
-                    "Idempotency key already belongs to a different control request".into(),
-                ));
-            }
-            return Ok(existing);
-        }
-    }
-    let request = state
-        .store
-        .create_control_request(&ControlRequest {
-            request_id: uuid::Uuid::new_v4().to_string(),
-            session_id: session_id.clone(),
-            origin_subject: subject.to_string(),
-            kind: kind.to_string(),
-            text,
-            target_turn_id,
-            server_seq: 0,
-            state: "accepted".into(),
-            idempotency_key,
-            vendor_receipt: None,
-            error_message: None,
-            created_at_ms: crate::models::now_ms(),
-            consumed_at_ms: None,
-            failed_at_ms: None,
-            revision: 0,
-        })
-        .await?;
-    crate::api::controls::publish(state, &request).await;
-    Ok(request)
-}
-
-pub async fn control_requests(
-    State(state): State<AppState>,
-    Extension(subject): Extension<SubjectId>,
-    Path(session_id): Path<String>,
-) -> Result<Json<serde_json::Value>> {
-    let session_id = require_session(&state, &session_id).await?;
-    if !state
-        .store
-        .has_capability(&subject.0, session_id.environment.as_str(), "observe")
-        .await?
-    {
-        return Err(Error::SessionNotFound);
-    }
-    Ok(Json(
-        serde_json::json!({"requests": state.store.list_control_requests(&session_id).await?}),
-    ))
-}
-
+//! Current environment and vendor control capability surfaces.
+use crate::{
+    error::{Error, Result},
+    link_state::LinkState,
+    middleware::auth::SubjectId,
+    AppState,
+};
+use axum::{
+    extract::{Extension, Path, State},
+    http::StatusCode,
+    Json,
+};
 fn remote_link_state(agent: String, value: serde_json::Value) -> Result<LinkState> {
     let capabilities_value = value
         .get("capabilities")
@@ -162,16 +80,6 @@ fn remote_config_refusal(code: &str, message: String) -> Error {
 pub struct PreparedConfigRequest {
     pub id: String,
     pub value: serde_json::Value,
-}
-
-#[derive(Deserialize)]
-pub struct TraceEventsQuery {
-    #[serde(default = "default_trace_after_seq")]
-    pub after_seq: i32,
-}
-
-fn default_trace_after_seq() -> i32 {
-    -1
 }
 
 /// POST /api/v1/sessions/draft/{id}/config
@@ -254,994 +162,102 @@ pub async fn prepared_capabilities(
     Err(Error::SessionNotFound)
 }
 
-/// What this session's agent can do right now.
-///
-/// Establishes a link if there is none, because the answer is only knowable from
-/// a live agent — the project's command list depends on files the CLI reads at
-/// startup. A caller that merely wants to know whether a link exists reads the
-/// session's `link` field instead of paying for one here.
 pub async fn capabilities(
     State(state): State<AppState>,
-    axum::extract::Extension(subject): axum::extract::Extension<crate::middleware::auth::SubjectId>,
-    Path(session_id): Path<String>,
+    Extension(subject): Extension<SubjectId>,
+    Path(id): Path<String>,
 ) -> Result<Json<LinkState>> {
-    let session_id = require_session(&state, &session_id).await?;
-
+    let id = crate::api::sessions::decode_id(&id)?;
+    crate::api::sessions::authorize(&state, &subject.0, &id, "observe").await?;
+    state
+        .store
+        .get_session(&id)
+        .await?
+        .ok_or(Error::SessionNotFound)?;
     if !state
         .env_bridge
-        .environment_connected(&session_id.environment)
+        .environment_connected(&id.environment)
         .await
     {
-        return Ok(Json(LinkState::failed(
-            sylph_protocol::UnavailableReason::EnvironmentUnreachable,
-        )));
+        return Ok(Json(LinkState::detached_remote()));
     }
-    if let Some(environment) = state
-        .env_bridge
-        .list_environments()
-        .await
-        .map_err(|error| Error::LinkFailed(format!("{error:#}")))?
-        .into_iter()
-        .find(|environment| environment.id == session_id.environment)
-    {
-        if environment
-            .agents
-            .iter()
-            .any(|agent| agent.name == session_id.agent.as_str() && !agent.available)
-        {
-            return Ok(Json(LinkState::failed(
-                sylph_protocol::UnavailableReason::NoAgent,
-            )));
-        }
-    }
-    let mut outcome = state
+    let outcome = state
         .env_bridge
         .remote_session_command(
-            &session_id,
+            &id,
             sylph_protocol::EnvironmentCommand::Capabilities {
-                session_id: session_id.clone(),
+                session_id: id.clone(),
             },
             sylph_protocol::IdempotencyPolicy::Replayable,
         )
         .await
-        .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
-    if matches!(&outcome, sylph_protocol::CommandOutcome::Rejected { code, .. } if code == "SESSION_NOT_HOSTED")
-    {
-        let attach_outcome = match state
-            .env_bridge
-            .remote_attach(
-                &state
-                    .store
-                    .get_session(&session_id)
-                    .await?
-                    .ok_or(Error::SessionNotFound)?,
-            )
-            .await
-        {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                if let Some(remote) = error.downcast_ref::<crate::env::bridge::RemoteCommandError>()
-                {
-                    if matches!(remote.code(), Some("NO_AGENT" | "AGENT_UNAVAILABLE")) {
-                        return Ok(Json(LinkState::failed(
-                            sylph_protocol::UnavailableReason::NoAgent,
-                        )));
-                    }
-                }
-                return Err(Error::LinkFailed(format!("{error:#}")));
-            }
-        };
-        if let sylph_protocol::CommandOutcome::Rejected { code, message } = attach_outcome {
-            if matches!(
-                sylph_protocol::RejectCode::parse(&code),
-                Some(sylph_protocol::RejectCode::AgentUnavailable)
-            ) {
-                return Ok(Json(LinkState::failed(
-                    sylph_protocol::UnavailableReason::NoAgent,
-                )));
-            }
-            if code == "NO_AGENT" {
-                return Ok(Json(LinkState::failed(
-                    sylph_protocol::UnavailableReason::NoAgent,
-                )));
-            }
-            return Err(remote_refusal(&code, message));
-        }
-        outcome = state
-            .env_bridge
-            .remote_session_command(
-                &session_id,
-                sylph_protocol::EnvironmentCommand::Capabilities {
-                    session_id: session_id.clone(),
-                },
-                sylph_protocol::IdempotencyPolicy::Replayable,
-            )
-            .await
-            .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
-    }
-    let mut link = match outcome {
-        sylph_protocol::CommandOutcome::Accepted {
-            result: Some(value),
-        } => remote_link_state(session_id.agent.to_string(), value)?,
-        sylph_protocol::CommandOutcome::Accepted { result: None } => LinkState::detached_remote(),
-        sylph_protocol::CommandOutcome::Rejected { code, message } => {
-            return Err(remote_refusal(&code, message));
-        }
-        sylph_protocol::CommandOutcome::Unknown { message } => Err(Error::LinkFailed(format!(
-            "remote capabilities outcome is unknown: {}",
-            message.unwrap_or_default()
-        )))?,
-    };
-    if let Some(status) = state
+        .map_err(|e| Error::LinkFailed(e.to_string()))?;
+    let value = crate::env::EnvBridge::remote_outcome_value(outcome)
+        .await
+        .map_err(|e| Error::LinkFailed(e.to_string()))?;
+    let mut link = remote_link_state(id.agent.to_string(), value)?;
+    link.authorization = state
         .store
-        .authorization_status(&subject.0, session_id.environment.as_str(), "control")
+        .authorization_status(&subject.0, id.environment.as_str(), "control")
         .await?
-        .filter(|status| *status != "granted")
+        .map(str::to_owned);
+    if !state
+        .store
+        .has_capability(&subject.0, id.environment.as_str(), "control")
+        .await?
     {
-        link.authorization = Some(status.into());
         link.control_block = Some(crate::link_state::ControlBlock {
-            kind: "unauthorized".into(),
-            reason: status.into(),
+            kind: "authorization".into(),
+            reason: "control capability required".into(),
         });
     }
     Ok(Json(link))
 }
-
-/// Establish a link eagerly.
-///
-/// Worth having as its own operation because establishment is slow — an agent CLI
-/// loads a project — and a UI that knows a user is about to type can pay that
-/// cost before they finish rather than after they send.
 pub async fn attach(
     State(state): State<AppState>,
-    Path(session_id): Path<String>,
-) -> Result<Json<LinkState>> {
-    let session_id = require_session(&state, &session_id).await?;
-
-    let outcome = state
-        .env_bridge
-        .remote_attach(
-            &state
-                .store
-                .get_session(&session_id)
-                .await?
-                .ok_or(Error::SessionNotFound)?,
-        )
-        .await
-        .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
-    match outcome {
-        sylph_protocol::CommandOutcome::Accepted { .. } => {
-            for request in state.store.abandon_open_requests(&session_id).await? {
-                state
-                    .hub
-                    .publish_session(
-                        &session_id.encode(),
-                        crate::events::StreamEvent {
-                            seq: 0,
-                            arrival_turn_id: None,
-                            kind: "request".into(),
-                            phase: None,
-                            stream_id: None,
-                            span: None,
-                            interior_state: None,
-                            name: None,
-                            text: String::new(),
-                            data: Some(serde_json::to_value(request).unwrap_or_default()),
-                            is_error: false,
-                            stability: "stable".into(),
-                            source: "server".into(),
-                            arrival_at_ms: crate::models::now_ms(),
-                            recorded_at_ms: None,
-                            body_ref: None,
-                            tool_summary: None,
-                            created_at_ms: crate::models::now_ms(),
-                            started_at_ms: None,
-                        },
-                    )
-                    .await;
-            }
-            Ok(Json(LinkState::detached_remote()))
-        }
-        sylph_protocol::CommandOutcome::Rejected { code, message } => {
-            Err(remote_refusal(&code, message))
-        }
-        sylph_protocol::CommandOutcome::Unknown { message } => Err(Error::LinkFailed(format!(
-            "remote attach outcome is unknown: {}",
-            message.unwrap_or_default()
-        ))),
-    }
-}
-
-/// Tear a link down without ending the session.
-pub async fn detach(
-    State(state): State<AppState>,
-    Path(session_id): Path<String>,
-) -> Result<Json<LinkState>> {
-    let session_id = require_session(&state, &session_id).await?;
-    let abandoned = state.store.abandon_open_requests(&session_id).await?;
-    for request in abandoned {
-        state
-            .hub
-            .publish_session(
-                &session_id.encode(),
-                crate::events::StreamEvent {
-                    seq: 0,
-                    arrival_turn_id: None,
-                    kind: "request".into(),
-                    phase: None,
-                    stream_id: None,
-                    span: None,
-                    interior_state: None,
-                    name: None,
-                    text: String::new(),
-                    data: Some(serde_json::to_value(request).unwrap_or_default()),
-                    is_error: false,
-                    stability: "stable".into(),
-                    source: "server".into(),
-                    arrival_at_ms: crate::models::now_ms(),
-                    recorded_at_ms: None,
-                    body_ref: None,
-                    tool_summary: None,
-                    created_at_ms: crate::models::now_ms(),
-                    started_at_ms: None,
-                },
-            )
-            .await;
-    }
-    let outcome = state
-        .env_bridge
-        .remote_session_command(
-            &session_id,
-            sylph_protocol::EnvironmentCommand::Close {
-                session_id: Some(session_id.clone()),
-            },
-            sylph_protocol::IdempotencyPolicy::Replayable,
-        )
-        .await
-        .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
-    match outcome {
-        sylph_protocol::CommandOutcome::Accepted { .. } => Ok(Json(LinkState::detached_remote())),
-        sylph_protocol::CommandOutcome::Rejected { code, message } => {
-            Err(Error::LinkFailed(format!("{code}: {message}")))
-        }
-        sylph_protocol::CommandOutcome::Unknown { message } => Err(Error::LinkFailed(format!(
-            "remote detach outcome is unknown: {}",
-            message.unwrap_or_default()
-        ))),
-    }
-}
-
-/// What this session is waiting on.
-///
-/// Read from the journal rather than from the link, so it answers after a client
-/// reconnects, from a different frontend, and for a session whose link has since
-/// died — the last of which is exactly when a user needs to know why nothing is
-/// happening.
-pub async fn list_requests(
-    State(state): State<AppState>,
-    axum::extract::Extension(subject): axum::extract::Extension<crate::middleware::auth::SubjectId>,
-    Path(session_id): Path<String>,
-) -> Result<Json<Vec<PendingRequest>>> {
-    let session_id = require_session(&state, &session_id).await?;
-    if !state
-        .store
-        .has_capability(&subject.0, session_id.environment.as_str(), "observe")
-        .await?
-    {
-        return Err(Error::SessionNotFound);
-    }
-    Ok(Json(state.store.open_requests(&session_id).await?))
-}
-
-/// Answer a request an agent raised.
-pub async fn resolve(
-    State(state): State<AppState>,
-    axum::extract::Extension(subject): axum::extract::Extension<crate::middleware::auth::SubjectId>,
-    Path(request_id): Path<String>,
-    Json(body): Json<ResolveRequest>,
-) -> Result<Json<PendingRequest>> {
-    let request = state
-        .store
-        .get_request(&request_id)
-        .await?
-        .ok_or(Error::RequestNotFound)?;
-    if !state
-        .store
-        .has_capability(
-            &subject.0,
-            request.session_id.environment.as_str(),
-            "control",
-        )
-        .await?
-    {
-        return Err(Error::RequestNotFound);
-    }
-
-    // The option has to be one the agent offered. A client inventing one would
-    // reach the adapter as an unrecognized string, and an adapter's handling of
-    // that is undefined — for an approval, "unrecognized" must never be able to
-    // mean "allow".
-    let offered = request.options();
-    let known = offered
-        .as_array()
-        .map(|options| {
-            options.iter().any(|option| {
-                option.get("id").and_then(|id| id.as_str()) == Some(body.option.as_str())
-            })
-        })
-        .unwrap_or(false);
-    if !known {
-        return Err(Error::InvalidRequest(format!(
-            "'{}' is not an option this request offered",
-            body.option
-        )));
-    }
-
-    let input_json = body.input.as_ref().map(|value| value.to_string());
-
-    // And when the request declared a form, the answer has to fit it. Checked here,
-    // before the claim below, for a reason the ordering makes load-bearing: a
-    // malformed answer that reached the UPDATE would consume the single-winner claim
-    // and mark the request resolved, leaving the agent blocked on a question nobody
-    // can answer any more. Refusing first leaves it open and answerable.
-    //
-    // This is the same rule that governs `option` above and a `set_config` value: the
-    // client renders whatever an agent it has never seen reported, so the server is
-    // what keeps a malformed answer from reaching a vendor CLI whose handling of one
-    // is undefined.
-    if let Some(form) = request.form() {
-        // Only when the answer is being submitted. Declining carries no values, and
-        // requiring a complete form in order to say "don't answer" would make a
-        // required field into a trap the user cannot leave.
-        let declining = body.option.starts_with("deny") || body.option == "cancel";
-        if !declining {
-            form.validate(body.input.as_ref())
-                .map_err(Error::InvalidRequest)?;
-        }
-    }
-
-    let _guard = state
-        .env_bridge
-        .session_command_lock(&request.session_id)
-        .await
-        .lock_owned()
-        .await;
-
-    // Claimed in one statement, so two clients answering together produce one
-    // winner rather than two forwarded answers.
-    let resolved = state
-        .store
-        .resolve_request(&request_id, &body.option, input_json.as_deref(), None)
-        .await?
-        .ok_or(Error::RequestAlreadyResolved)?;
-
-    state
-        .hub
-        .publish_session(
-            &request.session_id.encode(),
-            crate::events::StreamEvent {
-                seq: 0,
-                arrival_turn_id: None,
-                kind: "request".into(),
-                phase: None,
-                stream_id: None,
-                span: None,
-                interior_state: None,
-                name: None,
-                text: String::new(),
-                data: Some(serde_json::to_value(&resolved).unwrap_or_default()),
-                is_error: false,
-                stability: "stable".into(),
-                source: "server".into(),
-                arrival_at_ms: crate::models::now_ms(),
-                recorded_at_ms: None,
-                body_ref: None,
-                tool_summary: None,
-                created_at_ms: crate::models::now_ms(),
-                started_at_ms: None,
-            },
-        )
-        .await;
-
-    // Announced before the forward, and deliberately so. The claim above is what makes
-    // this request answered — the row is committed and no second answer can win — so
-    // every other client may stop showing it from this moment, whether or not the
-    // adapter is still there to hear the answer. Announcing after the forward would
-    // tie a *display* concern to a *delivery* one, and the `LinkGone` path below
-    // returns early: a request answered on a phone against a dead link would then stay
-    // on screen on every other client, which is the bug this fixes, surviving in the
-    // one case where the user most needs to be told what happened.
-    //
-    // This is the counterpart of `absorb_request`'s announcement. Arrival was published
-    // and departure was not, so a client's view of what a session is blocked on could
-    // only ever grow; it shrank on a 20-second poll that a backgrounded tab does not
-    // run, which is why answering on one device left the dialog standing on another
-    // until a manual reload.
-    // Forward the typed resolution to the envagent that owns the vendor process,
-    // while the durable claim above remains the server's single-winner authority.
-    let outcome = state
-        .env_bridge
-        .remote_session_command(
-            &request.session_id,
-            sylph_protocol::EnvironmentCommand::Resolve {
-                session_id: request.session_id.clone(),
-                resolution: serde_json::json!({
-                    "requestId": request.adapter_request_id.clone(),
-                    "option": body.option.clone(),
-                    "input": body.input.clone(),
-                }),
-            },
-            sylph_protocol::IdempotencyPolicy::AtMostOnce,
-        )
-        .await
-        .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
-    match outcome {
-        sylph_protocol::CommandOutcome::Accepted { .. } => Ok(Json(resolved)),
-        sylph_protocol::CommandOutcome::Rejected { code, message } => {
-            Err(Error::LinkFailed(format!("{code}: {message}")))
-        }
-        sylph_protocol::CommandOutcome::Unknown { message } => Err(Error::LinkFailed(format!(
-            "remote resolution outcome is unknown: {}",
-            message.unwrap_or_default()
-        ))),
-    }
-}
-
-/// Interrupt the running turn, keeping the session alive.
-///
-/// Deliberately not `stop`. Stop signals the process group and ends the agent;
-/// interrupt asks the agent to abandon this turn and stay loaded, so the next
-/// message continues the same conversation. They are different intentions — "that
-/// is not what I meant" against "stop everything" — and offering only one means
-/// the other is unavailable.
-pub async fn interrupt(
-    State(state): State<AppState>,
-    axum::extract::Extension(subject): axum::extract::Extension<crate::middleware::auth::SubjectId>,
-    Path(session_id): Path<String>,
+    Extension(subject): Extension<SubjectId>,
+    Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>> {
-    let session_id = require_session(&state, &session_id).await?;
-    if !state
+    let id = crate::api::sessions::decode_id(&id)?;
+    crate::api::sessions::authorize(&state, &subject.0, &id, "control").await?;
+    let session = state
         .store
-        .has_capability(&subject.0, session_id.environment.as_str(), "control")
-        .await?
-    {
-        return Err(Error::Forbidden("control capability required".into()));
-    }
-
-    let turn_id = state
-        .store
-        .running_turn_id(&session_id)
-        .await?
-        .ok_or_else(|| Error::InvalidRequest("No turn is running".into()))?;
-    let _ = super::turns::stop(
-        State(state),
-        Extension(subject),
-        Path(turn_id),
-        axum::http::HeaderMap::new(),
-    )
-    .await?;
-    Ok(Json(serde_json::json!({"interrupted": true})))
-}
-
-/// Add text to a turn already in flight.
-///
-/// `turnId` is a precondition rather than a routing hint. A steer that races a turn
-/// boundary would otherwise be delivered into the *next* turn — the request
-/// succeeds, nothing errors, and the text lands in the wrong conversation. Naming
-/// the turn the client believed was running turns that into a refusal.
-pub async fn steer(
-    State(state): State<AppState>,
-    axum::extract::Extension(subject): axum::extract::Extension<crate::middleware::auth::SubjectId>,
-    Path(session_id): Path<String>,
-    Json(body): Json<SteerRequest>,
-) -> Result<Json<serde_json::Value>> {
-    let session_id = require_session(&state, &session_id).await?;
-    if !state
-        .store
-        .has_capability(&subject.0, session_id.environment.as_str(), "control")
-        .await?
-    {
-        return Err(Error::Forbidden("control capability required".into()));
-    }
-    if !state
-        .env_bridge
-        .environment_connected(&session_id.environment)
-        .await
-    {
-        return Err(Error::EnvironmentUnreachable(
-            session_id.environment.to_string(),
-        ));
-    }
-
-    if body.text.trim().is_empty() {
-        return Err(Error::InvalidRequest(
-            "Steering text cannot be empty".into(),
-        ));
-    }
-
-    let _guard = state
-        .env_bridge
-        .session_command_lock(&session_id)
-        .await
-        .lock_owned()
-        .await;
-    if let Some(key) = body.idempotency_key.as_deref() {
-        if let Some(existing) = state
-            .store
-            .find_control_request_by_idempotency(&session_id, key)
-            .await?
-        {
-            if existing.kind != "steer"
-                || existing.text != body.text
-                || existing.origin_subject != subject.0
-            {
-                return Err(Error::InvalidRequest(
-                    "Idempotency key belongs to a different request".into(),
-                ));
-            }
-            return Ok(Json(
-                serde_json::to_value(existing)
-                    .map_err(|error| Error::Internal(error.to_string()))?,
-            ));
-        }
-    }
-
-    // Checked here as well as by the adapter: the server knows which turn is
-    // running, so a stale client can be told so without waking the agent.
-    let running = state.store.running_turn_id(&session_id).await?;
-    if let Some(expected) = body.turn_id.as_deref() {
-        if running.as_deref() != Some(expected) {
-            return Err(Error::TurnMoved {
-                expected: expected.to_string(),
-                running: running.clone(),
-            });
-        }
-    }
-
-    let turn_id = running.ok_or_else(|| Error::InvalidRequest("No turn is running".into()))?;
-    let request = record_control(
-        &state,
-        &subject.0,
-        &session_id,
-        "steer",
-        body.text.clone(),
-        Some(turn_id.clone()),
-        body.idempotency_key,
-    )
-    .await?;
-    let request = super::controls::dispatch(
-        &state,
-        &request,
-        sylph_protocol::EnvironmentCommand::Steer {
-            session_id,
-            text: body.text,
-            expected_turn_id: Some(turn_id),
-        },
-    )
-    .await?;
-    Ok(Json(
-        serde_json::to_value(request).map_err(|error| Error::Internal(error.to_string()))?,
-    ))
-}
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SteerRequest {
-    pub text: String,
-    pub idempotency_key: Option<String>,
-    /// The turn the client believes is running. Optional, because a client with no
-    /// turn in view is steering "whatever is running", which is a coherent ask.
-    #[serde(default)]
-    pub turn_id: Option<String>,
-}
-
-/// Add text to run **after** the turn in flight.
-///
-/// # Why this is not `steer` with a flag
-///
-/// The two differ by *when the agent reads the text*, and that decides what the request
-/// means rather than how it is delivered. A steer is a correction, so it carries a turn
-/// precondition: text that misses its turn lands in the wrong conversation, and naming the
-/// turn is what turns that into a refusal. A queued follow-up has **no such precondition** —
-/// it is *for* after the turn, so a turn boundary crossing underneath it changes nothing, and
-/// queueing with nothing running is a coherent ask that becomes the next turn's opening text.
-///
-/// Collapsing them behind one endpoint would have meant a `turnId` that is required for one
-/// meaning and meaningless for the other, which is the shape that let one vendor declare the
-/// wrong word for what it does: `claude` claimed `Capability::Steer` while its only mid-turn
-/// channel is read after the turn ends, so a user's correction arrived after the thing it was
-/// meant to prevent with every layer reporting success.
-///
-/// The refusal path matters as much as the success one. An agent without
-/// [`sylph_protocol::Capability::Queue`] answers `UNSUPPORTED_FIELD`, which a client renders
-/// by retiring the control rather than leaving it clickable — and that is the code `claude`'s
-/// `steer` now returns, so a client asking the wrong one of these is told which.
-pub async fn queue(
-    State(state): State<AppState>,
-    axum::extract::Extension(subject): axum::extract::Extension<crate::middleware::auth::SubjectId>,
-    Path(session_id): Path<String>,
-    Json(body): Json<QueueRequest>,
-) -> Result<Json<serde_json::Value>> {
-    let session_id = require_session(&state, &session_id).await?;
-    if !state
-        .store
-        .has_capability(&subject.0, session_id.environment.as_str(), "control")
-        .await?
-    {
-        return Err(Error::Forbidden("control capability required".into()));
-    }
-
-    if body.text.trim().is_empty() {
-        return Err(Error::InvalidRequest("Queued text cannot be empty".into()));
-    }
-
-    let _guard = state
-        .env_bridge
-        .session_command_lock(&session_id)
-        .await
-        .lock_owned()
-        .await;
-    let key = body
-        .idempotency_key
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    if let Some(existing) = state
-        .store
-        .find_control_request_by_idempotency(&session_id, &key)
-        .await?
-    {
-        if existing.kind != "queue" || existing.origin_subject != subject.0 {
-            return Err(Error::InvalidRequest(
-                "Idempotency key belongs to a different request".into(),
-            ));
-        }
-        return Ok(Json(
-            serde_json::to_value(existing).map_err(|error| Error::Internal(error.to_string()))?,
-        ));
-    }
-    let request = record_control(
-        &state,
-        &subject.0,
-        &session_id,
-        "queue",
-        body.text,
-        None,
-        Some(key),
-    )
-    .await?;
-    let Json(link) = capabilities(
-        State(state.clone()),
-        Extension(subject),
-        Path(session_id.encode()),
-    )
-    .await?;
-    if !link.supports.iter().any(|cap| cap == "queue") {
-        let reason = "This agent does not support queued follow-ups";
-        super::controls::transition(&state, &request, "rejected", None, Some(reason)).await?;
-        return Err(Error::Unsupported(reason.into()));
-    }
-    let request = super::controls::transition(&state, &request, "queued", None, None).await?;
-    Ok(Json(
-        serde_json::to_value(request).map_err(|error| Error::Internal(error.to_string()))?,
-    ))
-}
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct QueueRequest {
-    pub text: String,
-    pub idempotency_key: Option<String>,
-}
-
-/// Set one typed config option on a live session.
-///
-/// The response is the refreshed capability surface rather than an acknowledgement,
-/// because setting one option can change another's choices — `pi`'s thinking levels
-/// depend on the selected model, and `claude` carries per-model effort levels. A
-/// client that assumed its own optimistic value would drift from the agent.
-pub async fn set_config(
-    State(state): State<AppState>,
-    axum::extract::Extension(subject): axum::extract::Extension<crate::middleware::auth::SubjectId>,
-    Path(session_id): Path<String>,
-    Json(body): Json<SetConfigRequest>,
-) -> Result<Json<LinkState>> {
-    let session_id = require_session(&state, &session_id).await?;
-    if !state
-        .store
-        .has_capability(&subject.0, session_id.environment.as_str(), "control")
-        .await?
-    {
-        return Err(Error::Forbidden("control capability required".into()));
-    }
-
-    if body.config_id.trim().is_empty() {
-        return Err(Error::InvalidRequest("A config id is required".into()));
-    }
-
-    let outcome = state
-        .env_bridge
-        .remote_session_command(
-            &session_id,
-            sylph_protocol::EnvironmentCommand::SetConfig {
-                session_id: session_id.clone(),
-                id: body.config_id,
-                value: body.value,
-            },
-            sylph_protocol::IdempotencyPolicy::AtMostOnce,
-        )
-        .await
-        .map_err(|error| Error::LinkFailed(format!("{error:#}")))?;
-    match outcome {
-        sylph_protocol::CommandOutcome::Accepted {
-            result: Some(value),
-        } => {
-            if let Some(flag) = value.get("persistedLaunchFlag") {
-                if let (Some(key), Some(value)) = (
-                    flag.get("key").and_then(|v| v.as_str()),
-                    flag.get("value").and_then(|v| v.as_str()),
-                ) {
-                    state
-                        .store
-                        .set_session_flag(&session_id, key, value)
-                        .await?;
-                }
-            }
-            Ok(Json(remote_link_state(
-                session_id.agent.to_string(),
-                value,
-            )?))
-        }
-        sylph_protocol::CommandOutcome::Accepted { result: None } => {
-            Ok(Json(LinkState::detached_remote()))
-        }
-        sylph_protocol::CommandOutcome::Rejected { code, message } => {
-            Err(remote_config_refusal(&code, message))
-        }
-        sylph_protocol::CommandOutcome::Unknown { message } => Err(Error::LinkFailed(format!(
-            "remote config outcome is unknown: {}",
-            message.unwrap_or_default()
-        ))),
-    }
-}
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SetConfigRequest {
-    pub config_id: String,
-    pub value: serde_json::Value,
-}
-
-/// Session-scoped facts, as SSE.
-///
-/// Separate from the turn stream because links, capability changes, and requests
-/// are properties of a session: they happen with no turn running, and a client
-/// watching only turns would miss an approval raised while it was idle.
-///
-/// Carries no replay. These are notifications that state changed, and the state
-/// itself is a resource — `/requests` and `/capabilities` — so a client that
-/// reconnects re-reads rather than replaying. That is what keeps a missed frame
-/// from stranding an approval.
-pub async fn events(
-    State(state): State<AppState>,
-    axum::extract::Extension(subject): axum::extract::Extension<crate::middleware::auth::SubjectId>,
-    Path(session_id): Path<String>,
-) -> Result<impl axum::response::IntoResponse> {
-    let session_id = require_session(&state, &session_id).await?;
-    if !state
-        .store
-        .has_capability(&subject.0, session_id.environment.as_str(), "observe")
-        .await?
-    {
-        return Err(Error::SessionNotFound);
-    }
-
-    let live = state.hub.attach_session(&session_id.encode()).await;
-    let stream = tokio_stream::wrappers::BroadcastStream::new(live)
-        .filter_map(|result| result.ok())
-        .map(|event| {
-            let data = serde_json::to_string(&event).unwrap_or_default();
-            Ok::<axum::response::sse::Event, std::convert::Infallible>(
-                axum::response::sse::Event::default()
-                    .event(&event.kind)
-                    .data(data),
-            )
-        });
-
-    Ok((
-        // `no-transform` for the reason recorded in AGENTS.md: a proxy that gzips
-        // an SSE body buffers it invisibly, and the symptom reads as a rendering
-        // bug rather than a transport one.
-        [
-            ("Cache-Control", "no-cache, no-store, no-transform"),
-            ("X-Accel-Buffering", "no"),
-        ],
-        axum::response::sse::Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default()),
-    ))
-}
-
-/// GET /api/v1/sessions/{id}/trace/events — one reconnectable stream for the whole session.
-///
-/// Unlike the older `/sessions/{id}/events` notification stream, this carries normalized
-/// turn events as well. That distinction matters when a child trajectory reports after its
-/// parent turn has settled: a turn-scoped subscriber is gone, while a session trace can
-/// route the event back to the existing trajectory without inventing an `agent` turn.
-pub async fn trace_events(
-    State(state): State<AppState>,
-    axum::extract::Extension(subject): axum::extract::Extension<crate::middleware::auth::SubjectId>,
-    Path(session_id): Path<String>,
-    Query(query): Query<TraceEventsQuery>,
-) -> Result<impl IntoResponse> {
-    let session = require_session(&state, &session_id).await?;
-    if !state
-        .store
-        .has_capability(&subject.0, session.environment.as_str(), "observe")
-        .await?
-    {
-        return Err(Error::SessionNotFound);
-    }
-    let encoded = session.encode();
-    let after_seq = query.after_seq;
-
-    // Subscribe before reading either durable tier. The live receiver buffers anything
-    // emitted while the history snapshot is assembled, closing the replay/live gap.
-    let attachment = state.hub.attach_trace(&encoded, after_seq).await;
-
-    let mut by_seq = std::collections::BTreeMap::<i32, crate::events::StreamEvent>::new();
-    for block in state
-        .history
-        .blocks(&encoded, after_seq)
-        .await
-        .unwrap_or_default()
-    {
-        by_seq
-            .entry(block.seq)
-            .or_insert_with(|| crate::api::sessions::block_to_event(&block));
-    }
-    for row in state
-        .store
-        .session_events_after(&session, after_seq)
-        .await?
-    {
-        by_seq
-            .entry(row.seq)
-            .or_insert_with(|| crate::events::StreamEvent::from_row(&row));
-    }
-    for event in attachment.projection {
-        by_seq.entry(event.seq).or_insert(event);
-    }
-
-    // Keep the sequence ids that are about to be replayed. The receiver was
-    // subscribed before reading storage, so a stable event can legitimately be
-    // present in both the snapshot and the broadcast buffer when it lands between
-    // those reads. Filtering by the replay set removes that duplicate without using
-    // a high-water mark: an ephemeral event may have a lower seq than a later stable
-    // event and still only exist in the live projection.
-    let replay_seq = by_seq
-        .keys()
-        .copied()
-        .collect::<std::collections::HashSet<_>>();
-    let replay = by_seq.into_values().map(sse_trace_event);
-    let live = BroadcastStream::new(attachment.live)
-        .filter_map(|result| result.ok())
-        .filter(move |event| event.seq > after_seq && !replay_seq.contains(&event.seq))
-        .map(sse_trace_event);
-
-    Ok((
-        [
-            ("Cache-Control", "no-cache, no-store, no-transform"),
-            ("X-Accel-Buffering", "no"),
-        ],
-        Sse::new(stream::iter(replay).chain(live)).keep_alive(KeepAlive::default()),
-    ))
-}
-
-fn sse_trace_event(event: crate::events::StreamEvent) -> std::result::Result<Event, Infallible> {
-    let data = serde_json::to_string(&event).unwrap_or_default();
-    Ok(Event::default().event(&event.kind).data(data))
-}
-
-/// 404 for an unknown session before anything expensive happens.
-///
-/// Without this, asking for capabilities on a mistyped id would try to establish
-/// a link, fail on a missing session deeper in, and report that as an agent
-/// problem rather than as a bad id.
-/// Decode a path segment and confirm the session exists, answering with its id.
-///
-/// Returns the typed [`SessionId`] rather than `()` so every handler gets the decoded
-/// value from the same call that validated it. Decoding separately would mean two
-/// places that know how a path segment becomes an identity, and the second one is where
-/// a hand-assembled string creeps in.
-///
-/// Two distinct failures, deliberately not collapsed: a malformed triple is a **400**
-/// because the request is unintelligible, while a well-formed id naming nothing is a
-/// **404**. Answering 404 for both would tell a client with a corrupted id that its
-/// session had been deleted.
-async fn require_session(state: &AppState, encoded: &str) -> Result<SessionId> {
-    let session_id = crate::api::sessions::decode_id(encoded)?;
-    state
-        .store
-        .get_session(&session_id)
+        .get_session(&id)
         .await?
         .ok_or(Error::SessionNotFound)?;
-    Ok(session_id)
-}
-
-/// Preserve harness queues without claiming a turn-scoped delivery receipt.
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NativeQueueRequest {
-    pub text: String,
-    pub idempotency_key: String,
-    pub priority: bool,
-}
-
-pub async fn native_queue(
-    State(state): State<AppState>,
-    Extension(subject): Extension<crate::middleware::auth::SubjectId>,
-    Path(id): Path<String>,
-    Json(body): Json<NativeQueueRequest>,
-) -> Result<Json<serde_json::Value>> {
-    let session_id = require_session(&state, &id).await?;
-    if !state
-        .store
-        .has_capability(&subject.0, session_id.environment.as_str(), "control")
-        .await?
-    {
-        return Err(Error::Forbidden("control capability required".into()));
-    }
-    if body.text.trim().is_empty() {
-        return Err(Error::InvalidRequest("Queued text cannot be empty".into()));
-    }
-    let _guard = state
+    let outcome = state
         .env_bridge
-        .session_command_lock(&session_id)
+        .remote_attach(&session)
         .await
-        .lock_owned()
-        .await;
-    let kind = if body.priority {
-        "native_steer"
-    } else {
-        "native_queue"
-    };
-    if let Some(existing) = state
-        .store
-        .find_control_request_by_idempotency(&session_id, &body.idempotency_key)
-        .await?
-    {
-        if existing.kind != kind
-            || existing.text != body.text
-            || existing.origin_subject != subject.0
-        {
-            return Err(Error::InvalidRequest(
-                "Idempotency key belongs to a different request".into(),
-            ));
-        }
-        return Ok(Json(
-            serde_json::to_value(existing).map_err(|error| Error::Internal(error.to_string()))?,
-        ));
-    }
-    let request = record_control(
-        &state,
-        &subject.0,
-        &session_id,
-        kind,
-        body.text.clone(),
-        None,
-        Some(body.idempotency_key),
-    )
-    .await?;
-    let command = if body.priority {
-        sylph_protocol::EnvironmentCommand::QueueSteering {
-            session_id,
-            text: body.text,
-        }
-    } else {
-        sylph_protocol::EnvironmentCommand::Queue {
-            session_id,
-            text: body.text,
-        }
-    };
-    let request = super::controls::dispatch(&state, &request, command).await?;
+        .map_err(|e| Error::LinkFailed(e.to_string()))?;
     Ok(Json(
-        serde_json::to_value(request).map_err(|error| Error::Internal(error.to_string()))?,
+        crate::env::EnvBridge::remote_outcome_value(outcome)
+            .await
+            .map_err(|e| Error::LinkFailed(e.to_string()))?,
+    ))
+}
+pub async fn detach(
+    State(state): State<AppState>,
+    Extension(subject): Extension<SubjectId>,
+    Path(id): Path<String>,
+) -> Result<StatusCode> {
+    let id = crate::api::sessions::decode_id(&id)?;
+    crate::api::sessions::authorize(&state, &subject.0, &id, "control").await?;
+    state
+        .env_bridge
+        .close_remote_session(&id)
+        .await
+        .map_err(|e| Error::LinkFailed(e.to_string()))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+pub async fn list_requests(
+    State(state): State<AppState>,
+    Extension(subject): Extension<SubjectId>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>> {
+    let id = crate::api::sessions::decode_id(&id)?;
+    crate::api::sessions::authorize(&state, &subject.0, &id, "observe").await?;
+    Ok(Json(
+        serde_json::json!({"requests":state.store.current_requests(&id).await?}),
     ))
 }

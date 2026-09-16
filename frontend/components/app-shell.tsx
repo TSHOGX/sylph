@@ -66,8 +66,8 @@ import {
  * `ssr: false` on all four: they render nothing until state opens them, so
  * prerendering them produces markup the client immediately discards.
  */
-const WorkPanel = dynamic(
-  () => import("@/components/work-panel").then((m) => m.WorkPanel),
+const StandaloneFiles = dynamic(
+  () => import("@/components/trace-inspector").then((m) => m.StandaloneFiles),
   { ssr: false },
 );
 const SearchOverlay = dynamic(
@@ -163,6 +163,7 @@ function ShellFrame({
   createError: unknown;
 }) {
   const { leftOpen, overlay, drawer, closeDrawer, isMobile, rereadNotice } = useWorkspaceUI();
+  const pathname = usePathname();
   const t = useT();
 
   return (
@@ -209,13 +210,7 @@ function ShellFrame({
       )}
       {rereadNotice?.state === "success" && (
         <p role="status" aria-live="polite" className="shrink-0 border-b border-line bg-sunken px-4 py-1.5 text-2xs text-ink-muted">
-          {t("shell.rereadSuccess", {
-            session: rereadNotice.sessionLabel,
-            examined: rereadNotice.report.examined,
-            ingested: rereadNotice.report.ingested,
-            held: rereadNotice.report.alreadyHeld,
-            errors: rereadNotice.report.readErrors,
-          })}
+          {t("shell.rereadSuccess", { session: rereadNotice.sessionLabel })}
         </p>
       )}
       {rereadNotice?.state === "error" && (
@@ -254,7 +249,7 @@ function ShellFrame({
           {children}
         </main>
 
-        <WorkPanel />
+        {pathname.startsWith("/sessions/draft/") && <StandaloneFiles />}
       </div>
 
       {/*

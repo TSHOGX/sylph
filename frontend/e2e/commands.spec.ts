@@ -44,6 +44,8 @@ test("the slash menu still opens after a completed turn", async ({ page }) => {
 
 test("a control command opens a picker instead of sending a message", async ({ page }) => {
   await createSession(page);
+  const commands: string[] = [];
+  page.on("request", (request) => { if (request.method() === "POST" && new URL(request.url()).pathname === "/api/v1/trace/commands") commands.push(request.postDataJSON().action); });
 
   const composer = page.getByLabel("Message", { exact: true });
   await composer.fill("/model");
@@ -63,5 +65,5 @@ test("a control command opens a picker instead of sending a message", async ({ p
 
   // And nothing was sent. This is the whole point of the distinction: `/model` as
   // prompt text is what produced a paragraph about models in the transcript.
-  await expect(page.getByText("Hello from the E2E runner.")).toBeHidden();
+  expect(commands).toEqual(["configure"]);
 });

@@ -11,20 +11,17 @@
  */
 
 export * from "./api-types";
+import { clearTraceAccess } from "./trace-cache";
 import type {
   AdoptSessionRequest, BrowseResponse, BrowseRootsResponse, ConfigReport,
-  CreateSessionRequest, CreateTurnRequest, ControlRequest, DocumentWindow, EnumerateFilters,
+  CreateSessionRequest, CreateCommandRequest, DocumentWindow, EnumerateFilters,
   EnumerateResponse, EnvironmentsResponse, FileContentResponse, FileDocumentResponse,
-  FileTreeResponse, LinkState, MkdirRequest, MkdirResponse, PendingRequest, SearchResponse,
+  FileTreeResponse, LinkState, MkdirRequest, MkdirResponse, PendingRequest,
   PairingGrant,
   PairingOffer,
-  RereadResponse,
   Session,
-  SessionEdge,
   SessionFilters,
   SoulResponse,
-  Turn,
-  HistoryPage,
   UploadFileRequest,
   UploadFileResponse, WorkspacesResponse,
 } from "./api-types";
@@ -52,7 +49,7 @@ export class ApiError extends Error {
  * stores it. Parsing it here means the composer reads `flags.model` without every
  * consumer repeating a `JSON.parse` that can throw on a hand-edited row.
  */
-export function sessionFlags(session: Session): Record<string, string> {
+export function sessionFlags(session: Pick<Session, "flagsJson">): Record<string, string> {
   try {
     const parsed = JSON.parse(session.flagsJson || "{}");
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
@@ -171,7 +168,7 @@ function queryString(params: Record<string, string | number | undefined>): strin
  * `encodeURIComponent` and never `encodeURI`: the latter deliberately leaves `/` and
  * `:` alone, which are precisely the two characters this exists to escape.
  *
- * **Exported because the streaming paths do not go through this client.** `use-agent-session`
+ * **Exported because the streaming paths do not go through this client.** the operational control reader
  * opens its event stream with `fetch` directly, so it interpolates a session id itself — and
  * it did so raw, which is exactly the defect this function's first paragraph describes:
  * the browser percent-encoded the `:` on the way out, and the backend's `SessionId::decode`
@@ -205,13 +202,13 @@ export const api = {
       fetchAPI<{ id: string; name: string; isAdmin: boolean; token: string }>("/auth/register", {
         method: "POST",
         body: JSON.stringify({ name }),
-      }),
+      }).then((value) => { clearTraceAccess(); return value; }),
     login: (token: string) =>
       fetchAPI<{ id: string }>("/auth/login", {
         method: "POST",
         body: JSON.stringify({ token }),
-      }),
-    logout: () => fetchAPI<void>("/auth/logout", { method: "POST" }),
+      }).then((value) => { clearTraceAccess(); return value; }),
+    logout: () => fetchAPI<void>("/auth/logout", { method: "POST" }).then(() => clearTraceAccess()),
   },
   sessions: {
     list: (filters: SessionFilters = {}) =>
@@ -254,21 +251,13 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ id, value }),
       }),
-    preparedTurn: (draftId: string, req: CreateTurnRequest) =>
-      fetchAPI<{ session: Session }>(`/sessions/draft/${segment(draftId)}/turns`, {
+    preparedCommand: (draftId: string, req: CreateCommandRequest) =>
+      fetchAPI<import("./api-types").PreparedCommandResult>(`/sessions/draft/${segment(draftId)}/commands`, {
         method: "POST",
         body: JSON.stringify(req),
       }),
     discardPrepared: (draftId: string) =>
       fetchAPI<void>(`/sessions/draft/${segment(draftId)}`, { method: "DELETE" }),
-    turnStates: (id: string, signal?: AbortSignal) =>
-      fetchAPI<HistoryPage>(`/sessions/${segment(id)}/turn-state?limit=40`, { signal }),
-    exportTurn: (id: string, turnId: string) =>
-      fetchAPI<{turns: import("./api-types").TurnWithEvents[]}>(`/sessions/${segment(id)}/turns?turn_id=${encodeURIComponent(turnId)}`),
-    eventBody: (id: string, seq: number, signal?: AbortSignal) =>
-      fetchAPI<{ text: string; data?: unknown }>(`/sessions/${segment(id)}/bodies/${seq}`, { signal }),
-    edges: (id: string) =>
-      fetchAPI<{ edges: SessionEdge[] }>(`/sessions/${segment(id)}/edges`),
     /**
      * Bring in a session an agent already has on some environment.
      *
@@ -311,7 +300,7 @@ export const api = {
      * the agent loads the project) and instant afterwards.
      *
      * **A failure here is a 200 with a reason, not a 5xx**, so the session stays
-     * readable when its agent is gone. `lib/use-agent-session.ts` owns what that
+     * readable when its agent is gone. the operational control reader owns what that
      * means for caching.
      */
     capabilities: (id: string, signal?: AbortSignal) =>
@@ -331,98 +320,12 @@ export const api = {
      * that refetches what Sylph already holds, which is the defect this exists for.
      */
     reread: (id: string) =>
-      fetchAPI<RereadResponse>(`/sessions/${segment(id)}/reread`, {
-        method: "POST",
-      }),
-    reproject: (id: string) =>
-      fetchAPI<RereadResponse>(`/sessions/${segment(id)}/reproject`, {
+      fetchAPI<void>(`/sessions/${segment(id)}/reread`, {
         method: "POST",
       }),
     /** What the agent is currently blocked on. */
     requests: (id: string, signal?: AbortSignal) =>
-      fetchAPI<PendingRequest[]>(`/sessions/${segment(id)}/requests`, { signal }),
-    /**
-     * End the current turn but keep the agent loaded.
-     *
-     * Distinct from `turns.stop`, which ends the agent too. These are different
-     * intentions — "that is not what I meant" against "stop everything" — and the
-     * UI should offer whichever the agent declares it supports.
-     */
-    interrupt: (id: string) =>
-      fetchAPI<{ interrupted: boolean }>(`/sessions/${segment(id)}/interrupt`, {
-        method: "POST",
-      }),
-    /**
-     * Add text to a turn already in flight.
-     *
-     * `turnId` is a precondition, not a routing hint: a steer that races a turn
-     * boundary would otherwise be delivered into the *next* turn, succeeding
-     * silently with the text in the wrong conversation. A mismatch is a 409.
-     */
-    steer: (id: string, text: string, turnId: string, idempotencyKey: string) =>
-      fetchAPI<ControlRequest>(`/sessions/${segment(id)}/steer`, {
-        method: "POST",
-        body: JSON.stringify({ text, turnId, idempotencyKey }),
-      }),
-    /** Submit to the harness's own queue without claiming turn-scoped delivery. */
-    nativeQueue: (id: string, text: string, priority: boolean, idempotencyKey: string) =>
-      fetchAPI<ControlRequest>(`/sessions/${segment(id)}/native-queue`, {
-        method: "POST", body: JSON.stringify({ text, priority, idempotencyKey }),
-      }),
-    queue: (id: string, text: string, idempotencyKey: string) =>
-      fetchAPI<ControlRequest>(`/sessions/${segment(id)}/queue`, {
-        method: "POST",
-        body: JSON.stringify({ text, idempotencyKey }),
-      }),
-    /**
-     * Set one typed config option on a live session.
-     *
-     * Answers with the refreshed surface rather than an acknowledgement, because
-     * setting one option can change another's choices — effort levels depend on
-     * the selected model for both installed agents. So the response is applied
-     * rather than an optimistic local value.
-     */
-    setConfig: (id: string, configId: string, value: string | boolean) =>
-      fetchAPI<LinkState>(`/sessions/${segment(id)}/config`, {
-        method: "POST",
-        body: JSON.stringify({ configId, value }),
-      }),
-  },
-  controls: {
-    list: (sessionId: string) =>
-      fetchAPI<{ requests: ControlRequest[] }>(`/sessions/${segment(sessionId)}/control-requests`),
-    edit: (sessionId: string, requestId: string, text: string, revision: number) =>
-      fetchAPI<{ request: ControlRequest }>(`/control-requests/${segment(requestId)}`, {
-        method: "PATCH",
-        body: JSON.stringify({ text, revision }),
-      }),
-    cancel: (sessionId: string, requestId: string, revision: number) =>
-      fetchAPI<{ request: ControlRequest }>(`/control-requests/${segment(requestId)}`, {
-        method: "DELETE",
-        body: JSON.stringify({ revision }),
-      }),
-    steer: (sessionId: string, requestId: string, revision: number, turnId: string, idempotencyKey: string) =>
-      fetchAPI<{ request: ControlRequest }>(`/control-requests/${segment(requestId)}/steer`, {
-        method: "POST",
-        body: JSON.stringify({ revision, turnId, idempotencyKey }),
-      }),
-  },
-  requests: {
-    /**
-     * Answer a request an agent raised.
-     *
-     * `input` carries an edited version of what the agent proposed, which is how
-     * "allow, but change the command" works. Omitting it means "as proposed".
-     *
-     * Fails with `REQUEST_ALREADY_RESOLVED` when someone else answered first, and
-     * that is worth surfacing rather than swallowing: it means the dialog on
-     * screen was stale.
-     */
-    resolve: (requestId: string, option: string, input?: unknown) =>
-      fetchAPI<PendingRequest>(`/requests/${requestId}/resolve`, {
-        method: "POST",
-        body: JSON.stringify({ option, input }),
-      }),
+      fetchAPI<{ requests: PendingRequest[] }>(`/sessions/${segment(id)}/requests`, { signal }).then((result) => result.requests),
   },
   files: {
     tree: (sessionId: string, path = "", signal?: AbortSignal) =>
@@ -528,15 +431,8 @@ export const api = {
   workspaces: {
     list: () => fetchAPI<WorkspacesResponse>("/workspaces"),
   },
-  turns: {
-    create: (sessionId: string, req: CreateTurnRequest) =>
-      fetchAPI<{ turn: Turn }>(`/sessions/${segment(sessionId)}/turns`, {
-        method: "POST",
-        body: JSON.stringify(req),
-      }),
-    get: (turnId: string) => fetchAPI<{ turn: Turn }>(`/turns/${turnId}`),
-    stop: (turnId: string) =>
-      fetchAPI<{ turn: Turn }>(`/turns/${turnId}/stop`, { method: "POST" }),
+  commands: {
+    get: (id: string, signal?: AbortSignal) => fetchAPI<import("./api-types").PreparedCommandResult>(`/commands/${segment(id)}`, { signal }),
   },
   /**
    * Every paired environment, whether it is connected, and what it can run.
@@ -567,16 +463,6 @@ export const api = {
     unpair: (id: string) =>
       fetchAPI<void>(`/environments/${segment(id)}`, { method: "DELETE" }),
   },
-  /**
-   * FTS5 over the server's own history.
-   *
-   * **Keep this off any polled path.** Measured against an equivalent store, every
-   * other read is microseconds to sub-millisecond while this is orders of magnitude slower — so
-   * gating it on a real query length is not politeness, it is the difference between
-   * a search box and a load generator.
-   */
-  search: (query: string, limit?: number) =>
-    fetchAPI<SearchResponse>(`/search${queryString({ q: query, limit })}`),
   health: () =>
     fetchAPI<{
       ok: boolean;

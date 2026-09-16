@@ -131,18 +131,17 @@ test("the composer and the skip link translate too", async ({ page }) => {
  * body text around it changes.
  */
 test("the file pane translates, including its accessible names", async ({ page }) => {
-  await gotoReady(page);
+  await createSession(page);
   const settings = await openSettings(page);
   await settings.getByRole("button", { name: "中文", exact: true }).click();
   await page.keyboard.press("Escape");
 
   await page.keyboard.press("ControlOrMeta+Backslash");
-  const pane = page.getByRole("complementary", { name: "工作面板" });
+  const pane = page.getByRole("complementary", { name: "轨迹检查器" });
   await expect(pane).toBeVisible();
 
-  // With no session open the pane is its empty state, which is the one part of it
-  // that renders without a workdir — and it was hardcoded English too.
-  await expect(pane.getByText("未打开会话")).toBeVisible();
+  await pane.getByRole("tab", { name: "文件", exact: true }).click();
+  await expect(pane.getByRole("tree", { name: "文件树" })).toBeVisible();
 });
 
 /**

@@ -319,17 +319,21 @@ pub async fn events(
 
 /// A server restart cannot leave a job claiming that a vanished worker is running.
 /// Completed item identities stay durable, and retry resumes the remaining snapshot.
-pub async fn recover_state(store: &crate::db::JournalStore) -> Result<()> {
+pub async fn recover_state(store: &crate::db::ControlStore) -> Result<()> {
     sqlx::query("UPDATE import_jobs SET status='failed',error='Server restarted; retry to resume remaining history',updated_at_ms=? WHERE status IN ('queued','running')")
         .bind(now_ms()).execute(store.raw_pool()).await.map_err(Error::Database)?;
     Ok(())
 }
 
 pub fn spawn_sync(state: AppState) {
+    let state = state.downgrade();
     tokio::spawn(async move {
         let mut failed = false;
         loop {
             tokio::time::sleep(SYNC_INTERVAL).await;
+            let Some(state) = state.upgrade() else {
+                break;
+            };
             match sync_once(&state).await {
                 Ok(_) => failed = false,
                 Err(error) => {
@@ -354,7 +358,7 @@ struct SyncItem {
     item: ImportItem,
 }
 
-async fn sync_candidates(store: &crate::db::JournalStore) -> Result<Vec<SyncItem>> {
+async fn sync_candidates(store: &crate::db::ControlStore) -> Result<Vec<SyncItem>> {
     sqlx::query_as::<_, SyncItem>(
         "WITH latest AS (SELECT j.id AS job_id,j.environment_id AS environment,j.origin_subject,j.mode,j.cancel_requested, \
          i.ordinal,i.agent,i.native_id,i.title,i.workdir,i.status,i.reason,i.error_code,i.source_revision, \
@@ -632,10 +636,16 @@ async fn reread_complete(
         Path(session_id.encode()),
     )
     .await?;
-    if response.reread.read_errors > 0 {
+    if response
+        .0
+        .get("readErrors")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0)
+        > 0
+    {
         return Err(Error::LinkFailed(format!(
             "Native history contains {} unreadable records; the source revision remains pending for retry",
-            response.reread.read_errors,
+            response.0.get("readErrors").and_then(|v|v.as_u64()).unwrap_or(0),
         )));
     }
     Ok(())
@@ -1013,7 +1023,7 @@ async fn import_item(
 mod tests {
     use super::*;
 
-    async fn seed_snapshot(store: &crate::db::JournalStore, id: &str, mode: &str, cancelled: bool) {
+    async fn seed_snapshot(store: &crate::db::ControlStore, id: &str, mode: &str, cancelled: bool) {
         sqlx::query("INSERT INTO import_jobs(id,environment_id,origin_subject,mode,idempotency_key,request_json,status,scan_complete,cancel_requested,created_at_ms,updated_at_ms) VALUES(?,'env7fk2','subject',?,?,'{}',?,1,?,1,1)")
             .bind(id).bind(mode).bind(id).bind(if cancelled { "cancelled" } else { "completed" })
             .bind(cancelled).execute(store.raw_pool()).await.unwrap();
@@ -1024,9 +1034,13 @@ mod tests {
     #[tokio::test]
     async fn equal_timestamp_imports_follow_transaction_insertion_order() {
         let root = tempfile::tempdir().unwrap();
-        let store = crate::db::JournalStore::new(root.path().join("journal.db").to_str().unwrap())
-            .await
-            .unwrap();
+        let store = crate::db::ControlStore::open(
+            &root.path().join("control.db"),
+            sylph_protocol::trace::Issuer::Server("test".into()),
+            crate::db::control::OutboxLimits::default(),
+        )
+        .await
+        .unwrap();
         seed_snapshot(&store, "z-earlier", "import_and_watch", false).await;
         seed_snapshot(&store, "a-later", "import_once", false).await;
         assert!(sync_candidates(&store).await.unwrap().is_empty());
@@ -1035,9 +1049,13 @@ mod tests {
     #[tokio::test]
     async fn cancelling_the_latest_subscription_does_not_restore_an_older_one() {
         let root = tempfile::tempdir().unwrap();
-        let store = crate::db::JournalStore::new(root.path().join("journal.db").to_str().unwrap())
-            .await
-            .unwrap();
+        let store = crate::db::ControlStore::open(
+            &root.path().join("control.db"),
+            sylph_protocol::trace::Issuer::Server("test".into()),
+            crate::db::control::OutboxLimits::default(),
+        )
+        .await
+        .unwrap();
         seed_snapshot(&store, "first", "import_and_watch", false).await;
         seed_snapshot(&store, "cancelled", "import_and_watch", true).await;
         assert!(sync_candidates(&store).await.unwrap().is_empty());

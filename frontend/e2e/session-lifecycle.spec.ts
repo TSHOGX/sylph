@@ -48,25 +48,11 @@ test("a new session accepts a turn and streams the reply", async ({ page }) => {
 
   // The mock runner streams a thinking block, then deltas, then a completed
   // reply. Asserting the final text covers the whole delta-accumulation path.
-  await expect(page.getByText("Hello from the E2E runner.")).toBeVisible();
+  await expect(page.getByText("Hello from the E2E runner.", { exact: true }).first()).toBeVisible();
 
-  // Thinking is collapsed by default in the agent-first timeline, so its text is
-  // in the DOM but hidden until the disclosure is opened. That it is *not*
-  // visible is the assertion: reasoning must not compete with output.
-  const thinking = page.getByText("Considering the request.");
-  await expect(thinking).toBeHidden();
-  const work = page.locator(".reading-work > button").first();
-  await work.click();
-  if (await work.getAttribute("aria-expanded") === "false") await work.click();
-  await page.getByRole("button",{name:/^Thinking/}).first().click();
-  const thought = page.getByLabel("Tool calls", {exact: true}).getByRole("button", {name:"Thinking",exact:true});
-  await expect(thought).toBeVisible();
-  await thought.click();
-  await expect(thinking).toBeVisible();
+  await expect(page).toHaveURL(/\/agents\//);
+  await expect(page.locator("[data-trace-address]").filter({ hasText: "Hello from Playwright" }).first()).toBeVisible();
 
-  // The user's own message is journalled too, so history is complete.
-  await expect(page.getByRole("heading", { name: "Hello from Playwright" })).toBeVisible();
-  await expect(page.getByLabel(/Turn /).getByText("Hello from Playwright")).toBeVisible();
 });
 
 /**
@@ -86,7 +72,7 @@ test("a created session is offered for resumption on the start screen", async ({
   await page.goto("/");
 
   const recents = page.locator("#main").getByRole("listitem");
-  await expect(recents.first()).toContainText(/e2e|tmp/);
+  await expect(recents.first()).toContainText(/codex|tmp/);
 
   // The row links to the conversation, which is the only thing this list is for.
   await recents.first().getByRole("link").click();
@@ -99,18 +85,18 @@ test("reloading mid-conversation replays the journal", async ({ page }) => {
   const composer = page.getByLabel("Message", { exact: true });
   await composer.fill("Persist this");
   await page.getByRole("button", { name: "Send", exact: true }).click();
-  await expect(page.getByText("Hello from the E2E runner.")).toBeVisible();
+  await expect(page.getByText("Hello from the E2E runner.", { exact: true }).first()).toBeVisible();
 
   // A reload drops the SSE connection entirely, so what survives is what the
   // journal holds. Ephemeral deltas are expected to be gone; the completed reply
   // is not.
   await page.reload();
 
-  await expect(page.getByText("Hello from the E2E runner.")).toBeVisible();
+  await expect(page.getByText("Hello from the E2E runner.", { exact: true }).first()).toBeVisible();
   // The fixture's promotion turn intentionally owns the session title.  Reloading
   // must preserve the later user message as a turn, not replace the title with a
   // subsequent prompt.
-  await expect(page.getByLabel(/Turn /).getByText("Persist this")).toBeVisible();
+  await expect(page.locator("[data-trace-address]").filter({ hasText: "Persist this" }).first()).toBeVisible();
 });
 
 /** The session a run creates must show up under its workspace in the sidebar. */

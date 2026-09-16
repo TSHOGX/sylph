@@ -19,30 +19,6 @@
 
 export type SessionStatus = "idle" | "running";
 
-export type ControlKind = "send" | "steer" | "queue" | "native_steer" | "native_queue" | "stop" | "approval";
-export type ControlState =
-  | "accepted" | "queued" | "dispatched" | "confirmed" | "unconfirmed" | "consumed"
-  | "rejected" | "failed" | "cancelled";
-
-/** Server-authoritative intent, separate from the vendor's transcript and receipts. */
-export interface ControlRequest {
-  requestId: string;
-  sessionId: string;
-  originSubject: string;
-  kind: ControlKind;
-  text: string;
-  targetTurnId: string | null;
-  serverSeq: number;
-  state: ControlState;
-  idempotencyKey: string | null;
-  vendorReceipt?: unknown;
-  errorMessage: string | null;
-  createdAtMs: number;
-  consumedAtMs: number | null;
-  failedAtMs: number | null;
-  revision: number;
-}
-
 /**
  * How much resolution the record of a session has.
  *
@@ -55,11 +31,12 @@ export interface ControlRequest {
  * **A renderer reads this before drawing a duration.** `stream` means every delta
  * and its arrival time was recorded; the other two mean the source recorded less,
  * and no care downstream recovers a timing that was never written — see
- * `lib/execution-store.ts`, which refuses to lay out an axis without it.
+ * the trace reader, which refuses to lay out an axis without it.
  */
 export type Fidelity = "stream" | "blocks" | "messages";
 
 export interface Session {
+  traceAgentRef: string;
   /**
    * The encoded identity triple, `<environment>:<agent>:<nativeId>`.
    *
@@ -91,129 +68,6 @@ export interface Session {
   status: SessionStatus;
   createdAtMs: number;
   updatedAtMs: number;
-}
-
-/**
- * A turn's lifecycle state.
- *
- * The four terminal members — `completed`, `failed`, `cancelled`, `interrupted` — mean
- * something stronger than "the agent stopped": **the turn's record is finished**. A turn
- * whose outcome is known while the server is still closing what it left open reads
- * `settling`, which is in flight. So a client that sees a terminal status can refetch
- * history and find everything, with no grace period and no second signal.
- *
- * That is a server guarantee rather than a convention, and a recent one: `status` used to
- * go terminal *before* the settle sweep ran, so a client acting on it unmounted the stream
- * before the sweep's events arrived and refetched a journal the sweep had not written.
- * `crates/server/src/supervisor/closer.rs` holds the measurement.
- *
- * `settling` is transient and usually a few milliseconds, but it is a real state a poll can
- * land on, so it renders as in-flight rather than being folded into `running`.
- */
-export type TurnStatus =
-  | "queued"
-  | "running"
-  | "stopping"
-  | "settling"
-  | "completed"
-  | "failed"
-  | "cancelled"
-  | "interrupted";
-
-export interface Turn {
-  id: string;
-  sessionId: string;
-  status: TurnStatus;
-  /**
-   * Who started this turn.
-   *
-   * `agent` means nobody did: the agent spoke after its previous turn had settled,
-   * which is how backgrounded work reports finishing. Such a turn has an empty
-   * `requestText` by construction, so this is the only thing that distinguishes it
-   * from a user who sent nothing — and without the distinction it reads as a reply to
-   * a message the user never wrote.
-   *
-   * Required: `crates/server/src/models/turn.rs:20` has this as a non-`Option` `String`
-   * with no `skip_serializing_if`, so it is on every row the backend serializes.
-   */
-  origin: "user" | "agent";
-  requestText: string;
-  commandInvocationId: string | null;
-  idempotencyKey: string | null;
-  errorCode: string | null;
-  errorMessage: string | null;
-  createdAtMs: number;
-  startedAtMs: number | null;
-  completedAtMs: number | null;
-  stoppedAtMs: number | null;
-}
-
-/** A normalized journal/stream event. Mirrors the backend `StreamEvent`. */
-export interface StreamEvent {
-  seq: number;
-  /** The turn on which the server received this event, independent of trajectory owner. */
-  arrivalTurnId?: string;
-  kind: string;
-  phase?: string;
-  streamId?: string;
-  /**
-   * The delegated trajectory this event happened in; absent is the root turn.
-   *
-   * `docs/session-protocol.md` § Delegated trajectories. A `subagent` event's
-   * `streamId` *is* a trajectory id, so a nested delegation is one whose `span`
-   * names another — which is how arbitrary depth and a dynamic workflow's
-   * parallel phases are carried by a single field.
-   */
-  span?: string;
-  /** Typed reachability state for a delegated trajectory's interior. */
-  interiorState?: InteriorState;
-  name?: string;
-  text?: string;
-  data?: unknown;
-  /** Complete bodies are fetched separately when these fields are previews. */
-  bodyRef?: { seq: number; textBytes: number; dataBytes: number };
-  toolSummary?: {
-    kind: "read" | "edit" | "write" | "shell" | "search" | "task" | "other";
-    name: string;
-    summary: string;
-    path?: string;
-    command?: string;
-    pattern?: string;
-  };
-  isError?: boolean;
-  stability: string;
-  source: string;
-  /** When Sylph received the fact; the server's clock, always present on new rows. */
-  arrivalAtMs?: number;
-  /** Vendor/source timestamp, absent when that source carried no usable time. */
-  recordedAtMs?: number;
-  createdAtMs: number;
-  /**
-   * When a consolidated block's *first* phase arrived. Absent on a live event.
-   *
-   * A live event is one arrival, so `createdAtMs` is the whole story. A consolidated
-   * block is many arrivals folded into one row keyed by its close, which makes
-   * `createdAtMs` its *end* — so this is the only field that says when it began.
-   * Presence therefore also distinguishes settled history from a live stream.
-   */
-  startedAtMs?: number;
-}
-
-export type InteriorState =
-  | "forwards_nothing"
-  | "pending"
-  | "partial"
-  | "full"
-  | "unreadable";
-
-/** One turn plus its durable events, as returned by the history endpoint. */
-export interface TurnWithEvents {
-  turn: Turn;
-  events: StreamEvent[];
-}
-
-export interface HistoryPage {
-  turns: { turn: Pick<Turn, "id" | "status"> }[];
 }
 
 /** A flag declared by an agent's handshake. */
@@ -317,7 +171,7 @@ export interface SessionCapabilities {
  * server" — which there is no such thing as here — costs the two sites that branch
  * on it their exhaustiveness, and both make a decision a wrong default gets wrong:
  * `components/composer.tsx` decides retryability and what to say, and
- * `lib/use-agent-session.ts` decides cache lifetime. A variant added to the protocol
+ * the operational control reader decides cache lifetime. A variant added to the protocol
  * should fail the type check rather than silently fall to whichever arm handles the
  * rest.
  *
@@ -461,96 +315,28 @@ export interface RequestOption {
  */
 export interface PendingRequest {
   id: string;
-  sessionId: string;
-  turnId: string;
-  /** `approval` | `dialog` | `elicitation` | `choice`. */
-  kind: string;
+  kind: "approval" | "dialog" | "elicitation" | "choice";
   tool?: string;
   toolUseId?: string;
   title: string;
-  /** JSON: what the agent proposed. For an approval, the tool input. */
-  detailJson: string;
-  /** JSON array of `RequestOption`. */
-  optionsJson: string;
-  /**
-   * JSON: the input this request declared it wants collected, when it declares one.
-   *
-   * Absent is an approval, whose subject is one proposed tool input rendered from
-   * `detailJson`. Parsed by `requestFormOf` in `lib/request-form.ts`; see
-   * `docs/session-protocol.md` § Request forms for why it is declared rather than
-   * inferred from `detailJson`'s field names.
-   */
-  formJson?: string;
-  defaultOption?: string;
-  /** `safe` | `destructive` | `network`. Advisory, for emphasis. */
-  risk?: string;
-  /**
-   * Whether a lasting grant may be offered at all.
-   *
-   * `false` means the dialog must omit "always allow" entirely, not merely
-   * de-emphasize it: the agent has said that granting always would write a rule
-   * broader than this ask, so showing it turns a narrow yes into a wide one the
-   * user never read. Absent means allowed.
-   */
-  allowPersistent?: boolean;
-  /** When the agent stops waiting, if it will. Advisory. */
+  detail?: unknown;
+  options: RequestOption[];
+  form?: import("./request-form").RequestForm;
+  default?: string;
+  risk?: "safe" | "destructive" | "network";
+  allowPersistent: boolean;
   expiresAtMs?: number;
-  status: string;
-  chosenOption?: string;
-  createdAtMs: number;
-  resolvedAtMs?: number;
 }
 
-/** Parse a request's proposed input. Never throws: a malformed payload renders
- * as no detail rather than breaking the dialog that has to display it. */
+/** The object proposal is editable; every other JSON shape stays visible as raw detail. */
 export function requestDetail(request: PendingRequest): Record<string, unknown> {
-  try {
-    const parsed = JSON.parse(request.detailJson);
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch {
-    return {};
-  }
+  const detail = request.detail;
+  return detail !== null && typeof detail === "object" && !Array.isArray(detail) ? detail as Record<string, unknown> : {};
 }
 
-/** Parse a request's offered options, falling back to a bare allow/deny.
- *
- * The fallback matters: a request whose options failed to parse would otherwise
- * render as a dialog with no buttons, leaving the agent blocked with no way for
- * the user to answer. Allow and deny are the two the backend validates against
- * whatever the agent actually offered, so a wrong guess is refused rather than
- * silently accepted.
- *
- * A persistent option is dropped when the request forbids one. That filtering lives
- * here rather than in the dialog so every consumer of this list is correct by
- * construction: the agent has said that granting always would write a permission
- * rule *broader than this ask*, and offering it anyway converts a narrow yes into a
- * wide one the user never read. Absent means allowed, which keeps a minimal adapter
- * working. */
+/** Render only the choices actually declared by this current request. */
 export function requestOptions(request: PendingRequest): RequestOption[] {
-  const offered = (() => {
-    try {
-      const parsed = JSON.parse(request.optionsJson);
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed as RequestOption[];
-    } catch {
-      // fall through
-    }
-    return [
-      { id: "allow", label: "Allow" },
-      { id: "deny", label: "Deny" },
-    ] satisfies RequestOption[];
-  })();
-
-  if (request.allowPersistent === false) {
-    const narrowed = offered.filter((option) => !option.persistent);
-    // Filtering must never empty the dialog. If every option the agent offered was
-    // persistent, a UI with no buttons leaves the agent blocked with no way for the
-    // user to answer at all — strictly worse than the over-broad grant this filter
-    // exists to avoid. Declining is always safe, and the backend validates the id
-    // against what the agent offered, so a rejected deny fails loudly rather than
-    // silently approving.
-    return narrowed.length > 0 ? narrowed : [{ id: "deny", label: "Deny" }];
-  }
-  return offered;
+  return request.options.filter((option) => request.allowPersistent || !option.persistent);
 }
 
 /**
@@ -643,18 +429,6 @@ export interface PairingGrant {
   expiresAtMs: number;
 }
 
-export interface SessionIdentity {
-  environment: string;
-  agent: string;
-  nativeId: string;
-}
-
-export interface SessionEdge {
-  parent: SessionIdentity;
-  child: SessionIdentity;
-  relation: "delegation" | "fork";
-}
-
 export interface CreateSessionRequest {
   /** Which machine to run on. Required: a session has no default environment. */
   environment: string;
@@ -738,7 +512,6 @@ export interface NativeSessionRow {
    * session**, so a client must not render it as "never finished".
    */
   endedAtMs?: number;
-  eventCount?: number;
   /** Delegation parent or fork origin, as the vendor recorded it. */
   parentNativeId?: string;
   /**
@@ -763,28 +536,6 @@ export interface NativeSessionRow {
    */
   id: string;
   blocked?: BlockedReason;
-}
-
-/**
- * What one `POST /sessions/{id}/reread` pass added.
- *
- * **`ingested + alreadyHeld` may be less than `examined`, and a client must not derive
- * one from the others.** A turn's opening bracket survives in neither storage tier, so a
- * pass that finds nothing new after one neither writes it nor claims it was already held
- * (`docs/api/sessions.md` § `POST /api/v1/sessions/{id}/reread`).
- *
- * `ingested: 0` is the ordinary "nothing new since last time" answer and a success. A
- * store that no longer holds the session is a `404`, not a zero.
- */
-export interface RereadReport {
-  examined: number;
-  ingested: number;
-  alreadyHeld: number;
-  readErrors: number;
-}
-
-export interface RereadResponse {
-  reread: RereadReport;
 }
 
 /** One page of `GET /sessions/enumerate`. */
@@ -838,52 +589,10 @@ export interface AttachmentPayload {
   data: string;
 }
 
-export interface CreateTurnRequest {
+export interface CreateCommandRequest {
   text?: string;
   attachments?: AttachmentPayload[];
   idempotencyKey?: string;
-  /** Named command the agent declared for this session. */
-  command?: string;
-  args?: Record<string, string>;
-}
-
-/** Where in a session the query matched. */
-export interface BestMatch {
-  /** Sequence number to scroll to when opening the match. */
-  seq: number;
-  turnId?: string;
-  excerpt: string;
-}
-
-/**
- * One search hit: a session, and why it matched.
- *
- * **One store, so a hit is a session rather than a foreign row.** The index is over the
- * same rows the timeline renders (`docs/database-schema.md` § Search lives beside
- * `history.db`), so every hit is openable, nothing has to be imported first, and there is
- * no second id space to translate through.
- *
- * The session is carried whole rather than flattened into a handful of fields, so a
- * result row renders with the same `sessionLabel`, fidelity marker, and environment
- * chip a listing row does — and gains whatever is added to {@link Session} without a
- * change here.
- */
-export interface SearchResult {
-  session: Session;
-  bestMatch?: BestMatch;
-  /** How many blocks inside the session matched. */
-  hits?: number;
-}
-
-/**
- * `GET /search`.
- *
- * No `available` flag and no `detail`: the index is server-owned and opened with the
- * history store. It never 503s for an empty result and answers an empty array for a
- * query that finds nothing (`docs/api/sessions.md` § Search).
- */
-export interface SearchResponse {
-  results: SearchResult[];
 }
 
 /** Server-side filters for the session list. Omitted fields are no-ops. */
@@ -1192,3 +901,9 @@ export interface MkdirResponse {
  * codes; keeping `code` lets callers branch on machine-readable causes (for
  * example `SESSION_ALREADY_RUNNING`) instead of matching on prose.
  */
+
+/** Durable command acceptance; identity binding can complete after HTTP acceptance. */
+export interface PreparedCommandResult {
+  command: { acceptance: { commandId: string }; state: "accepted" | "dispatching" | "receiver_accepted" | "unknown" | "rejected" | "consumed" | "cancelled" | "conflicting" };
+  session?: Session;
+}

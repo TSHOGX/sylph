@@ -10,9 +10,7 @@ pub mod adapters;
 pub mod attachments;
 pub mod client;
 pub mod credentials;
-pub mod fixture;
 pub mod health;
-mod native_transfer;
 pub mod path;
 pub mod runtime;
 pub mod spool;
@@ -24,12 +22,11 @@ pub use client::{
     run_runtime_stream_with_adapters, ClientConnection,
 };
 pub use credentials::{Credential, CredentialStore};
-pub use fixture::{FaultPlan, FaultPoint, FixtureSink};
 pub use health::{AgentHealth, EnvironmentHealth, HealthReporter};
 pub use path::{ContainmentError, PathPolicy};
 pub use runtime::{
-    ChannelEventSink, EnvAgent, EnvAgentConfig, EventSink, HostedSession, RecordingSink,
+    ChannelCaptureTransport, EnvAgent, EnvAgentConfig, CaptureTransport, HostedSession,
 };
-pub use spool::{Spool, SpoolConfig, SpoolError, SpoolEvent};
+pub use spool::{Spool, SpoolConfig, SpoolError};
 pub use spool::capture::CaptureRegistry;
 pub use transport::{Backoff, ConnectionEpoch, ConnectionSupervisor, FrameError, FramedConnection};

@@ -36,10 +36,9 @@ fields produce visible mapping diagnostics while the complete observation is ret
 | `fixtures/native/claude/fork-replay-messageuuid-mirrors-own-uuid.jsonl` | `forkedFrom.messageUuid` repeats each copied record's own UUID; it is not a universal fork cutoff |
 | SDK declarations, lines 2334–2341, 3387–3460, 3481–3524 | Assistant/user UUIDs, task notifications, task updates, source provenance, and `shouldQuery` are separate fields |
 
-The current implementation is useful evidence about acquisition mechanics, not a
-semantic authority. In particular, the host/trajectory promotion in
-`crates/adapters/src/claude/translate.rs` and the native-to-live block synthesis in
-`crates/adapters/src/claude/native.rs` are replaced by the mappings below.
+Acquisition lives in `crates/adapters/src/claude/`; semantic interpretation lives in
+`crates/trace/src/mapping/claude.rs`. Captured host identifiers and native records are
+interpreted by the mappings below and cannot promote transport containers into agents.
 
 ## Capture inventory and source state
 

@@ -1,753 +1,254 @@
-//! Shared test harness.
-//!
-//! Each test gets an isolated backend: a fresh temp directory holding the
-//! SQLite journal, staged attachments, and a mock runners directory. The router
-//! is driven in-process via `oneshot`, so no port is bound and tests can run
-//! concurrently.
-//!
-//! The mock runner is a real script implementing the runner protocol, which
-//! keeps the supervisor under test on its production path — spawning a process,
-//! reading NDJSON from its stdout, parsing the final envelope — without paying
-//! for a model call.
-
+//! Isolated HTTP server and real envagent runtime communicating over framed duplex I/O.
 #![allow(dead_code)]
-
 pub mod mock;
-
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-
-pub use mock::{MockAgents, MockRunner};
-
-use axum::body::Body;
-use axum::http::{header, Request, Response};
-use axum::Router;
-use serde_json::Value;
-use sylph_protocol::{AgentName, EnvironmentId, Fidelity, NativeId, SessionId};
-use sylph_server::{config::Config, models::Session, router, AppState};
+use axum::{
+    body::Body,
+    http::{header, Request, Response},
+    Router,
+};
+pub use mock::FixtureAgents;
+use serde_json::{json, Value};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+use sylph_server::{
+    config::{Config, Resolved},
+    router, AppState,
+};
 use tempfile::TempDir;
 use tower::ServiceExt;
 
 pub struct TestBackend {
+    pub state: AppState,
+    pub source: FixtureAgents,
     router: Router,
-    /// Held for the lifetime of the test: dropping it deletes the journal and
-    /// every staged attachment.
     temp: TempDir,
     workdir: PathBuf,
-    quick_start_dir: PathBuf,
     cookie: String,
-    /// Kept so a test can rebuild the backend against the same journal, which
-    /// is how a restart is simulated.
-    config: Config,
-    /// The live state behind the router.
-    ///
-    /// Exposed because some state has no endpoint that creates it: an agent
-    /// request is raised by a link's drain task, so a test for the *resolve* API
-    /// has to seed one directly. Driving a real adapter to produce one would make
-    /// these tests depend on a live agent process to exercise a store guarantee.
-    pub state: AppState,
-    /// The agents this backend can run.
-    ///
-    /// Exposed so a test can make one **absent** ([`MockAgents::uninstall`]), which is what
-    /// `remove_dir_all(agents_dir().join(name))` used to express. There is no adapter
-    /// directory any more — an adapter is linked in — so availability is a fact the source
-    /// holds rather than one the filesystem does.
-    pub agents: MockAgents,
-    environment: EnvironmentId,
+    environment: sylph_protocol::EnvironmentId,
     installation_id: String,
     token: String,
-    bridge_task: tokio::task::JoinHandle<()>,
-    envagent_task: tokio::task::JoinHandle<()>,
-    session_ids: Arc<tokio::sync::Mutex<Vec<SessionId>>>,
+    tasks: Vec<tokio::task::JoinHandle<()>>,
 }
-
-impl TestBackend {
-    /// Start a backend with the default mock runner (`mock`), which streams a
-    /// short thinking/assistant sequence and exits successfully.
-    pub async fn start() -> Self {
-        Self::start_with_runners(&[MockRunner::success("mock")]).await
-    }
-
-    /// Start a backend whose runners directory contains exactly `runners`.
-    pub async fn start_with_runners(runners: &[MockRunner]) -> Self {
-        Self::start_with(runners, None, &[]).await
-    }
-
-    /// Start a backend whose resolved `SOUL.md` holds `text`.
-    ///
-    /// The file must exist before [`Config`] is built, because resolution
-    /// requires a readable file — the same order production runs in, where
-    /// `SOUL.md` predates the process.
-    pub async fn start_with_soul(text: &str) -> Self {
-        Self::start_with(&[MockRunner::success("mock")], Some(text), &[]).await
-    }
-
-    async fn start_with(runners: &[MockRunner], soul: Option<&str>, extra_roots: &[&Path]) -> Self {
-        let temp = TempDir::new().expect("failed to create temp dir");
-        let root = temp.path();
-
-        // The harness root *is* the Sylph home, so every path resolves the way
-        // production resolves it — from one root — rather than being assembled
-        // field by field here. A hand-built `Config` was how the harness came to
-        // describe a layout the resolver no longer produced.
-        let workdir = root.join("workspace");
-        std::fs::create_dir_all(&workdir).unwrap();
-
-        if let Some(text) = soul {
-            std::fs::write(root.join("SOUL.md"), text).unwrap();
+impl Drop for TestBackend {
+    fn drop(&mut self) {
+        for task in &self.tasks {
+            task.abort();
         }
-
-        let agents = MockAgents::new(runners);
-
-        // Resolved from an explicit environment rather than the process's own, so
-        // tests run concurrently: `std::env::set_var` is process-global and unsafe
-        // in a threaded test binary.
-        let env: sylph_server::config::resolve::Env = [
-            ("HOME", root.display().to_string()),
-            ("SYLPH_HOME", root.display().to_string()),
-            // The harness root, not `$HOME`: browsing tests must resolve inside the
-            // throwaway tree so they assert the real containment rule without
-            // depending on the developer's home directory. Colon-separated, as in
-            // production, when a test permits a directory outside its own tree.
+    }
+}
+impl TestBackend {
+    pub async fn start() -> Self {
+        Self::with_source(FixtureAgents::default()).await
+    }
+    pub async fn with_source(source: FixtureAgents) -> Self {
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_env_filter("error")
+            .try_init();
+        let temp = tempfile::tempdir().unwrap();
+        let workdir = temp.path().join("workspace");
+        std::fs::create_dir_all(&workdir).unwrap();
+        let env = [
+            ("HOME".into(), temp.path().display().to_string()),
+            ("SYLPH_HOME".into(), temp.path().display().to_string()),
             (
-                "SYLPH_BROWSE_ROOTS",
-                std::iter::once(root.display().to_string())
-                    .chain(extra_roots.iter().map(|path| path.display().to_string()))
-                    .collect::<Vec<_>>()
-                    .join(":"),
+                "SYLPH_BROWSE_ROOTS".into(),
+                temp.path().display().to_string(),
             ),
         ]
         .into_iter()
-        .map(|(k, v)| (k.to_string(), v))
         .collect();
-
-        let resolved = sylph_server::config::Resolved::from_parts(
-            &env,
-            &sylph_server::config::resolve::FileConfig::default(),
-            false,
-        );
-        // Seeded like a first run, so the harness exercises the same directory
-        // creation production does — and so `data_dir` exists before the store
-        // opens. `SOUL.md` written above survives, since seeding never overwrites.
+        let resolved = Resolved::from_parts(&env, &Default::default(), false);
         sylph_server::config::seed(&resolved).unwrap();
-        // A first run also *creates* a `SOUL.md`, which for the harness would
-        // silently turn identity injection on for every test. Only the tests that
-        // ask for one should have one, so the seeded copy is removed again — after
-        // seeding rather than instead of it, so the seeding path stays exercised.
-        if soul.is_none() {
-            std::fs::remove_file(root.join("SOUL.md")).ok();
-        }
-
         let mut config = Config::from_resolved(&resolved);
-        config.port = 0;
-        config.cookie_secret = "test-secret-token".to_string();
-
-        // The server never receives an adapter source. The deterministic adapter lives in
-        // the fixture envagent below, so this build exercises the same production wiring
-        // and reaches execution only across the bridge.
-        let state = AppState::build(config.clone())
-            .await
-            .expect("failed to build state");
-        let cookie = format!("sylph_session={}", state.config.cookie_secret);
-
-        // Resolved once, in the spelling the server records and reports. Every
-        // assertion comparing against these is then comparing against the
-        // configured value as the server resolved it, rather than against a
-        // spelling only the harness ever uses.
-        let quick_start_dir = std::fs::canonicalize(&config.quick_start_dir)
-            .unwrap_or_else(|_| config.quick_start_dir.clone());
-        let workdir = std::fs::canonicalize(&workdir).unwrap_or(workdir);
-
-        // Every stored session the mock enumerates reports this directory. Inside the
-        // harness tree deliberately: adopting runs the *recorded* path through the same
-        // containment bound `POST /sessions` uses, so a fixture reporting somewhere else
-        // would exercise the refusal rather than the adopt. Canonical, because that is the
-        // spelling the server journals and compares against.
-        agents.set_store_workdir(Some(workdir.display().to_string()));
-
-        let offer = state
-            .env_bridge
-            .create_pairing()
-            .await
-            .expect("fixture pairing offer should be created");
+        config.cookie_secret = "test-cookie".into();
+        let state = AppState::build(config).await.unwrap();
+        let offer = state.env_bridge.create_pairing().await.unwrap();
         let grant = state
             .env_bridge
-            .claim_pairing(
-                &offer.code,
-                "test fixture",
-                "development",
-                agents.infos().await,
-            )
+            .claim_pairing(&offer.code, "Fixture", "development", vec![mock::info()])
             .await
-            .expect("fixture pairing should be accepted");
+            .unwrap();
         let environment = grant.environment_id.clone();
-        let producer_id = sylph_protocol::ProducerId::parse("fixture-producer").unwrap();
+        let producer = sylph_protocol::ProducerId::parse("fixture-producer").unwrap();
         let mut hello = sylph_protocol::Hello::current(
             grant.installation_id.clone(),
-            producer_id.clone(),
+            producer.clone(),
             Some(environment.clone()),
             0,
         );
-        hello.agents = agents.inventory().await;
-        let (server_stream, agent_stream) = tokio::io::duplex(8 * 1024 * 1024);
+        hello.agents = vec![sylph_protocol::AgentInventory::available(mock::info())];
+        let (server, agent) = tokio::io::duplex(8 * 1024 * 1024);
         let bridge = state.env_bridge.clone();
-        let bridge_task = tokio::spawn(async move {
-            let (reader, writer) = tokio::io::split(server_stream);
-            let _ = bridge.serve_io(reader, writer).await;
+        let server_task = tokio::spawn(async move {
+            let (r, w) = tokio::io::split(server);
+            if let Err(e) = bridge.serve_io(r, w).await {
+                eprintln!("fixture bridge: {e:#}");
+            }
         });
-        let mut env_roots = std::iter::once(root.to_path_buf())
-            .chain(extra_roots.iter().map(|path| path.to_path_buf()))
-            .collect::<Vec<_>>();
-        if config.quick_start_dir.exists() {
-            env_roots.push(config.quick_start_dir.clone());
-        }
-        let env_config = sylph_envagent::EnvAgentConfig {
+        let config = sylph_envagent::EnvAgentConfig {
             environment_id: environment.to_string(),
-            producer_id: producer_id.to_string(),
-            spool: sylph_envagent::SpoolConfig::new(
-                root.join("envagent-spool.db"),
-                64 * 1024 * 1024,
-            ),
-            path_policy: sylph_envagent::PathPolicy::from_roots(env_roots)
-                .expect("fixture envagent path policy should build"),
+            producer_id: producer.to_string(),
+            spool: sylph_envagent::SpoolConfig::new(temp.path().join("spool.db"), 64 * 1024 * 1024),
+            path_policy: sylph_envagent::PathPolicy::from_roots(vec![temp.path().to_path_buf()])
+                .unwrap(),
         };
-        let source: Arc<dyn sylph_envagent::adapters::AdapterSource> = Arc::new(agents.clone());
+        let agents = source.clone();
         let token = grant.credential.clone();
-        let envagent_task = tokio::spawn(async move {
-            let _ = sylph_envagent::run_runtime_stream_with_adapters(
-                agent_stream,
+        let agent_task = tokio::spawn(async move {
+            if let Err(e) = sylph_envagent::run_runtime_stream_with_adapters(
+                agent,
                 hello,
                 token,
-                env_config,
-                source,
+                config,
+                Arc::new(agents),
             )
-            .await;
+            .await
+            {
+                eprintln!("fixture envagent: {e:#}");
+            }
         });
-        for _ in 0..100 {
+        for _ in 0..200 {
             if state.env_bridge.environment_connected(&environment).await {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
-        assert!(
-            state.env_bridge.environment_connected(&environment).await,
-            "fixture envagent failed to connect"
-        );
-
+        assert!(state.env_bridge.environment_connected(&environment).await);
         Self {
             router: router(state.clone()),
+            state,
+            source,
             temp,
             workdir,
-            quick_start_dir,
-            cookie,
-            config,
-            state,
-            agents,
+            cookie: "sylph_session=test-cookie".into(),
             environment,
             installation_id: grant.installation_id,
             token: grant.credential,
-            bridge_task,
-            envagent_task,
-            session_ids: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            tasks: vec![server_task, agent_task],
         }
     }
-
-    /// Wait until a settled turn's events have moved into history.
-    ///
-    /// Consolidation is scheduled on settle and runs detached, so a test cannot
-    /// simply read afterwards. This polls the observable end state — journal empty,
-    /// history populated — and sweeps once as a fallback, which covers the case
-    /// where the scheduled attempt deferred.
-    pub async fn await_consolidation(&self, turn_id: &str) {
-        for attempt in 0..50 {
-            let journalled = self
-                .state
-                .store
-                .turn_events_after(turn_id, -1)
-                .await
-                .unwrap_or_default();
-            let blocks = self
-                .state
-                .history
-                .turn_blocks(turn_id)
-                .await
-                .unwrap_or_default();
-            if journalled.is_empty() && !blocks.is_empty() {
-                return;
-            }
-            // Halfway through, do the work ourselves rather than waiting out the
-            // whole budget on an attempt that already failed.
-            if attempt == 25 {
-                self.state.consolidate_now().await;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-        panic!("turn {} was never consolidated", turn_id);
-    }
-
-    /// Rebuild the backend against the same journal, as a restart would.
-    ///
-    /// Child processes do not survive a real restart, so anything the previous
-    /// process left mid-flight is gone. This is the only way to exercise the
-    /// startup recovery that reconciles those rows.
-    pub async fn restart(&mut self) {
-        // A restart rebuilds only server state. The deterministic adapter remains inside
-        // the fixture envagent, exactly as it does in production.
-        let state = AppState::build(self.config.clone())
-            .await
-            .expect("failed to rebuild state");
-        self.bridge_task.abort();
-        self.envagent_task.abort();
-        self.router = router(state.clone());
-        // Replaced too, or a test would keep querying the pre-restart store and
-        // miss exactly the recovery it is asserting on.
-        self.state = state;
-
-        let producer_id = sylph_protocol::ProducerId::parse("fixture-producer").unwrap();
-        let mut hello = sylph_protocol::Hello::current(
-            self.installation_id.clone(),
-            producer_id.clone(),
-            Some(self.environment.clone()),
-            0,
-        );
-        hello.agents = self.agents.inventory().await;
-        let (server_stream, agent_stream) = tokio::io::duplex(8 * 1024 * 1024);
-        let bridge = self.state.env_bridge.clone();
-        self.bridge_task = tokio::spawn(async move {
-            let (reader, writer) = tokio::io::split(server_stream);
-            let _ = bridge.serve_io(reader, writer).await;
-        });
-        let mut env_roots = self.config.browse_roots.clone();
-        if self.config.quick_start_dir.exists() {
-            env_roots.push(self.config.quick_start_dir.clone());
-        }
-        let env_config = sylph_envagent::EnvAgentConfig {
-            environment_id: self.environment.to_string(),
-            producer_id: producer_id.to_string(),
-            spool: sylph_envagent::SpoolConfig::new(
-                self.temp.path().join("envagent-spool.db"),
-                64 * 1024 * 1024,
-            ),
-            path_policy: sylph_envagent::PathPolicy::from_roots(env_roots)
-                .expect("fixture envagent path policy should build"),
-        };
-        let source: Arc<dyn sylph_envagent::adapters::AdapterSource> =
-            Arc::new(self.agents.clone());
-        let token = self.token.clone();
-        self.envagent_task = tokio::spawn(async move {
-            let _ = sylph_envagent::run_runtime_stream_with_adapters(
-                agent_stream,
-                hello,
-                token,
-                env_config,
-                source,
-            )
-            .await;
-        });
-        for _ in 0..100 {
-            if self
-                .state
-                .env_bridge
-                .environment_connected(&self.environment)
-                .await
-            {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-        assert!(
-            self.state
-                .env_bridge
-                .environment_connected(&self.environment)
-                .await,
-            "fixture envagent failed to reconnect after restart"
-        );
-        // The test envagent task is recreated on restart, so restore the hosted
-        // handles a real reconnecting envagent would retain. This keeps subsequent
-        // commands on durable sessions on the bridge path rather than manufacturing
-        // a SESSION_NOT_HOSTED failure from the harness lifecycle itself.
-        let session_ids = self.session_ids.lock().await.clone();
-        for session_id in session_ids {
-            if let Some(session) = self
-                .state
-                .store
-                .get_session(&session_id)
-                .await
-                .expect("fixture session lookup after restart failed")
-            {
-                let _ = self.state.env_bridge.remote_attach(&session).await;
-            }
-        }
-    }
-
-    /// Restart with the Quick Start directory *outside* every browse root.
-    ///
-    /// The configuration this expresses is a real one — `SYLPH_HOME` and
-    /// `paths.quick_start_dir` both move it, and `docs/configuration.md` says so — and it
-    /// is the only one in which the Quick Start half of `session_roots()` is observable.
-    /// With the default layout it sits under the harness root, so a bound built from
-    /// `browse_roots` alone coincides with `session_roots()` and a test cannot tell them
-    /// apart. Returns the new directory, canonicalized as the server resolves it.
-    pub async fn restart_with_external_quick_start(&mut self) -> PathBuf {
-        let external = self.temp.path().join("outside-the-roots").join("scratch");
-        std::fs::create_dir_all(&external).unwrap();
-        // `browse_roots` deliberately keeps only the workspace subtree, so the new Quick
-        // Start directory is reachable *only* through the unconditional permission.
-        self.config.browse_roots = vec![self.workdir.clone()];
-        self.config.quick_start_dir = external.clone();
-        self.restart().await;
-        let canonical = std::fs::canonicalize(&external).unwrap_or(external);
-        self.quick_start_dir = canonical.clone();
-        canonical
-    }
-
-    /// Restart against the same journal with the session roots narrowed to
-    /// `roots`.
-    ///
-    /// Exists for one property that cannot be observed any other way: a session
-    /// recorded while its directory was permitted must stay readable after
-    /// configuration stops permitting it. Reading the journal with a *different*
-    /// bound in force is the whole test, and a harness that could only restart
-    /// with identical configuration could not express it.
-    pub async fn restart_with_session_roots(&mut self, roots: &[&Path]) {
-        self.config.browse_roots = roots.iter().map(|path| path.to_path_buf()).collect();
-        // Moved out of the way too. It is permitted unconditionally, so leaving it
-        // pointing inside the tree would keep a root the test meant to remove.
-        self.config.quick_start_dir = self.temp.path().join("no-quick-start");
-        self.restart().await;
-    }
-
-    /// The session workdir, in the spelling the server records.
-    ///
-    /// Canonical, because session creation resolves a client-named workdir before
-    /// journalling it — so this is what a created session's `workdir` reads back
-    /// as, and what `/workspaces` groups by. `TempDir` hands out a path under
-    /// `/var/folders` on macOS, which resolves to `/private/var/folders`; a test
-    /// comparing against the unresolved spelling would be asserting against a
-    /// value the server never produces.
     pub fn workdir(&self) -> &Path {
         &self.workdir
     }
-
-    /// Where Quick Start sessions run, as configuration resolved it.
-    ///
-    /// Exposed so a test asserts against the *configured* directory rather than a
-    /// literal path. A test that hardcoded one could only ever confirm that the
-    /// endpoint agreed with the test, which is how the endpoint kept reporting a
-    /// directory belonging to another project. Canonical for the same reason
-    /// [`Self::workdir`] is.
-    pub fn quick_start_dir(&self) -> &Path {
-        &self.quick_start_dir
-    }
-
-    /// A directory outside every configured session root.
-    ///
-    /// Exists because "outside the roots" cannot be asserted with a literal: the
-    /// harness root moves per test, so a hardcoded path would either be
-    /// accidentally inside it or prove nothing about the configured bound. Created
-    /// on demand and cleaned up with the returned guard.
-    pub fn outside_the_roots(&self) -> TempDir {
-        TempDir::new().expect("failed to create a directory outside the roots")
-    }
-
-    /// The configured browse root — the throwaway tree's top level.
-    ///
-    /// Distinct from [`Self::workdir`], which is a directory *inside* it. Tests
-    /// about the browse boundary need the root itself, because "has no parent to
-    /// offer" is only true at a root.
     pub fn browse_root(&self) -> &Path {
         self.temp.path()
     }
-
-    /// A Cookie header value that passes auth.
+    pub fn quick_start_dir(&self) -> &Path {
+        &self.state.config.quick_start_dir
+    }
+    pub fn outside_the_roots(&self) -> TempDir {
+        tempfile::tempdir().unwrap()
+    }
     pub fn cookie(&self) -> &str {
         &self.cookie
     }
-
-    async fn send(&self, request: Request<Body>) -> Response<Body> {
+    pub fn installation_id(&self) -> &str {
+        &self.installation_id
+    }
+    pub fn environment_token(&self) -> &str {
+        &self.token
+    }
+    pub async fn environment_id(&self) -> String {
+        self.environment.to_string()
+    }
+    pub async fn request(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+        cookie: Option<&str>,
+    ) -> Response<Body> {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("host", "localhost");
+        if let Some(cookie) = cookie {
+            builder = builder.header(header::COOKIE, cookie);
+        }
+        let body = if let Some(body) = body {
+            builder = builder.header(header::CONTENT_TYPE, "application/json");
+            Body::from(body.to_string())
+        } else {
+            Body::empty()
+        };
         self.router
             .clone()
-            .oneshot(request)
+            .oneshot(builder.body(body).unwrap())
             .await
-            .expect("router call failed")
+            .unwrap()
     }
-
-    pub async fn get(&self, path: &str) -> Response<Body> {
-        self.send(
-            Request::builder()
-                .uri(path)
-                .header(header::HOST, "127.0.0.1")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-    }
-
-    pub async fn get_authed(&self, path: &str) -> Response<Body> {
-        self.send(
-            Request::builder()
-                .uri(path)
-                .header(header::HOST, "127.0.0.1")
-                .header(header::COOKIE, &self.cookie)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-    }
-
-    pub async fn get_with_cookie(&self, path: &str, cookie: &str) -> Response<Body> {
-        self.send(
-            Request::builder()
-                .uri(path)
-                .header(header::HOST, "127.0.0.1")
-                .header(header::COOKIE, cookie)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-    }
-
-    /// An authenticated GET carrying one extra request header.
-    ///
-    /// Exists for conditional requests: an `If-None-Match` round trip is the only
-    /// way to observe that a route revalidates instead of resending its body.
-    pub async fn get_authed_with_header(
-        &self,
-        path: &str,
-        name: header::HeaderName,
-        value: &str,
-    ) -> Response<Body> {
-        self.send(
-            Request::builder()
-                .uri(path)
-                .header(header::HOST, "127.0.0.1")
-                .header(header::COOKIE, &self.cookie)
-                .header(name, value)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-    }
-
-    /// An authenticated request with an arbitrary method.
-    ///
-    /// Exists for the read-only assertions: proving a route rejects `PUT` needs a
-    /// method the typed helpers do not offer, and adding a helper per verb would be
-    /// four functions to prove one property.
     pub async fn request_authed(
         &self,
         method: &str,
         path: &str,
         body: Option<Value>,
     ) -> Response<Body> {
-        let mut builder = Request::builder()
-            .method(method)
-            .uri(path)
-            .header(header::HOST, "127.0.0.1")
-            .header(header::COOKIE, &self.cookie);
-        let body = match body {
-            Some(value) => {
-                builder = builder.header(header::CONTENT_TYPE, "application/json");
-                Body::from(value.to_string())
-            }
-            None => Body::empty(),
-        };
-        self.send(builder.body(body).unwrap()).await
+        self.request(method, path, body, Some(&self.cookie)).await
     }
-
-    pub async fn post_authed(&self, path: &str, body: Value) -> Response<Body> {
-        self.send(
-            Request::builder()
-                .method("POST")
-                .uri(path)
-                .header(header::HOST, "127.0.0.1")
-                .header(header::COOKIE, &self.cookie)
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(body.to_string()))
-                .unwrap(),
-        )
-        .await
+    pub async fn get(&self, path: &str) -> Response<Body> {
+        self.request("GET", path, None, None).await
     }
-
+    pub async fn get_authed(&self, path: &str) -> Response<Body> {
+        self.request_authed("GET", path, None).await
+    }
+    pub async fn get_with_cookie(&self, path: &str, cookie: &str) -> Response<Body> {
+        self.request("GET", path, None, Some(cookie)).await
+    }
     pub async fn post(&self, path: &str, body: Value) -> Response<Body> {
-        self.send(
-            Request::builder()
-                .method("POST")
-                .uri(path)
-                .header(header::HOST, "127.0.0.1")
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(body.to_string()))
-                .unwrap(),
-        )
-        .await
+        self.request("POST", path, Some(body), None).await
     }
-
+    pub async fn post_authed(&self, path: &str, body: Value) -> Response<Body> {
+        self.request_authed("POST", path, Some(body)).await
+    }
     pub async fn patch_authed(&self, path: &str, body: Value) -> Response<Body> {
-        self.send(
-            Request::builder()
-                .method("PATCH")
-                .uri(path)
-                .header(header::HOST, "127.0.0.1")
-                .header(header::COOKIE, &self.cookie)
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(body.to_string()))
-                .unwrap(),
-        )
-        .await
+        self.request_authed("PATCH", path, Some(body)).await
     }
-
     pub async fn delete_authed(&self, path: &str) -> Response<Body> {
-        self.send(
-            Request::builder()
-                .method("DELETE")
-                .uri(path)
-                .header(header::HOST, "127.0.0.1")
-                .header(header::COOKIE, &self.cookie)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
+        self.request_authed("DELETE", path, None).await
     }
-
-    /// POST with an explicit `Idempotency-Key` header.
-    pub async fn post_authed_with_key(&self, path: &str, body: Value, key: &str) -> Response<Body> {
-        self.send(
-            Request::builder()
-                .method("POST")
-                .uri(path)
-                .header(header::HOST, "127.0.0.1")
-                .header(header::COOKIE, &self.cookie)
-                .header(header::CONTENT_TYPE, "application/json")
-                .header("Idempotency-Key", key)
-                .body(Body::from(body.to_string()))
-                .unwrap(),
-        )
-        .await
+    pub async fn prepare(&self, workdir: &str) -> Value {
+        let response=self.post_authed("/api/v1/sessions",json!({"environment":self.environment,"agent":"codex","workdir":workdir,"injectIdentity":false})).await;
+        let status = response.status();
+        let value = json_body(response).await;
+        assert_eq!(status, 201, "{value}");
+        value
     }
-
-    /// Create a session and return its id, asserting the call succeeded.
-    ///
-    /// The status is captured before the body is consumed, so one request
-    /// serves both the assertion and the id. Issuing a second request to
-    /// recover the id would leave an orphan session behind and make any
-    /// session-counting assertion silently wrong.
-    pub async fn create_session(&self, agent: &str) -> String {
-        let workdir = self.workdir.display().to_string();
-        self.create_session_in(agent, &workdir).await
+    pub async fn create_session(&self, _: &str) -> String {
+        self.create_session_in("codex", self.workdir.to_str().unwrap())
+            .await
     }
-
-    /// [`Self::create_session`] in a named directory.
-    ///
-    /// For the filter tests, which need two sessions in *different* directories — and
-    /// specifically in sibling directories whose paths are prefixes of one another, since
-    /// that is the case a substring filter gets wrong.
-    pub async fn create_session_in(&self, agent: &str, workdir: &str) -> String {
-        // Most tests need an existing durable session with an empty turn history so they
-        // can exercise a later request in isolation. The production API deliberately
-        // cannot create such a row: POST /sessions returns an in-memory draft and the
-        // first real turn atomically promotes it. Seed this fixture directly in the
-        // journal instead of smuggling a fake "fixture setup" turn through that API.
-        // Tests that cover the public lifecycle use the endpoint explicitly below.
-        let environment = EnvironmentId::parse(self.environment_id().await).unwrap();
-        let agent_name = AgentName::parse(agent.to_string()).unwrap();
-        let session_id = SessionId::new(
-            environment,
-            agent_name,
-            NativeId::new(format!("fixture-{}", uuid::Uuid::new_v4())),
-        );
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64;
-        self.state
-            .store
-            .create_session(&Session {
-                id: session_id.clone(),
-                workdir: Some(
-                    std::fs::canonicalize(workdir)
-                        .unwrap_or_else(|_| PathBuf::from(workdir))
-                        .display()
-                        .to_string(),
+    pub async fn create_session_in(&self, _: &str, workdir: &str) -> String {
+        let draft = self.prepare(workdir).await;
+        let response = self
+            .post_authed(
+                &format!(
+                    "/api/v1/sessions/draft/{}/commands",
+                    draft["draftId"].as_str().unwrap()
                 ),
-                title: None,
-                inject_identity: true,
-                fidelity: Fidelity::Stream,
-                flags_json: "{}".to_string(),
-                status: "idle".to_string(),
-                created_at_ms: now,
-                updated_at_ms: now,
-            })
-            .await
-            .expect("fixture session insert failed");
-        let session = self
-            .state
-            .store
-            .get_session(&session_id)
-            .await
-            .expect("fixture session lookup failed")
-            .expect("fixture session must be present");
-        let outcome = self
-            .state
-            .env_bridge
-            .remote_attach(&session)
-            .await
-            .expect("fixture remote link establishment failed");
-        assert!(matches!(
-            outcome,
-            sylph_protocol::CommandOutcome::Accepted { .. }
-        ));
-        self.session_ids.lock().await.push(session_id.clone());
-        session_id.encode()
+                json!({"text":"Fixture input","idempotencyKey":"initial"}),
+            )
+            .await;
+        let status = response.status();
+        let body = json_body(response).await;
+        assert_eq!(status, 202, "{body}");
+        body["session"]["id"].as_str().unwrap().into()
     }
-
-    /// The environment this harness's server reports.
-    ///
-    /// Read back from `GET /environments` rather than hardcoded: a test that hardcodes
-    /// what the code hardcodes proves only that the two agree, which `AGENTS.md` records
-    /// as having twice let a test and the endpoint be wrong about the product together.
-    pub async fn environment_id(&self) -> String {
-        self.environment.to_string()
-    }
-
-    pub fn installation_id(&self) -> &str {
-        &self.installation_id
-    }
-
-    pub fn environment_token(&self) -> &str {
-        &self.token
-    }
-
-    /// The typed form of a session id, for the store-level APIs.
-    pub fn session_id(encoded: &str) -> sylph_protocol::SessionId {
-        sylph_protocol::SessionId::decode(encoded).expect("the server issued this id")
-    }
-
-    /// Poll a turn until it reaches a terminal status, or panic on timeout.
-    ///
-    /// Turns run detached from the request that created them, so tests must
-    /// wait for the supervisor rather than assuming completion.
-    pub async fn await_turn(&self, turn_id: &str) -> Value {
-        for _ in 0..100 {
-            let response = self.get_authed(&format!("/api/v1/turns/{}", turn_id)).await;
-            let body = json_body(response).await;
-            let status = body["turn"]["status"].as_str().unwrap_or("");
-            if matches!(status, "completed" | "failed" | "cancelled" | "interrupted") {
-                return body;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-        panic!("turn {} did not reach a terminal state within 5s", turn_id);
+    pub fn session_id(value: &str) -> sylph_protocol::SessionId {
+        sylph_protocol::SessionId::decode(value).unwrap()
     }
 }
-
-pub async fn body_string(response: Response<Body>) -> String {
-    let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
-        .await
-        .expect("failed to read body");
-    String::from_utf8_lossy(&bytes).to_string()
-}
-
 pub async fn json_body(response: Response<Body>) -> Value {
-    let text = body_string(response).await;
-    serde_json::from_str(&text).unwrap_or_else(|e| panic!("body was not JSON ({}): {}", e, text))
+    serde_json::from_str(&body_string(response).await).unwrap()
+}
+pub async fn body_string(response: Response<Body>) -> String {
+    String::from_utf8(
+        axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap()
 }

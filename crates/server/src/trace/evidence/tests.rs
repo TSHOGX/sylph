@@ -1178,3 +1178,18 @@ async fn deletion_of_a_pre_identity_inventory_rejects_its_old_capture_epoch_afte
     ));
     assert_eq!(recaptured.source_position, captured.source_position);
 }
+
+#[tokio::test]
+async fn current_scope_epoch_returns_live_authorization_and_omits_deleted_scope() {
+    let fixture = Fixture::new().await;
+    let scope = IngestionScope::Agent(fixture.agent.clone());
+    assert_eq!(
+        fixture.store.current_scope_epoch(&scope).await.unwrap(),
+        Some(fixture.epoch.clone())
+    );
+    fixture.store.delete_scope(&scope).await.unwrap();
+    assert_eq!(
+        fixture.store.current_scope_epoch(&scope).await.unwrap(),
+        None
+    );
+}

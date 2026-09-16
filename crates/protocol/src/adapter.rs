@@ -1,9 +1,5 @@
-//! The adapter contract: one trait, three modes, one vocabulary out of all of them.
-//!
-//! `docs/session-protocol.md` §§ An adapter is a trait, with three modes and What the
-//! adapter owns, and what it must not are authoritative.
-//!
-//! **Declarations only.** The implementations live in `crates/adapters`.
+//! Vendor process control, capability discovery and native acquisition locators.
+//! The server maps retained captures into trace semantics independently of these handles.
 
 use std::collections::BTreeMap;
 use std::pin::Pin;
@@ -14,8 +10,8 @@ use futures::Stream;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CapabilityFacets, ConfigOption, Event, Fidelity, FlagSchema, NativeId, Request, Resolution,
-    SessionCapabilities, TurnInputFact,
+    CapabilityFacets, ConfigOption, Fidelity, FlagSchema, NativeId, Request, Resolution,
+    SessionCapabilities,
 };
 
 /// What the local CLI reports about itself, plus what this module knows about it.
@@ -53,12 +49,8 @@ pub struct AgentInfo {
     /// *Measured 2026-08-27:* `claude` takes `--session-id`, `pi` takes `--session-id`
     /// and creates the session if it is missing, `codex` assigns its own and reports it.
     ///
-    /// **Dictating is the preferred path**, because then the server can establish the
-    /// durable identity without correlating a later event. A prepared link may still
-    /// have no id while it is idle: some vendors create the native history record only
-    /// when the first turn is accepted. In that case the adapter returns the id from
-    /// [`Session::send_initial`]; an id is required for promotion, but not for opening
-    /// a disposable prepared link.
+    /// A requested id is not proof that the vendor used it. The held session must
+    /// return retained native identity evidence before the server binds a launch.
     pub dictates_native_id: bool,
     /// The best fidelity this agent's *native store* can yield.
     ///
@@ -162,7 +154,7 @@ pub struct RunSpec {
 pub enum RequestedNativeId {
     /// Open a new session under this id, which the **envagent** generated.
     ///
-    /// The preferred path: identity is known before the first event.
+    /// The requested id still requires confirmation in retained vendor evidence.
     ///
     /// The envagent rather than the server or the adapter, because it is the process that
     /// holds the adapter and builds the [`RunSpec`]. An adapter must never mint one: an id it
@@ -236,16 +228,7 @@ pub struct NativeSummary {
     /// guessing a directory to run an agent in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workdir: Option<String>,
-    /// The vendor's own recorded title, when it keeps one.
-    ///
-    /// *Measured:* `claude` records one for ~73% of sessions; `codex` and `pi` record
-    /// **none**. So every surface showing this needs the opening-ask fallback, and that
-    /// fallback belongs to the server rather than here — because the rule it needs is
-    /// subtle enough that two implementations would disagree. **The first `user` event
-    /// is usually not what the user typed**: agents inject their own context as leading
-    /// pseudo user turns, so taking it verbatim labels most sessions with boilerplate
-    /// byte-identical across every session of that agent. Skipping injected envelopes
-    /// raised recognizable labels from ~10% to 98% over 311 measured sessions.
+    /// The vendor's own recorded title. Unknown values remain absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -254,9 +237,6 @@ pub struct NativeSummary {
     /// store has not settled — an absent end is not an ended session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended_at_ms: Option<i64>,
-    /// How many events one pass would yield, when the store can say cheaply.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub event_count: Option<i64>,
     /// Opaque revision of every native source contributing to this session. Absence
     /// requires a fresh read; timestamps of the last projected event are not revisions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -293,152 +273,19 @@ pub struct NativeSummary {
     pub fidelity: Fidelity,
 }
 
-/// One vendor-native record preserved alongside its normalized projection.
-///
-/// Native stores evolve faster than the event vocabulary.  Keeping the complete payload
-/// (including fields the current projection ignores) makes a parser change a local
-/// re-projection rather than a second read of a vendor file that may already have rotated.
-/// `version` is an opaque revision, never an ordering key. The retained archive keeps
-/// first-observed order separately, including across sources in the same bundle.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NativeRecord {
-    /// Stable source name relative to the native session bundle, never an absolute path.
-    pub source: String,
-    pub version: u64,
-    /// Original JSONL bytes when the source is line-oriented. Keeping lexical bytes avoids
-    /// losing whitespace, key order, duplicate keys, and escape spelling during re-projection.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub raw_json: Option<Vec<u8>>,
-    pub payload: serde_json::Value,
-    /// Large sidecar bodies referenced by this record.  The preview remains in `payload`;
-    /// the full bytes are externalized by the server into its content-addressed store.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub blobs: Vec<NativeBlob>,
-}
-
-/// A sidecar body associated with a native record.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NativeBlob {
-    pub name: String,
-    pub size: u64,
-    /// Present when the sidecar is small enough to inline. The server stores these bytes in
-    /// CAS before committing the native record.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bytes: Option<Vec<u8>>,
-    /// Opaque source locator for a large sidecar. The owning envagent acquires the bytes
-    /// before sending the record, then removes this locator; the server must never open it.
-    /// Large bodies travel in bounded producer chunks, separate from timeline events.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub locator: Option<String>,
-    /// Present when the sidecar could not be read; this is explicit state, not an absent
-    /// blob that a client must guess was never attempted.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
-
-/// One ordered JSON line in a disk-backed native projection transfer.
-/// User inputs stay between the records and events they describe.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
-pub enum NativeTransferItem {
-    Event(Event),
-    Record(NativeRecord),
-    TurnInput(TurnInputFact),
-    Summary { read_errors: usize, skipped: usize },
-}
-
-/// One bounded chunk fits comfortably in a wire frame even with JSON byte-array encoding.
-pub const NATIVE_TRANSFER_CHUNK_BYTES: usize = 64 * 1024;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NativeTransfer {
-    pub id: String,
-    pub bytes: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum NativeTransferOperation {
-    Begin,
-    Append {
-        id: String,
-        offset: u64,
-        bytes: Vec<u8>,
-    },
-    Read {
-        id: String,
-        offset: u64,
-    },
-    Release {
-        id: String,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NativeTransferChunk {
-    pub bytes: Vec<u8>,
-    pub next_offset: u64,
-}
-
-/// Anything an adapter has to tell the server about a session.
-///
-/// # Why a stream of messages and not a stream of events
-///
-/// A session multiplexes three unrelated kinds of fact — an event to journal, a request
-/// blocking the agent on a human, and a capability surface that changed. All three
-/// arrive on one channel because all three are *ordered with respect to each other*: an
-/// approval raised mid-turn belongs between the `tool_call` before it and the
-/// `tool_result` after, and a capability change caused by a `system/init` belongs where
-/// that turn began. Two channels would let a client render a dialog for a tool call it
-/// has not seen yet.
-///
-/// # What does not survive
-///
-/// `LinkEvent::Closed { exit_code, stderr_tail }` is gone. **An exit code is not a
-/// concept an in-process adapter has** — there is no process of its own to exit, and a
-/// vendor CLI's exit code was only ever readable because a subprocess wrapped it. The
-/// stream simply ends, which is what a `Stream` already expresses, and a failure that
-/// needs explaining arrives as an `Err` item before it does.
+/// Operational session state, requests awaiting human input, and capability updates.
+/// Exact vendor bytes reach the capture sink before these control messages are decoded.
+/// Trace mappers independently interpret the retained record on the server.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionMessage {
-    /// One normalized event, in the order it happened.
-    Event(Event),
-    /// The agent is waiting on a human.
-    ///
-    /// **Durable state, not UI state**: journaled, and re-delivered on reconnect, or
-    /// closing a laptop lid strands an agent forever.
     Request(Request),
-    /// The capability surface changed — a skill was edited, a plugin loaded.
-    ///
-    /// **A partial, and the server owns the merge** ([`CapabilityFacets::apply_to`]).
-    /// The v3 transport merged inside the link so the server never saw a partial;
-    /// in-process that would put one rule in three adapters, so the facets travel and
-    /// the server applies them. An unmentioned facet is not changed.
     Capabilities(CapabilityFacets),
-    /// A complete vendor-native record, retained for lossless re-projection.
-    NativeRecord(NativeRecord),
-    /// User input recovered from a native store. This is a container fact,
-    /// not a timeline event; the server uses it to populate the owning turn's
-    /// request text without fabricating a `user` event.
-    TurnInput(TurnInputFact),
+    Control(crate::ControlNotice),
 }
 
-/// A session's messages, as they arrive.
-///
-/// `Send` because the server drives it from a task that is not the one that opened the
-/// session; boxed because every adapter's stream is a different concrete type and the
-/// server holds them uniformly.
-///
-/// An `Err` item is a failure **reading** the session, not a failure of the session: a
-/// truncated native file, a vendor payload that could not be parsed. The stream may
-/// continue after one — `pi`'s `_rewriteFile()` truncate-rewrites with no lock, so a
-/// reader can observe an empty or half-written file and the correct response is to keep
-/// reading rather than to declare the session over.
-pub type EventStream = Pin<Box<dyn Stream<Item = Result<SessionMessage>> + Send>>;
+/// Ordered operational messages from a held vendor process. An error describes a link
+/// failure; semantic execution outcomes require retained native evidence.
+pub type ControlStream = Pin<Box<dyn Stream<Item = Result<SessionMessage>> + Send>>;
 
 /// A live session. **Carries turns both ways.**
 ///
@@ -452,7 +299,7 @@ pub type EventStream = Pin<Box<dyn Stream<Item = Result<SessionMessage>> + Send>
 /// it, stdout still open, process still alive.
 ///
 /// So: open once, a turn per [`Self::send`], and the outcome arrives as an event on
-/// [`Self::events`] rather than as an exit code.
+/// [`Self::messages`] rather than as an exit code.
 #[async_trait]
 pub trait Session: Send + Sync {
     /// The id the vendor actually used, when it has assigned one.
@@ -463,6 +310,9 @@ pub trait Session: Send + Sync {
     /// history store.  The server must therefore delay durable promotion until this
     /// becomes `Some` rather than inventing an id.
     fn native_id(&self) -> Option<NativeId>;
+
+    /// Retained vendor observations establishing the actual native identity.
+    async fn identity_evidence(&self) -> Vec<crate::trace::ObservationRef>;
 
     /// This session's current capability surface.
     ///
@@ -482,7 +332,7 @@ pub trait Session: Send + Sync {
     ///
     /// Returns when the agent has **accepted** it, not when it has finished: a turn
     /// outlives the call that started it, which is the same reason `POST /turns` answers
-    /// `202`. Completion arrives on [`Self::events`].
+    /// `202`. Completion arrives on [`Self::messages`].
     async fn send(&self, turn: TurnInput) -> Result<()>;
 
     /// Vendor identity from the last successful send receipt, not a live-state query.
@@ -498,7 +348,7 @@ pub trait Session: Send + Sync {
     /// when the first user message is accepted (Claude is one measured example), so the
     /// server cannot require [`Self::native_id`] before sending that message.  The adapter
     /// owns the wait for its id and buffers any events emitted while the server promotes the
-    /// link; the ordinary [`Self::events`] stream remains lossless for the caller.
+    /// link; the ordinary [`Self::messages`] stream remains lossless for the caller.
     async fn send_initial(&self, turn: TurnInput) -> Result<NativeId>;
 
     /// End the current turn, keep the session.
@@ -586,7 +436,7 @@ pub trait Session: Send + Sync {
     /// Takes `&mut self` and yields the stream once. A second call is a bug rather than
     /// a second subscription: two consumers of one vendor's stdio would each see half
     /// the turn, and fan-out is the server's job, which already does it.
-    fn events(&mut self) -> Option<EventStream>;
+    fn messages(&mut self) -> Option<ControlStream>;
 
     /// Ask the agent to exit, and make sure it did.
     ///
@@ -625,40 +475,10 @@ pub struct TurnInput {
 
 /// Everything Sylph knows about one vendor CLI.
 ///
-/// One implementation per agent (`docs/agents.md`), holding how to launch it, how to
-/// read its native store, what it exposes to a second party, and where it lies.
-///
-/// # All three modes emit the same events
-///
-/// That is the point of the shape. The journal, the history fold, the timeline, replay,
-/// and search see one vocabulary and cannot tell which mode produced a given row. The
-/// only visible difference is [`Fidelity`] on the record.
-///
-/// | Mode | Source | Fidelity | Control facet |
-/// | --- | --- | --- | --- |
-/// | [`Self::run`] | the process's own stdio | `stream` | full |
-/// | [`Self::watch`] | native store, followed | `blocks` or `messages`, per vendor | whatever the vendor offers a second party |
-/// | [`Self::adopt`] | native store, one pass | `blocks` or `messages`, per vendor | none while it runs; full once resumed by `run` |
-///
-/// # What an adapter owns, and what it must not
-///
-/// **Owns:** the vendor CLI's command line and native store format, translation in both
-/// directions, the vendor's own ids, and the decision to **omit rather than guess**.
-///
-/// **Must not:** decide identity injection (the server passes it), invent an event kind
-/// the vocabulary does not have, retry a turn on its own, or report a refusal as a
-/// success. Nor synthesize a value the vendor did not give — a synthesized id, name, or
-/// timestamp is a lie a journal makes permanent.
-///
-/// # There is no `probe` for availability, and no discovery
-///
-/// [`Self::probe`] answers *what this CLI is*, not *whether Sylph can find an adapter
-/// for it*. Availability is whether the vendor CLI is on that machine's `PATH` — one
-/// question with one answer and an error message that can say it. The mechanism this
-/// replaces produced two total failures, both recorded in
-/// `docs/environments.md` § Agent availability: zero discovered agents made `/` a dead
-/// keystroke three layers from the cause, and a stale fixture failed a whole E2E suite
-/// against an agent that did not exist.
+/// One linked implementation per vendor. It owns process I/O and operational controls,
+/// native locators and cheap catalogue metadata. Exact bytes reach the raw capture sink
+/// before runtime decoding; no adapter-side semantic event or reprojection API exists.
+/// The envagent registry follows native files, and server mappers interpret the archive.
 #[async_trait]
 pub trait Adapter: Send + Sync {
     /// The minimum vendor CLI version this adapter has been verified against.
@@ -682,45 +502,16 @@ pub trait Adapter: Send + Sync {
     async fn probe(&self) -> Result<AgentInfo>;
 
     /// Hold a live session's stdio. The returned handle carries turns both ways.
-    async fn run(&self, spec: RunSpec) -> Result<Box<dyn Session>>;
+    async fn run(
+        &self,
+        spec: RunSpec,
+        capture: std::sync::Arc<dyn crate::RawCaptureSink>,
+    ) -> Result<Box<dyn Session>>;
 
-    /// Parse what the vendor's native store already holds, **once**.
-    ///
-    /// The stream ends when the pass does. Yields [`Fidelity::Blocks`] or
-    /// [`crate::Fidelity::Messages`], never [`crate::Fidelity::Stream`]: no care recovers a timing
-    /// that was never written.
-    async fn adopt(&self, id: &NativeId) -> Result<EventStream>;
+    /// Inventory native files and companion sidecars. The envagent registry owns
+    /// lexical acquisition, cursors and generations; no semantic projection runs here.
+    async fn native_sources(&self, id: &NativeId) -> Result<Vec<crate::NativeSource>>;
 
-    /// Re-project retained native envelopes without reading the vendor store.
-    ///
-    /// The envagent supplies records already retained by the server. This is the
-    /// recovery path after a vendor rotates or removes its source files.
-    async fn reproject(&self, _records: Vec<NativeRecord>) -> Result<EventStream> {
-        Err(anyhow::anyhow!(
-            "this adapter has no retained native reprojection"
-        ))
-    }
-
-    /// Parse, then follow the native store as it grows.
-    ///
-    /// The same first pass as [`Self::adopt`], then whatever the vendor appends. All
-    /// three supported agents write mid-turn, which is what makes this offerable at all
-    /// — an observer sees progress rather than only outcomes.
-    ///
-    /// Two hazards a watcher must be built around, both measured on `pi` 0.84.3 and both
-    /// general enough to expect elsewhere: `_rewriteFile()` truncate-rewrites with mode
-    /// `"w"` and no lock, so a reader can observe an empty or half-written file; and
-    /// persistence buffers until the first assistant message, so the file **does not
-    /// exist** early in a turn. **An absent file is not an absent session.**
-    async fn watch(&self, id: &NativeId) -> Result<EventStream>;
-
-    /// Which native sessions this machine's store holds.
-    ///
-    /// Answers "what is on this machine" **without parsing every session**, which is the
-    /// requirement rather than an optimization: measured against a real store, asking per
-    /// session costs two orders of magnitude more per fact than one bounded read per file,
-    /// which is the difference between a listing that is affordable and one that is not.
-    /// **An adapter that implements this by parsing each session has not implemented it.**
     async fn enumerate(&self, filter: &StoreFilter) -> Result<Vec<NativeSummary>>;
 
     /// Read one session's metadata. Vendor adapters narrow by native identity before

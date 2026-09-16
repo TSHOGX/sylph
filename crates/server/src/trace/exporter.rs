@@ -1,10 +1,15 @@
 //! Transfer fixed operational occurrences into evidence without dispatching commands.
+use std::sync::Arc;
+use sylph_protocol::PayloadDeclaration;
+use tokio::sync::Mutex;
+#[cfg(test)]
+type ExportPause = Arc<Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>>;
 
 use super::{
     evidence::{EvidenceError, ReceiptDisposition},
-    outbox::{ControlStore, ExportDisposition, OutboxError, OutboxOccurrence},
-    upload::{BeginCapture, CaptureUploads, PayloadDeclaration, UploadError},
+    upload::{BeginCapture, CaptureUploads, UploadError},
 };
+use crate::db::control::{ControlStore, ExportDisposition, OutboxError, OutboxOccurrence};
 #[cfg(test)]
 use sylph_protocol::trace::{CommandTarget, IngestionScope};
 
@@ -33,6 +38,9 @@ pub struct ExportProgress {
 pub struct OutboxExporter {
     control: ControlStore,
     uploads: CaptureUploads,
+    gate: Arc<Mutex<()>>,
+    #[cfg(test)]
+    pause_after_begin: ExportPause,
 }
 
 impl OutboxExporter {
@@ -69,13 +77,22 @@ impl OutboxExporter {
         {
             return Err(ExportError::IncompatibleLimits);
         }
-        Ok(Self { control, uploads })
+        Ok(Self {
+            control,
+            uploads,
+            gate: Arc::new(Mutex::new(())),
+            #[cfg(test)]
+            pause_after_begin: Arc::new(Mutex::new(None)),
+        })
     }
 
     /// A bounded pass advances only after a terminal durable evidence receipt.
     /// Admission and marking are deliberately separate commits: retrying the exact
     /// occurrence closes that crash window without repeating a vendor effect.
     pub async fn run_once(&self) -> Result<ExportProgress, ExportError> {
+        // API flushes and the background pass share one bounded producer. Upload
+        // tickets are independently idempotent across separately opened exporters.
+        let _guard = self.gate.lock().await;
         let occurrences = self.control.pending().await?;
         let mut progress = ExportProgress::default();
         for occurrence in occurrences {
@@ -131,6 +148,11 @@ impl OutboxExporter {
         {
             BeginCapture::Complete(batch) => batch,
             BeginCapture::Pending(ticket) => {
+                #[cfg(test)]
+                if let Some((entered, resume)) = self.pause_after_begin.lock().await.take() {
+                    entered.notify_one();
+                    resume.notified().await;
+                }
                 if let Some(manifest) = &occurrence.manifest {
                     for chunk in &manifest.chunks {
                         let start = usize::try_from(chunk.payload_offset)
@@ -232,14 +254,14 @@ fn worst_declaration_bytes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::control::{CommandState, OutboxLimits};
     use crate::{
-        storage::cas::BlobStore,
+        trace::cas::BlobStore,
         trace::{
             evidence::{
                 catalogue::{CatalogueLimits, EvidenceCatalogue},
                 AdmissionLimits, EvidenceStore,
             },
-            outbox::{CommandState, OutboxLimits},
             upload::UploadLimits,
         },
     };
@@ -330,6 +352,29 @@ mod tests {
             )
             .unwrap()
         }
+    }
+
+    #[tokio::test]
+    async fn independently_opened_exporters_can_finish_the_same_inflight_upload() {
+        let fixture = Fixture::new().await;
+        fixture
+            .accept(b"one exact operational occurrence".to_vec())
+            .await;
+        let first = fixture.exporter();
+        let second = fixture.exporter();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+        *first.pause_after_begin.lock().await = Some((entered.clone(), resume.clone()));
+        let task = tokio::spawn(async move { first.run_once().await });
+        entered.notified().await;
+        assert_eq!(second.run_once().await.unwrap().retained, 1);
+        resume.notify_one();
+        assert_eq!(task.await.unwrap().unwrap().retained, 1);
+        assert_eq!(fixture.evidence.evidence_cut().await.unwrap(), 1);
+        assert_eq!(
+            fixture.control.progress(200).await.unwrap().pending_count,
+            0
+        );
     }
 
     #[tokio::test]

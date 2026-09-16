@@ -357,6 +357,8 @@ pub struct PayloadAnchorChange {
 #[serde(rename_all = "camelCase")]
 pub struct ProjectionBatch {
     pub through_cut: u64,
+    /// A bounded interpretation refinement may advance the view at the same evidence cut.
+    pub continuation: bool,
     pub claims: Vec<Claim>,
     pub objects: Vec<ObjectUpdate>,
     pub memberships: Vec<MembershipChange>,
@@ -364,6 +366,7 @@ pub struct ProjectionBatch {
     pub mapper_states: BTreeMap<String, serde_json::Value>,
     pub processed_occurrences: Vec<u64>,
     pub payload_derivations: Vec<sylph_protocol::trace::PayloadDerivation>,
+    pub read_rows: Vec<super::reading_store::ReadRowChange>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -577,6 +580,12 @@ impl GenerationStore {
         decode_checkpoint(&self.manifest.generation, &row)
     }
 
+    pub async fn snapshot_at(&self,revision:u64)->Result<Snapshot> {
+        let row=sqlx::query("SELECT r.evidence_cut FROM projection_revisions r JOIN projection_state s ON s.singleton=1 WHERE r.view_revision=? AND r.view_revision>=s.revision_floor")
+            .bind(signed(revision)?).fetch_optional(&self.readers).await?.ok_or(GenerationError::SnapshotExpired)?;
+        Ok(Snapshot {generation:self.manifest.generation.clone(),evidence_cut:unsigned(row.try_get("evidence_cut")?)?,view_revision:revision})
+    }
+
     pub async fn apply(
         &self,
         expected_fence: u64,
@@ -598,9 +607,10 @@ impl GenerationStore {
                 actual: prior.snapshot.evidence_cut,
             });
         }
-        if batch.through_cut <= expected_cut {
+        if batch.through_cut < expected_cut || (batch.through_cut == expected_cut &&
+            (!batch.continuation || !batch.processed_occurrences.is_empty())) {
             return Err(GenerationError::Invalid(
-                "projection cut must advance".into(),
+                "a same-cut interpretation continuation cannot claim new admitted occurrences".into(),
             ));
         }
         let revision = prior
@@ -712,6 +722,7 @@ impl GenerationStore {
         for change in &batch.payload_anchors {
             save_anchor(&mut tx, change, revision).await?;
         }
+        super::reading_store::apply_rows(&mut tx, &batch.read_rows, revision).await?;
         for derivation in &batch.payload_derivations {
             let json = serde_json::to_string(derivation)?;
             let key = blake3::hash(json.as_bytes()).to_hex().to_string();
@@ -1450,7 +1461,7 @@ impl GenerationStore {
         Ok(result)
     }
 
-    async fn read_connection(
+    pub(crate) async fn read_connection(
         &self,
         snapshot: &Snapshot,
     ) -> Result<(PoolConnection<Sqlite>, Arc<AtomicU64>)> {
@@ -1484,12 +1495,19 @@ impl GenerationStore {
             + batch.objects.len()
             + batch.memberships.len()
             + batch.payload_anchors.len()
-            + batch.mapper_states.len();
+            + batch.mapper_states.len()
+            + batch.read_rows.len()
+            + batch.processed_occurrences.len()
+            + batch.payload_derivations.len();
         if count > self.limits.max_batch_changes {
             return Err(GenerationError::Limit("projection batch changes"));
         }
         if serde_json::to_vec(batch)?.len() > self.limits.max_batch_bytes {
             return Err(GenerationError::Limit("projection batch bytes"));
+        }
+        for row in &batch.read_rows {
+            if row.scope.len()>self.limits.max_key_bytes||row.address.len()>self.limits.max_key_bytes||row.order_key.len()>self.limits.max_key_bytes {return Err(GenerationError::Limit("reading row key"));}
+            if row.body.as_ref().map(serde_json::to_vec).transpose()?.is_some_and(|body|body.len()>self.limits.max_summary_bytes) {return Err(GenerationError::Limit("individual reading row bytes"));}
         }
         for claim in &batch.claims {
             claim
@@ -1807,7 +1825,7 @@ fn signed(value: u64) -> Result<i64> {
 fn unsigned(value: i64) -> Result<u64> {
     u64::try_from(value).map_err(|_| GenerationError::Invalid("negative stored quantity".into()))
 }
-fn map_query_error(error: sqlx::Error) -> GenerationError {
+pub(crate) fn map_query_error(error: sqlx::Error) -> GenerationError {
     if error
         .as_database_error()
         .is_some_and(|error| error.code().is_some_and(|code| code == "9"))

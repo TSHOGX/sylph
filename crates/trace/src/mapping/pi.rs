@@ -702,6 +702,7 @@ impl Context<'_, '_> {
         );
         if role == "toolResult" {
             if let Some(operation) = operation {
+                for field in ["persistedOutputPath","outputFile"] {if let Some(path)=text(&value["details"],field) {let key=super::attachment_key(self.input.canonical_observation,selector,path);self.output.correlations.insert(key.clone(),AnyObjectRef::Operation(operation.clone()));self.output.correlation_evidence.insert(key,vec![self.input.canonical_observation.clone()]);}}
                 let payload = self.json(&value["content"], &format!("{selector}/content"));
                 self.result(
                     owner,

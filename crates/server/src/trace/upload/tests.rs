@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    storage::cas::BlobStore,
+    trace::cas::BlobStore,
     trace::{
         evidence::{
             catalogue::{CatalogueLimits, EvidenceCatalogue},
@@ -9,6 +9,7 @@ use crate::{
         gc::{GcLimits, TraceGarbageCollector},
     },
 };
+use sylph_protocol::trace::{ObservationRef, PayloadManifest};
 use sylph_protocol::{
     trace::{
         AgentRef, IngestionEpoch, IngestionScope, PayloadChunk, PayloadCompleteness,
@@ -17,6 +18,7 @@ use sylph_protocol::{
     },
     SessionId,
 };
+use sylph_protocol::{CaptureUploadTicket, PayloadDeclaration};
 
 struct Fixture {
     dir: tempfile::TempDir,
@@ -657,4 +659,51 @@ async fn sigkill_after_blob_sync_before_chunk_receipt_requires_the_same_owned_tr
             .unwrap(),
         bytes
     );
+}
+
+#[tokio::test]
+async fn admitted_chunk_retries_verify_exact_bytes_and_preserve_the_original_receipt() {
+    let fixture = Fixture::new().await;
+    let bytes = b"durable exact bytes";
+    let capture = fixture.capture(1, 1, bytes);
+    let issuer = &capture.observation_ref.issuer;
+    let ticket = fixture.ticket(&capture, bytes).await;
+    fixture
+        .uploads
+        .put_chunk(issuer, &ticket, &capture.payload_ref, bytes)
+        .await
+        .unwrap();
+    let first = fixture.uploads.finish(issuer, &ticket).await.unwrap();
+    fixture
+        .uploads
+        .put_chunk(issuer, &ticket, &capture.payload_ref, bytes)
+        .await
+        .unwrap();
+    let second = fixture.uploads.finish(issuer, &ticket).await.unwrap();
+    assert_eq!(
+        first.receipts[0].observation_ref,
+        second.receipts[0].observation_ref
+    );
+    assert_eq!(
+        first.receipts[0].disposition,
+        second.receipts[0].disposition
+    );
+    assert!(!second.receipts[0].newly_recorded);
+    let mut changed = bytes.to_vec();
+    changed[0] ^= 1;
+    assert!(matches!(
+        fixture
+            .uploads
+            .put_chunk(issuer, &ticket, &capture.payload_ref, &changed)
+            .await,
+        Err(UploadError::BytesMismatch)
+    ));
+    assert!(matches!(
+        fixture
+            .uploads
+            .put_chunk(issuer, &ticket, &capture.payload_ref, &[])
+            .await,
+        Err(UploadError::BytesMismatch)
+    ));
+    assert_eq!(fixture.evidence.evidence_cut().await.unwrap(), 1);
 }

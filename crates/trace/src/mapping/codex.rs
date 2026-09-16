@@ -11,7 +11,11 @@ use super::{
     MappingDiagnostic, SemanticMapper,
 };
 
+pub mod history;
+
 pub struct CodexMapper;
+mod runtime;
+mod collaboration;
 
 /// Checkpointed source knowledge. A copied parent header cannot replace the first
 /// governing header, and a parent connection does not own forwarded child frames.
@@ -28,6 +32,8 @@ struct CodexState {
     active_by_agent: BTreeMap<String, ActivationRef>,
     revision_by_message: BTreeMap<String, MessageRevisionRef>,
     entry_by_agent: BTreeMap<String, EntryRef>,
+    rpc_requests:BTreeMap<String,(String,ObservationRef)>,
+    runtime: runtime::RuntimeState,
 }
 
 impl SemanticMapper for CodexMapper {
@@ -36,6 +42,7 @@ impl SemanticMapper for CodexMapper {
     }
 
     fn map(&self, input: MapInput<'_>) -> MapOutput {
+        if input.capture.transport_kind==TransportKind::NativeDatabase {return map_database(input);}
         let mut output = MapOutput {
             state: input.state.clone(),
             ..MapOutput::default()
@@ -69,6 +76,7 @@ impl SemanticMapper for CodexMapper {
             }
             return output;
         };
+        history::record_source(&input, &value, &mut output);
         let mut state = match input.state.values.get("codex") {
             Some(value) => match serde_json::from_value(value.clone()) {
                 Ok(state) => state,
@@ -96,7 +104,7 @@ impl SemanticMapper for CodexMapper {
             },
             None => CodexState::default(),
         };
-        let is_live = matches!(input.capture.transport_kind, TransportKind::LiveStdout);
+        let is_live = matches!(input.capture.transport_kind, TransportKind::LiveStdout|TransportKind::LiveStdin);
         let mut context = Context {
             input: &input,
             output: &mut output,
@@ -104,7 +112,9 @@ impl SemanticMapper for CodexMapper {
             build: self.build(),
             vendor_ordinal: value.get("ordinal").and_then(Value::as_u64),
         };
-        if is_live {
+        if value.get("schema_version").is_some() && value.get("rollout_id").is_some() {
+            context.raw_trace(&value);
+        } else if is_live {
             context.live(&value);
         } else {
             context.native(&value);
@@ -115,6 +125,39 @@ impl SemanticMapper for CodexMapper {
         );
         output
     }
+}
+
+fn map_database(input:MapInput<'_>)->MapOutput {
+    use sylph_protocol::{NativeDatabaseSnapshot,NativeDatabaseStatus,NativeDatabaseValue};
+    let mut output=MapOutput {state:input.state.clone(),..MapOutput::default()};
+    let snapshot:NativeDatabaseSnapshot=match serde_json::from_slice(input.raw) {Ok(value)=>value,Err(error)=>{output.diagnostics.push(MappingDiagnostic {evidence:vec![input.canonical_observation.clone()],code:DiagnosticCode::DecodeFailure,message:error.to_string()});return output;}};
+    let issue=|output:&mut MapOutput,code,message:&str|output.diagnostics.push(MappingDiagnostic {evidence:vec![input.canonical_observation.clone()],code,message:message.into()});
+    if snapshot.table=="thread_goals" {return runtime::map_goal_database(input,snapshot);}
+    if snapshot.status!=NativeDatabaseStatus::Available {issue(&mut output,DiagnosticCode::UnknownSelection,"Native selected-rollout metadata is unavailable");return output;}
+    if snapshot.table!="threads" {issue(&mut output,DiagnosticCode::UnsupportedKind,"Unknown Codex native database table");return output;}
+    let Some(NativeDatabaseValue::Text(id))=snapshot.row.get("id") else {issue(&mut output,DiagnosticCode::MissingOwner,"Selected-rollout row does not name its native thread");return output;};
+    let Issuer::Environment(environment)=&input.capture.observation_ref.issuer else {issue(&mut output,DiagnosticCode::ConflictingOwner,"Native selected-rollout metadata requires an environment issuer");return output;};
+    let agent=AgentRef::Session(SessionId::new(environment.clone(),AgentName::parse("codex").unwrap(),NativeId::new(id)));
+    let Some((source,generation))=snapshot.selected_source.zip(snapshot.selected_generation) else {issue(&mut output,DiagnosticCode::MissingSource,"Selected rollout has no retained source inventory binding");return output;};
+    let Some(owner)=input.archive.source_owners.get(&(source.clone(),generation)) else {output.requests.push(ArchiveRequest::Source {source,generation});return output;};
+    if owner.agent!=agent {issue(&mut output,DiagnosticCode::ConflictingOwner,"Selected source header and metadata thread identity disagree");return output;}
+    // A reverted rollout contains only a suffix. Until frozen base expansion is
+    // connected, selecting that suffix would silently omit retained history.
+    if input.archive.history_records.get(&(source.clone(), generation))
+        .and_then(|records| records.get(&0))
+        .and_then(|record| record.header.as_ref())
+        .is_some_and(|header| header.history_base.is_some())
+    {
+        issue(&mut output, DiagnosticCode::UnknownSelection, "Selected rollout requires unresolved frozen history bases");
+        return output;
+    }
+    let Some(count)=snapshot.selected_record_count else {issue(&mut output,DiagnosticCode::UnknownSelection,"Selected source complete-record extent is unknown");return output;};
+    let selection=SelectionRef::occurrence(agent.clone(),input.capture.source_position.clone(),vec!["selected-rollout".into()]).unwrap();
+    let mut declaration=claim(&input,&agent,"codex/database-selection","codex-1",Fact::Declare {object:TraceObject::HistorySelection(HistorySelection {selection_ref:selection.clone(),agent:agent.clone(),membership:SelectionMembership::SourceExtents {extents:vec![SourceExtent {source,generation,coordinate:HistoryCoordinate::LocalRecordIndex,start_inclusive:0,end_exclusive:count,mapping_rule:"codex/native-history".into(),original_owner:None}],inherited_selections:vec![]},excluded_heads:vec![]})});
+    declaration.evidence.extend(owner.evidence.iter().cloned());output.claims.push(declaration);
+    let mut selected=claim(&input,&agent,"codex/database-selected","codex-1",Fact::SelectHistory {agent:agent.clone(),selection,selected_at:input.capture.source_position.clone()});selected.evidence.extend(owner.evidence.iter().cloned());output.claims.push(selected);
+    if snapshot.selected_pending_bytes.is_some_and(|bytes|bytes>0) {issue(&mut output,DiagnosticCode::CaptureGap,"Selected source has an incomplete pending lexical record");}
+    output
 }
 
 struct Context<'a, 'b> {
@@ -381,6 +424,9 @@ impl Context<'_, '_> {
             outer
         };
         match kind {
+            "exec_command_begin" | "exec_command_end" | "exec_command_output_delta" | "terminal_interaction" => self.core_runtime(&containing,kind,payload),
+            "thread_goal_updated" => self.goal_update(&containing,payload),
+            kind if kind.starts_with("collab_") => self.collaboration_event(&containing,kind,payload),
             "task_started" | "task_complete" | "turn_aborted" => {
                 self.native_boundary(&containing, kind, payload)
             }
@@ -567,6 +613,29 @@ impl Context<'_, '_> {
     }
 
     fn live(&mut self, value: &Value) {
+        if self.input.capture.transport_kind==TransportKind::LiveStdin {
+            if let (Some(id),Some(method))=(value.get("id"),string(value,"method")) {
+                self.state.rpc_requests.insert(id.to_string(),(method.into(),self.input.canonical_observation.clone()));
+            }
+            return;
+        }
+        if value.get("method").is_none() {
+            if let Some(id)=value.get("id") {
+                if let Some((method,request))=self.state.rpc_requests.remove(&id.to_string()) {
+                    if matches!(method.as_str(),"thread/start"|"thread/resume") {
+                        let thread=&value["result"]["thread"];
+                        if let Some(agent)=string(thread,"id").and_then(|id|self.agent(id)) {
+                            let start=self.output.claims.len();self.announce_agent(&agent,thread,true);
+                            self.output.state.governing_agent=Some(agent);
+                            for claim in &mut self.output.claims[start..] {claim.evidence.push(request.clone());}
+                        }
+                    }
+                } else {
+                    self.output.diagnostics.push(MappingDiagnostic {evidence:vec![self.input.canonical_observation.clone()],code:DiagnosticCode::MissingSource,message:"RPC reply has no retained request in this source incarnation".into()});
+                }
+            }
+            return;
+        }
         let method = string(value, "method").unwrap_or("");
         let params = &value["params"];
         if method == "thread/started" {
@@ -696,6 +765,7 @@ impl Context<'_, '_> {
                     RevisionForm::Append { predecessor },
                 );
             }
+            "thread/goal/updated" => self.goal_update(&owner,params),
             "thread/tokenUsage/updated" => self.token_count(&owner, &params["tokenUsage"], true),
             _ => self.issue(
                 &owner,
@@ -763,6 +833,7 @@ impl Context<'_, '_> {
                     }
                 }
             }
+            "collabAgentToolCall"|"CollabAgentToolCall"=>self.collaboration_item(owner,item,live,started,activation),
             "subAgentActivity" | "SubAgentActivity" => {
                 let child = string(
                     item,
@@ -1246,6 +1317,9 @@ impl Context<'_, '_> {
                 DiagnosticCode::DecodeFailure,
                 "Model invocation input is missing or not a lexical string",
             );
+        }
+        if kind=="function_call" && string(value,key).is_some_and(|input|serde_json::from_str::<Value>(input).is_err()) {
+            self.issue(owner,"codex/call-arguments-undecodable",DiagnosticCode::DecodeFailure,"Function arguments are retained exactly but are not valid JSON");
         }
         let namespace = string(value, "namespace");
         let Some(name) = string(value, "name") else {

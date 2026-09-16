@@ -12,6 +12,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 mod budget;
+mod reading;
 use sylph_protocol::trace::*;
 use sylph_trace::{
     mapping::{
@@ -145,7 +146,12 @@ struct WorkerState {
     available_evidence: BTreeSet<ObservationRef>,
     gaps: BTreeMap<String, SourceGap>,
     source_owners: BTreeMap<String, mapping::SourceOwnership>,
+    source_definitions: BTreeMap<String,mapping::codex::history::RecordedSource>,
+    history_records: BTreeMap<String,mapping::codex::history::HistoryRecord>,
+    captured_payloads:BTreeMap<String,Vec<mapping::CapturedPayloadBinding>>,
     observation_sources: BTreeMap<ObservationRef, SourcePosition>,
+    previews: BTreeMap<PayloadRef, sylph_trace::reading::PayloadPreview>,
+    object_epochs: BTreeMap<AnyObjectRef, IngestionEpoch>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -242,6 +248,32 @@ pub struct ProjectionWorker {
 }
 
 impl ProjectionWorker {
+    pub async fn projected_snapshot(
+        &self,
+        generation: &GenerationStore,
+    ) -> Result<(
+        Snapshot,
+        Arc<Reduction>,
+        BTreeMap<AnyObjectRef, IngestionEpoch>,
+    )> {
+        let entry = {
+            let mut states = self.states.lock().await;
+            states
+                .entry(generation.manifest().generation.clone())
+                .or_default()
+                .clone()
+        };
+        let mut state = entry.lock().await;
+        let checkpoint = generation.checkpoint().await?;
+        if state.cut != checkpoint.snapshot.evidence_cut {
+            *state = self.load_state(generation, &checkpoint.snapshot).await?;
+        }
+        Ok((
+            checkpoint.snapshot,
+            state.reduction.clone(),
+            state.object_epochs.clone(),
+        ))
+    }
     pub fn new(
         evidence: EvidenceStore,
         catalogue: EvidenceCatalogue,
@@ -306,22 +338,17 @@ impl ProjectionWorker {
             suspended_sources: state.gaps.len(),
             ..WorkerProgress::default()
         };
-        while state.cut < through_cut {
-            let limit = self
-                .limits
-                .max_unit_observations
-                .min(self.evidence.limits().max_read_items)
-                .min(usize::try_from(through_cut - state.cut).unwrap_or(usize::MAX));
-            let page = self.evidence.admissions_after(state.cut, limit).await?;
-            if page.next_after <= state.cut {
-                return Err(WorkerError::FutureCut);
-            }
+        while state.cut < through_cut || state.pending.values().any(|pending|pending.requests.contains(&ArchiveRequest::ContinueHistory)) {
+            let page = if state.cut < through_cut {
+                let limit = self.limits.max_unit_observations.min(self.evidence.limits().max_read_items)
+                    .min(usize::try_from(through_cut-state.cut).unwrap_or(usize::MAX));
+                Some(self.evidence.admissions_after(state.cut,limit).await?)
+            } else { None };
+            if page.as_ref().is_some_and(|page|page.next_after<=state.cut) {return Err(WorkerError::FutureCut);}
             let mut captures = Vec::new();
             let mut input_bytes = 0u64;
-            let mut unit_cut = page.next_after.min(through_cut);
-            for capture in page
-                .captures
-                .into_iter()
+            let mut unit_cut = page.as_ref().map_or(state.cut,|page|page.next_after.min(through_cut));
+            for capture in page.into_iter().flat_map(|page|page.captures)
                 .filter(|capture| capture.admission_seq <= through_cut)
             {
                 let length = self
@@ -402,6 +429,7 @@ impl ProjectionWorker {
         through: u64,
     ) -> Result<ProjectionUnit> {
         let mut unit = ProjectionUnit::new(state, through);
+        unit.batch.continuation=through==state.cut;
         let mut processed = BTreeSet::new();
         for captured in captures {
             unit.next
@@ -486,6 +514,7 @@ impl ProjectionWorker {
         if unit.next.reducer.len() != state.reducer.len() {
             unit.next.reduction = self.reduce(&mut unit.next.reducer).await?;
         }
+        let mut continuation_applied = false;
         for pass in 0..self.limits.max_resolution_passes {
             let before = (
                 unit.next.pending.keys().cloned().collect::<Vec<_>>(),
@@ -494,6 +523,10 @@ impl ProjectionWorker {
                 unit.next.source_owners.clone(),
             );
             for pending in unit.next.pending.values().cloned().collect::<Vec<_>>() {
+                if pending.requests.contains(&ArchiveRequest::ContinueHistory) {
+                    if continuation_applied || captures.iter().any(|capture|capture.canonical_observation_ref==pending.admitted.canonical_observation) {continue;}
+                    continuation_applied=true;
+                }
                 if !requests_may_resolve(&pending.requests, &unit.next) {
                     continue;
                 }
@@ -554,7 +587,7 @@ impl ProjectionWorker {
                     .next
                     .pending
                     .values()
-                    .any(|pending| requests_may_resolve(&pending.requests, &unit.next))
+                    .any(|pending| !pending.requests.contains(&ArchiveRequest::ContinueHistory) && requests_may_resolve(&pending.requests, &unit.next))
             {
                 return Err(WorkerError::Limit("pending dependency closure"));
             }
@@ -688,10 +721,26 @@ impl ProjectionWorker {
                 state
                     .gaps
                     .insert(key.into(), serde_json::from_value(value)?);
+            } else if let Some(key)=key.strip_prefix("captured_payload:") {state.captured_payloads.insert(key.into(),serde_json::from_value(value)?);
+            } else if let Some(key) = key.strip_prefix("source_definition:") {
+                state.source_definitions.insert(key.into(),serde_json::from_value(value)?);
+            } else if let Some(key) = key.strip_prefix("history_record:") {
+                state.history_records.insert(key.into(),serde_json::from_value(value)?);
             } else if let Some(key) = key.strip_prefix("owner:") {
                 state
                     .source_owners
                     .insert(key.into(), serde_json::from_value(value)?);
+            } else if let Some(key) = key.strip_prefix("read_epoch:") {
+                let reference = AnyObjectRef::decode(key)
+                    .map_err(|error| WorkerError::Task(error.to_string()))?;
+                state
+                    .object_epochs
+                    .insert(reference, serde_json::from_value(value)?);
+            } else if let Some(key) = key.strip_prefix("read_preview:") {
+                state.previews.insert(
+                    PayloadRef::parse(key).map_err(|error| WorkerError::Task(error.to_string()))?,
+                    serde_json::from_value(value)?,
+                );
             }
         }
         state.reduction = self.reduce(&mut state.reducer).await?;
@@ -706,13 +755,16 @@ impl ProjectionWorker {
         through_cut: u64,
         vendor: &str,
     ) -> Result<RecordMapping> {
+        if admitted.capture.transport_kind==TransportKind::PayloadBytes {return Ok(RecordMapping {output:MapOutput {state:original.clone(),..MapOutput::default()},gap:None});}
         let raw=match self.evidence.payload_bytes(&admitted.capture.payload_ref,self.limits.max_decode_bytes).await{
             Ok(raw)=>Arc::new(raw),
             Err(EvidenceError::Limit(_))=>return Ok(RecordMapping{output:MapOutput::default(),gap:Some((DiagnosticCode::ResourceLimit,"Retained observation exceeds semantic decode bytes; source requires reprojection".into()))}),
             Err(error)=>return Err(error.into()),
         };
+        let mut captured_payloads=BTreeMap::new();let mut payload_bytes=0usize;
         for _ in 0..self.limits.max_resolution_passes {
-            let archive = archive_context(state);
+            let mut archive = archive_context(state);
+            archive.captured_payloads=captured_payloads.clone();
             let input = admitted.clone();
             let source_state = original.clone();
             let raw = raw.clone();
@@ -741,6 +793,24 @@ impl ProjectionWorker {
             }).await.map_err(|error|WorkerError::Task(error.to_string()))?;
             let mut resolved = false;
             for request in &mapped.output.requests {
+                if let ArchiveRequest::CapturedPayload {parent,slot}=request {
+                    let key=mapping::captured_payload_key(parent,slot);
+                    if !captured_payloads.contains_key(&key) {
+                        if let Some(bindings)=state.captured_payloads.get(&key) {
+                            let payloads:BTreeSet<_>=bindings.iter().filter_map(|binding|binding.attachment.payload_ref.clone()).collect();
+                            let mut bytes=None;let mut limited=false;
+                            if payloads.len()==1 {
+                                let payload=payloads.first().unwrap();
+                                match self.evidence.payload_bytes(payload,self.limits.max_decode_bytes.saturating_sub(payload_bytes)).await {
+                                    Ok(value)=>{payload_bytes+=value.len();bytes=Some(value);},
+                                    Err(EvidenceError::Limit(_))=>limited=true,
+                                    Err(error)=>return Err(error.into()),
+                                }
+                            }
+                            captured_payloads.insert(key,mapping::CapturedPayload {bindings:bindings.clone(),bytes,limited});resolved=true;
+                        }
+                    }
+                }
                 if let ArchiveRequest::Observation { observation } = request {
                     let retained=self.evidence.receipt(observation).await?.is_some_and(|receipt|matches!(receipt.disposition,ReceiptDisposition::Retained{admission_seq}if admission_seq<=through_cut));
                     if retained {
@@ -773,6 +843,13 @@ impl ProjectionWorker {
     ) -> Result<()> {
         let admitted = context.admitted;
         let epoch = admitted.capture.ingestion_authorization_epoch.clone();
+        for binding in &output.capture_payload_bindings {
+            let key=mapping::captured_payload_key(&binding.parent,&binding.slot);
+            let values=unit.next.captured_payloads.entry(key.clone()).or_default();
+            if !values.iter().any(|old|old.attachment==binding.attachment) {values.push(binding.clone());}
+            unit.batch.mapper_states.insert(format!("captured_payload:{key}"),serde_json::to_value(values)?);
+        }
+
         for payload in &output.payloads {
             unit.batch.payload_derivations.push(PayloadDerivation {
                 payload: payload.reference.clone(),
@@ -796,6 +873,15 @@ impl ProjectionWorker {
                 .map(|payload| (payload, epoch.clone())),
         );
         for claim in &output.claims {
+            for subject in match &claim.fact {Fact::Declare {object}=>vec![object.object_ref()],_=>vec![]} {
+                if !unit.next.object_epochs.contains_key(&subject) {
+                    unit.batch.mapper_states.insert(
+                        format!("read_epoch:{}", subject.encode()),
+                        serde_json::to_value(&epoch)?,
+                    );
+                    unit.next.object_epochs.insert(subject, epoch.clone());
+                }
+            }
             for evidence in &claim.evidence {
                 if !unit.next.available_evidence.contains(evidence) {
                     if self.evidence.receipt(evidence).await?.is_some_and(|receipt|matches!(receipt.disposition,ReceiptDisposition::Retained{admission_seq}if admission_seq<=unit.batch.through_cut)){unit.next.available_evidence.insert(evidence.clone());}
@@ -809,6 +895,17 @@ impl ProjectionWorker {
             self.limits.max_claims_per_observation,
         )?;
         unit.batch.claims.extend(output.claims);
+        for definition in output.source_definitions {
+            let key=serde_json::to_string(&(&definition.definition.source,definition.definition.generation))?;
+            if unit.next.source_definitions.get(&key).is_some_and(|prior|prior.definition!=definition.definition) {return Err(WorkerError::CorrelationConflict);}
+            unit.batch.mapper_states.insert(format!("source_definition:{key}"),serde_json::to_value(&definition)?);
+            unit.next.source_definitions.insert(key,definition);
+        }
+        for record in output.history_records {
+            let key=record.observation.encode();
+            unit.batch.mapper_states.insert(format!("history_record:{key}"),serde_json::to_value(&record)?);
+            unit.next.history_records.insert(key,record);
+        }
         for ownership in output.source_owners {
             let key = serde_json::to_string(&(&ownership.source, ownership.generation))?;
             if let Some(prior) = unit.next.source_owners.get(&key) {
@@ -856,7 +953,7 @@ impl ProjectionWorker {
         } else {
             let pending = PendingMapping {
                 admitted: admitted.clone(),
-                state: context.original_state.clone(),
+                state: output.continuation_state.unwrap_or_else(||context.original_state.clone()),
                 requests: output.requests,
             };
             unit.batch
@@ -1002,6 +1099,7 @@ impl ProjectionWorker {
                 });
             }
         }
+        self.materialize_reading(generation, old, unit).await?;
         Ok(())
     }
 }
@@ -1010,6 +1108,8 @@ fn mapper_vendor<'a>(capture: &Capture, scope: &'a IngestionScope) -> &'a str {
     match capture.transport_kind {
         TransportKind::Control => "server",
         TransportKind::SourceInventory => "inventory",
+        TransportKind::SourceAttachment=>"attachment",
+        TransportKind::SourceState|TransportKind::Supervisor=>"observation",
         _ => scope.vendor().as_str(),
     }
 }
@@ -1017,6 +1117,8 @@ fn mapper_vendor<'a>(capture: &Capture, scope: &'a IngestionScope) -> &'a str {
 fn mapper(vendor: &str) -> Result<Box<dyn SemanticMapper>> {
     match vendor {
         "inventory" => Ok(Box::new(mapping::inventory::InventoryMapper)),
+        "attachment"=>Ok(Box::new(mapping::attachment::AttachmentMapper)),
+        "observation"=>Ok(Box::new(mapping::observation::ObservationMapper)),
         "server" => Ok(Box::new(mapping::server::ServerMapper)),
         "codex" => Ok(Box::new(mapping::codex::CodexMapper)),
         "claude" => Ok(Box::new(mapping::claude::ClaudeMapper)),
@@ -1078,6 +1180,7 @@ fn archive_context(state: &WorkerState) -> ArchiveContext {
                     .operations
                     .insert(operation.operation_ref.clone(), operation.clone());
             }
+            TraceObject::Result(result)=>{archive.result_operations.insert(result.result_ref.clone(),result.operation.clone());}
             _ => continue,
         }
         let evidence: BTreeSet<_> = support
@@ -1102,6 +1205,14 @@ fn archive_context(state: &WorkerState) -> ArchiveContext {
             .correlation_evidence
             .insert(key.clone(), binding.evidence.clone());
     }
+    for definition in state.source_definitions.values() {
+        archive.source_definitions.insert((definition.definition.source.clone(),definition.definition.generation),definition.clone());
+    }
+    for record in state.history_records.values() {
+        if let SourceLocator::Jsonl {record_ordinal,..}=record.position.locator {
+            archive.history_records.entry((record.position.source.clone(),record.position.generation)).or_default().insert(record_ordinal,record.clone());
+        }
+    }
     for claim in state.reducer.claims() {
         if let Fact::HistoryMappingComplete { extent } = &claim.fact {
             archive
@@ -1116,6 +1227,10 @@ fn archive_context(state: &WorkerState) -> ArchiveContext {
 
 fn requests_may_resolve(requests: &[ArchiveRequest], state: &WorkerState) -> bool {
     requests.iter().any(|request|match request {
+        ArchiveRequest::CapturedPayload {parent,slot}=>state.captured_payloads.contains_key(&mapping::captured_payload_key(parent,slot)),
+        ArchiveRequest::ContinueHistory=>true,
+        ArchiveRequest::HistorySource {source,generation}=>state.history_records.values().any(|record|&record.position.source==source&&record.position.generation==*generation),
+        ArchiveRequest::AttachmentTarget {parent,slot,locator}=>state.correlations.contains_key(&mapping::attachment_key(parent,slot,locator)),
         ArchiveRequest::Object {object_ref}=>state.reduction.object(object_ref).is_some(),
         ArchiveRequest::Observation {observation}=>state.available_evidence.contains(observation),
         ArchiveRequest::CommandIdentity {issuer,command_id}=>state.correlations.contains_key(&mapping::command_identity_key(issuer,command_id)),

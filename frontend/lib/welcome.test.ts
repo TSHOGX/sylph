@@ -7,7 +7,8 @@ function session(id: string, updatedAtMs: number, workdir = "/tmp"): Session {
     // The encoded triple, which is what a real id is. Written out rather than built
     // from parts because a client never assembles one — it echoes back what the server
     // gave it, and a helper that composed it here would model the wrong contract.
-    id: `env7fk2:e2e:${id}`,
+    id: `env7fk2:codex:${id}`,
+    traceAgentRef: `fixture-address-${id}`,
     environment: "env7fk2",
     agent: "e2e",
     nativeId: id,

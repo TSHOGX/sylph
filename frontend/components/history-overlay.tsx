@@ -208,7 +208,7 @@ export function HistoryOverlay() {
         // session now, and every row is continuable.
         onSelect: () => {
           closeOverlay();
-          router.push(`/sessions/${encodeURIComponent(session.id)}`);
+          router.push(`/agents/${encodeURIComponent(session.traceAgentRef)}`);
         },
       })),
     [sessions, workspaces, environments, closeOverlay, router],

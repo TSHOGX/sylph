@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { createSession, gotoReady } from "./fixtures/session";
-import { runExecution, openExecutionGroups } from "./fixtures/execution";
+import { agentLink, CHILD_AGENT, installTraceFixture, openTrace, unavailableExecution } from "./fixtures/trace";
 
 /**
  * Keyboard reachability, checked in a real browser.
@@ -199,7 +199,7 @@ test("the conversation canvas has no automated accessibility violations", async 
 
   // Both sidebars open, so the tree and the panes are in scope too.
   await page.keyboard.press("ControlOrMeta+Backslash");
-  await expect(page.getByRole("complementary", { name: "Work panel" })).toBeVisible();
+  await expect(page.getByRole("complementary", { name: "Trace inspector" })).toBeVisible();
 
   await audit(page, "conversation canvas with tool calls");
 });
@@ -213,16 +213,13 @@ test("the conversation canvas has no automated accessibility violations", async 
  * puts the danger colours inside a `bg-raised` card — a contrast pairing that does
  * not occur anywhere else in the timeline.
  */
-test("a nested delegation tree has no automated accessibility violations", async ({
-  page,
-}) => {
-  const {sessionId,turnId}=await runExecution(page,"delegate this please");
-  await openExecutionGroups(page,sessionId,turnId);
-  const explore=page.getByRole("region",{name:"Explore delegation"});
-  await explore.getByRole("button").first().click();
-  await audit(page,"delegation detail beside the conversation");
-  await page.getByRole("button",{name:"All subagents"}).click();
-  await audit(page,"delegation catalogue");
+test("a companion agent reader and its directory have no automated accessibility violations", async ({ page }) => {
+  const state = await installTraceFixture(page);
+  state.catalogue = [{ agent: agentLink(CHILD_AGENT, "Child"), relation: "spawn", ownExecution: unavailableExecution, activations: { value: 1, scope: "Agent", complete: true }, requiredInput: { value: 0, scope: "Agent", complete: true }, coverage: [] }];
+  await openTrace(page); await page.getByRole("button", { name: "Agents", exact: true }).click();
+  await audit(page, "agent directory");
+  await page.getByRole("button", { name: "Open alongside", exact: true }).click();
+  await audit(page, "companion agent reader");
 });
 
 /**
@@ -299,20 +296,19 @@ test("the adopt picker has no automated accessibility violations", async ({ page
       json: {
         sessions: [
           {
-            agent: "e2e",
+            agent: "codex",
             nativeId: "11111111-2222-3333-4444-555555555555",
             workdir: "/tmp",
             fidelity: "blocks",
-            id: "local:e2e:11111111-2222-3333-4444-555555555555",
+            id: "local:codex:11111111-2222-3333-4444-555555555555",
             title: "Fix the SSE reconnect loop",
-            eventCount: 42,
           },
           {
-            agent: "e2e",
+            agent: "codex",
             nativeId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
             workdir: "/tmp/other",
             fidelity: "blocks",
-            id: "local:e2e:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            id: "local:codex:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
             blocked: "outsideRoots",
           },
         ],
@@ -363,11 +359,11 @@ test("an overlay's filter takes focus without becoming the node focus returns to
 
   for (const [combo, name] of [
     ["ControlOrMeta+p", /command query/i],
-    ["ControlOrMeta+k", /search query/i],
+    ["ControlOrMeta+k", /search retained conversations/i],
     ["ControlOrMeta+Shift+k", /filter this workspace/i],
   ] as const) {
     await page.keyboard.press(combo);
-    await expect(page.getByRole("combobox", { name })).toBeFocused();
+    await expect(page.getByRole(combo === "ControlOrMeta+k" ? "textbox" : "combobox", { name })).toBeFocused();
 
     await page.keyboard.press("Escape");
     await expect(page.getByRole("dialog")).toBeHidden();

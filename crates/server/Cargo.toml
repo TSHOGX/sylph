@@ -2,10 +2,9 @@
 name = "sylph-server"
 version = "0.1.0"
 edition = "2021"
-# 1.88 rather than 1.85 because calamine 0.36 requires it. Left at 1.85 this
-# manifest would claim support it does not have: the build fails outright on a
-# 1.85 toolchain, and only a newer local toolchain hides that.
-rust-version = "1.88"
+# The standard-library archive file lock requires 1.89; it fences startup
+# recovery before any operational or evidence writer resets process state.
+rust-version = "1.89"
 
 [dependencies]
 # Web framework
@@ -68,15 +67,8 @@ sha2 = "0.10"
 hex = "0.4"
 base64 = { workspace = true }
 
-# Content addressing and compression for the durable history tier.
-#
-# blake3 for the content index: collision resistance is the only property needed
-# — nothing is executed or trusted on the basis of a hash — and it is several
-# times faster than SHA-256 on the sizes involved. zstd because agent output is
-# extremely redundant (tool output, code, diffs) and compresses 3-5x at level 3,
-# which is cheap enough for the write path.
+# Exact-byte content addressing for immutable trace payloads.
 blake3 = "1.5"
-zstd = "0.13"
 
 # No `nix`. Process groups and `killpg` were `env::LocalEnvironment::spawn`'s, and
 # it had one caller: the adapter subprocess. An adapter is linked in now and owns

@@ -1,186 +1,138 @@
 # Database Schema
 
-[unified-trace-storage.md](unified-trace-storage.md#logical-tables-and-constraints)
-owns the replacement table families, keys, transactions and indexes. Operational Session
-and authorization schema belongs to the control store; trace objects belong to versioned
-projections over immutable evidence. The initial schema changes in place, with no migration
-or legacy reader. Current DDL still describes the previous implementation; the gap lives
-in [roadmap.md](roadmap.md#unified-trace-foundation-review).
+SQLite stores operational authority, immutable evidence, and independently rebuildable
+query generations. [Unified Trace Storage](unified-trace-storage.md) owns their transaction,
+publication, snapshot, and retention contracts. The initial schemas are
+[control policy](../crates/server/src/db/schema.sql),
+[command outbox](../crates/server/src/db/control/schema.sql),
+[evidence](../crates/server/src/trace/evidence/schema.sql),
+[publication catalogue](../crates/server/src/trace/evidence/catalogue/schema.sql), and
+[semantic generations](../crates/server/src/trace/generation/schema.sql).
 
 ## Identity in the schema
 
-Public Session identity is the native triple. Trace AgentRefs additionally address real
-embedded child identities without minting a public Session. Object keys retain native
-namespace or deterministic source occurrence scope, and equivalence is proved rather
-than inferred. The complete key algebra is
-[unified-trace-foundation.md](unified-trace-foundation.md#identity-and-reference-resolution).
+A native Session has the composite key `(environment, agent, native_id)`. The public
+encoded Session ID preserves that tuple. Trace AgentThread and object addresses use the
+typed reference algebra in [the foundation](unified-trace-foundation.md#identity-and-reference-resolution).
+An acquisition inventory can exist before a native identity is available. It is an
+admission scope, not a Session row or a substitute AgentThread.
 
-Same-database constraints enforce resolved relationships. Cross-database references
-use typed manifests, not foreign keys SQLite cannot enforce. See
-[unified-trace-storage.md](unified-trace-storage.md#logical-tables-and-constraints).
+## Operational authority
 
-## sessions
+`control.db` holds Subjects, environment installations and grants, native Session
+metadata, current runtime requests and execution leases, durable command outcomes,
+immutable command acceptances and the evidence outbox. It uses one FULL-synchronous WAL
+writer and separate query-only readers.
 
-The control store holds native identity, working-directory provenance, title, identity
-injection and reachability/policy metadata. A session has no creator-based class and
-cannot change native identity. `inject_identity` stays immutable after creation.
-AgentThread execution, coverage and history selection are trace facts, not overloaded
-session row state. The store has no event-count-derived identity allocator.
+`sessions` stores the identity triple, optional native workdir/title, creation-time
+`inject_identity`, retained fidelity, chosen launch flags, current reachability-related
+status, and creation/update timestamps. A row is inserted only after a vendor supplies
+a real native identity. Deletion removes its metadata after committing trace suppression.
+Changing an identity or resetting a session is not an operation.
 
-[architecture.md](architecture.md) owns public identity and policy;
-[unified-trace-foundation.md](unified-trace-foundation.md) owns embedded agents and trace
-relationships. Spawn, fork, context lineage and current selected head are separate.
+`trace_commands` retains the original acceptance, the exact current immutable submitted
+revision, dispatch attempt count and state, and a separately evidenced launch identity
+binding. An edit is allowed only while a server-queued command has no dispatch permit;
+it writes a new revision and `Revised` outbox occurrence atomically. Dispatch reads and
+records the selected revision in its own transaction. Vendor queue acceptance does not
+prove consumption. Each edit names its preceding immutable revision explicitly.
 
-## turns
+`current_requests` holds scoped vendor notices and their waiting/resolving/resolved
+state. A resolution reserves the exact notice JSON in the same transaction as its
+command dispatch permit. A changed notice or second resolver cannot obtain a permit.
+Accepted or unconfirmed resolutions remain non-actionable across server/envagent
+reconnects; only an explicit vendor refusal releases the claim. Public request IDs
+include the hosted process incarnation, so a restarted vendor may reuse its native ID
+without reviving an earlier request.
 
-The former row combining queued request text and execution outcome is replaced by
-immutable command/message revisions, Delivery attempts and native Activation objects.
-Queued/starting/stopping control state does not fabricate an execution boundary.
-See [unified-trace-foundation.md](unified-trace-foundation.md#messages-deliveries-and-model-visibility)
-and [the operational outbox](unified-trace-storage.md#operational-facts-use-an-outbox).
-
-### A terminal status means the record is finished
-
-This former guarantee is superseded. A terminal Activation describes the execution's own
-outcome. Late history, child results and sidecars may still arrive. Evidence admission,
-projection/search progress and observation coverage explicitly describe record completeness.
-See [unified-trace-foundation.md](unified-trace-foundation.md#independent-lifecycle-claims).
-
-## events
-
-The kind/phase/span journal is replaced by immutable capture occurrences and typed
-semantic claims. Producer receipt, source position, archive admission and query change
-revision are separate axes. Sealed message content, operation return and child completion
-cannot share one phase column. Table constraints and typed missing/conflicting references
-are specified in [unified-trace-storage.md](unified-trace-storage.md#logical-tables-and-constraints).
-
-## pending_requests
-
-What an agent is blocked on, waiting for a human. A resource rather than a stream message,
-because the agent waits until someone answers: a client closing its laptop must not strand
-it, and the answer has to be possible from a frontend that was not attached when the
-request was raised.
-
-A row carries the request's kind (`approval` | `dialog` | `elicitation` | `choice`), the
-tool and tool-use id it concerns, the declared options and form, a default, a risk marker,
-an expiry, and its resolution. A partial index covers open rows only, since resolved rows
-accumulate without bound and never appear in the hot "what is this session waiting on"
-query.
-
-`adapter_request_id` is the adapter's own id, scoped to one link and never serialized to a
-client — a client-supplied adapter id would be a way to answer a request that was never
-raised. Clients address a request by `id`.
-
-**`status = 'pending'` in the resolve UPDATE's WHERE clause is the entire concurrency
-control.** Two clients answering at once both run it, SQLite serializes them, and exactly
-one gets a row back. A restart marks every still-pending row `abandoned` rather than
-leaving it answerable, because no link survives a restart — and the row is kept, so the
-timeline can explain why a turn stopped instead of showing a gap.
-
-`form_json` is the input the request declared it wants collected, and absent is meaningful
-rather than missing: a request with no form is an approval, whose subject is the one
-proposed tool input (`docs/session-protocol.md` § Request forms).
+`control_outbox` retains each fixed observation identity and payload until evidence
+returns a terminal retained or deletion-discarded receipt. Retrying export cannot
+repeat a vendor effect. `deleted_commands` preserves erased command identities while
+bounded deletion jobs remove exported input bytes. A deletion job has a fixed accepted
+sequence cut, so subsequent explicit re-adoption cannot place fresh input in an old job.
 
 ## Subjects, environments, and grants
 
-`subjects` holds one row per authenticated actor
-([ADR-0002](adr/0002-environment-workspace-subject.md)). The bootstrap seeds one explicit
-development row, while the login and registration routes add registered Subjects alongside it.
+`subjects` stores authenticated principals and the server-administration flag.
+`env_installations` stores paired environment identity, credential hash, connection
+epoch, grant authority, native agent inventory and machine facts. `env_grants` binds
+one Subject to an environment capability, issuer and optional expiry. `administer` is
+not a grantable capability: the server administrator and machine authority have distinct
+responsibilities defined in [environment authority](adr/0006-environment-authority-and-capability-grants.md).
 
-`is_admin` is the server administration authority — the party ADR-0006 assigns as the
-authority root for every `grant_authority = server` environment. It is a column here rather
-than a grant row for two independent reasons: grants are keyed per environment and this
-authority is not, and a grantable `administer` would restore the escalation chain ADR-0006
-removes. Nothing sets it over the wire, so an admin cannot mint another admin. It confers no
-`observe` or `control` on any environment — an admin who wants to read a session grants
-themselves one, which leaves a grant row, since bundling reads into the administration
-authority would make the audit surface the largest unlogged reader.
+Pairing and invite codes are single-use hashes with expirations. Unpairing revokes the
+installation and its grants while retaining native Session and trace records. An
+expired or revoked Subject grant is reevaluated on each request and dispatch; it never
+changes the environment's cached facet state. Connection epochs fence messages from
+superseded envagent sockets.
 
-**Environment installations and pairings** are server-owned. Pairing codes are stored as
-hashes and consumed atomically; the bearer token itself is never written to the journal. A
-reconnect is accepted only for the current connection epoch. An installation carries
-`grant_authority`, `machine` or `server`, derived from pairing provenance and immutable
-thereafter — it records where authorization legitimately originates, and a value that could
-be re-pointed later would record nothing.
+## Evidence and acquisition
 
-Unpairing removes the installation and its lease **while leaving every recorded session
-readable** (`docs/environments.md` § Unpairing is the terminal operation).
+`evidence.db` holds immutable source occurrences, observations, durable producer
+receipts and contiguous prefixes, payload roots, admission epochs and permanent
+deletion tombstones. Capture admission deduplicates producer delivery independently
+from source-position rereads. Equal bytes at different source positions remain distinct.
 
-**Grants** are one row per `(subject, environment)` with a capability of `observe` or
-`control`, plus the provenance of the local signing act that issued it, its expiry, and its
-consumption state. `administer` never appears, because a row asserting it would be a grant
-of the power to grant.
+Source inventory authorization precedes capture. Epoch ordering and evidenced
+inventory-to-agent bindings make deletion effective even when native identity arrives
+late. Re-adoption issues a fresh epoch; neither old spool frames nor old server outbox
+occurrences can be retagged with it.
 
-Expiry is what makes the link's `expired` distinguishable from `not_granted`: an expired
-row is still present and still proves the grant was once legitimate, so the remedy is a
-renewal rather than a first issuance. Revocation deletes the row, and a deleted row cannot
-be distinguished from one never issued — which is why "revoked" survives on the turn it cut
-short, as `close_reason = grant_revoked`, rather than in the grant table.
+Payload addresses distinguish exact bytes from manifests while retaining one physical
+BLAKE3 CAS. Capture-upload records prove which fixed observation actually supplied each
+chunk. A global digest is insufficient authority to import another environment's bytes.
+A same-source, same-position reread may reuse proof within its original admission epoch.
 
-Invite codes share the pairing code's hashing and atomic consumption, and are validated on
-five properties: environment scope, capability, expiry, single consumption, and issuer
-provenance. Scope is stored rather than inferred from the redeeming connection, so a grant
-asserts only over the environment that issued it.
+## Semantic generations and snapshots
 
-**Evidence receipts** deduplicate the complete producer/epoch/sequence identity and
-commit with evidence admission, before semantic mapping. Source occurrence and retention
-authorization epoch are independent keys. The replacement transaction and collision
-rules are [the evidence admission contract](unified-trace-storage.md#admission-and-acknowledgments).
+Each generation owns typed claims, object declarations, temporal summaries, membership
+and order revisions, exact payload anchors, mapper checkpoints and atomic change batches.
+Summary revisions are separate from history membership revisions, so streaming text does
+not multiply history-order rows. Indexed provenance comes from the protocol's typed
+`Fact::subject_refs` and `Fact::kind` producers.
 
-## Search lives beside history.db
+A reader lease fixes generation, evidence cut and view revision. Every pagination cursor
+also binds its complete query scope. Queries fetch a bounded metadata candidate window
+before validity filtering or payload access. Dense superseded membership rows return an
+explicit advancing work-budget cursor, not a false complete empty page.
 
-Search moves to its own generation/checkpoint store so tokenization cannot delay evidence
-acknowledgments. It reports coverage and lag, applies current grants, and pins corresponding
-trace membership/body revisions. [unified-trace-storage.md](unified-trace-storage.md#search-consistency)
-owns this contract. Native stores are read only by their capture adapter; directory scopes
-remain canonical exact path/containment matches, never substring matches.
+The evidence catalogue owns generation build jobs, immutable ready manifests, the active
+pointer, reusable leases, scope pins and publication guards. Pointer publication is one
+FULL transaction after the old and new projection writers are fenced. An unpublished
+ready directory cannot become active merely because its mtime is newer. The product
+holds an exclusive archive file lock before resetting interrupted publication or GC
+guards. A missing or corrupt published projection cancels its old views and reports
+recovery while a private full replay reaches the current durable evidence cut. Only
+the catalogue pointer transaction makes that replacement readable. Visibility has its
+own catalogue revision: deleting an epoch triggers a private replay even when the
+evidence admission cut is unchanged. Publication removes suppressed directory and
+search membership together; prior views continue to fail their deletion checks.
+
+## Search and garbage collection
+
+Search uses a separate generation-specific database, the linked jieba tokenizer, and
+its own declared projection checkpoint. Result jobs retain a stable matching trace view.
+Indexing lag and work limits are explicit. Search and export checkpoint roots retain
+semantic revisions as well as payload bytes; the temporal reclamation floor includes
+these roots and live reader leases. The search worker reserves a pending view before
+reading its checkpoint and transfers that protection to its durable index root before
+releasing the view. An old index is invalidated after its last result/reader lease
+expires, then its revision and payload pins are released in bounded passes.
+
+The physical root ledger includes authoritative observations, pending capture transfers,
+derived uploads, active/building/leased generation roots, and search/export roots. GC
+releases eligible roots and reserves physical digests in bounded passes. A durable
+collector guard and per-digest deletion reservations prevent a stale collector from
+unlinking newly republished bytes. Startup recovery retries interrupted reservations.
 
 ## Schema evolution
 
-Each replacement database has a single initial schema applied at open. Runtime checks
-validate its schema/build rather than accumulating a migration chain. The exact target
-layout is in [unified-trace-storage.md](unified-trace-storage.md#authority-and-database-boundaries).
+The project has one consumer and no compatibility schemas or incremental migrations.
+Change the initial schema and its typed consumers together. Evidence is authoritative;
+query databases are disposable and rebuild from retained evidence under named mapper
+and reducer builds. Never discard authoritative evidence as a remedy for a query-schema
+change.
 
-**Schemas change in place.** The store is disposable: a build that cannot read one refuses
-to start and names it, and the answer is to discard `data/` and re-adopt from the vendors'
-own native stores. So the chain stays collapsed rather than growing. `sqlx` checksums each
-file, so editing one a running database has already applied makes that database refuse to
-open — that failure is the design. It is loud, it lands while someone is looking, and it
-costs one `rm -rf ~/.sylph/data`. A chain is what you would keep instead to make an edit
-survivable, and nothing here needs it: preserving the order a schema was discovered in is
-only worth the second reading path while some database is stranded partway along it.
-
-**A collapsed migration does not use `IF NOT EXISTS`.** In an appended chain it is
-harmless, because the object it guards genuinely may exist from an earlier member. In a
-single file that only ever runs against a fresh database, the guard can only turn "this
-table already exists, so something is wrong" into a silent success over a schema that may
-be missing every column added since — which is the class of defect `AGENTS.md` § Where
-Design Rules Live opens with, a plausible result in place of an error.
-
-Attachments use immutable payload references; accepted command revisions and evidence
-export use the operational outbox. A turn row is not their shared container.
-
-**`/api/v1/health` reports `MAX(version)` from `_sqlx_migrations`, never a stored key**, and
-the test reads the highest filename prefix out of the journal's migration directory rather
-than pinning a literal. A number the runner already maintains cannot have a second copy,
-since nothing would compare the two. It reads the prefix and not a count of the files
-because `MAX(version)` is what the runner records: the two agree only while the files are
-numbered contiguously from 1, so a count would survive today and report a version nobody
-assigned the moment a second file appeared out of order.
-
-There are no `sqlx::query!` macros here, only runtime `sqlx::query`, so there is no
-`DATABASE_URL` and no `.sqlx` offline directory. A schema mistake surfaces in the store
-tests rather than at compile time, which is why those tests matter.
-
-## Execution nodes
-
-Promoted block-derived execution nodes are replaced by independently typed agents,
-activations, operations and resources. Query projections index those objects without
-becoming their identities. See [unified-trace-storage.md](unified-trace-storage.md#logical-tables-and-constraints).
-
-## Conversation reading addresses
-
-Every issued semantic reference remains resolvable across verified identity reconciliation.
-Temporal summaries pin order, membership and immutable payload revisions under a reusable
-view lease. [unified-trace-storage.md](unified-trace-storage.md#snapshot-pages-and-live-changes)
-owns the address and cursor contract.
+SQLx executes queries at runtime. Store and API tests therefore validate SQL structure,
+constraints, transaction boundaries and concrete returned values. `cargo doc` and the
+document pointer checker are additional repository gates.

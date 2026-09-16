@@ -1,40 +1,19 @@
-//! The `claude` adapter.
-//!
-//! `docs/agents.md` § `claude` is the governing spec and holds the measurement behind
-//! every quirk below. Every constant here was **enumerated against the real CLI** rather
-//! than read off its `--help` or its error text, and where the two disagree the
-//! measurement is recorded beside the constant — because on this vendor they do disagree.
-//!
-//! # What the translation half is, and why it is separate
-//!
-//! [`translate`] holds the whole vendor→Sylph projection as pure functions over a
-//! [`Correlation`] state, with no process, no I/O, and no tokens. The split is what makes
-//! classification testable at all: an end-to-end check spends real tokens and sees only
-//! whatever shapes one live turn happens to produce, so **every classification bug in this
-//! adapter's history was invisible to one** — the invented `task_*` subtypes, `task_type`
-//! read as a delegation when it named a backgrounded shell job, a content-block index
-//! keyed without its trajectory. Each is now a unit test over [`translate`].
-//!
-//! # There is no `--describe`
-//!
-//! v1 carried one as a compatibility entry point. No v1 contract remains to serve and
-//! `AGENTS.md` § Compatibility forbids keeping one.
+//! Claude process control and native source discovery. `docs/agents.md` owns the
+//! measured capability and control surface; `docs/unified-trace-claude.md` owns pure
+//! semantic mapping from retained live and native bytes on the server.
 
 pub mod hostauth;
 pub mod native;
 pub mod requests;
 pub mod session;
 pub mod surface;
-pub mod translate;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use sylph_protocol::{
-    Adapter, AgentInfo, Capability, EventStream, Facet, Fidelity, FlagSpec, LinkFacets, NativeId,
-    NativeRecord, NativeSummary, RunSpec, Session, StoreFilter, UnavailableReason,
+    Adapter, AgentInfo, Capability, Facet, Fidelity, FlagSpec, LinkFacets, NativeId, NativeSummary,
+    RunSpec, Session, StoreFilter, UnavailableReason,
 };
-
-pub use translate::{Correlation, Emission};
 
 /// The name this adapter answers to, and the `PATH` binary that decides availability.
 ///
@@ -450,26 +429,17 @@ impl Adapter for ClaudeAdapter {
         })
     }
 
-    async fn run(&self, spec: RunSpec) -> Result<Box<dyn Session>> {
-        session::run(spec).await
+    async fn run(
+        &self,
+        spec: RunSpec,
+        capture: std::sync::Arc<dyn sylph_protocol::RawCaptureSink>,
+    ) -> Result<Box<dyn Session>> {
+        session::run(spec, capture).await
     }
 
-    async fn adopt(&self, id: &NativeId) -> Result<EventStream> {
-        native::adopt(id)
-    }
-
-    async fn reproject(&self, records: Vec<NativeRecord>) -> Result<EventStream> {
-        let mut correlation = translate::Correlation::new();
-        let messages = records
-            .iter()
-            .flat_map(|record| native::reproject_native_record(&mut correlation, record))
-            .map(Ok)
-            .collect::<Vec<_>>();
-        Ok(Box::pin(futures::stream::iter(messages)))
-    }
-
-    async fn watch(&self, id: &NativeId) -> Result<EventStream> {
-        native::watch(id)
+    async fn native_sources(&self, id: &NativeId) -> Result<Vec<sylph_protocol::NativeSource>> {
+        let id = id.clone();
+        tokio::task::spawn_blocking(move || native::sources(&id)).await?
     }
 
     async fn enumerate(&self, filter: &StoreFilter) -> Result<Vec<NativeSummary>> {

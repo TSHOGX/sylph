@@ -211,7 +211,7 @@ function AuthSection() {
       setNotice(t("settings.account.registered", { name: subject.name }));
       setName("");
       void queryClient.invalidateQueries({ queryKey: ["auth", "token"] });
-      void queryClient.invalidateQueries({
+      void queryClient.resetQueries({
         predicate: (query) => query.queryKey[0] !== "auth",
       });
     },
@@ -223,7 +223,7 @@ function AuthSection() {
       setToken("");
       setIssuedToken(null);
       void queryClient.invalidateQueries({ queryKey: ["auth", "token"] });
-      void queryClient.invalidateQueries({
+      void queryClient.resetQueries({
         predicate: (query) => query.queryKey[0] !== "auth",
       });
     },
@@ -671,7 +671,6 @@ const ACTION_KEYS: Record<ShortcutAction, MessageKey> = {
   toggleRightSidebar: "shortcut.toggleRightSidebar",
   openSettings: "shortcut.openSettings",
   stopTurn: "shortcut.stopTurn",
-  collapseAll: "shortcut.collapseAll",
   findInSession: "shortcut.findInSession",
 };
 

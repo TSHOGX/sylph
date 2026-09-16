@@ -4,7 +4,7 @@
 //! `--input-format stream-json`, `pi` as `--mode rpc`, `codex` as `app-server` JSON-RPC —
 //! so the framing, the reply correlation, and the shutdown escalation are one
 //! implementation rather than three. What differs per vendor is the *content* of a line,
-//! which is each module's `translate`.
+//! which its runtime decodes only for operational control.
 //!
 //! # Two things this owns that a caller must not re-derive
 //!
@@ -14,7 +14,7 @@
 //!
 //! **The read loop's ownership of stdout.** Lines are read once, into a channel, by a task
 //! that outlives any single call. A second reader would see half the turn, which is the
-//! same reason [`sylph_protocol::Session::events`] yields its stream once.
+//! same reason [`sylph_protocol::Session::messages`] yields its stream once.
 
 use std::collections::HashMap;
 use std::ops::Deref;
@@ -25,6 +25,10 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::Value;
+use sylph_protocol::{
+    trace::{ObservationRef, TransportKind},
+    ProcessEvent, RawCapture, RawCaptureSink, SourceProcessEvent, MAX_FRAME_BYTES,
+};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot, Mutex};
@@ -50,7 +54,7 @@ const STDERR_TAIL_BYTES: usize = 4096;
 
 /// One parsed line the vendor wrote to stdout, retaining its lexical payload.
 ///
-/// `value` is what adapters normally consume. `raw` is the exact line bytes, excluding only
+/// `value` is what adapters normally consume. `raw` is the exact line bytes including
 /// the framing newline, so a recorder can preserve whitespace, key order, duplicate keys, and
 /// escape spelling. A parse failure is [`Err`] and **does not end the stream**: one malformed
 /// line must not fail a turn, and a vendor that has just started may print a banner before its
@@ -59,6 +63,7 @@ const STDERR_TAIL_BYTES: usize = 4096;
 pub struct ProcessLine {
     pub value: Value,
     pub raw: Vec<u8>,
+    pub observation: ObservationRef,
 }
 
 impl Deref for ProcessLine {
@@ -71,6 +76,11 @@ impl Deref for ProcessLine {
 
 pub type Line = Result<ProcessLine>;
 
+struct WriteRequest {
+    bytes: Vec<u8>,
+    completion: oneshot::Sender<Result<()>>,
+}
+
 /// A held vendor process.
 pub struct Child {
     /// Serialized writes.
@@ -78,9 +88,9 @@ pub struct Child {
     /// A channel rather than a shared `AsyncWrite`, because two concurrent writers can
     /// interleave halves of two JSON lines — which corrupts the stream in a way the vendor
     /// reports as a parse error about content neither writer sent.
-    stdin: mpsc::Sender<String>,
+    stdin: mpsc::Sender<WriteRequest>,
     /// Replies awaiting their caller, keyed by the id we sent.
-    pending: Arc<Mutex<HashMap<String, oneshot::Sender<Value>>>>,
+    pending: Arc<Mutex<HashMap<String, oneshot::Sender<ProcessLine>>>>,
     /// Monotonic request ids, unique for this process's life.
     next_id: AtomicU64,
     /// The process group, addressable while another task drains stdout.
@@ -180,12 +190,70 @@ pub fn json_rpc_reply_id(frame: &Value) -> Option<String> {
     frame.get("id").and_then(reply_id)
 }
 
+async fn read_line(
+    reader: &mut (impl tokio::io::AsyncBufRead + Unpin),
+    raw: &mut Vec<u8>,
+) -> std::io::Result<usize> {
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            return Ok(raw.len());
+        }
+        let end = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map(|index| index + 1);
+        let count = end
+            .unwrap_or(available.len())
+            .min(MAX_FRAME_BYTES.saturating_sub(raw.len()) + 1);
+        raw.extend_from_slice(&available[..count]);
+        reader.consume(count);
+        if raw.len() > MAX_FRAME_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "vendor line exceeds the capture frame limit",
+            ));
+        }
+        if end == Some(count) {
+            return Ok(raw.len());
+        }
+    }
+}
+
+async fn record_process_event(
+    capture: &Arc<dyn RawCaptureSink>,
+    stream: &str,
+    rpc: &str,
+    incarnation: &str,
+    event: ProcessEvent,
+) {
+    if let Err(error) = capture
+        .capture(RawCapture {
+            stream: stream.into(),
+            transport: TransportKind::Supervisor,
+            bytes: serde_json::to_vec(&SourceProcessEvent {
+                rpc_stream: rpc.into(),
+                process_incarnation: incarnation.into(),
+                event,
+            })
+            .expect("process lifecycle serialization"),
+            captured_at_ms: crate::now_ms(),
+        })
+        .await
+    {
+        debug!(%error,"retaining process lifecycle failed");
+    }
+}
+
 impl Child {
     /// Start the process and take over its stdout.
     ///
     /// Returns the handle and the line stream. Lines the caller correlated with
     /// [`Self::request`] are removed from the stream, because a reply is not an event.
-    pub async fn spawn(spawn: Spawn) -> Result<(Self, mpsc::Receiver<Line>)> {
+    pub async fn spawn(
+        spawn: Spawn,
+        capture: Arc<dyn RawCaptureSink>,
+    ) -> Result<(Self, mpsc::Receiver<Line>)> {
         let mut command = Command::new(&spawn.program);
         command
             .args(&spawn.args)
@@ -194,7 +262,8 @@ impl Child {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             // Its own group, so a stop reaches the tool the vendor spawned.
-            .process_group(0);
+            .process_group(0)
+            .kill_on_drop(true);
         // Removals first, so a caller that both removes and sets a name gets the value it
         // set rather than an empty environment slot.
         for key in &spawn.env_remove {
@@ -222,39 +291,120 @@ impl Child {
         let stdout = child.stdout.take().context("stdout was not piped")?;
         let stderr = child.stderr.take().context("stderr was not piped")?;
 
-        let (write_tx, mut write_rx) = mpsc::channel::<String>(64);
+        let process_epoch = uuid::Uuid::new_v4().to_string();
+        let stdout_source = format!("{process_epoch}/rpc");
+        let stdin_source = stdout_source.clone();
+        let stderr_source = format!("{process_epoch}/stderr");
+        let lifecycle_source = format!("{process_epoch}/lifecycle");
+        let lifecycle_capture = |event| RawCapture {
+            stream: lifecycle_source.clone(),
+            transport: TransportKind::Supervisor,
+            bytes: serde_json::to_vec(&SourceProcessEvent {
+                rpc_stream: stdout_source.clone(),
+                process_incarnation: process_epoch.clone(),
+                event,
+            })
+            .expect("process lifecycle serialization"),
+            captured_at_ms: crate::now_ms(),
+        };
+        if let Err(error) = capture
+            .capture(lifecycle_capture(ProcessEvent::Spawned {
+                pid: pgid,
+                program: spawn.program.clone(),
+                args: spawn.args.clone(),
+                workdir: spawn.cwd.clone(),
+            }))
+            .await
+        {
+            unsafe { libc::killpg(pgid, libc::SIGKILL) };
+            return Err(error);
+        }
+
+        let (write_tx, mut write_rx) = mpsc::channel::<WriteRequest>(64);
+        let stdin_capture = capture.clone();
+        let stdin_lifecycle = lifecycle_source.clone();
+        let stdin_incarnation = process_epoch.clone();
         tokio::spawn(async move {
-            while let Some(line) = write_rx.recv().await {
-                if stdin.write_all(line.as_bytes()).await.is_err() {
-                    break;
+            while let Some(write) = write_rx.recv().await {
+                let result = async {
+                    stdin_capture
+                        .capture(RawCapture {
+                            stream: stdin_source.clone(),
+                            transport: TransportKind::LiveStdin,
+                            bytes: write.bytes.clone(),
+                            captured_at_ms: crate::now_ms(),
+                        })
+                        .await?;
+                    stdin.write_all(&write.bytes).await?;
+                    stdin.flush().await?;
+                    Ok::<_, anyhow::Error>(())
                 }
-                if stdin.write_all(b"\n").await.is_err() || stdin.flush().await.is_err() {
+                .await;
+                let failed = result.is_err();
+                if let Err(error) = &result {
+                    record_process_event(
+                        &stdin_capture,
+                        &stdin_lifecycle,
+                        &stdin_source,
+                        &stdin_incarnation,
+                        ProcessEvent::CaptureFailed {
+                            channel: "stdin".into(),
+                            reason: format!("{error:#}"),
+                        },
+                    )
+                    .await;
+                }
+                let _ = write.completion.send(result);
+                if failed {
+                    unsafe { libc::killpg(pgid, libc::SIGKILL) };
                     break;
                 }
             }
-            // Dropping stdin here is what tells a vendor waiting on it that no more input
-            // is coming, which is how `claude` exits when a session closes.
         });
-
         let tail = Arc::new(Mutex::new(String::new()));
         let stderr_tail = tail.clone();
-        tokio::spawn(async move {
-            let mut reader = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = reader.next_line().await {
+        let stderr_capture = capture.clone();
+        let stderr_task = tokio::spawn(async move {
+            let mut reader = BufReader::new(stderr);
+            let mut raw = Vec::new();
+            loop {
+                raw.clear();
+                let count = match read_line(&mut reader, &mut raw).await {
+                    Ok(count) => count,
+                    Err(error) => {
+                        unsafe { libc::killpg(pgid, libc::SIGKILL) };
+                        return Err(error.into());
+                    }
+                };
+                if count == 0 {
+                    break;
+                }
+                if let Err(error) = stderr_capture
+                    .capture(RawCapture {
+                        stream: stderr_source.clone(),
+                        transport: TransportKind::LiveStderr,
+                        bytes: raw.clone(),
+                        captured_at_ms: crate::now_ms(),
+                    })
+                    .await
+                {
+                    unsafe { libc::killpg(pgid, libc::SIGKILL) };
+                    return Err(error.context("retaining vendor stderr"));
+                }
                 let mut held = stderr_tail.lock().await;
-                held.push_str(&line);
-                held.push('\n');
-                // Bounded from the front: the newest lines are the ones that explain an
-                // exit, and an unbounded buffer on a chatty vendor is a leak for the
-                // session's whole life.
+                held.push_str(&String::from_utf8_lossy(&raw));
                 if held.len() > STDERR_TAIL_BYTES {
-                    let cut = held.len() - STDERR_TAIL_BYTES;
-                    *held = held[cut..].to_string();
+                    let mut cut = held.len() - STDERR_TAIL_BYTES;
+                    while !held.is_char_boundary(cut) {
+                        cut += 1;
+                    }
+                    held.drain(..cut);
                 }
             }
+            Ok::<_, anyhow::Error>(())
         });
 
-        let pending: Arc<Mutex<HashMap<String, oneshot::Sender<Value>>>> =
+        let pending: Arc<Mutex<HashMap<String, oneshot::Sender<ProcessLine>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let (line_tx, line_rx) = mpsc::channel::<Line>(256);
         let reply_id_of = spawn.reply_id;
@@ -266,12 +416,38 @@ impl Child {
             let mut raw = Vec::new();
             loop {
                 raw.clear();
-                match reader.read_until(b'\n', &mut raw).await {
+                match read_line(&mut reader, &mut raw).await {
                     Ok(0) => break,
                     Ok(_) => {
-                        if raw.last() == Some(&b'\n') {
-                            raw.pop();
-                        }
+                        let observation = match capture
+                            .capture(RawCapture {
+                                stream: stdout_source.clone(),
+                                transport: TransportKind::LiveStdout,
+                                bytes: raw.clone(),
+                                captured_at_ms: crate::now_ms(),
+                            })
+                            .await
+                        {
+                            Ok(observation) => observation,
+                            Err(error) => {
+                                record_process_event(
+                                    &capture,
+                                    &lifecycle_source,
+                                    &stdout_source,
+                                    &process_epoch,
+                                    ProcessEvent::CaptureFailed {
+                                        channel: "stdout".into(),
+                                        reason: format!("{error:#}"),
+                                    },
+                                )
+                                .await;
+                                let _ = line_tx
+                                    .send(Err(error.context("retaining vendor stdout")))
+                                    .await;
+                                unsafe { libc::killpg(pgid, libc::SIGKILL) };
+                                break;
+                            }
+                        };
                         if raw.iter().all(u8::is_ascii_whitespace) {
                             continue;
                         }
@@ -294,7 +470,11 @@ impl Child {
                         if let Some(read_id) = &reply_id_of {
                             if let Some(id) = read_id(&parsed) {
                                 if let Some(waiter) = routed.lock().await.remove(&id) {
-                                    let _ = waiter.send(parsed);
+                                    let _ = waiter.send(ProcessLine {
+                                        value: parsed,
+                                        raw: raw.clone(),
+                                        observation,
+                                    });
                                     continue;
                                 }
                             }
@@ -303,6 +483,7 @@ impl Child {
                             .send(Ok(ProcessLine {
                                 value: parsed,
                                 raw: raw.clone(),
+                                observation,
                             }))
                             .await
                             .is_err()
@@ -312,6 +493,18 @@ impl Child {
                         }
                     }
                     Err(error) => {
+                        record_process_event(
+                            &capture,
+                            &lifecycle_source,
+                            &stdout_source,
+                            &process_epoch,
+                            ProcessEvent::CaptureFailed {
+                                channel: "stdout".into(),
+                                reason: error.to_string(),
+                            },
+                        )
+                        .await;
+                        unsafe { libc::killpg(pgid, libc::SIGKILL) };
                         let _ = line_tx.send(Err(anyhow!("reading stdout: {error}"))).await;
                         break;
                     }
@@ -325,7 +518,49 @@ impl Child {
             routed.lock().await.clear();
             // Reaped here so the child never becomes a zombie, and its exit is not raced
             // with `close`.
-            let _ = child.wait().await;
+            let status = child.wait().await;
+            let stderr_result = stderr_task.await;
+            #[cfg(unix)]
+            use std::os::unix::process::ExitStatusExt;
+            let exit = match status {
+                Ok(status) => ProcessEvent::Exited {
+                    code: status.code(),
+                    signal: status.signal(),
+                },
+                Err(error) => ProcessEvent::WaitFailed {
+                    reason: error.to_string(),
+                },
+            };
+            let stderr_error = match stderr_result {
+                Ok(Ok(())) => None,
+                Ok(Err(error)) => Some(error.to_string()),
+                Err(error) => Some(error.to_string()),
+            };
+            let mut events = vec![exit];
+            if let Some(reason) = stderr_error {
+                events.push(ProcessEvent::CaptureFailed {
+                    channel: "stderr".into(),
+                    reason,
+                });
+            }
+            for event in events {
+                if let Err(error) = capture
+                    .capture(RawCapture {
+                        stream: lifecycle_source.clone(),
+                        transport: TransportKind::Supervisor,
+                        bytes: serde_json::to_vec(&SourceProcessEvent {
+                            rpc_stream: stdout_source.clone(),
+                            process_incarnation: process_epoch.clone(),
+                            event,
+                        })
+                        .expect("process lifecycle serialization"),
+                        captured_at_ms: crate::now_ms(),
+                    })
+                    .await
+                {
+                    debug!(%error,"retaining vendor process lifecycle failed");
+                }
+            }
         });
 
         Ok((
@@ -343,10 +578,16 @@ impl Child {
 
     /// Send one line, expecting no reply.
     pub async fn send(&self, payload: Value) -> Result<()> {
+        let mut bytes = serde_json::to_vec(&payload)?;
+        bytes.push(b'\n');
+        let (completion, answer) = oneshot::channel();
         self.stdin
-            .send(payload.to_string())
+            .send(WriteRequest { bytes, completion })
             .await
-            .map_err(|_| anyhow!("the vendor process is no longer accepting input"))
+            .map_err(|_| anyhow!("the vendor process is no longer accepting input"))?;
+        answer
+            .await
+            .map_err(|_| anyhow!("vendor stdin ended before its write receipt"))?
     }
 
     /// An id no other request on this process uses.
@@ -370,6 +611,13 @@ impl Child {
     /// a fast vendor has already sent, which presents as an intermittent timeout on a
     /// correct implementation.
     pub async fn request(&self, build: impl FnOnce(u64) -> Value) -> Result<Value> {
+        Ok(self.request_with_receipt(build).await?.value)
+    }
+
+    pub async fn request_with_receipt(
+        &self,
+        build: impl FnOnce(u64) -> Value,
+    ) -> Result<ProcessLine> {
         // Checked first: after EOF nothing drains the pending map, so registering would
         // buy a 30-second wait for an answer that cannot come ([`Self::closed`]).
         if self.has_ended() {
@@ -485,6 +733,33 @@ pub fn reply_id(value: &Value) -> Option<String> {
 }
 
 #[cfg(test)]
+#[derive(Default)]
+pub(crate) struct RecordingCapture {
+    pub records: std::sync::Mutex<Vec<(RawCapture, ObservationRef)>>,
+}
+#[cfg(test)]
+#[async_trait::async_trait]
+impl RawCaptureSink for RecordingCapture {
+    async fn capture(&self, capture: RawCapture) -> Result<ObservationRef> {
+        let mut records = self.records.lock().unwrap();
+        let observation = ObservationRef {
+            issuer: sylph_protocol::trace::Issuer::Environment(
+                sylph_protocol::EnvironmentId::parse("fixture").unwrap(),
+            ),
+            producer_id: "fixture-process".into(),
+            producer_epoch: "test".into(),
+            producer_seq: records.len() as u64 + 1,
+        };
+        records.push((capture, observation.clone()));
+        Ok(observation)
+    }
+}
+#[cfg(test)]
+pub(crate) fn test_capture() -> Arc<dyn RawCaptureSink> {
+    Arc::new(RecordingCapture::default())
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -514,9 +789,12 @@ mod tests {
     /// Lines arrive parsed, in order.
     #[tokio::test]
     async fn stdout_lines_arrive_parsed_and_in_order() {
-        let (_child, mut lines) = Child::spawn(spawn_sh(r#"printf '{"n":1}\n{"n":2}\n'"#, None))
-            .await
-            .unwrap();
+        let (_child, mut lines) = Child::spawn(
+            spawn_sh(r#"printf '{"n":1}\n{"n":2}\n'"#, None),
+            test_capture(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(lines.recv().await.unwrap().unwrap()["n"], json!(1));
         assert_eq!(lines.recv().await.unwrap().unwrap()["n"], json!(2));
@@ -524,14 +802,16 @@ mod tests {
 
     #[tokio::test]
     async fn stdout_lines_retain_lexical_json_bytes() {
-        let (_child, mut lines) =
-            Child::spawn(spawn_sh(r#"printf ' {"b":"\u0061", "a": 1}  \n'"#, None))
-                .await
-                .unwrap();
+        let (_child, mut lines) = Child::spawn(
+            spawn_sh(r#"printf ' {"b":"\u0061", "a": 1}  \n'"#, None),
+            test_capture(),
+        )
+        .await
+        .unwrap();
 
         let line = lines.recv().await.unwrap().unwrap();
         assert_eq!(line.value, json!({"b": "a", "a": 1}));
-        assert_eq!(line.raw, br#" {"b":"\u0061", "a": 1}  "#);
+        assert_eq!(line.raw, b" {\"b\":\"\\u0061\", \"a\": 1}  \n");
     }
 
     /// **An unparsable line is reported and the stream continues.**
@@ -541,9 +821,12 @@ mod tests {
     /// gap.
     #[tokio::test]
     async fn an_unparsable_line_is_reported_without_ending_the_stream() {
-        let (_child, mut lines) = Child::spawn(spawn_sh(r#"printf 'not json\n{"n":1}\n'"#, None))
-            .await
-            .unwrap();
+        let (_child, mut lines) = Child::spawn(
+            spawn_sh(r#"printf 'not json\n{"n":1}\n'"#, None),
+            test_capture(),
+        )
+        .await
+        .unwrap();
 
         assert!(lines.recv().await.unwrap().is_err());
         assert_eq!(lines.recv().await.unwrap().unwrap()["n"], json!(1));
@@ -552,9 +835,10 @@ mod tests {
     /// A blank line is neither an event nor an error.
     #[tokio::test]
     async fn blank_lines_are_skipped_entirely() {
-        let (_child, mut lines) = Child::spawn(spawn_sh(r#"printf '\n\n{"n":1}\n'"#, None))
-            .await
-            .unwrap();
+        let (_child, mut lines) =
+            Child::spawn(spawn_sh(r#"printf '\n\n{"n":1}\n'"#, None), test_capture())
+                .await
+                .unwrap();
 
         assert_eq!(lines.recv().await.unwrap().unwrap()["n"], json!(1));
     }
@@ -565,7 +849,9 @@ mod tests {
     #[tokio::test]
     async fn a_correlated_reply_leaves_the_stream() {
         let script = r#"read -r line; printf '{"id":"1","ok":true}\n{"n":1}\n'"#;
-        let (child, mut lines) = Child::spawn(spawn_sh(script, flat_id())).await.unwrap();
+        let (child, mut lines) = Child::spawn(spawn_sh(script, flat_id()), test_capture())
+            .await
+            .unwrap();
 
         let reply = child
             .request(|id| json!({"id": id.to_string(), "method": "ping"}))
@@ -587,7 +873,9 @@ mod tests {
         // Echoes back the id it was sent, as a JSON *number*, exactly as a JSON-RPC peer
         // does.
         let script = r#"read -r line; id=$(printf '%s' "$line" | sed 's/.*"id":\([0-9]*\).*/\1/'); printf '{"id":%s,"ok":true}\n' "$id""#;
-        let (child, _lines) = Child::spawn(spawn_sh(script, flat_id())).await.unwrap();
+        let (child, _lines) = Child::spawn(spawn_sh(script, flat_id()), test_capture())
+            .await
+            .unwrap();
 
         let reply = child
             .request(|id| json!({"id": id, "method": "ping"}))
@@ -600,7 +888,9 @@ mod tests {
     #[tokio::test]
     async fn a_string_reply_id_correlates() {
         let script = r#"read -r line; id=$(printf '%s' "$line" | sed 's/.*"id":"\([^"]*\)".*/\1/'); printf '{"id":"%s","ok":true}\n' "$id""#;
-        let (child, _lines) = Child::spawn(spawn_sh(script, flat_id())).await.unwrap();
+        let (child, _lines) = Child::spawn(spawn_sh(script, flat_id()), test_capture())
+            .await
+            .unwrap();
 
         let reply = child
             .request(|id| json!({"id": id.to_string(), "method": "ping"}))
@@ -612,7 +902,9 @@ mod tests {
     /// A vendor that exits without answering fails the request rather than hanging.
     #[tokio::test]
     async fn a_vendor_that_exits_without_answering_fails_the_request() {
-        let (child, _lines) = Child::spawn(spawn_sh("exit 0", flat_id())).await.unwrap();
+        let (child, _lines) = Child::spawn(spawn_sh("exit 0", flat_id()), test_capture())
+            .await
+            .unwrap();
 
         let error = child
             .request(|id| json!({"id": id}))
@@ -627,9 +919,10 @@ mod tests {
     /// stderr is kept, so a failed launch can say why.
     #[tokio::test]
     async fn stderr_is_retained_for_an_error_to_quote() {
-        let (child, mut lines) = Child::spawn(spawn_sh("echo boom >&2; exit 1", None))
-            .await
-            .unwrap();
+        let (child, mut lines) =
+            Child::spawn(spawn_sh("echo boom >&2; exit 1", None), test_capture())
+                .await
+                .unwrap();
 
         // Drain to EOF so the stderr task has run.
         while lines.recv().await.is_some() {}
@@ -645,14 +938,17 @@ mod tests {
     /// A program that is not there fails at spawn, naming it.
     #[tokio::test]
     async fn a_missing_program_fails_naming_itself() {
-        let outcome = Child::spawn(Spawn {
-            program: "sylph-no-such-binary".to_string(),
-            args: vec![],
-            cwd: "/tmp".to_string(),
-            env: HashMap::new(),
-            env_remove: Vec::new(),
-            reply_id: None,
-        })
+        let outcome = Child::spawn(
+            Spawn {
+                program: "sylph-no-such-binary".to_string(),
+                args: vec![],
+                cwd: "/tmp".to_string(),
+                env: HashMap::new(),
+                env_remove: Vec::new(),
+                reply_id: None,
+            },
+            test_capture(),
+        )
         .await;
         let error = match outcome {
             Ok(_) => panic!("a missing program cannot spawn"),
@@ -669,7 +965,9 @@ mod tests {
     #[tokio::test]
     async fn close_signals_the_whole_process_group() {
         let script = "sleep 30 & printf '{\"pid\":'$!'}\\n'; wait";
-        let (child, mut lines) = Child::spawn(spawn_sh(script, None)).await.unwrap();
+        let (child, mut lines) = Child::spawn(spawn_sh(script, None), test_capture())
+            .await
+            .unwrap();
 
         let grandchild = lines.recv().await.unwrap().unwrap()["pid"]
             .as_i64()
@@ -706,7 +1004,9 @@ mod tests {
         // Emits an approval numbered 1 — colliding with our first request id — and only
         // then the real reply.
         let script = r#"read -r line; printf '{"id":1,"method":"item/commandExecution/requestApproval","params":{}}\n{"id":1,"result":{"ok":true}}\n'"#;
-        let (child, mut lines) = Child::spawn(spawn_sh(script, rpc_id())).await.unwrap();
+        let (child, mut lines) = Child::spawn(spawn_sh(script, rpc_id()), test_capture())
+            .await
+            .unwrap();
 
         let reply = child
             .request(|id| json!({"id": id, "method": "thread/settings/update"}))
@@ -735,7 +1035,9 @@ mod tests {
     #[tokio::test]
     async fn correlating_on_the_id_alone_swallows_a_vendor_request() {
         let script = r#"read -r line; printf '{"id":1,"method":"item/commandExecution/requestApproval","params":{}}\n{"id":1,"result":{"ok":true}}\n'"#;
-        let (child, _lines) = Child::spawn(spawn_sh(script, flat_id())).await.unwrap();
+        let (child, _lines) = Child::spawn(spawn_sh(script, flat_id()), test_capture())
+            .await
+            .unwrap();
 
         let reply = child
             .request(|id| json!({"id": id, "method": "thread/settings/update"}))
@@ -766,7 +1068,9 @@ mod tests {
                 .and_then(|body| body.get("request_id"))
                 .and_then(reply_id)
         }));
-        let (child, _lines) = Child::spawn(spawn_sh(script, nested)).await.unwrap();
+        let (child, _lines) = Child::spawn(spawn_sh(script, nested), test_capture())
+            .await
+            .unwrap();
 
         let reply = child
             .request(|id| json!({"type": "control_request", "request_id": id.to_string()}))
@@ -787,7 +1091,9 @@ mod tests {
     /// gone, so the write succeeds.
     #[tokio::test]
     async fn a_request_after_the_vendor_exits_fails_at_once() {
-        let (child, mut lines) = Child::spawn(spawn_sh("exit 0", flat_id())).await.unwrap();
+        let (child, mut lines) = Child::spawn(spawn_sh("exit 0", flat_id()), test_capture())
+            .await
+            .unwrap();
         while lines.recv().await.is_some() {}
 
         let started = std::time::Instant::now();
@@ -813,9 +1119,12 @@ mod tests {
     /// and a panic alike — discarding the one message that names the fix.
     #[tokio::test]
     async fn an_error_quotes_what_the_vendor_said_on_stderr() {
-        let (child, mut lines) = Child::spawn(spawn_sh("echo 'no API key' >&2; exit 1", flat_id()))
-            .await
-            .unwrap();
+        let (child, mut lines) = Child::spawn(
+            spawn_sh("echo 'no API key' >&2; exit 1", flat_id()),
+            test_capture(),
+        )
+        .await
+        .unwrap();
         while lines.recv().await.is_some() {}
 
         for _ in 0..50 {
@@ -855,7 +1164,7 @@ mod tests {
         );
         let mut spawn = spawn_sh(&script, None);
         spawn.env_remove = vec![stripped.clone()];
-        let (_child, mut lines) = Child::spawn(spawn).await.unwrap();
+        let (_child, mut lines) = Child::spawn(spawn, test_capture()).await.unwrap();
 
         let seen = lines.recv().await.unwrap().unwrap();
         assert_eq!(
@@ -883,11 +1192,95 @@ mod tests {
     /// Ids are unique for the process's life.
     #[tokio::test]
     async fn request_ids_do_not_repeat() {
-        let (child, _lines) = Child::spawn(spawn_sh("sleep 1", flat_id())).await.unwrap();
+        let (child, _lines) = Child::spawn(spawn_sh("sleep 1", flat_id()), test_capture())
+            .await
+            .unwrap();
         let ids: Vec<u64> = (0..5).map(|_| child.next_request_id()).collect();
         let mut unique = ids.clone();
         unique.sort();
         unique.dedup();
         assert_eq!(unique.len(), ids.len(), "{ids:?}");
+    }
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+    use serde_json::json;
+    fn peer(script: &str) -> Spawn {
+        Spawn {
+            program: "sh".into(),
+            args: vec!["-c".into(), script.into()],
+            cwd: "/tmp".into(),
+            env: HashMap::new(),
+            env_remove: vec![],
+            reply_id: Some(Box::new(json_rpc_reply_id)),
+        }
+    }
+    #[tokio::test]
+    async fn raw_bytes_are_retained_before_parse_and_reply_routing_in_one_rpc_source() {
+        let capture = Arc::new(RecordingCapture::default());
+        let (child,mut lines)=Child::spawn(peer("IFS= read -r line; printf 'not json\\r\\n'; printf '\\n'; printf ' {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"value\":1,\"value\":2}} \\r\\n'; printf 'diagnostic\\r\\n' >&2"),capture.clone()).await.unwrap();
+        let reply = child
+            .request_with_receipt(|id| json!({"jsonrpc":"2.0","id":id,"method":"probe"}))
+            .await
+            .unwrap();
+        assert_eq!(reply["result"]["value"], 2);
+        while lines.recv().await.is_some() {}
+        let records = capture.records.lock().unwrap();
+        let input = records
+            .iter()
+            .find(|(value, _)| value.transport == TransportKind::LiveStdin)
+            .unwrap();
+        let output = records
+            .iter()
+            .find(|(_, reference)| *reference == reply.observation)
+            .unwrap();
+        assert_eq!(input.0.stream, output.0.stream);
+        assert!(input.1.producer_seq < output.1.producer_seq);
+        assert_eq!(
+            output.0.bytes,
+            b" {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"value\":1,\"value\":2}} \r\n"
+        );
+        assert!(records
+            .iter()
+            .any(|(record, _)| record.bytes == b"not json\r\n"));
+        assert!(records.iter().any(|(record, _)| record.bytes == b"\n"));
+        assert!(records
+            .iter()
+            .any(|(record, _)| record.transport == TransportKind::LiveStderr
+                && record.bytes == b"diagnostic\r\n"));
+        assert_eq!(
+            serde_json::from_slice::<Value>(&input.0.bytes).unwrap()["method"],
+            "probe"
+        );
+    }
+    struct RefusingCapture;
+    #[async_trait::async_trait]
+    impl RawCaptureSink for RefusingCapture {
+        async fn capture(&self, capture: RawCapture) -> Result<ObservationRef> {
+            if capture.transport == TransportKind::LiveStdin {
+                return Err(anyhow!("durable spool unavailable"));
+            }
+            RecordingCapture::default().capture(capture).await
+        }
+    }
+    #[tokio::test]
+    async fn a_request_never_reaches_vendor_stdin_when_capture_commit_fails() {
+        let path =
+            std::env::temp_dir().join(format!("sylph-capture-refusal-{}", uuid::Uuid::new_v4()));
+        let script = format!(
+            "IFS= read -r line; printf '%s' \"$line\" > '{}'",
+            path.display()
+        );
+        let (child, mut lines) = Child::spawn(peer(&script), Arc::new(RefusingCapture))
+            .await
+            .unwrap();
+        assert!(child
+            .send(json!({"type":"user","text":"do not lose me"}))
+            .await
+            .is_err());
+        while lines.recv().await.is_some() {}
+        assert!(!path.exists());
     }
 }

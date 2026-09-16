@@ -108,7 +108,7 @@ export default defineConfig({
       cwd: path.join(__dirname, ".."),
       // Playwright races URL and stdout readiness when both are configured. Wait
       // only for pairing: a healthy server can still have no connected envagent.
-      wait: { stdout: /\[e2e\] paired envagent is connected and reports the e2e adapter/ },
+      wait: { stdout: /\[e2e\] paired envagent is connected and reports the fixture codex adapter/ },
       reuseExistingServer: false,
       // A cold `cargo run` compiles the whole backend first.
       timeout: 180_000,

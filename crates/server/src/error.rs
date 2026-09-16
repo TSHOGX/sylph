@@ -13,9 +13,6 @@ pub enum Error {
     #[error("Session not found")]
     SessionNotFound,
 
-    #[error("Turn not found")]
-    TurnNotFound,
-
     /// A path inside a session's working directory does not exist. Carries no
     /// path: the client already knows what it asked for, and echoing a resolved
     /// absolute path would confirm filesystem layout to a probing caller.
@@ -24,9 +21,6 @@ pub enum Error {
 
     #[error("Session already has an active turn")]
     SessionAlreadyRunning,
-
-    #[error("Turn is already in a terminal state")]
-    StopAlreadyCompleted,
 
     #[error("Unauthorized")]
     Unauthorized,
@@ -132,11 +126,6 @@ pub enum Error {
     /// valid moments earlier. Refusing it is the point — delivering the text into
     /// whatever turn happens to be running now would succeed silently and land it
     /// in the wrong conversation, which is far harder to notice than an error.
-    #[error("Turn {expected} is no longer running")]
-    TurnMoved {
-        expected: String,
-        running: Option<String>,
-    },
 
     /// A link could not be established, or the agent refused to open a session.
     #[error("Could not start the agent: {0}")]
@@ -192,11 +181,6 @@ impl Error {
                 "SESSION_NOT_FOUND",
                 "Session not found".to_string(),
             ),
-            Error::TurnNotFound => (
-                StatusCode::NOT_FOUND,
-                "TURN_NOT_FOUND",
-                "Turn not found".to_string(),
-            ),
             Error::FileNotFound => (
                 StatusCode::NOT_FOUND,
                 "FILE_NOT_FOUND",
@@ -208,11 +192,6 @@ impl Error {
                 StatusCode::CONFLICT,
                 "SESSION_ALREADY_RUNNING",
                 "Session already has an active turn".to_string(),
-            ),
-            Error::StopAlreadyCompleted => (
-                StatusCode::CONFLICT,
-                "STOP_ALREADY_COMPLETED",
-                "Turn has already finished".to_string(),
             ),
             Error::RequestNotFound => (
                 StatusCode::NOT_FOUND,
@@ -230,16 +209,6 @@ impl Error {
                 StatusCode::CONFLICT,
                 "LINK_GONE",
                 "The agent that raised this request has exited".to_string(),
-            ),
-            Error::TurnMoved { expected, running } => (
-                StatusCode::CONFLICT,
-                "TURN_MOVED",
-                match running {
-                    Some(running) => {
-                        format!("Turn {} is no longer running; {} is", expected, running)
-                    }
-                    None => format!("Turn {} is no longer running", expected),
-                },
             ),
             // 502-ish in spirit but reported as 503: the agent is a dependency
             // this server starts, and the useful signal is "try again once it
@@ -361,18 +330,14 @@ pub type Result<T> = std::result::Result<T, Error>;
 mod tests {
     use super::*;
 
-    use crate::supervisor::Outcome;
-
     #[test]
     fn not_found_variants_map_to_404() {
         assert_eq!(Error::SessionNotFound.status(), StatusCode::NOT_FOUND);
-        assert_eq!(Error::TurnNotFound.status(), StatusCode::NOT_FOUND);
     }
 
     #[test]
     fn conflict_variants_map_to_409() {
         assert_eq!(Error::SessionAlreadyRunning.status(), StatusCode::CONFLICT);
-        assert_eq!(Error::StopAlreadyCompleted.status(), StatusCode::CONFLICT);
     }
 
     #[test]
@@ -382,7 +347,6 @@ mod tests {
             Error::SessionAlreadyRunning.code(),
             "SESSION_ALREADY_RUNNING"
         );
-        assert_eq!(Error::StopAlreadyCompleted.code(), "STOP_ALREADY_COMPLETED");
         assert_eq!(
             Error::AttachmentInvalid("x".into()).code(),
             "ATTACHMENT_INVALID"
@@ -468,10 +432,8 @@ mod tests {
         let all = [
             Error::Database(sqlx::Error::RowNotFound),
             Error::SessionNotFound,
-            Error::TurnNotFound,
             Error::FileNotFound,
             Error::SessionAlreadyRunning,
-            Error::StopAlreadyCompleted,
             Error::Unauthorized,
             Error::Forbidden("x".into()),
             Error::AttachmentInvalid("x".into()),
@@ -487,10 +449,6 @@ mod tests {
             Error::RequestNotFound,
             Error::RequestAlreadyResolved,
             Error::LinkGone,
-            Error::TurnMoved {
-                expected: "t".into(),
-                running: None,
-            },
             Error::LinkFailed("x".into()),
             Error::HandshakeFailed("x".into()),
             Error::Unsupported("x".into()),
@@ -503,10 +461,8 @@ mod tests {
             match error {
                 Error::Database(_)
                 | Error::SessionNotFound
-                | Error::TurnNotFound
                 | Error::FileNotFound
                 | Error::SessionAlreadyRunning
-                | Error::StopAlreadyCompleted
                 | Error::Unauthorized
                 | Error::Forbidden(_)
                 | Error::AttachmentInvalid(_)
@@ -522,7 +478,6 @@ mod tests {
                 | Error::RequestNotFound
                 | Error::RequestAlreadyResolved
                 | Error::LinkGone
-                | Error::TurnMoved { .. }
                 | Error::LinkFailed(_)
                 | Error::HandshakeFailed(_)
                 | Error::Unsupported(_)
@@ -537,42 +492,6 @@ mod tests {
                 "`{code}` is emitted by the API but absent from the OpenAPI \
                  error enum, so a client cannot know to handle it",
             );
-        }
-
-        // `Error` is not the only producer of a published code. A turn that ends
-        // badly records one on its journal row, and those never pass through
-        // this type at all — so the loop above cannot see them, and `LINK_LOST`
-        // was emitted by the old turn runner while absent from the enum for as
-        // long as the outcome existed. Its two siblings were published, which is
-        // what makes the omission a slip rather than a policy.
-        //
-        // Same mechanism as above, for the same reason: the match has no
-        // wildcard arm, so a new `Outcome` fails to compile until it is listed.
-        let outcomes = [
-            Outcome::Completed { stop_reason: None },
-            Outcome::Failed {
-                message: "x".into(),
-            },
-            Outcome::Interrupted,
-            Outcome::LinkLost { detail: None },
-        ];
-        for outcome in &outcomes {
-            match outcome {
-                Outcome::Completed { .. }
-                | Outcome::Failed { .. }
-                | Outcome::Interrupted
-                | Outcome::LinkLost { .. } => {}
-            }
-            // `Completed` records no code, which is not an omission: a turn that
-            // succeeded has nothing for a client to branch on.
-            let (_, code, _) = outcome.as_status();
-            if let Some(code) = code {
-                assert!(
-                    published.iter().any(|member| member == code),
-                    "`{code}` is recorded on a turn row but absent from the \
-                     OpenAPI error enum, so a client cannot know to handle it",
-                );
-            }
         }
     }
 

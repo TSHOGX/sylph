@@ -72,6 +72,7 @@ function useDismiss(
   ref: React.RefObject<HTMLElement | null>,
   onClose: () => void,
   enabled = true,
+  anchor?: HTMLElement | null,
 ) {
   useEffect(() => {
     if (!enabled) return;
@@ -96,6 +97,11 @@ function useDismiss(
      */
     function onScroll(event: Event) {
       if (ref.current?.contains(event.target as Node)) return;
+      // Live trace updates can scroll a different pane while this menu is open.
+      // Only a scroller containing the trigger can move this menu's anchor.
+      const target = event.target;
+      const origin = anchor ?? ref.current?.parentElement;
+      if (origin && target instanceof Node && !target.contains(origin)) return;
       onClose();
     }
 
@@ -108,7 +114,7 @@ function useDismiss(
       window.removeEventListener("scroll", onScroll, true);
       window.removeEventListener("resize", onClose);
     };
-  }, [ref, onClose, enabled]);
+  }, [ref, onClose, enabled, anchor]);
 }
 
 const PANEL =
@@ -279,7 +285,7 @@ export function Menu({
   }, [anchor]);
 
   // Popover only. The sheet owns its own dismissal, and this would fight the tap.
-  useDismiss(ref, onClose, !isMobile);
+  useDismiss(ref, onClose, !isMobile, anchor);
 
   const filter = list.search ? (
     <SelectFilter list={list} name={label} ready={position !== null} />

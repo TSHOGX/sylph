@@ -149,12 +149,47 @@ impl PublicationCoordinator {
     ) -> Result<PublishedGeneration> {
         let guard = self.catalogue.acquire_publication(ticket).await?;
         let result = self
-            .publish_guarded(ticket, private, old, worker, &guard)
+            .publish_guarded(ticket, private, old, worker, &guard, None)
             .await;
         self.catalogue.release_publication(&guard).await?;
         result
     }
 
+    /// Rebuild an unavailable published file only after exclusive startup recovery
+    /// proves the prior process is gone. Current admitted evidence bounds every cut
+    /// the lost writer could have committed; directory discovery cannot supply it.
+    pub async fn recover_unavailable(
+        &self,
+        ticket: &BuildTicket,
+        private: &GenerationStore,
+        worker: &impl ProjectionCatchUp,
+    ) -> Result<PublishedGeneration> {
+        let published = self
+            .catalogue
+            .active_generation()
+            .await?
+            .ok_or(PublicationError::GenerationMismatch)?;
+        if published.pointer != ticket.expected_pointer {
+            return Err(CatalogueError::PublicationConflict.into());
+        }
+        let recovery_cut = self
+            .catalogue
+            .evidence()
+            .evidence_cut()
+            .await
+            .map_err(|error| PublicationError::Worker(error.into()))?;
+        if recovery_cut < published.ready.snapshot.evidence_cut {
+            return Err(PublicationError::GenerationMismatch);
+        }
+        let guard = self.catalogue.acquire_publication(ticket).await?;
+        let result = self
+            .publish_guarded(ticket, private, None, worker, &guard, Some(recovery_cut))
+            .await;
+        self.catalogue.release_publication(&guard).await?;
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn publish_guarded(
         &self,
         ticket: &BuildTicket,
@@ -162,6 +197,7 @@ impl PublicationCoordinator {
         old: Option<&GenerationStore>,
         worker: &impl ProjectionCatchUp,
         guard: &PublicationGuard,
+        recovery_cut: Option<u64>,
     ) -> Result<PublishedGeneration> {
         if private.manifest() != &ticket.manifest
             || !path_matches(private.path(), &self.directory.join(&ticket.relative_file))
@@ -169,7 +205,8 @@ impl PublicationCoordinator {
             return Err(PublicationError::GenerationMismatch);
         }
         match (&ticket.expected_pointer.generation, old) {
-            (None, None) => {}
+            (None, None) if recovery_cut.is_none() => {}
+            (Some(_), None) if recovery_cut.is_some() => {}
             (Some(expected), Some(old)) if &old.manifest().generation == expected => {}
             _ => return Err(PublicationError::GenerationMismatch),
         }
@@ -213,6 +250,7 @@ impl PublicationCoordinator {
                 &baseline,
                 worker,
                 guard,
+                recovery_cut,
             ),
         )
         .await;
@@ -254,6 +292,7 @@ impl PublicationCoordinator {
         baseline: &GenerationValidation,
         worker: &impl ProjectionCatchUp,
         guard: &PublicationGuard,
+        recovery_cut: Option<u64>,
     ) -> Result<PublishedGeneration> {
         let old_fence = match (old, old_token) {
             (Some(old), Some(token)) => Some(old.fence(token).await?),
@@ -261,7 +300,9 @@ impl PublicationCoordinator {
         };
         let old_cut = old_fence
             .as_ref()
-            .map_or(0, |fence| fence.checkpoint.evidence_cut);
+            .map_or(recovery_cut.unwrap_or(0), |fence| {
+                fence.checkpoint.evidence_cut
+            });
         let publication_cut = self
             .catalogue
             .evidence()

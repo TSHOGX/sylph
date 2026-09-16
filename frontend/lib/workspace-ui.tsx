@@ -1,7 +1,8 @@
 "use client";
 
 import { useSessionIdParam } from "./use-session-id-param";
-import { activatePanel, updatePanel, usePanelState } from "./work-panel-state";
+import { updateFilePanel, useFilePanelState } from "./file-panel-state";
+import { useTraceFocus } from "./trace-focus";
 
 /**
  * Shell-wide UI state: which panes are open, which overlay is up, and which
@@ -33,7 +34,7 @@ import { comboFromEvent, isTypingTarget } from "@/lib/shortcuts";
 import { useIsMobile } from "@/lib/viewport";
 import type { ShortcutAction } from "@/lib/settings";
 import type { PreviewKind } from "@/lib/api-types";
-import { api, type RereadReport } from "@/lib/api";
+import { api } from "@/lib/api";
 
 /**
  * At most one overlay is up at a time; they are all modal.
@@ -95,14 +96,14 @@ export type MobileDrawer = "none" | "sessions" | "files";
 
 /**
  * Actions the shell handles centrally. Session-scoped actions (`stopTurn`,
- * `collapseAll`) cannot be: they need state that only the open session owns, so
+ * `findInSession`) cannot be: they need state that only the open session owns, so
  * the session page registers a handler and the shell forwards to it.
  */
 export type SessionActionHandler = (action: ShortcutAction) => boolean;
 
 export type RereadNotice =
   | { state: "pending"; sessionId: string; sessionLabel: string }
-  | { state: "success"; sessionId: string; sessionLabel: string; report: RereadReport }
+  | { state: "success"; sessionId: string; sessionLabel: string }
   | { state: "error"; sessionId: string; sessionLabel: string; message: string };
 
 interface WorkspaceUIValue {
@@ -201,8 +202,10 @@ export function WorkspaceUIProvider({
   onQuickStart: () => void;
   onCreateSessionIn: (workdir: string | undefined, environmentId?: string | null) => void;
 }) {
-  const routeSessionId = useSessionIdParam();
-  const panel = usePanelState(routeSessionId ?? "");
+  const draftId = useSessionIdParam();
+  const focused = useTraceFocus();
+  const routeSessionId = focused?.context?.sessionId ?? draftId;
+  const panel = useFilePanelState(routeSessionId ?? "");
   const { settings, update } = useSettings();
   const queryClient = useQueryClient();
 
@@ -230,8 +233,8 @@ export function WorkspaceUIProvider({
     rereading.current.add(sessionId);
     setRereadNotice({ state: "pending", sessionId, sessionLabel });
     void api.sessions.reread(sessionId).then(
-      ({ reread }) => {
-        setRereadNotice({ state: "success", sessionId, sessionLabel, report: reread });
+      () => {
+        setRereadNotice({ state: "success", sessionId, sessionLabel });
         void queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
         void queryClient.invalidateQueries({ queryKey: ["files", sessionId] });
         void queryClient.invalidateQueries({ queryKey: ["sessions"] });
@@ -341,8 +344,7 @@ export function WorkspaceUIProvider({
 
   const showArtifact = useCallback(
     (target: ArtifactTarget) => {
-      activatePanel(routeSessionId ?? target.sessionId, "files");
-      updatePanel(routeSessionId ?? "", { artifact: target, artifactView: "preview" });
+      updateFilePanel(routeSessionId ?? "", { artifact: target, artifactView: "preview" });
       // One atomic update rather than an effect keyed on the target: the action
       // already knows a file was chosen, so deriving "show the preview" from a
       // state change would cascade a render to re-establish a fact we have.
@@ -365,13 +367,13 @@ export function WorkspaceUIProvider({
   // from the selection, so clearing it here would collapse the directories the
   // user navigated through on the way to the file.
   const backToTree = useCallback(() => {
-    updatePanel(routeSessionId ?? "", { artifactView: "tree" });
+    updateFilePanel(routeSessionId ?? "", { artifactView: "tree" });
     setArtifactFullscreen(false);
   }, [routeSessionId]);
 
   const clearArtifact = useCallback(() => {
-    updatePanel(routeSessionId ?? "", { artifact: null });
-    updatePanel(routeSessionId ?? "", { artifactView: "tree" });
+    updateFilePanel(routeSessionId ?? "", { artifact: null });
+    updateFilePanel(routeSessionId ?? "", { artifactView: "tree" });
     setArtifactFullscreen(false);
   }, [routeSessionId]);
 

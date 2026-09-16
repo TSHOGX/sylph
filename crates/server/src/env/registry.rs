@@ -2,9 +2,8 @@
 //!
 //! The registry deliberately contains no adapter or filesystem logic. It owns
 //! pairing credentials, connection liveness, inventory snapshots, and the
-//! single active lease per environment. Event ingestion is implemented by the
-//! bridge on top of this registry so the server remains the authority for
-//! canonical journal sequences.
+//! single active lease per environment. The bridge authenticates capture uploads
+//! against this registry; the trace evidence store alone admits their receipts.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -91,9 +90,9 @@ impl EnvironmentRegistry {
         self
     }
 
-    /// Restore an installation loaded from the server journal. The token is
+    /// Restore an installation loaded from the operational store. The token is
     /// held only in memory for this process; durable authentication remains
-    /// the hashed value in the journal.
+    /// the hashed value in the operational store.
     pub async fn register_existing(
         &self,
         id: EnvironmentId,
