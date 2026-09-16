@@ -1067,7 +1067,10 @@ async fn publication_validation_rejects_a_missing_derived_chunk_without_changing
     let worker = fixture.worker();
     worker.catch_up(&generation, 1, 2).await.unwrap();
     let snapshot = generation.checkpoint().await.unwrap().snapshot;
-    worker.validate_generation(&generation, &snapshot).await.unwrap();
+    worker
+        .validate_generation(&generation, &snapshot)
+        .await
+        .unwrap();
     let revision = claims(&generation)
         .await
         .into_iter()
@@ -1088,7 +1091,10 @@ async fn publication_validation_rejects_a_missing_derived_chunk_without_changing
         .remove(manifest.chunks[0].digest.digest())
         .await
         .unwrap();
-    assert!(worker.validate_generation(&generation, &snapshot).await.is_err());
+    assert!(worker
+        .validate_generation(&generation, &snapshot)
+        .await
+        .is_err());
     assert_eq!(
         generation.checkpoint().await.unwrap().snapshot.evidence_cut,
         2
@@ -1158,15 +1164,21 @@ async fn worker_projection_scaling_probe() {
         "type": "response_item",
         "payload": {"type": "message", "id": "warm-append", "role": "assistant",
             "content": [{"type": "output_text", "text": "measured warm append"}]}
-    })).unwrap();
+    }))
+    .unwrap();
     appended.push(b'\n');
     fixture.native(records as u64 + 2, offset, &appended).await;
     let started = std::time::Instant::now();
-    let warm = worker.catch_up(&generation, 1, records as u64 + 2).await.unwrap();
+    let warm = worker
+        .catch_up(&generation, 1, records as u64 + 2)
+        .await
+        .unwrap();
     let warm_ms = started.elapsed().as_millis();
-    assert_eq!(revision_bytes(&fixture, &generation, &message("warm-append")).await,
-        vec![b"measured warm append".to_vec()]);
-    eprintln!("worker scaling: records={records} admission_ms={admission_ms} projection_ms={projection_ms} cold_rows={} warm_append_ms={warm_ms} warm_rows={} revision={}",cold.reader_rows_materialized,warm.reader_rows_materialized,snapshot.view_revision);
+    assert_eq!(
+        revision_bytes(&fixture, &generation, &message("warm-append")).await,
+        vec![b"measured warm append".to_vec()]
+    );
+    eprintln!("worker scaling: records={records} admission_ms={admission_ms} projection_ms={projection_ms} cold_rows={} warm_append_ms={warm_ms} warm_rows={} warm_claims_resolved={} warm_history_entries={} warm_full_resolutions={} revision={}",cold.reader_rows_materialized,warm.reader_rows_materialized,warm.reduction.claims_resolved,warm.reduction.history_entries_updated,warm.reduction.full_resolutions,snapshot.view_revision);
 }
 
 #[tokio::test]
@@ -1609,52 +1621,104 @@ async fn initial_zero_cut_catch_up_finishes_a_durable_empty_source_tail() {
 
 #[tokio::test]
 async fn shared_archive_snapshots_keep_prior_facts_and_refresh_later_reduction_proofs() {
-    let fixture=Fixture::new().await;fixture.native_fixture().await;
-    let (generation,_)=fixture.generation("shared-archive").await;
-    let worker=fixture.worker();worker.catch_up(&generation,1,2).await.unwrap();
-    let held=worker.states.lock().await.get("shared-archive").unwrap().clone();
-    let previous=archive_context(&mut *held.lock().await);
+    let fixture = Fixture::new().await;
+    fixture.native_fixture().await;
+    let (generation, _) = fixture.generation("shared-archive").await;
+    let worker = fixture.worker();
+    worker.catch_up(&generation, 1, 2).await.unwrap();
+    let held = worker
+        .states
+        .lock()
+        .await
+        .get("shared-archive")
+        .unwrap()
+        .clone();
+    let previous = archive_context(&mut *held.lock().await);
     assert!(previous.semantic.history_entries.is_empty());
-    worker.catch_up(&generation,1,5).await.unwrap();
-    let current=archive_context(&mut *held.lock().await);
-    assert_eq!(current.semantic.history_entries.len(),2);
-    let repeated=archive_context(&mut *held.lock().await);
+    worker.catch_up(&generation, 1, 5).await.unwrap();
+    let current = archive_context(&mut *held.lock().await);
+    assert_eq!(current.semantic.history_entries.len(), 2);
+    let repeated = archive_context(&mut *held.lock().await);
     assert!(current.claims.ptr_eq(&repeated.claims));
     assert!(current.observations.ptr_eq(&repeated.observations));
-    assert!(current.observation_sources.ptr_eq(&repeated.observation_sources));
+    assert!(current
+        .observation_sources
+        .ptr_eq(&repeated.observation_sources));
     assert!(current.history_records.ptr_eq(&repeated.history_records));
     assert!(current.source_owners.ptr_eq(&repeated.source_owners));
-    assert!(current.source_definitions.ptr_eq(&repeated.source_definitions));
+    assert!(current
+        .source_definitions
+        .ptr_eq(&repeated.source_definitions));
     assert!(current.correlations.ptr_eq(&repeated.correlations));
-    assert!(current.correlation_evidence.ptr_eq(&repeated.correlation_evidence));
-    assert!(previous.semantic.history_entries.is_empty(),"old mapper inputs cannot be mutated by later projection");
+    assert!(current
+        .correlation_evidence
+        .ptr_eq(&repeated.correlation_evidence));
+    assert!(
+        previous.semantic.history_entries.is_empty(),
+        "old mapper inputs cannot be mutated by later projection"
+    );
     for entry in current.semantic.history_entries.values() {
-        let evidence=current.semantic.object_evidence.get(&AnyObjectRef::HistoryEntry(entry.entry_ref.clone())).unwrap();
-        assert!(!evidence.is_empty());assert!(evidence.iter().all(|observation|current.observations.contains(observation)));
+        let evidence = current
+            .semantic
+            .object_evidence
+            .get(&AnyObjectRef::HistoryEntry(entry.entry_ref.clone()))
+            .unwrap();
+        assert!(!evidence.is_empty());
+        assert!(evidence
+            .iter()
+            .all(|observation| current.observations.contains(observation)));
     }
-    let mut fork=current.clone();fork.semantic_mut().history_entries.clear();
-    assert_eq!(current.semantic.history_entries.len(),2,"a candidate context cannot mutate another mapping input");
+    let mut fork = current.clone();
+    fork.semantic_mut().history_entries.clear();
+    assert_eq!(
+        current.semantic.history_entries.len(),
+        2,
+        "a candidate context cannot mutate another mapping input"
+    );
 }
 
 #[test]
 fn native_history_coordinate_conflicts_cannot_replace_a_retained_witness() {
-    let source = SourceRef { issuer: Issuer::Environment(agent().environment().clone()), instance: "native-coordinate".into() };
+    let source = SourceRef {
+        issuer: Issuer::Environment(agent().environment().clone()),
+        instance: "native-coordinate".into(),
+    };
     let original = mapping::codex::history::HistoryRecord {
-        position: SourcePosition { source, generation: 0, locator: SourceLocator::Jsonl { byte_start: 0, byte_end: 10, record_ordinal: 0 } },
-        observation: native_observation(1), vendor_ordinal: Some(7), header: None,
+        position: SourcePosition {
+            source,
+            generation: 0,
+            locator: SourceLocator::Jsonl {
+                byte_start: 0,
+                byte_end: 10,
+                record_ordinal: 0,
+            },
+        },
+        observation: native_observation(1),
+        vendor_ordinal: Some(7),
+        header: None,
     };
     let mut records = mapping::codex::history::HistoryRecords::new();
     index_history_record(&mut records, original.clone()).unwrap();
     let before = records.clone();
     let mut conflicts = vec![];
     let mut wrong = original.clone();
-    wrong.position.locator = SourceLocator::Jsonl { byte_start: 0, byte_end: 11, record_ordinal: 0 };
+    wrong.position.locator = SourceLocator::Jsonl {
+        byte_start: 0,
+        byte_end: 11,
+        record_ordinal: 0,
+    };
     conflicts.push(wrong);
     let mut wrong = original.clone();
     wrong.vendor_ordinal = Some(8);
     conflicts.push(wrong);
     let mut wrong = original.clone();
-    wrong.header = Some(mapping::codex::history::HistoryHeader { agent: agent(), history_base: None, history_mode: None, inherited_before: None, inherited_from: None });
+    wrong.header = Some(mapping::codex::history::HistoryHeader {
+        agent: agent(),
+        history_base: None,
+        history_mode: None,
+        inherited_before: None,
+        inherited_from: None,
+    });
     conflicts.push(wrong);
     for mut wrong in conflicts {
         wrong.observation = native_observation(2);
@@ -1666,6 +1730,17 @@ fn native_history_coordinate_conflicts_cannot_replace_a_retained_witness() {
     index_history_record(&mut records, repeated.clone()).unwrap();
     let mut reordered = mapping::codex::history::HistoryRecords::new();
     index_history_record(&mut reordered, repeated).unwrap();
-    index_history_record(&mut reordered, before.values().next().unwrap().values().next().unwrap().clone()).unwrap();
+    index_history_record(
+        &mut reordered,
+        before
+            .values()
+            .next()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap()
+            .clone(),
+    )
+    .unwrap();
     assert_eq!(records, reordered);
 }

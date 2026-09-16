@@ -186,7 +186,12 @@ pub fn project_independent_append(
             || old.selected_entries != new.selected_entries
             || old.unresolved_entries != new.unresolved_entries
             || old.candidate_heads.len() != new.candidate_heads.len()
-            || !new.archive_order.starts_with(&old.archive_order)
+            || new.archive_order.len() < old.archive_order.len()
+            || old
+                .archive_order
+                .iter()
+                .zip(new.archive_order.iter())
+                .any(|(before, after)| before != after)
             || old
                 .order_basis
                 .iter()
@@ -194,12 +199,12 @@ pub fn project_independent_append(
         {
             return None;
         }
-        let tail = &new.archive_order[old.archive_order.len()..];
+        let tail: imbl::Vector<_> = new.archive_order.skip(old.archive_order.len());
         if tail.is_empty() || tail.iter().any(|entry| !entries.contains(entry)) {
             return None;
         }
-        let mut predecessor = old.archive_order.last();
-        for entry in tail {
+        let mut predecessor = old.archive_order.last().cloned();
+        for entry in &tail {
             let TraceObject::HistoryEntry(value) = after
                 .object(&AnyObjectRef::HistoryEntry(entry.clone()))?
                 .declaration
@@ -207,10 +212,10 @@ pub fn project_independent_append(
             else {
                 return None;
             };
-            if value.predecessor.as_ref() != predecessor {
+            if value.predecessor.as_ref() != predecessor.as_ref() {
                 return None;
             }
-            predecessor = Some(entry);
+            predecessor = Some(entry.clone());
         }
         appended.extend(tail.iter().cloned());
         partial.histories.insert(
@@ -218,14 +223,16 @@ pub fn project_independent_append(
             HistoryView {
                 agent: agent.clone(),
                 selection: Resolved::Unknown,
-                candidate_heads: vec![],
-                archive_order: tail.to_vec(),
+                candidate_heads: imbl::Vector::new(),
+                archive_order: tail.clone(),
                 order_basis: tail
                     .iter()
                     .map(|entry| Some((entry.clone(), new.order_basis.get(entry)?.clone())))
-                    .collect::<Option<_>>()?,
+                    .collect::<Option<Vec<_>>>()?
+                    .into_iter()
+                    .collect(),
                 selected_entries: None,
-                unresolved_entries: vec![],
+                unresolved_entries: imbl::Vector::new(),
             },
         );
     }

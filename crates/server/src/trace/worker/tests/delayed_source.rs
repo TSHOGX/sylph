@@ -271,7 +271,10 @@ async fn ordered_successors_resume_in_bounded_same_cut_pages_after_restart() {
         "a long source tail is one durable cursor"
     );
     worker.commit_effects(&generation, &unit).await.unwrap();
-    generation.apply(1, state.committed_snapshot(), &unit.batch).await.unwrap();
+    generation
+        .apply(1, state.committed_snapshot(), &unit.batch)
+        .await
+        .unwrap();
     drop(state);
     drop(held);
     drop(worker);

@@ -23,7 +23,7 @@ macro_rules! resolved_ref {
 }
 
 fn canonical(
-    registry: &BTreeMap<AnyObjectRef, AnyObjectRef>,
+    registry: &imbl::OrdMap<AnyObjectRef, AnyObjectRef>,
     reference: &AnyObjectRef,
 ) -> AnyObjectRef {
     registry
@@ -113,16 +113,18 @@ pub enum ReadingOrderBasis {
 pub struct HistoryView {
     pub agent: AgentRef,
     pub selection: Resolved<SelectionRef>,
-    pub candidate_heads: Vec<EntryRef>,
-    pub archive_order: Vec<EntryRef>,
-    pub order_basis: BTreeMap<EntryRef, ReadingOrderBasis>,
+    pub candidate_heads: imbl::Vector<EntryRef>,
+    pub archive_order: imbl::Vector<EntryRef>,
+    pub order_basis: imbl::OrdMap<EntryRef, ReadingOrderBasis>,
     /// None means there is no proven selected head/membership, not an empty history.
-    pub selected_entries: Option<Vec<EntryRef>>,
-    pub unresolved_entries: Vec<EntryRef>,
+    pub selected_entries: Option<imbl::Vector<EntryRef>>,
+    pub unresolved_entries: imbl::Vector<EntryRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MessageHistory {
+    // Independent tail updates add fresh singleton messages. Growing revisions
+    // within an existing message still needs its own incremental storage boundary.
     pub revisions: Vec<MessageRevisionRef>,
     pub selected: Resolved<MessageRevisionRef>,
     pub sealed: bool,
@@ -207,22 +209,22 @@ fn select_revision(values: &[&RevisionCandidate]) -> Resolved<MessageRevisionRef
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Reduction {
-    pub objects: BTreeMap<AnyObjectRef, ResolvedObject>,
-    pub representatives: BTreeMap<AnyObjectRef, AnyObjectRef>,
-    pub executions: BTreeMap<AnyObjectRef, ExecutionState>,
-    pub delivery_stages: BTreeMap<DeliveryRef, Vec<(DeliveryStage, ClaimRef)>>,
-    pub delivery_revisions: BTreeMap<DeliveryRef, BTreeMap<ClaimRef, MessageRevisionRef>>,
-    pub resource_states: BTreeMap<ResourceRef, Vec<(ResourceState, ClaimRef)>>,
-    pub agent_states: BTreeMap<AgentRef, Vec<(AgentState, ClaimRef)>>,
-    pub relations: Vec<ResolvedRelation>,
-    pub histories: BTreeMap<AgentRef, HistoryView>,
-    pub selection_memberships: BTreeMap<SelectionRef, Option<Vec<EntryRef>>>,
-    pub history_contents: BTreeMap<EntryRef, BTreeMap<ClaimRef, HistoryContentObservation>>,
-    pub selection_content_observations: BTreeMap<SelectionRef, Option<BTreeSet<ClaimRef>>>,
-    pub messages: BTreeMap<MessageRef, MessageHistory>,
-    pub coverage: Vec<(Coverage, ClaimRef)>,
-    pub diagnostics: Vec<ReductionDiagnostic>,
-    pub withdrawn_claims: Vec<ClaimRef>,
+    pub objects: imbl::OrdMap<AnyObjectRef, ResolvedObject>,
+    pub representatives: imbl::OrdMap<AnyObjectRef, AnyObjectRef>,
+    pub executions: imbl::OrdMap<AnyObjectRef, ExecutionState>,
+    pub delivery_stages: imbl::OrdMap<DeliveryRef, Vec<(DeliveryStage, ClaimRef)>>,
+    pub delivery_revisions: imbl::OrdMap<DeliveryRef, BTreeMap<ClaimRef, MessageRevisionRef>>,
+    pub resource_states: imbl::OrdMap<ResourceRef, Vec<(ResourceState, ClaimRef)>>,
+    pub agent_states: imbl::OrdMap<AgentRef, Vec<(AgentState, ClaimRef)>>,
+    pub relations: imbl::Vector<ResolvedRelation>,
+    pub histories: imbl::OrdMap<AgentRef, HistoryView>,
+    pub selection_memberships: imbl::OrdMap<SelectionRef, Option<Vec<EntryRef>>>,
+    pub history_contents: imbl::OrdMap<EntryRef, BTreeMap<ClaimRef, HistoryContentObservation>>,
+    pub selection_content_observations: imbl::OrdMap<SelectionRef, Option<BTreeSet<ClaimRef>>>,
+    pub messages: imbl::OrdMap<MessageRef, MessageHistory>,
+    pub coverage: imbl::Vector<(Coverage, ClaimRef)>,
+    pub diagnostics: imbl::Vector<ReductionDiagnostic>,
+    pub withdrawn_claims: imbl::Vector<ClaimRef>,
 }
 
 impl Reduction {
@@ -248,6 +250,8 @@ impl Reduction {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Reducer {
     claims: imbl::OrdMap<ClaimRef, Claim>,
+    #[serde(skip)]
+    incremental: incremental::IncrementalState,
 }
 
 impl Reducer {
@@ -290,6 +294,12 @@ impl Reducer {
             }
             incoming.insert(claim.claim_ref.clone(), claim.clone());
         }
+        self.incremental.pending.extend(
+            incoming
+                .keys()
+                .filter(|reference| !self.claims.contains_key(*reference))
+                .cloned(),
+        );
         self.claims.extend(incoming);
         Ok(())
     }
@@ -319,7 +329,10 @@ impl Reducer {
         resolve_objects(&declarations, &mut result);
         for claim in &active {
             if let Fact::HistoryContentObserved { observation } = &claim.fact {
-                result.history_contents.entry(observation.entry.clone()).or_default()
+                result
+                    .history_contents
+                    .entry(observation.entry.clone())
+                    .or_default()
                     .insert(claim.claim_ref.clone(), observation.clone());
             }
         }
@@ -340,7 +353,10 @@ impl Reducer {
                     .or_default()
                     .push((stage.clone(), claim.claim_ref.clone())),
                 Fact::DeliveryRevisionObserved { delivery, revision } => {
-                    result.delivery_revisions.entry(delivery.clone()).or_default()
+                    result
+                        .delivery_revisions
+                        .entry(delivery.clone())
+                        .or_default()
                         .insert(claim.claim_ref.clone(), revision.clone());
                 }
                 Fact::ResourceState { resource, state } => result
@@ -350,18 +366,23 @@ impl Reducer {
                     .push((state.clone(), claim.claim_ref.clone())),
                 Fact::Coverage { coverage } => result
                     .coverage
-                    .push((coverage.clone(), claim.claim_ref.clone())),
-                Fact::Diagnostic { diagnostic } => result.diagnostics.push(ReductionDiagnostic {
-                    code: diagnostic.code,
-                    claims: vec![claim.claim_ref.clone()],
-                    message: diagnostic.message.clone(),
-                }),
+                    .push_back((coverage.clone(), claim.claim_ref.clone())),
+                Fact::Diagnostic { diagnostic } => {
+                    result.diagnostics.push_back(ReductionDiagnostic {
+                        code: diagnostic.code,
+                        claims: vec![claim.claim_ref.clone()],
+                        message: diagnostic.message.clone(),
+                    })
+                }
                 _ => {}
             }
         }
-        result
-            .diagnostics
-            .sort_by(|a, b| (&a.claims, &a.message).cmp(&(&b.claims, &b.message)));
+        // The reference ordering is stable; the persistent vector uses quicksort.
+        let mut diagnostics: Vec<_> = std::mem::take(&mut result.diagnostics)
+            .into_iter()
+            .collect();
+        diagnostics.sort_by(|a, b| (&a.claims, &a.message).cmp(&(&b.claims, &b.message)));
+        result.diagnostics = diagnostics.into();
         result
     }
 
@@ -427,7 +448,9 @@ fn field_key(fact: &Fact) -> String {
         Fact::DeliveryStage { delivery, stage } => {
             serde_json::json!(["delivery", delivery, variant_name(stage)])
         }
-        Fact::DeliveryRevisionObserved { delivery, .. } => serde_json::json!(["delivery_revision", delivery]),
+        Fact::DeliveryRevisionObserved { delivery, .. } => {
+            serde_json::json!(["delivery_revision", delivery])
+        }
         Fact::Execution {
             execution,
             boundary,
@@ -451,7 +474,10 @@ fn field_key(fact: &Fact) -> String {
             serde_json::json!(["history_mapping_complete", extent])
         }
         Fact::HistoryContentObserved { observation } => serde_json::json!([
-            "history_content", observation.entry, observation.position, observation.mapping_rule
+            "history_content",
+            observation.entry,
+            observation.position,
+            observation.mapping_rule
         ]),
         Fact::Equivalence { left, right, .. } => {
             let (a, b) = if left <= right {
@@ -487,7 +513,7 @@ fn diagnostic(
 ) {
     claims.sort();
     claims.dedup();
-    result.diagnostics.push(ReductionDiagnostic {
+    result.diagnostics.push_back(ReductionDiagnostic {
         code,
         claims,
         message: message.into(),
@@ -758,8 +784,7 @@ fn refine_declaration(a: &TraceObject, b: &TraceObject) -> Option<TraceObject> {
             }))
         }
         (TraceObject::HistoryEntry(a), TraceObject::HistoryEntry(b))
-            if a.entry_ref == b.entry_ref
-                && a.containing_agent == b.containing_agent =>
+            if a.entry_ref == b.entry_ref && a.containing_agent == b.containing_agent =>
         {
             Some(TraceObject::HistoryEntry(HistoryEntry {
                 entry_ref: a.entry_ref.clone(),
@@ -1023,10 +1048,10 @@ fn resolve_execution(active: &[&Claim], result: &mut Reduction) {
             }
         }
     }
-    for (reference, state) in &mut result.executions {
-        state.outcome = resolve_values(outcomes.remove(reference).unwrap_or_default().into_iter());
+    for (reference, mut state) in std::mem::take(&mut result.executions) {
+        state.outcome = resolve_values(outcomes.remove(&reference).unwrap_or_default().into_iter());
         if let Resolved::Conflicted { alternatives } = &state.outcome {
-            result.diagnostics.push(ReductionDiagnostic {
+            result.diagnostics.push_back(ReductionDiagnostic {
                 code: DiagnosticCode::ConflictingOutcome,
                 claims: alternatives
                     .iter()
@@ -1035,6 +1060,7 @@ fn resolve_execution(active: &[&Claim], result: &mut Reduction) {
                 message: "Independent terminal outcomes disagree".into(),
             });
         }
+        result.executions.insert(reference, state);
     }
 }
 
@@ -1172,7 +1198,7 @@ fn resolve_relations(active: &[&Claim], result: &mut Reduction) {
                 continue;
             }
         }
-        result.relations.push(ResolvedRelation {
+        result.relations.push_back(ResolvedRelation {
             claim: claim.claim_ref.clone(),
             relation: relation.clone(),
         });
@@ -1181,6 +1207,10 @@ fn resolve_relations(active: &[&Claim], result: &mut Reduction) {
 
 mod history;
 use history::resolve_histories;
+
+mod incremental;
+pub use incremental::{ReductionWork, Resolution};
+mod dependencies;
 
 mod changes;
 pub use changes::{ChangedValue, MapChanges, ReductionChanges, SetChanges};

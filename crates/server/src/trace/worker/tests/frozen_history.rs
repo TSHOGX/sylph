@@ -255,7 +255,10 @@ async fn frozen_parent_aliases_resume_after_restart_at_the_same_evidence_cut() {
         .values()
         .any(|pending| pending.requests.contains(&ArchiveRequest::ContinueHistory)));
     worker.commit_effects(&generation, &unit).await.unwrap();
-    generation.apply(1, state.committed_snapshot(), &unit.batch).await.unwrap();
+    generation
+        .apply(1, state.committed_snapshot(), &unit.batch)
+        .await
+        .unwrap();
     drop(state);
     drop(held);
     drop(worker);
@@ -274,7 +277,7 @@ async fn frozen_parent_aliases_resume_after_restart_at_the_same_evidence_cut() {
         .as_ref()
         .unwrap();
     assert_eq!(entries.len(), count + 1);
-    for entry in &entries[..count] {
+    for entry in entries.iter().take(count) {
         let TraceObject::HistoryEntry(entry) = reduction
             .object(&AnyObjectRef::HistoryEntry(entry.clone()))
             .unwrap()

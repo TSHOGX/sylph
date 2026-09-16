@@ -374,7 +374,10 @@ fn selected_history_follows_predecessors_and_preserves_other_branches() {
     let unknown = reduce(&claims);
     let view = &unknown.histories[&agent("root")];
     assert!(view.selected_entries.is_none());
-    assert_eq!(view.candidate_heads, vec![entry("a2"), entry("b2")]);
+    assert_eq!(
+        view.candidate_heads,
+        imbl::vector![entry("a2"), entry("b2")]
+    );
     let selection = SelectionRef::native(agent("root"), "selected", vec!["b2".into()]).unwrap();
     claims.push(claim(
         6,
@@ -400,7 +403,7 @@ fn selected_history_follows_predecessors_and_preserves_other_branches() {
     let view = &result.histories[&agent("root")];
     assert_eq!(
         view.selected_entries,
-        Some(vec![entry("p"), entry("b"), entry("b2")])
+        Some(imbl::vector![entry("p"), entry("b"), entry("b2")])
     );
     assert_eq!(view.archive_order.len(), 5);
 }
@@ -810,7 +813,7 @@ fn vendor_ordinal_extents_are_not_physical_lines_or_child_authorship() {
     let result = reduce(&claims);
     assert_eq!(
         result.histories[&child].selected_entries,
-        Some(vec![entry("parent-entry")])
+        Some(imbl::vector![entry("parent-entry")])
     );
     assert!(result.histories[&child].archive_order.is_empty());
     let TraceObject::HistoryEntry(retained) = result.objects
@@ -841,8 +844,8 @@ fn proved_reader_order_never_changes_native_history_predecessors() {
     ];
     let result = reduce(&claims);
     let view = &result.histories[&agent("root")];
-    assert_eq!(view.archive_order, vec![entry("b"), entry("a")]);
-    assert_eq!(view.candidate_heads, vec![entry("a"), entry("b")]);
+    assert_eq!(view.archive_order, imbl::vector![entry("b"), entry("a")]);
+    assert_eq!(view.candidate_heads, imbl::vector![entry("a"), entry("b")]);
 }
 
 #[test]

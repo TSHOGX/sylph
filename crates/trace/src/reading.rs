@@ -7,9 +7,9 @@ use crate::reducer::{ReadingOrderBasis, Reduction, Resolved};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use sylph_protocol::trace::*;
+mod append;
 mod content;
 mod window;
-mod append;
 pub use append::project_independent_append;
 pub use content::ComposedPayload;
 
@@ -286,7 +286,7 @@ pub fn project(
         if !reduction.histories.contains_key(agent) {
             result
                 .windows
-                .insert(scope.clone(), index.window(&scope, &[]));
+                .insert(scope.clone(), index.window(&scope, std::iter::empty()));
         }
     }
     for (agent, history) in &reduction.histories {
@@ -296,7 +296,7 @@ pub fn project(
         };
         result.windows.insert(
             archive.clone(),
-            index.window(&archive, &history.archive_order),
+            index.window(&archive, history.archive_order.iter()),
         );
         if let Some((selection, entries)) = history
             .selection
@@ -309,7 +309,7 @@ pub fn project(
             };
             result
                 .windows
-                .insert(scope.clone(), index.window(&scope, entries));
+                .insert(scope.clone(), index.window(&scope, entries.iter()));
         }
     }
     for object in reduction
@@ -335,10 +335,11 @@ pub fn project(
                 result
                     .windows
                     .entry(scope.clone())
-                    .or_insert_with(|| index.window(&scope, entries));
-                result
-                    .selected_objects
-                    .insert(scope.clone(), index.selected_objects(&scope, entries));
+                    .or_insert_with(|| index.window(&scope, entries.iter()));
+                result.selected_objects.insert(
+                    scope.clone(),
+                    index.selected_objects(&scope, entries.iter()),
+                );
             }
             result
                 .histories
@@ -477,16 +478,12 @@ impl Index<'_> {
             .map_or(&revision.parts, Vec::as_slice)
     }
 
-    fn selected_objects(
+    fn selected_objects<'a>(
         &self,
         scope: &ReadingScope,
-        entries: &[EntryRef],
+        entries: impl Iterator<Item = &'a EntryRef>,
     ) -> BTreeSet<AnyObjectRef> {
-        let mut pending: Vec<_> = entries
-            .iter()
-            .cloned()
-            .map(AnyObjectRef::HistoryEntry)
-            .collect();
+        let mut pending: Vec<_> = entries.cloned().map(AnyObjectRef::HistoryEntry).collect();
         pending.push(AnyObjectRef::Agent(scope.agent.clone()));
         if let Some(selection) = &scope.selection {
             pending.push(AnyObjectRef::HistorySelection(selection.clone()));
@@ -1135,7 +1132,6 @@ impl Index<'_> {
             payload: access,
         }
     }
-
 
     #[allow(clippy::too_many_arguments)]
     fn message_unit(

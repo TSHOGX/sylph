@@ -2,7 +2,10 @@
 
 use super::*;
 
-fn normalized_owner(registry: &BTreeMap<AnyObjectRef, AnyObjectRef>, owner: &OwnerRef) -> OwnerRef {
+fn normalized_owner(
+    registry: &imbl::OrdMap<AnyObjectRef, AnyObjectRef>,
+    owner: &OwnerRef,
+) -> OwnerRef {
     match owner {
         OwnerRef::Agent { agent } => OwnerRef::Agent {
             agent: resolved_ref!(registry, Agent, agent),
@@ -11,7 +14,10 @@ fn normalized_owner(registry: &BTreeMap<AnyObjectRef, AnyObjectRef>, owner: &Own
     }
 }
 
-fn normalized_author(registry: &BTreeMap<AnyObjectRef, AnyObjectRef>, author: &Author) -> Author {
+fn normalized_author(
+    registry: &imbl::OrdMap<AnyObjectRef, AnyObjectRef>,
+    author: &Author,
+) -> Author {
     match author {
         Author::Agent { agent } => Author::Agent {
             agent: normalized_owner(registry, agent),
@@ -26,7 +32,7 @@ fn normalized_author(registry: &BTreeMap<AnyObjectRef, AnyObjectRef>, author: &A
 }
 
 fn normalized_recipient(
-    registry: &BTreeMap<AnyObjectRef, AnyObjectRef>,
+    registry: &imbl::OrdMap<AnyObjectRef, AnyObjectRef>,
     recipient: &Recipient,
 ) -> Recipient {
     match recipient {
@@ -41,7 +47,7 @@ fn normalized_recipient(
 }
 
 fn normalized_history_content(
-    registry: &BTreeMap<AnyObjectRef, AnyObjectRef>,
+    registry: &imbl::OrdMap<AnyObjectRef, AnyObjectRef>,
     content: &HistoryContent,
 ) -> HistoryContent {
     match content {
@@ -59,7 +65,7 @@ fn normalized_history_content(
 }
 
 fn normalized_object(
-    registry: &BTreeMap<AnyObjectRef, AnyObjectRef>,
+    registry: &imbl::OrdMap<AnyObjectRef, AnyObjectRef>,
     object: &TraceObject,
 ) -> TraceObject {
     let mut object = object.clone();
@@ -207,7 +213,7 @@ fn normalized_object(
 }
 
 fn normalized_relation(
-    registry: &BTreeMap<AnyObjectRef, AnyObjectRef>,
+    registry: &imbl::OrdMap<AnyObjectRef, AnyObjectRef>,
     relation: &Relation,
 ) -> Relation {
     match relation {
@@ -294,7 +300,7 @@ fn normalized_relation(
 }
 
 pub(super) fn normalized_claim(
-    registry: &BTreeMap<AnyObjectRef, AnyObjectRef>,
+    registry: &imbl::OrdMap<AnyObjectRef, AnyObjectRef>,
     claim: &Claim,
 ) -> Claim {
     let mut claim = claim.clone();

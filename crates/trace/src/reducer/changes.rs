@@ -35,6 +35,36 @@ impl<K, V> MapChanges<K, V> {
     }
 }
 
+impl<K: Ord, V: PartialEq> MapChanges<K, V> {
+    /// Compose consecutive state transitions without revisiting unchanged keys.
+    pub fn compose(&mut self, later: Self) {
+        for (key, change) in later.changed {
+            let before = match self.changed.remove(&key) {
+                Some(previous) => previous.before,
+                None => self.removed.remove(&key).or(change.before),
+            };
+            if before.as_ref() != Some(&change.after) {
+                self.changed.insert(
+                    key,
+                    ChangedValue {
+                        before,
+                        after: change.after,
+                    },
+                );
+            }
+        }
+        for (key, value) in later.removed {
+            let before = match self.changed.remove(&key) {
+                Some(previous) => previous.before,
+                None => Some(self.removed.remove(&key).unwrap_or(value)),
+            };
+            if let Some(before) = before {
+                self.removed.insert(key, before);
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetChanges<T> {
     pub added: BTreeSet<T>,
@@ -56,6 +86,21 @@ impl<T> SetChanges<T> {
     }
 }
 
+impl<T: Ord> SetChanges<T> {
+    pub fn compose(&mut self, later: Self) {
+        for value in later.added {
+            if !self.removed.remove(&value) {
+                self.added.insert(value);
+            }
+        }
+        for value in later.removed {
+            if !self.added.remove(&value) {
+                self.removed.insert(value);
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReductionChanges {
     pub objects: MapChanges<AnyObjectRef, ResolvedObject>,
@@ -73,11 +118,63 @@ pub struct ReductionChanges {
     pub messages: MapChanges<MessageRef, MessageHistory>,
     pub coverage: MapChanges<ClaimRef, Coverage>,
     /// Derived diagnostics have no separate stable identity; preserve both complete lists.
-    pub diagnostics: Option<ChangedValue<Vec<ReductionDiagnostic>>>,
+    pub diagnostics: Option<ChangedValue<imbl::Vector<ReductionDiagnostic>>>,
     pub withdrawn_claims: SetChanges<ClaimRef>,
 }
 
 impl ReductionChanges {
+    /// Combine consecutive unpublished reductions, retaining initial and final
+    /// endpoints only. Work visits changed keys and compares their changed values;
+    /// it never scans the complete committed or final reduction.
+    pub fn compose(&mut self, later: Self) {
+        let Self {
+            objects,
+            representatives,
+            executions,
+            delivery_stages,
+            delivery_revisions,
+            resource_states,
+            agent_states,
+            relations,
+            histories,
+            selection_memberships,
+            history_contents,
+            selection_content_observations,
+            messages,
+            coverage,
+            diagnostics,
+            withdrawn_claims,
+        } = later;
+        self.objects.compose(objects);
+        self.representatives.compose(representatives);
+        self.executions.compose(executions);
+        self.delivery_stages.compose(delivery_stages);
+        self.delivery_revisions.compose(delivery_revisions);
+        self.resource_states.compose(resource_states);
+        self.agent_states.compose(agent_states);
+        self.relations.compose(relations);
+        self.histories.compose(histories);
+        self.selection_memberships.compose(selection_memberships);
+        self.history_contents.compose(history_contents);
+        self.selection_content_observations
+            .compose(selection_content_observations);
+        self.messages.compose(messages);
+        self.coverage.compose(coverage);
+        self.withdrawn_claims.compose(withdrawn_claims);
+        if let Some(change) = diagnostics {
+            let before = match self.diagnostics.take() {
+                Some(previous) => previous.before,
+                None => change.before,
+            };
+            if before.as_ref() != Some(&change.after) {
+                self.diagnostics = Some(ChangedValue {
+                    before,
+                    after: change.after,
+                });
+            }
+        }
+    }
+
     pub fn between(before: &Reduction, after: &Reduction) -> Self {
         // Exhaustive destructuring makes a newly added Reduction field require a
         // deliberate change here instead of disappearing from invalidation silently.
@@ -178,8 +275,8 @@ impl ReductionChanges {
 }
 
 fn compare_maps<K: Ord + Clone, V: PartialEq + Clone>(
-    before: &BTreeMap<K, V>,
-    after: &BTreeMap<K, V>,
+    before: &imbl::OrdMap<K, V>,
+    after: &imbl::OrdMap<K, V>,
 ) -> MapChanges<K, V> {
     compare_entries(before.iter(), after.iter())
 }
@@ -296,11 +393,12 @@ mod tests {
         HistoryView {
             agent: agent("root"),
             selection: Resolved::Unknown,
-            candidate_heads: vec![entry("old")],
-            archive_order: vec![entry("old")],
-            order_basis: BTreeMap::from([(entry("old"), ReadingOrderBasis::PresentationTiebreak)]),
+            candidate_heads: imbl::vector![entry("old")],
+            archive_order: imbl::vector![entry("old")],
+            order_basis: BTreeMap::from([(entry("old"), ReadingOrderBasis::PresentationTiebreak)])
+                .into(),
             selected_entries: None,
-            unresolved_entries: vec![],
+            unresolved_entries: imbl::Vector::new(),
         }
     }
     fn message_history() -> MessageHistory {
@@ -343,8 +441,10 @@ mod tests {
 
     #[test]
     fn map_additions_replacements_and_removals_keep_their_old_and_new_values() {
-        let before = BTreeMap::from([(1, "removed"), (3, "old"), (5, "unchanged"), (7, "last")]);
-        let after = BTreeMap::from([(2, "added"), (3, "new"), (5, "unchanged"), (8, "tail")]);
+        let before: imbl::OrdMap<_, _> =
+            BTreeMap::from([(1, "removed"), (3, "old"), (5, "unchanged"), (7, "last")]).into();
+        let after: imbl::OrdMap<_, _> =
+            BTreeMap::from([(2, "added"), (3, "new"), (5, "unchanged"), (8, "tail")]).into();
         let changed = compare_maps(&before, &after);
         assert_eq!(
             changed.changed,
@@ -402,11 +502,11 @@ mod tests {
             },
         };
         let before = Reduction {
-            objects: BTreeMap::from([(key.clone(), old.clone())]),
+            objects: BTreeMap::from([(key.clone(), old.clone())]).into(),
             ..Default::default()
         };
         let after = Reduction {
-            objects: BTreeMap::from([(key.clone(), new.clone())]),
+            objects: BTreeMap::from([(key.clone(), new.clone())]).into(),
             ..Default::default()
         };
         let changes = ReductionChanges::between(&before, &after);
@@ -415,7 +515,7 @@ mod tests {
             ReductionChanges::between(&after, &Reduction::default())
                 .objects
                 .removed,
-            after.objects
+            after.objects.into_iter().collect()
         );
     }
 
@@ -425,11 +525,11 @@ mod tests {
         let old = AnyObjectRef::Message(message("old"));
         let new = AnyObjectRef::Message(message("new"));
         let before = Reduction {
-            representatives: BTreeMap::from([(key.clone(), old.clone())]),
+            representatives: BTreeMap::from([(key.clone(), old.clone())]).into(),
             ..Default::default()
         };
         let after = Reduction {
-            representatives: BTreeMap::from([(key.clone(), new.clone())]),
+            representatives: BTreeMap::from([(key.clone(), new.clone())]).into(),
             ..Default::default()
         };
         let changes = ReductionChanges::between(&before, &after);
@@ -455,11 +555,11 @@ mod tests {
             claims: vec![claim("failed")],
         };
         let before = Reduction {
-            executions: BTreeMap::from([(key.clone(), old.clone())]),
+            executions: BTreeMap::from([(key.clone(), old.clone())]).into(),
             ..Default::default()
         };
         let after = Reduction {
-            executions: BTreeMap::from([(key.clone(), new.clone())]),
+            executions: BTreeMap::from([(key.clone(), new.clone())]).into(),
             ..Default::default()
         };
         let changes = ReductionChanges::between(&before, &after);
@@ -482,11 +582,11 @@ mod tests {
             claim("delivery"),
         )];
         let before = Reduction {
-            delivery_stages: BTreeMap::from([(delivery(), old.clone())]),
+            delivery_stages: BTreeMap::from([(delivery(), old.clone())]).into(),
             ..Default::default()
         };
         let after = Reduction {
-            delivery_stages: BTreeMap::from([(delivery(), new.clone())]),
+            delivery_stages: BTreeMap::from([(delivery(), new.clone())]).into(),
             ..Default::default()
         };
         assert_replaced(
@@ -502,11 +602,11 @@ mod tests {
         let old = BTreeMap::from([(claim("binding"), revision("old"))]);
         let new = BTreeMap::from([(claim("binding"), revision("new"))]);
         let before = Reduction {
-            delivery_revisions: BTreeMap::from([(delivery(), old.clone())]),
+            delivery_revisions: BTreeMap::from([(delivery(), old.clone())]).into(),
             ..Default::default()
         };
         let after = Reduction {
-            delivery_revisions: BTreeMap::from([(delivery(), new.clone())]),
+            delivery_revisions: BTreeMap::from([(delivery(), new.clone())]).into(),
             ..Default::default()
         };
         assert_replaced(
@@ -534,11 +634,11 @@ mod tests {
             claim("resource"),
         )];
         let before = Reduction {
-            resource_states: BTreeMap::from([(resource(), old.clone())]),
+            resource_states: BTreeMap::from([(resource(), old.clone())]).into(),
             ..Default::default()
         };
         let after = Reduction {
-            resource_states: BTreeMap::from([(resource(), new.clone())]),
+            resource_states: BTreeMap::from([(resource(), new.clone())]).into(),
             ..Default::default()
         };
         assert_replaced(
@@ -559,11 +659,11 @@ mod tests {
             claim("agent"),
         )];
         let before = Reduction {
-            agent_states: BTreeMap::from([(agent("root"), old.clone())]),
+            agent_states: BTreeMap::from([(agent("root"), old.clone())]).into(),
             ..Default::default()
         };
         let after = Reduction {
-            agent_states: BTreeMap::from([(agent("root"), new.clone())]),
+            agent_states: BTreeMap::from([(agent("root"), new.clone())]).into(),
             ..Default::default()
         };
         assert_replaced(
@@ -582,14 +682,14 @@ mod tests {
             operation: None,
         };
         let before = Reduction {
-            relations: vec![ResolvedRelation {
+            relations: imbl::vector![ResolvedRelation {
                 claim: claim("edge"),
                 relation: relation("old"),
             }],
             ..Default::default()
         };
         let after = Reduction {
-            relations: vec![ResolvedRelation {
+            relations: imbl::vector![ResolvedRelation {
                 claim: claim("edge"),
                 relation: relation("new"),
             }],
@@ -613,14 +713,14 @@ mod tests {
     fn history_order_and_selection_changes_keep_the_previous_membership() {
         let old = history();
         let mut new = old.clone();
-        new.archive_order.push(entry("new"));
-        new.selected_entries = Some(vec![entry("new")]);
+        new.archive_order.push_back(entry("new"));
+        new.selected_entries = Some(imbl::vector![entry("new")]);
         let before = Reduction {
-            histories: BTreeMap::from([(agent("root"), old.clone())]),
+            histories: BTreeMap::from([(agent("root"), old.clone())]).into(),
             ..Default::default()
         };
         let after = Reduction {
-            histories: BTreeMap::from([(agent("root"), new.clone())]),
+            histories: BTreeMap::from([(agent("root"), new.clone())]).into(),
             ..Default::default()
         };
         assert_replaced(
@@ -634,11 +734,12 @@ mod tests {
     #[test]
     fn selected_membership_distinguishes_unknown_from_known_empty() {
         let before = Reduction {
-            selection_memberships: BTreeMap::from([(selection("selected"), None)]),
+            selection_memberships: BTreeMap::from([(selection("selected"), None)]).into(),
             ..Default::default()
         };
         let after = Reduction {
-            selection_memberships: BTreeMap::from([(selection("selected"), Some(vec![]))]),
+            selection_memberships: BTreeMap::from([(selection("selected"), Some(Vec::new()))])
+                .into(),
             ..Default::default()
         };
         assert_replaced(
@@ -663,11 +764,11 @@ mod tests {
         let mut new = BTreeMap::from([(claim("content"), observation("new"))]);
         new.get_mut(&claim("content")).unwrap().complete = false;
         let before = Reduction {
-            history_contents: BTreeMap::from([(entry("entry"), old.clone())]),
+            history_contents: BTreeMap::from([(entry("entry"), old.clone())]).into(),
             ..Default::default()
         };
         let after = Reduction {
-            history_contents: BTreeMap::from([(entry("entry"), new.clone())]),
+            history_contents: BTreeMap::from([(entry("entry"), new.clone())]).into(),
             ..Default::default()
         };
         assert_replaced(
@@ -683,11 +784,13 @@ mod tests {
         let old = Some(BTreeSet::from([claim("old")]));
         let new = Some(BTreeSet::from([claim("new")]));
         let before = Reduction {
-            selection_content_observations: BTreeMap::from([(selection("selected"), old.clone())]),
+            selection_content_observations: BTreeMap::from([(selection("selected"), old.clone())])
+                .into(),
             ..Default::default()
         };
         let after = Reduction {
-            selection_content_observations: BTreeMap::from([(selection("selected"), new.clone())]),
+            selection_content_observations: BTreeMap::from([(selection("selected"), new.clone())])
+                .into(),
             ..Default::default()
         };
         assert_replaced(
@@ -709,11 +812,11 @@ mod tests {
         new.late_segments.push(revision("late"));
         new.sealed = true;
         let before = Reduction {
-            messages: BTreeMap::from([(message("message"), old.clone())]),
+            messages: BTreeMap::from([(message("message"), old.clone())]).into(),
             ..Default::default()
         };
         let after = Reduction {
-            messages: BTreeMap::from([(message("message"), new.clone())]),
+            messages: BTreeMap::from([(message("message"), new.clone())]).into(),
             ..Default::default()
         };
         assert_replaced(
@@ -736,11 +839,11 @@ mod tests {
             state: CoverageState::Complete,
         };
         let before = Reduction {
-            coverage: vec![(coverage("old"), claim("coverage"))],
+            coverage: imbl::vector![(coverage("old"), claim("coverage"))],
             ..Default::default()
         };
         let after = Reduction {
-            coverage: vec![(coverage("new"), claim("coverage"))],
+            coverage: imbl::vector![(coverage("new"), claim("coverage"))],
             ..Default::default()
         };
         assert_replaced(
@@ -770,25 +873,25 @@ mod tests {
             message: "new diagnostic".into(),
         };
         let before = Reduction {
-            diagnostics: vec![old.clone()],
+            diagnostics: imbl::vector![old.clone()],
             ..Default::default()
         };
         let after = Reduction {
-            diagnostics: vec![new.clone()],
+            diagnostics: imbl::vector![new.clone()],
             ..Default::default()
         };
         assert_eq!(
             ReductionChanges::between(&before, &after).diagnostics,
             Some(ChangedValue {
-                before: Some(vec![old.clone()]),
-                after: vec![new]
+                before: Some(imbl::vector![old.clone()]),
+                after: imbl::vector![new]
             })
         );
         assert_eq!(
             ReductionChanges::between(&before, &Reduction::default()).diagnostics,
             Some(ChangedValue {
-                before: Some(vec![old]),
-                after: vec![]
+                before: Some(imbl::vector![old]),
+                after: imbl::Vector::new()
             })
         );
     }
@@ -796,11 +899,11 @@ mod tests {
     #[test]
     fn withdrawn_claim_changes_distinguish_reinstatement_from_new_withdrawal() {
         let before = Reduction {
-            withdrawn_claims: vec![claim("reinstated"), claim("unchanged")],
+            withdrawn_claims: imbl::vector![claim("reinstated"), claim("unchanged")],
             ..Default::default()
         };
         let after = Reduction {
-            withdrawn_claims: vec![claim("newly-withdrawn"), claim("unchanged")],
+            withdrawn_claims: imbl::vector![claim("newly-withdrawn"), claim("unchanged")],
             ..Default::default()
         };
         assert_eq!(
@@ -810,5 +913,217 @@ mod tests {
                 removed: BTreeSet::from([claim("reinstated")]),
             }
         );
+    }
+
+    fn composition_state(label: &str) -> Reduction {
+        let mut state = Reduction::default();
+        let object = AnyObjectRef::Agent(agent("root"));
+        state.objects.insert(
+            object.clone(),
+            ResolvedObject {
+                reference: object.clone(),
+                declaration: Resolved::Known {
+                    value: TraceObject::Agent(AgentThread {
+                        agent_ref: agent("root"),
+                        vendor: sylph_protocol::AgentName::parse("codex").unwrap(),
+                        name: Some(label.into()),
+                        model: None,
+                    }),
+                    claims: vec![claim(label)],
+                },
+            },
+        );
+        state.representatives.insert(
+            AnyObjectRef::Agent(agent("alias")),
+            AnyObjectRef::Agent(agent(label)),
+        );
+        state.executions.insert(
+            object.clone(),
+            ExecutionState {
+                started: vec![claim(label)],
+                terminated: vec![],
+                outcome: Resolved::Unknown,
+                interrupt_requests: vec![],
+                boundaries: vec![],
+            },
+        );
+        state.delivery_stages.insert(
+            delivery(),
+            vec![(
+                DeliveryStage::Admitted {
+                    entry: Some(entry(label)),
+                },
+                claim("admitted"),
+            )],
+        );
+        state.delivery_revisions.insert(
+            delivery(),
+            BTreeMap::from([(claim("binding"), revision(label))]),
+        );
+        state.resource_states.insert(
+            resource(),
+            vec![(
+                ResourceState::GoalUpdated {
+                    status: label.into(),
+                    detail: None,
+                },
+                claim("resource"),
+            )],
+        );
+        state.agent_states.insert(
+            agent("root"),
+            vec![(
+                AgentState::VendorClosed {
+                    reason: Some(label.into()),
+                },
+                claim("agent"),
+            )],
+        );
+        state.relations.push_back(ResolvedRelation {
+            claim: claim("relation"),
+            relation: Relation::Spawn {
+                parent: agent("root"),
+                child: agent(label),
+                operation: None,
+            },
+        });
+        let mut view = history();
+        view.archive_order = imbl::vector![entry(label)];
+        view.candidate_heads = imbl::vector![entry(label)];
+        view.order_basis = [(entry(label), ReadingOrderBasis::NativePredecessor)]
+            .into_iter()
+            .collect();
+        state.histories.insert(agent("root"), view);
+        state
+            .selection_memberships
+            .insert(selection("selected"), Some(vec![entry(label)]));
+        state.history_contents.insert(
+            entry("entry"),
+            BTreeMap::from([(
+                claim("content"),
+                HistoryContentObservation::complete(
+                    entry("entry"),
+                    position(),
+                    "fixture/history",
+                    vec![HistoryContent::Message(revision(label))],
+                ),
+            )]),
+        );
+        state
+            .selection_content_observations
+            .insert(selection("selected"), Some(BTreeSet::from([claim(label)])));
+        let mut history = message_history();
+        history.revisions = vec![revision(label)];
+        state.messages.insert(message("message"), history);
+        state.coverage.push_back((
+            Coverage {
+                subject: AnyObjectRef::Agent(agent(label)),
+                source: position().source,
+                dimension: CoverageDimension::Timing,
+                interval: CoverageInterval::Object {
+                    object: AnyObjectRef::Agent(agent(label)),
+                },
+                state: CoverageState::Complete,
+            },
+            claim("coverage"),
+        ));
+        state.diagnostics.push_back(ReductionDiagnostic {
+            code: DiagnosticCode::MissingSource,
+            claims: vec![claim(label)],
+            message: label.into(),
+        });
+        state.withdrawn_claims.push_back(claim(label));
+        state
+    }
+
+    #[test]
+    fn composed_map_transitions_keep_initial_values_and_cancel_restored_keys() {
+        let before = imbl::ordmap! {
+            "changed-removed" => "original", "removed-restored" => "original",
+            "removed-replaced" => "original", "changed-restored" => "original",
+            "changed-again" => "original", "unchanged" => "keep"
+        };
+        let middle = imbl::ordmap! {
+            "added-removed" => "temporary", "added-updated" => "temporary",
+            "changed-removed" => "middle", "changed-restored" => "middle",
+            "changed-again" => "middle", "unchanged" => "keep"
+        };
+        let after = imbl::ordmap! {
+            "added-updated" => "final", "removed-restored" => "original",
+            "removed-replaced" => "final", "changed-restored" => "original",
+            "changed-again" => "final", "unchanged" => "keep", "later-added" => "last"
+        };
+        let mut changes = compare_maps(&before, &middle);
+        changes.compose(compare_maps(&middle, &after));
+        assert_eq!(changes, compare_maps(&before, &after));
+        assert_eq!(
+            changes.removed,
+            BTreeMap::from([("changed-removed", "original")])
+        );
+        assert_eq!(changes.changed["added-updated"].before, None);
+        assert_eq!(changes.changed["changed-again"].before, Some("original"));
+        for key in [
+            "added-removed",
+            "removed-restored",
+            "changed-restored",
+            "unchanged",
+        ] {
+            assert!(!changes.changed.contains_key(key));
+            assert!(!changes.removed.contains_key(key));
+        }
+    }
+
+    #[test]
+    fn composed_dependency_passes_keep_original_object_history_and_delivery_endpoints() {
+        let before = composition_state("original");
+        let middle = composition_state("intermediate");
+        let mut after = composition_state("final");
+        after.objects.clear();
+        after.histories.clear();
+        let mut changes = ReductionChanges::between(&before, &middle);
+        changes.compose(ReductionChanges::between(&middle, &after));
+        assert_eq!(changes, ReductionChanges::between(&before, &after));
+        assert_eq!(
+            changes.objects.removed[&AnyObjectRef::Agent(agent("root"))],
+            before.objects[&AnyObjectRef::Agent(agent("root"))]
+        );
+        assert_eq!(
+            changes.histories.removed[&agent("root")],
+            before.histories[&agent("root")]
+        );
+        assert_replaced(
+            &changes.delivery_stages,
+            &delivery(),
+            &before.delivery_stages[&delivery()],
+            &after.delivery_stages[&delivery()],
+        );
+        assert_replaced(
+            &changes.delivery_revisions,
+            &delivery(),
+            &before.delivery_revisions[&delivery()],
+            &after.delivery_revisions[&delivery()],
+        );
+    }
+
+    #[test]
+    fn composing_added_then_removed_state_cancels_every_non_object_family() {
+        let empty = Reduction::default();
+        let transient = composition_state("transient");
+        let mut changes = ReductionChanges::between(&empty, &transient);
+        changes.compose(ReductionChanges::between(&transient, &empty));
+        assert_eq!(changes, ReductionChanges::default());
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn composing_removal_then_restoration_and_intermediate_changes_cancels_net_noops() {
+        let original = composition_state("original");
+        let empty = Reduction::default();
+        let intermediate = composition_state("intermediate");
+        let mut changes = ReductionChanges::between(&original, &empty);
+        changes.compose(ReductionChanges::between(&empty, &intermediate));
+        changes.compose(ReductionChanges::between(&intermediate, &original));
+        assert_eq!(changes, ReductionChanges::default());
+        assert!(changes.is_empty());
     }
 }

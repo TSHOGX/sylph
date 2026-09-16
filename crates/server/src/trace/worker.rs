@@ -19,7 +19,7 @@ use sylph_trace::{
         self, ArchiveContext, ArchiveRequest, DerivedPayload, MapInput, MapOutput, MapperState,
         MappingDiagnostic, SemanticMapper,
     },
-    reducer::{Reducer, Reduction, ReductionChanges},
+    reducer::{Reducer, Reduction, ReductionChanges, ReductionWork, Resolution},
 };
 use tokio::sync::{Mutex, Semaphore};
 
@@ -37,6 +37,7 @@ pub struct WorkerLimits {
     pub max_decode_bytes: usize,
     pub max_claims_per_observation: usize,
     pub max_reducer_claims: usize,
+    pub max_incremental_dependencies: usize,
     pub max_pending: usize,
     pub max_state_bytes: usize,
     pub max_resolution_passes: usize,
@@ -54,6 +55,7 @@ impl Default for WorkerLimits {
             max_decode_bytes: 16 * 1024 * 1024,
             max_claims_per_observation: 512,
             max_reducer_claims: 250_000,
+            max_incremental_dependencies: 1_000_000,
             max_pending: 4096,
             max_state_bytes: 64 * 1024 * 1024,
             max_resolution_passes: 8,
@@ -103,6 +105,7 @@ pub struct WorkerProgress {
     pub unmapped_observations: usize,
     /// Rows constructed by reader materialization during this worker pass.
     pub reader_rows_materialized: usize,
+    pub reduction: ReductionWork,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -171,12 +174,14 @@ struct WorkerState {
     previews: BTreeMap<PayloadRef, sylph_trace::reading::PayloadPreview>,
     object_epochs: BTreeMap<AnyObjectRef, IngestionEpoch>,
     reading: Option<Arc<reading::MaterializedReading>>,
-    archive_semantic:Option<(std::sync::Weak<Reduction>,Arc<mapping::ArchiveSemantic>)>,
+    archive_semantic: Option<(std::sync::Weak<Reduction>, Arc<mapping::ArchiveSemantic>)>,
 }
 
 impl WorkerState {
     fn committed_snapshot(&self) -> &Snapshot {
-        self.snapshot.as_ref().expect("worker state is loaded before projection")
+        self.snapshot
+            .as_ref()
+            .expect("worker state is loaded before projection")
     }
 
     fn cut(&self) -> u64 {
@@ -209,6 +214,8 @@ struct ProjectionUnit {
     bindings: Vec<(IngestionEpoch, ObservationRef, AgentRef)>,
     pins: BTreeSet<(PayloadRef, IngestionEpoch)>,
     reader_rows_materialized: usize,
+    reduction_changes: ReductionChanges,
+    reduction_work: ReductionWork,
 }
 
 impl ProjectionUnit {
@@ -227,6 +234,8 @@ impl ProjectionUnit {
             bindings: vec![],
             pins: BTreeSet::new(),
             reader_rows_materialized: 0,
+            reduction_changes: ReductionChanges::default(),
+            reduction_work: ReductionWork::default(),
         }
     }
     fn gap(
@@ -302,7 +311,7 @@ impl ProjectionWorker {
         let mut state = entry.lock().await;
         let checkpoint = generation.checkpoint().await?;
         if state.snapshot.as_ref() != Some(&checkpoint.snapshot) {
-            *state = self.load_state(generation, &checkpoint.snapshot).await?;
+            *state = self.load_state(generation, &checkpoint.snapshot).await?.0;
         }
         Ok((
             checkpoint.snapshot,
@@ -319,6 +328,7 @@ impl ProjectionWorker {
             limits.max_decode_bytes,
             limits.max_claims_per_observation,
             limits.max_reducer_claims,
+            limits.max_incremental_dependencies,
             limits.max_pending,
             limits.max_state_bytes,
             limits.max_resolution_passes,
@@ -402,14 +412,18 @@ impl ProjectionWorker {
         };
         let mut state = held.lock().await;
         let checkpoint = generation.checkpoint().await?;
+        let mut restoration_work = ReductionWork::default();
         if state.snapshot.as_ref() != Some(&checkpoint.snapshot) {
-            *state = self.load_state(generation, &checkpoint.snapshot).await?;
+            let (restored, work) = self.load_state(generation, &checkpoint.snapshot).await?;
+            *state = restored;
+            restoration_work = work;
         }
         let mut progress = WorkerProgress {
             evidence_cut,
             projected_cut: state.cut(),
             pending_mappings: state.pending.len(),
             suspended_sources: state.gaps.len(),
+            reduction: restoration_work,
             ..WorkerProgress::default()
         };
         while state.cut() < through_cut
@@ -464,6 +478,7 @@ impl ProjectionWorker {
                     .await?;
                 // Oversized candidates still spent this work before batch splitting.
                 progress.reader_rows_materialized += prepared.reader_rows_materialized;
+                progress.reduction.accumulate(&prepared.reduction_work);
                 match generation.validate_batch(&prepared.batch) {
                     Ok(()) => break prepared,
                     Err(GenerationError::Limit(_)) if captures.len() > 1 => {
@@ -610,7 +625,7 @@ impl ProjectionWorker {
                 .push(admitted.occurrence_id);
         }
         if unit.next.reducer.len() != state.reducer.len() {
-            unit.next.reduction = self.reduce(&mut unit.next.reducer).await?;
+            self.reduce_unit(&mut unit).await?;
         }
         let mut continuation_applied = false;
         let mut ordered_applied = 0usize;
@@ -730,7 +745,7 @@ impl ProjectionWorker {
             if before == after {
                 break;
             }
-            unit.next.reduction = self.reduce(&mut unit.next.reducer).await?;
+            self.reduce_unit(&mut unit).await?;
             if pass + 1 == self.limits.max_resolution_passes
                 && unit.next.pending.values().any(|pending| {
                     pending.source_order.is_none()
@@ -753,8 +768,24 @@ impl ProjectionWorker {
         Ok(unit)
     }
 
-    async fn reduce(&self, reducer: &mut Reducer) -> Result<Arc<Reduction>> {
-        let owned = std::mem::take(reducer);
+    async fn reduce_unit(&self, unit: &mut ProjectionUnit) -> Result<()> {
+        let resolved = self.reduce(&mut unit.next.reducer).await?;
+        unit.next.reduction = resolved.reduction;
+        unit.reduction_changes.compose(resolved.changes);
+        unit.reduction_work.accumulate(&resolved.work);
+        Ok(())
+    }
+
+    async fn reduce(&self, reducer: &mut Reducer) -> Result<Resolution> {
+        let mut owned = std::mem::take(reducer);
+        #[cfg(test)]
+        let max_dependencies = if self.full_reader_rebuilds {
+            0
+        } else {
+            self.limits.max_incremental_dependencies
+        };
+        #[cfg(not(test))]
+        let max_dependencies = self.limits.max_incremental_dependencies;
         let permit = self
             .cpu
             .clone()
@@ -763,13 +794,13 @@ impl ProjectionWorker {
             .map_err(|error| WorkerError::Task(error.to_string()))?;
         let (restored, result) = tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            let result = owned.resolve();
+            let result = owned.resolve_incremental(max_dependencies);
             (owned, result)
         })
         .await
         .map_err(|error| WorkerError::Task(error.to_string()))?;
         *reducer = restored;
-        Ok(Arc::new(result))
+        Ok(result)
     }
 
     async fn commit_effects(
@@ -817,7 +848,7 @@ impl ProjectionWorker {
         &self,
         generation: &GenerationStore,
         snapshot: &Snapshot,
-    ) -> Result<WorkerState> {
+    ) -> Result<(WorkerState, ReductionWork)> {
         let mut state = WorkerState {
             snapshot: Some(snapshot.clone()),
             ..WorkerState::default()
@@ -866,7 +897,9 @@ impl ProjectionWorker {
             } else if let Some(key) = key.strip_prefix("correlation:") {
                 let binding: CorrelationBinding = serde_json::from_value(value)?;
                 state.correlations.insert(key.into(), binding.reference);
-                state.correlation_evidence.insert(key.into(), binding.evidence);
+                state
+                    .correlation_evidence
+                    .insert(key.into(), binding.evidence);
             } else if let Some(key) = key.strip_prefix("source_replay:") {
                 state
                     .source_replays
@@ -887,18 +920,22 @@ impl ProjectionWorker {
                 let definition: mapping::codex::history::RecordedSource =
                     serde_json::from_value(value)?;
                 state.source_definitions.insert(
-                    (definition.definition.source.clone(), definition.definition.generation),
+                    (
+                        definition.definition.source.clone(),
+                        definition.definition.generation,
+                    ),
                     definition,
                 );
             } else if key.starts_with("history_record:") {
                 index_history_record(&mut state.history_records, serde_json::from_value(value)?)?;
             } else if key.starts_with("owner:") {
                 let ownership: mapping::SourceOwnership = serde_json::from_value(value)?;
-                state.available_evidence.extend(ownership.owner.evidence.iter().cloned());
-                state.source_owners.insert(
-                    (ownership.source, ownership.generation),
-                    ownership.owner,
-                );
+                state
+                    .available_evidence
+                    .extend(ownership.owner.evidence.iter().cloned());
+                state
+                    .source_owners
+                    .insert((ownership.source, ownership.generation), ownership.owner);
             } else if let Some(key) = key.strip_prefix("read_epoch:") {
                 let reference = AnyObjectRef::decode(key)
                     .map_err(|error| WorkerError::Task(error.to_string()))?;
@@ -912,8 +949,9 @@ impl ProjectionWorker {
                 );
             }
         }
-        state.reduction = self.reduce(&mut state.reducer).await?;
-        Ok(state)
+        let resolved = self.reduce(&mut state.reducer).await?;
+        state.reduction = resolved.reduction;
+        Ok((state, resolved.work))
     }
 
     async fn map_record(
@@ -1014,7 +1052,10 @@ impl ProjectionWorker {
                 if let ArchiveRequest::Observation { observation } = request {
                     let retained=self.evidence.receipt(observation).await?.is_some_and(|receipt|matches!(receipt.disposition,ReceiptDisposition::Retained{admission_seq}if admission_seq<=through_cut));
                     if retained {
-                        resolved |= state.available_evidence.insert(observation.clone()).is_none();
+                        resolved |= state
+                            .available_evidence
+                            .insert(observation.clone())
+                            .is_none();
                         if !state.observation_sources.contains_key(observation) {
                             if let Some(position) =
                                 self.evidence.observation_source(observation).await?
@@ -1174,7 +1215,9 @@ impl ProjectionWorker {
                 format!("correlation:{key}"),
                 serde_json::to_value(&binding)?,
             );
-            unit.next.correlations.insert(key.clone(), binding.reference);
+            unit.next
+                .correlations
+                .insert(key.clone(), binding.reference);
             unit.next.correlation_evidence.insert(key, binding.evidence);
         }
         let id = admitted.canonical_observation.encode();
@@ -1373,7 +1416,7 @@ impl ProjectionWorker {
             }
         }
         if replayed > 0 {
-            unit.next.reduction = self.reduce(&mut unit.next.reducer).await?;
+            self.reduce_unit(unit).await?;
         }
         Ok(())
     }
@@ -1436,11 +1479,7 @@ impl ProjectionWorker {
         unit: &mut ProjectionUnit,
     ) -> Result<()> {
         let new = &unit.next.reduction;
-        let changes = if std::ptr::eq(old, new.as_ref()) {
-            ReductionChanges::default()
-        } else {
-            ReductionChanges::between(old, new)
-        };
+        let changes = std::mem::take(&mut unit.reduction_changes);
         // Redelivery and acquisition-only metadata do not change a reader. Keep
         // the exact committed materialization; payload availability and new epoch
         // bindings remain independent inputs even when semantic values agree.
@@ -1502,7 +1541,8 @@ impl ProjectionWorker {
                 });
             }
         }
-        self.materialize_reading(generation, old, &changes, unit).await?;
+        self.materialize_reading(generation, old, &changes, unit)
+            .await?;
         Ok(())
     }
 }
@@ -1609,14 +1649,20 @@ fn archive_context(state: &mut WorkerState) -> ArchiveContext {
                 .insert(value.object_ref(), evidence.into_iter().collect());
         }
         for (entry, observations) in &state.reduction.history_contents {
-            semantic.history_contents.insert(entry.clone(), observations.iter().filter_map(|(reference, observation)| {
-                let proof = claims.get(reference)?;
-                Some(mapping::ArchiveHistoryContent {
-                    claim_ref: reference.clone(),
-                    observation: observation.clone(),
-                    evidence: proof.evidence.clone(),
-                })
-            }).collect());
+            semantic.history_contents.insert(
+                entry.clone(),
+                observations
+                    .iter()
+                    .filter_map(|(reference, observation)| {
+                        let proof = claims.get(reference)?;
+                        Some(mapping::ArchiveHistoryContent {
+                            claim_ref: reference.clone(),
+                            observation: observation.clone(),
+                            evidence: proof.evidence.clone(),
+                        })
+                    })
+                    .collect(),
+            );
         }
         for (alias, canonical) in &state.reduction.representatives {
             if let Some(evidence) = semantic.object_evidence.get(canonical).cloned() {
@@ -1654,9 +1700,10 @@ fn index_history_record(
     // Only agreeing lexical witnesses may share a coordinate. Proof selection
     // remains deterministic across admission and restart without choosing one
     // plausible byte range or header from contradictory source evidence.
-    if source.get(&record_ordinal).is_none_or(|prior| {
-        prior.observation.encode() <= record.observation.encode()
-    }) {
+    if source
+        .get(&record_ordinal)
+        .is_none_or(|prior| prior.observation.encode() <= record.observation.encode())
+    {
         source.insert(record_ordinal, record);
     }
     Ok(())

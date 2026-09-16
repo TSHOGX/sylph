@@ -13,9 +13,11 @@ pub(super) struct WindowBindings {
 }
 
 impl WindowBindings {
-    pub(super) fn new(index: &Index<'_>, scope: &ReadingScope, entries: &[EntryRef]) -> Self {
+    pub(super) fn new<'a, I>(index: &Index<'_>, scope: &ReadingScope, entries: I) -> Self
+    where
+        I: Iterator<Item = &'a EntryRef> + Clone,
+    {
         let contents = entries
-            .iter()
             .map(|entry| {
                 (
                     entry.clone(),
@@ -52,8 +54,11 @@ pub(super) struct WindowState {
 }
 
 impl super::Index<'_> {
-    pub(super) fn window(&self, scope: &ReadingScope, entries: &[EntryRef]) -> Vec<ReadingUnit> {
-        let bindings = WindowBindings::new(self, scope, entries);
+    pub(super) fn window<'a, I>(&self, scope: &ReadingScope, entries: I) -> Vec<ReadingUnit>
+    where
+        I: Iterator<Item = &'a EntryRef> + Clone,
+    {
+        let bindings = WindowBindings::new(self, scope, entries.clone());
         let mut state = WindowState::default();
         let mut units = Vec::new();
         for entry in entries {

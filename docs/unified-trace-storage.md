@@ -368,6 +368,23 @@ incrementally, while a larger relabel/reconciliation rebuild runs as unpublished
 This keeps admission and already-published pages available without pretending that
 arbitrary graph updates have an O(1) algorithm.
 
+The incremental resolver retains structurally shared reduction maps, history order and
+relation sequences. Newly validated claims are pending inputs until resolution commits;
+exact redelivery creates no new pending work. A fresh predecessor chain can update its
+new message, revision, content and history objects without resolving prior claims when
+an indexed dependency check proves those new identities were not previously referenced.
+Nested ownership, delivery, revision, selection and claim references participate in that
+check, including unresolved references and corrections awaiting their targets. Selected
+source extents and explicit reader-order constraints can require full reconciliation.
+The dependency index has its own bound; exceeding it reports that incremental indexing is
+unavailable and retains full semantic resolution, rather than dropping evidence.
+
+Incremental resolution emits typed deltas directly. Several unpublished dependency passes
+compose their initial and final endpoints, cancelling net no-ops without comparing the
+entire archive again. The full reducer remains the independent oracle for replay and
+reconciliation. Resolution work reports claims processed, history entries updated, full
+resolutions and dependency indexing separately from materialized reader rows.
+
 Reader invalidation consumes typed changes in every resolved semantic family, including
 old and new endpoints and removed values. Object declarations alone cannot invalidate
 execution, delivery bindings, content observations, selected membership, equivalence or

@@ -133,11 +133,11 @@ fn inherited_paths_use_the_same_evidenced_predecessor_as_direct_reads() {
     let result = reduce_history(&inherited_fixture(false));
     assert_eq!(
         result.histories[&owner("parent")].selected_entries,
-        Some(vec![entry("a"), entry("c")])
+        Some(imbl::vector![entry("a"), entry("c")])
     );
     assert_eq!(
         result.histories[&owner("child")].selected_entries,
-        Some(vec![entry("a"), entry("c")])
+        Some(imbl::vector![entry("a"), entry("c")])
     );
 }
 
@@ -168,7 +168,7 @@ fn a_missing_source_extent_is_unknown_until_empty_mapping_is_proved() {
     claims.push(fact(3, Fact::HistoryMappingComplete { extent: range }));
     assert_eq!(
         reduce_history(&claims).histories[&owner("child")].selected_entries,
-        Some(vec![])
+        Some(imbl::Vector::new())
     );
 }
 
@@ -206,7 +206,7 @@ fn mapping_witnesses_must_cover_every_requested_coordinate() {
     ));
     assert_eq!(
         reduce_history(&claims).histories[&owner("child")].selected_entries,
-        Some(vec![])
+        Some(imbl::Vector::new())
     );
 }
 

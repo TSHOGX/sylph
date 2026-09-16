@@ -599,7 +599,10 @@ async fn deleting_a_relation_target_hides_it_from_a_retained_parent_view() {
 async fn deleting_a_directory_owner_removes_membership_from_an_unrelated_retained_view() {
     let fixture = Fixture::new(Some(1)).await;
     let (status, child) = fixture
-        .get(&format!("/api/v1/trace/agents/{}", fixture.visible.encode()))
+        .get(&format!(
+            "/api/v1/trace/agents/{}",
+            fixture.visible.encode()
+        ))
         .await;
     assert_eq!(status, StatusCode::OK, "{child}");
     let child_view = child["view"]["token"].as_str().unwrap();
@@ -621,7 +624,10 @@ async fn deleting_a_directory_owner_removes_membership_from_an_unrelated_retaine
     assert!(page["items"].as_array().unwrap().is_empty(), "{page}");
     assert_eq!(page["total"]["value"], 0);
     let (status, gone) = fixture
-        .get(&format!("{}?at_snapshot={directory_view}", fixture.directory()))
+        .get(&format!(
+            "{}?at_snapshot={directory_view}",
+            fixture.directory()
+        ))
         .await;
     assert_eq!(status, StatusCode::GONE, "{gone}");
     assert_eq!(gone["error"]["code"], "snapshot_expired");

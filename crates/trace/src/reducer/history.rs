@@ -166,7 +166,7 @@ impl HistoryGraph {
     fn reading_order(
         &self,
         agent: &AgentRef,
-        relations: &[ResolvedRelation],
+        relations: &imbl::Vector<ResolvedRelation>,
         result: &mut Reduction,
     ) -> ReadingView {
         let owned: BTreeSet<_> = self
@@ -392,11 +392,11 @@ pub(super) fn resolve_histories(active: &[&Claim], result: &mut Reduction) {
             HistoryView {
                 agent,
                 selection: selected,
-                candidate_heads,
-                archive_order,
-                order_basis,
-                selected_entries,
-                unresolved_entries,
+                candidate_heads: candidate_heads.into(),
+                archive_order: archive_order.into(),
+                order_basis: order_basis.into(),
+                selected_entries: selected_entries.map(Into::into),
+                unresolved_entries: unresolved_entries.into(),
             },
         );
     }
@@ -412,7 +412,7 @@ fn membership(
     graph: &HistoryGraph,
     selections: &BTreeMap<SelectionRef, HistorySelection>,
     active: &[&Claim],
-    contents: &BTreeMap<EntryRef, BTreeMap<ClaimRef, HistoryContentObservation>>,
+    contents: &imbl::OrdMap<EntryRef, BTreeMap<ClaimRef, HistoryContentObservation>>,
     entry_order: &BTreeMap<EntryRef, usize>,
     visiting: &mut BTreeSet<SelectionRef>,
 ) -> Option<SelectedMembership> {

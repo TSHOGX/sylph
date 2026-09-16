@@ -31,22 +31,19 @@ pub(super) fn resolve(
             _ => None,
         })
         .collect();
-    for (selection, entries) in reduction
-        .histories
-        .values()
-        .map(|history| (None, history.archive_order.as_slice()))
-        .chain(
-            reduction
-                .selection_memberships
-                .iter()
-                .filter_map(|(selection, members)| {
-                    members.as_deref().map(|members| (Some(selection), members))
-                }),
-        )
-    {
+    let mut scopes = Vec::new();
+    for history in reduction.histories.values() {
+        scopes.push((None, history.archive_order.clone()));
+    }
+    for (selection, members) in reduction.selection_memberships.iter() {
+        if let Some(members) = members {
+            scopes.push((Some(selection), imbl::Vector::from(members.clone())));
+        }
+    }
+    for (selection, entries) in scopes {
         let mut messages = BTreeMap::<MessageRef, BTreeSet<MessageRevisionRef>>::new();
         for entry in entries {
-            let contents = reduction.entry_contents(entry, selection);
+            let contents = reduction.entry_contents(&entry, selection);
             for content in contents
                 .slots
                 .values()

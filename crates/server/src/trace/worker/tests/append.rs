@@ -71,6 +71,12 @@ async fn warm_append_after(records: usize) -> usize {
     .await;
     let cut = fixture.evidence.evidence_cut().await.unwrap();
     let appended = worker.catch_up(&warm, 1, cut).await.unwrap();
+    assert_eq!(
+        appended.reduction.full_resolutions, 0,
+        "An independent warm append must not rerun full reduction"
+    );
+    assert_eq!(appended.reduction.history_entries_updated, 1);
+    assert!(appended.reduction.claims_resolved <= worker.limits.max_claims_per_observation);
     let warm_projection = reader_projection(&fixture, &warm).await;
     assert_eq!(
         warm_projection
@@ -113,6 +119,7 @@ async fn warm_append_after(records: usize) -> usize {
     cold.close().await;
     warm.close().await;
     fixture.evidence.close().await;
+    assert!(appended.reduction.dependency_references_indexed > 0);
     appended.reader_rows_materialized
 }
 

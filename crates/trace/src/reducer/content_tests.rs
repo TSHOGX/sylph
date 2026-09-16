@@ -361,7 +361,7 @@ fn assert_topology(reduced: &Reduction) {
     assert_eq!(value.predecessor, Some(entry("before")));
     assert_eq!(
         reduced.histories[&owner("root")].selected_entries,
-        Some(vec![entry("before"), entry("answer")])
+        Some(imbl::vector![entry("before"), entry("answer")])
     );
 }
 

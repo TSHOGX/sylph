@@ -146,7 +146,7 @@ fn a_selected_predecessor_requires_reconciling_its_selected_detail_collections()
     let (owner, history) = before.histories.iter().next().unwrap();
     let selection =
         SelectionRef::native(owner.clone(), "selection", vec!["pinned".into()]).unwrap();
-    let members = Some(history.archive_order.clone());
+    let members = Some(history.archive_order.iter().cloned().collect());
     for reduction in [&mut before, &mut after] {
         reduction
             .selection_memberships

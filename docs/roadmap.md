@@ -288,6 +288,16 @@ operations derive their witnesses from the exact retained claim snapshot when ne
 This removes a repeated mapping-input cost while full semantic reduction and general
 reconciliation remain open.
 
+The reducer now uses persistent ordered maps/vectors for growing semantic state and keeps
+an indexed pending-claim set. A fresh complete tail can resolve directly when its nested
+references, corrections, selections and source extents prove no older value can change;
+the resolver emits a typed delta and work counters without running the full oracle. Missing
+predecessors, deferred corrections/equivalences, selected-source completion, sibling/order
+changes and dependency-budget exhaustion fall back to the full deterministic reduction.
+The 20/200 tail oracle suite compares every reduction to the full resolver, including
+restart and redelivery; full 2000-record production scaling and direct delta scheduling
+remain open.
+
 Open implementation/acceptance work remains in the ordered list above. In particular,
 `crates/server/src/trace/worker/reading.rs` still materializes general reconciliation from
 the whole reduction. Tail proof evaluation also scans semantic metadata; constant row
