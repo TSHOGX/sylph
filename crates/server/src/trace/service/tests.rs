@@ -376,3 +376,130 @@ async fn failed_new_views_release_capacity_without_expiring_borrowed_or_retained
         .is_err());
     close(service).await;
 }
+
+#[tokio::test]
+async fn failed_view_cleanup_survives_the_request_runtime_being_destroyed() {
+    let directory = tempfile::tempdir().unwrap();
+    let service = TraceService::open(directory.path()).await.unwrap();
+    let guard = service
+        .lease_guard("temporary-runtime-reader", None)
+        .await
+        .unwrap();
+    let token = guard.token.clone();
+    tokio::task::spawn_blocking(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        // There is deliberately no yield after drop. Tokio never polls a spawned
+        // task synchronously, and this request runtime is destroyed immediately.
+        runtime.block_on(async move {
+            drop(guard);
+        });
+        drop(runtime);
+    })
+    .await
+    .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while service
+            .catalogue
+            .resolve_lease("temporary-runtime-reader", &token, crate::models::now_ms())
+            .await
+            .is_ok()
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("lease cleanup must outlive the request's temporary runtime");
+    close(service).await;
+}
+
+#[tokio::test]
+async fn bootstrap_cancellation_before_its_final_read_releases_the_unreturned_view() {
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use sqlx::{sqlite::SqliteConnectOptions, Connection, SqliteConnection};
+    use tower::ServiceExt;
+    let directory = tempfile::tempdir().unwrap();
+    let environment = [
+        ("HOME".into(), directory.path().display().to_string()),
+        ("SYLPH_HOME".into(), directory.path().display().to_string()),
+    ]
+    .into();
+    let resolved = crate::config::Resolved::from_parts(&environment, &Default::default(), false);
+    let mut config = crate::config::Config::from_resolved(&resolved);
+    config.cookie_secret = "lease-test".into();
+    let state = crate::AppState::build(config).await.unwrap();
+    admit_native(&state.trace).await;
+    state.trace.project_pending().await.unwrap();
+    let agent = AgentRef::Session(SessionId::decode("env7fk2:codex:response-user").unwrap());
+    let route = format!("/api/v1/trace/agents/{}", agent.encode());
+    let request = || {
+        Request::builder()
+            .uri(&route)
+            .header("host", "localhost")
+            .header("cookie", "sylph_session=lease-test")
+            .body(Body::empty())
+            .unwrap()
+    };
+    let entered = Arc::new(Notify::new());
+    let resume = Arc::new(Notify::new());
+    *state.trace.bootstrap_response_pause.lock().await = Some((entered.clone(), resume));
+    let app = crate::router(state.clone());
+    let task = tokio::spawn(app.clone().oneshot(request()));
+    tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+        .await
+        .expect("bootstrap must reach its last read");
+    let mut reader = SqliteConnection::connect_with(
+        &SqliteConnectOptions::new()
+            .filename(state.config.data_dir.join("evidence.db"))
+            .read_only(true),
+    )
+    .await
+    .unwrap();
+    let token: String = sqlx::query_scalar(
+        "SELECT lease_id FROM trace_view_leases WHERE subject='bootstrap' AND state='active'",
+    )
+    .fetch_one(&mut reader)
+    .await
+    .unwrap();
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while state
+            .trace
+            .catalogue
+            .resolve_lease("bootstrap", &token, crate::models::now_ms())
+            .await
+            .is_ok()
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("a cancelled response must not retain its unreturned view");
+
+    let response = app.oneshot(request()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let response: ReaderBootstrap = serde_json::from_slice(&bytes).unwrap();
+    assert!(
+        state
+            .trace
+            .catalogue
+            .resolve_lease("bootstrap", &response.view.token, crate::models::now_ms())
+            .await
+            .is_ok(),
+        "successful bootstrap transfers its view to the client"
+    );
+    state
+        .trace
+        .release_lease("bootstrap", &response.view.token)
+        .await
+        .unwrap();
+}

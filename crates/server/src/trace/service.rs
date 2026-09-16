@@ -54,8 +54,11 @@ pub struct TraceService {
     recovery: Arc<RwLock<Option<String>>>,
     gc: TraceGarbageCollector,
     reprojection_wake: Arc<Notify>,
+    lease_cleanup_runtime: tokio::runtime::Handle,
     #[cfg(test)]
     reprojection_pause: ReprojectionPause,
+    #[cfg(test)]
+    pub(crate) bootstrap_response_pause: ReprojectionPause,
 }
 
 /// A newly reserved view belongs to its request until the successful response
@@ -88,6 +91,7 @@ impl LeaseGuard {
 }
 struct LeaseRelease {
     catalogue: EvidenceCatalogue,
+    runtime: tokio::runtime::Handle,
     subject: String,
     token: String,
     armed: AtomicBool,
@@ -97,13 +101,14 @@ impl Drop for LeaseRelease {
         if !self.armed.load(Ordering::Relaxed) {
             return;
         }
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            return;
-        };
         let catalogue = self.catalogue.clone();
         let subject = self.subject.clone();
         let token = self.token.clone();
-        runtime.spawn(async move {
+        // Search owns a temporary current-thread runtime on a blocking worker.
+        // Spawning there would lose this task when that request runtime drops:
+        // Tokio shutdown does not drain spawned async work. The application's
+        // runtime, captured when the trace service opens, owns lease cleanup.
+        self.runtime.spawn(async move {
             if let Err(error) = catalogue.expire_lease(&subject, &token).await {
                 tracing::debug!(%error,"failed request view release could not finish");
             }
@@ -196,8 +201,11 @@ impl TraceService {
             recovery: Arc::new(RwLock::new(None)),
             gc,
             reprojection_wake: Arc::new(Notify::new()),
+            lease_cleanup_runtime: tokio::runtime::Handle::current(),
             #[cfg(test)]
             reprojection_pause: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            bootstrap_response_pause: Arc::new(Mutex::new(None)),
         };
         service
             .catalogue
@@ -498,6 +506,7 @@ impl TraceService {
     fn pending_release(&self, subject: &str, token: &str) -> LeaseRelease {
         LeaseRelease {
             catalogue: self.catalogue.clone(),
+            runtime: self.lease_cleanup_runtime.clone(),
             subject: subject.into(),
             token: token.into(),
             armed: AtomicBool::new(true),

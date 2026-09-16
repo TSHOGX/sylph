@@ -1102,8 +1102,12 @@ pub async fn bootstrap(
     let control = crate::api::controls::control_availability(&state, &subject.0, &agent)
         .await
         .map_err(operational)?;
-    lease.retain();
-    Ok(Json(ReaderBootstrap {
+    #[cfg(test)]
+    if let Some((entered, resume)) = state.trace.bootstrap_response_pause.lock().await.take() {
+        entered.notify_one();
+        resume.notified().await;
+    }
+    let response = ReaderBootstrap {
         view: read_view(&lease),
         header,
         window,
@@ -1127,7 +1131,11 @@ pub async fn bootstrap(
         },
         control,
         authorization_scope: subject.0.clone(),
-    }))
+    };
+    // Ownership moves only after every fallible read completes. Cancellation
+    // during response assembly still leaves the guard responsible for cleanup.
+    lease.retain();
+    Ok(Json(response))
 }
 
 async fn page<T: serde::de::DeserializeOwned + Serialize>(
