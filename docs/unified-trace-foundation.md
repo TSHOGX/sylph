@@ -66,7 +66,7 @@ detail but cannot replace core identity, ownership, ordering, or outcome fields.
 | Delivery | One attempt/occurrence of routing a Message revision; `delivery_ref`, sender, recipient, message revision, route and stage evidence |
 | Operation | One invocation; `operation_ref`, owner agent, typed requester, optional known activation, category, input revision, result occurrences, own lifecycle |
 | Resource | An identified entity that outlives an invocation; `resource_ref`, creator/host if known, kind, independently observed state |
-| HistoryEntry | One native or observed history position; `entry_ref`, containing agent, content/operation/checkpoint references, predecessor and original-owner evidence |
+| HistoryEntry | One native or observed history position; `entry_ref`, containing agent, predecessor and original-owner evidence; immutable content observations bind its ordered slots separately |
 | HistorySelection | An immutable head or included membership description, and a separate observation selecting it for an agent |
 | ContextCheckpoint | What context is known at a boundary; owner, included references or opaque replacement, basis and coverage |
 | Measurement | A reported quantity; identity, scope, metric, unit, interval/counter domain, value, reporting evidence |
@@ -335,6 +335,20 @@ one predecessor are alternative paths, not duplicate user inputs. Native files c
 hold non-history telemetry, so source record offset is not automatically a history-entry
 ordinal. Adapter specs define the conversion and whether boundaries include the header.
 
+Entry topology and observed content are separate facts. A content observation names the
+entry, exact source position, mapping rule, ordered slot bindings and their completeness.
+Its ClaimRef identifies the immutable observation; each slot references a message
+revision, operation, checkpoint or opaque payload. Slots use the mapper's stable
+structural coordinates, never a body digest or revision identity. Keep bindings from one
+observation grouped: combining unrelated partial observations cannot manufacture a
+complete content sequence that no source observed. No observation means unknown content;
+an explicit complete empty observation establishes an empty entry.
+
+Reobserving one proved native entry may add distinct immutable content revisions without
+changing its predecessor graph. Content disagreement therefore cannot remove the entry
+or its descendants. Different messages or incompatible content within one slot remain
+explicit alternatives/conflicts, with their observation evidence available for inspection.
+
 A HistorySelection contains a typed `EntryPath(head_entry_ref)` / `EntrySet(entry_refs)`
 or ordered `SourceExtent(source_ref, generation, coordinate, start_inclusive,
 end_exclusive, mapping_rule, original_owner)` values, plus excluded branches when known.
@@ -347,6 +361,24 @@ operation into child-local identity, configuration, or execution. A separate obs
 previous immutable selections; implementations index membership rather than recursively
 loading an entire lineage on every query. Selection, source file generation, and context
 checkpoint each have their own identity.
+
+Selected membership retains eligible content-observation references as well as entry
+references. A source extent admits only the content observations proved at its selected
+source positions and mapping rule. Inherited selections preserve those bindings; they
+cannot expand to every later observation of an inherited entry. An entry path or set
+can carry an explicit observation scope when a vendor snapshot supplies one. A bare
+head/path establishes topology only: the reader considers observed alternatives at its
+query cut and does not claim a source-selected content revision. A retained query snapshot
+pins both topology and content bindings.
+
+Readable presentation is separate from revision identity. After restricting candidates
+to the selected bindings and one proved Message identity, explicit append, replacement,
+final and correction rules apply. Otherwise competing complete candidates can provide
+one readable value only when their ordered kinds, MIME types, encodings, immutable
+payload descriptors and completeness agree. Pick a deterministic eligible representative
+for rendering while retaining every revision and proof; this creates no equivalence or
+content-based identity. Unknown descriptors remain unknown, differing values remain
+conflicted, and distinct messages/deliveries remain distinct even when bytes match.
 
 Selecting another branch or reverting does not delete old work, change its author, or
 create a new AgentThread. Default selected-history reads exclude discarded suffixes;

@@ -252,7 +252,7 @@ contract; the exact Rust member spelling is defined once in the protocol impleme
 | Identity equivalences | Typed endpoints and proof; reversible derived equivalence classes; no destructive owner rewrite |
 | Agents, activations, messages, deliveries | Foundation object keys and owning references; message revision and delivery attempt indexed separately |
 | Operations, result occurrences, resources | Invocation/result/resource keys; explicit requester, activation and lifetime references |
-| History entries, selections, context checkpoints | Predecessor adjacency, selected-head claims, immutable membership extents and original ownership |
+| History entries, content observations, selections, context checkpoints | Independent predecessor adjacency; immutable content observations grouped by entry/source/slot; selected entry and observation membership; original ownership |
 | Measurements | Scope/metric/mode/counter-domain keys; series position uniqueness; no unqualified total column |
 | Diagnostics and coverage | Subject/source/dimension/interval, state/reason, evidence; structured conflict alternatives |
 | Query summaries and memberships | Object reference, `valid_from`, `valid_to`, selection/order/membership, bounded preview, immutable body revision refs |
@@ -269,6 +269,14 @@ agent edges by source/relation and target/relation; deliveries by recipient and 
 measurement samples by subject/metric/domain/position. Claims have subject/kind and
 evidence reverse indexes. Temporal tables additionally index current rows and the bounded
 validity predicates used by snapshot pages.
+
+History content indexes lead with entry and stable slot, and separately with source,
+generation, position and mapping rule. Reverse bindings connect revisions to their
+content observations and observations to selections. An agreeing observation can add
+provenance without rebuilding topology. A content change invalidates affected reading
+rows, parts, payload authorization anchors and search membership together. Rendering
+and selected-object authorization consume the same selected binding set; a source-bound
+view cannot render one revision while authorizing another source's unselected revision.
 
 No request discovers all siblings by decoding payloads, walks all ancestors to open one
 agent, counts entities by rescanning source JSON, or builds a full execution tree in the
