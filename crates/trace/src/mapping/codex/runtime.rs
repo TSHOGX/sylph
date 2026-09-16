@@ -2,6 +2,7 @@
 //! source and model tool names never establish which nested calls actually executed.
 use super::*;
 use base64::Engine;
+mod protocol_event;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(super) struct RuntimeState {
@@ -195,6 +196,7 @@ impl Context<'_, '_> {
         }
         let first_claim = self.output.claims.len();
         match kind {
+            "protocol_event_observed" => self.protocol_boundary(&owner, value, payload),
             "rollout_started" | "thread_started" => {
                 self.announce_agent(&owner, &Value::Null, true);
             }
@@ -600,17 +602,43 @@ impl Context<'_, '_> {
                         "codex/runtime-activation-start",
                         Fact::Execution {
                             execution: ExecutionRef::Activation(reference),
-                            boundary: ExecutionBoundary::Started { time: stamp },
+                            boundary: ExecutionBoundary::Started { time: None },
                         },
                     );
                 } else {
-                    self.close(
+                    // The pinned trace emitter maps every TurnComplete to completed,
+                    // including errors, and collapses every abort reason to cancelled.
+                    // Its wrapper timestamp is receipt timing. The retained EventMsg
+                    // supplies the actual outcome, reason and execution endpoints.
+                    self.add(
                         &owner,
-                        ExecutionRef::Activation(reference),
-                        runtime_outcome(string(payload, "status")),
-                        stamp,
-                        None,
+                        "codex/runtime-activation-ended",
+                        Fact::Execution {
+                            execution: ExecutionRef::Activation(reference.clone()),
+                            boundary: ExecutionBoundary::Terminated {
+                                time: None,
+                                reason: None,
+                            },
+                        },
                     );
+                    // The pinned rollout-trace ExecutionStatus contract also admits failed/aborted
+                    // runtime turn producers. The ordinary protocol_event adapter emits
+                    // only completed/cancelled, so those coarse wrapper values alone do
+                    // not establish an outcome; explicit status values do.
+                    if matches!(string(payload, "status"), Some("failed" | "aborted")) {
+                        self.add(
+                            &owner,
+                            "codex/runtime-explicit-outcome",
+                            Fact::Execution {
+                                execution: ExecutionRef::Activation(reference),
+                                boundary: ExecutionBoundary::Outcome {
+                                    outcome: runtime_outcome(string(payload, "status")),
+                                    reason: None,
+                                    detail: None,
+                                },
+                            },
+                        );
+                    }
                 }
             }
             "thread_ended" => {

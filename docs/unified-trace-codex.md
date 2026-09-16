@@ -228,6 +228,34 @@ image-generation, and tool-search records also remain operations/results even wh
 they have no ordinary `function_call` opener. Their payload types are preserved rather
 than flattened through a string-only tool result.
 
+## Runtime protocol observations
+
+Codex rollout traces wrap existing protocol observations in a `protocol_event_observed`
+record. The wrapper's `event_type` and captured EventMsg payload are both required:
+turn identity comes from the payload's own `turn_id`, and seconds-resolution timestamps
+remain distinct from receipt time. A coarse trace runtime boundary never overrides a
+payload's explicit failure or interruption evidence. Missing payloads block semantic
+mapping; identity mismatches produce diagnostics and never create a second operation.
+The wrapper's `codex_turn_ended` status is an observation of the raw trace writer; the
+ordinary protocol-event adapter emits `completed` for `TurnComplete` and `cancelled` for
+abort reasons. Those coarse values do not establish a vendor outcome or execution endpoint.
+An explicit `failed`/`aborted` runtime status is accepted only where the pinned trace
+`ExecutionStatus` contract supplies it, and endpoint times remain the retained EventMsg
+fields rather than wrapper receipt time.
+
+The raw trace runtime records code-cell start, yielded/initial response, terminal response,
+nested tool requester and runtime incarnation. A code-cell handle can be reused after a
+thread reopen, so resource identity includes the trace rollout incarnation. A nested
+wait or terminal poll is linked only when the corresponding cell/process creation is
+retained; equal handle text alone is insufficient. Caller-facing tool results and raw
+runtime output remain separate representations.
+
+A raw child-to-parent result observation, when retained, remains separate from child
+activation and turn claims until its explicit child and parent identities are available.
+`collabAgentToolCall`
+items use camelCase names in the live app-server and snake_case in native rollout records;
+that transport distinction is part of the vendor contract.
+
 ## Delegation and long-running work
 
 Spawn, follow-up, message, wait, interruption, and close are different operation kinds:

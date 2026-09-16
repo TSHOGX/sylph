@@ -67,7 +67,7 @@ fn map(
                         availability: AttachmentAvailability::Captured,
                         relation: "runtime".into(),
                     },
-                    evidence: vec![capture.observation_ref.clone()],
+                    evidence: vec![capture.observation_ref.clone(),self::capture(seq+1000).observation_ref],
                 }],
                 bytes: Some(serde_json::to_vec(&value).unwrap()),
                 limited: false,
@@ -411,4 +411,201 @@ fn initial_code_cell_response_remains_runtime_bytes_before_caller_formatting() {
         )),
     );
     assert!(caller.claims.iter().any(|claim|matches!(&claim.fact,Fact::Declare {object:TraceObject::Result(result)} if result.representation==Representation::CallerResult)));
+}
+
+
+fn captured_protocol_event(kind: &str) -> Value {
+    let fixture = if kind == "turn_aborted" {
+        include_str!("../../../../../../fixtures/native/codex/turn-aborted-interrupted.jsonl")
+    } else {
+        include_str!(
+            "../../../../../../fixtures/native/codex/ordinary-turn-item-completed-era.jsonl"
+        )
+    };
+    fixture
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|value| value.pointer("/payload/type").and_then(Value::as_str) == Some(kind))
+        .unwrap()["payload"]
+        .clone()
+}
+fn wrapped_protocol(event_type: &str) -> Value {
+    // record_protocol_event serializes this exact EventMsg as event_payload. The
+    // outer type is the rollout-trace contract, not an app-server notification.
+    json!({"schema_version":1,"seq":1,"rollout_id":"rollout-a","thread_id":"root","codex_turn_id":null,"wall_time_unix_ms":9999,"payload":{"type":"protocol_event_observed","event_type":event_type,"event_payload":{"raw_payload_id":"event","kind":{"type":"protocol_event"},"path":"event.json"}}})
+}
+
+#[test]
+fn wrapped_recorded_turn_boundaries_keep_native_ids_seconds_and_reported_duration() {
+    let start = captured_protocol_event("task_started");
+    let finish = captured_protocol_event("task_complete");
+    let started = map(
+        1,
+        wrapped_protocol("turn_started"),
+        &MapperState::default(),
+        Some(("event_payload", start.clone())),
+    );
+    let ended = map(
+        2,
+        wrapped_protocol("turn_complete"),
+        &started.state,
+        Some(("event_payload", finish.clone())),
+    );
+    let reference = super::super::activation(&agent("root"), start["turn_id"].as_str().unwrap());
+    assert!(started.claims.iter().any(|claim|matches!(&claim.fact,Fact::Execution {execution:ExecutionRef::Activation(id),boundary:ExecutionBoundary::Started {time:Some(time)}} if id==&reference && time.value==start["started_at"].as_i64().unwrap() && time.unit==TimeUnit::Seconds)));
+    assert!(ended.claims.iter().any(|claim|matches!(&claim.fact,Fact::Execution {execution:ExecutionRef::Activation(id),boundary:ExecutionBoundary::Outcome {outcome:TerminalOutcome::Succeeded,..}} if id==&reference)));
+    assert!(ended.claims.iter().any(|claim|matches!(&claim.fact,Fact::Declare {object:TraceObject::Measurement(measurement)} if measurement.subject==AnyObjectRef::Activation(reference.clone()) && measurement.value==finish["duration_ms"].as_number().unwrap().clone())));
+    assert!(!ended.claims.iter().any(|claim| matches!(
+        claim.fact,
+        Fact::DeliveryStage { .. }
+            | Fact::Declare {
+                object: TraceObject::Message(_)
+            }
+    )));
+}
+
+#[test]
+fn wrapped_abort_needs_its_own_turn_identity_and_keeps_the_native_reason() {
+    let aborted = captured_protocol_event("turn_aborted");
+    let output = map(
+        1,
+        wrapped_protocol("turn_aborted"),
+        &MapperState::default(),
+        Some(("event_payload", aborted.clone())),
+    );
+    assert!(output.claims.iter().any(|claim|matches!(&claim.fact,Fact::Execution {execution:ExecutionRef::Activation(id),boundary:ExecutionBoundary::Outcome {outcome:TerminalOutcome::Interrupted,..}} if id==&super::super::activation(&agent("root"),aborted["turn_id"].as_str().unwrap()))));
+    assert!(output.claims.iter().any(|claim|matches!(&claim.fact,Fact::Execution {boundary:ExecutionBoundary::Outcome {reason:Some(ExecutionCloseReason::Extension {namespace,code}),detail:Some(_),..},..} if namespace=="codex.turn-abort" && code=="interrupted")));
+    let mut missing = aborted;
+    missing.as_object_mut().unwrap().remove("turn_id");
+    let mut wrapper = wrapped_protocol("turn_aborted");
+    wrapper["codex_turn_id"] = json!("unrelated-envelope-turn");
+    let output = map(
+        2,
+        wrapper,
+        &MapperState::default(),
+        Some(("event_payload", missing)),
+    );
+    assert!(!output
+        .claims
+        .iter()
+        .any(|claim| matches!(claim.fact, Fact::Execution { .. })));
+    assert!(output.claims.iter().any(|claim|matches!(&claim.fact,Fact::Diagnostic {diagnostic} if diagnostic.code==DiagnosticCode::MissingOwner)));
+}
+
+#[test]
+fn wrapped_protocol_checks_its_event_type_and_explicit_turn_scope() {
+    let event = captured_protocol_event("turn_aborted");
+    for mismatch in ["kind", "turn"] {
+        let mut wrapper = wrapped_protocol(if mismatch == "kind" {
+            "turn_complete"
+        } else {
+            "turn_aborted"
+        });
+        if mismatch == "turn" {
+            wrapper["codex_turn_id"] = json!("another-turn");
+        }
+        let output = map(
+            1,
+            wrapper,
+            &MapperState::default(),
+            Some(("event_payload", event.clone())),
+        );
+        assert!(
+            !output
+                .claims
+                .iter()
+                .any(|claim| matches!(claim.fact, Fact::Execution { .. })),
+            "{mismatch}"
+        );
+        assert!(output.claims.iter().any(|claim|matches!(&claim.fact,Fact::Diagnostic {diagnostic} if matches!(diagnostic.code,DiagnosticCode::ConflictingOwner|DiagnosticCode::DecodeFailure))),"{mismatch}");
+    }
+}
+
+#[test]
+fn raw_turn_end_cannot_mask_the_error_preserved_only_in_its_protocol_payload() {
+    let mut event = captured_protocol_event("task_complete");
+    event["error"] = json!({"message":"recorded provider failure","codex_error_info":"other"});
+    let raw = json!({"schema_version":1,"seq":1,"rollout_id":"rollout-a","thread_id":"root","codex_turn_id":event["turn_id"],"wall_time_unix_ms":9999,"payload":{"type":"codex_turn_ended","codex_turn_id":event["turn_id"],"status":"completed"}});
+    let coarse = map(1, raw.clone(), &MapperState::default(), None);
+    assert!(
+        !coarse.claims.iter().any(|claim| matches!(
+            claim.fact,
+            Fact::Execution {
+                boundary: ExecutionBoundary::Outcome { .. },
+                ..
+            }
+        )),
+        "the vendor emits completed even when TurnComplete carries error"
+    );
+    let mut failed = raw;
+    failed["payload"]["status"] = json!("failed");
+    let explicit = map(3, failed, &MapperState::default(), None);
+    assert!(explicit.claims.iter().any(|claim| matches!(
+        claim.fact,
+        Fact::Execution {
+            boundary: ExecutionBoundary::Outcome {
+                outcome: TerminalOutcome::Failed,
+                ..
+            },
+            ..
+        }
+    )));
+    let exact = map(
+        2,
+        wrapped_protocol("turn_complete"),
+        &coarse.state,
+        Some(("event_payload", event)),
+    );
+    assert!(exact.claims.iter().any(|claim| matches!(
+        claim.fact,
+        Fact::Execution {
+            boundary: ExecutionBoundary::Outcome {
+                outcome: TerminalOutcome::Failed,
+                ..
+            },
+            ..
+        }
+    )));
+}
+
+#[test]
+fn wrapped_boundaries_wait_for_retained_payload_and_cite_its_distinct_observation() {
+    let event = captured_protocol_event("task_complete");
+    let wrapper = wrapped_protocol("turn_complete");
+    let pending = map(1, wrapper.clone(), &MapperState::default(), None);
+    assert!(pending.blocks_source);
+    assert!(pending.claims.is_empty());
+    assert_eq!(
+        pending.requests,
+        vec![ArchiveRequest::CapturedPayload {
+            parent: capture(1).observation_ref,
+            slot: "/payload/event_payload".into()
+        }]
+    );
+    let mut error = event;
+    error["error"] = json!({"message":"retained error","codex_error_info":"other"});
+    let admitted = map(
+        1,
+        wrapper,
+        &MapperState::default(),
+        Some(("event_payload", error)),
+    );
+    assert!(admitted.requests.is_empty());
+    assert!(!admitted.blocks_source);
+    let sidecar = capture(1001).observation_ref;
+    assert!(admitted
+        .claims
+        .iter()
+        .filter(|claim| matches!(claim.fact, Fact::Execution { .. }))
+        .all(|claim| claim.evidence.contains(&sidecar)));
+    let detail = admitted
+        .payloads
+        .iter()
+        .find(|payload| {
+            serde_json::from_slice::<Value>(&payload.bytes)
+                .is_ok_and(|value| value["message"] == "retained error")
+        })
+        .unwrap();
+    assert!(detail.evidence.contains(&sidecar));
+    assert_eq!(detail.selector, "/payload/event_payload/error");
 }
