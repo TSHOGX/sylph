@@ -214,16 +214,27 @@ impl Context<'_, '_> {
             return;
         };
         let tool = string(item, "tool").unwrap_or("");
-        let category = match tool {
-            "spawn_agent" => OperationCategory::Delegation,
-            "wait" => OperationCategory::Wait,
-            "send_input" | "send_message" | "followup_task" | "interrupt_agent" | "close_agent"
-            | "resume_agent" => OperationCategory::Communication,
+        // The app-server enum uses camelCase; native TurnItem serialization uses
+        // snake_case. These are two vendor contracts, not interchangeable aliases.
+        let category = match (live, tool) {
+            (true, "spawnAgent") | (false, "spawn_agent") => OperationCategory::Delegation,
+            (_, "wait") => OperationCategory::Wait,
+            (
+                true,
+                "sendInput" | "sendMessage" | "followupTask" | "interruptAgent" | "closeAgent"
+                | "resumeAgent",
+            )
+            | (
+                false,
+                "send_input" | "send_message" | "followup_task" | "interrupt_agent" | "close_agent"
+                | "resume_agent",
+            ) => OperationCategory::Communication,
             _ => OperationCategory::Extension {
                 namespace: "codex.collaboration".into(),
                 name: tool.into(),
             },
         };
+        let spawns = matches!(category, OperationCategory::Delegation);
         let operation =
             OperationRef::native(owner.clone(), "codex.collaboration-item", vec![id.into()])
                 .unwrap();
@@ -314,9 +325,7 @@ impl Context<'_, '_> {
                 let Some(child) = self.agent(target) else {
                     continue;
                 };
-                let relation = if tool == "spawn_agent"
-                    && !started
-                    && string(item, "status") == Some("completed")
+                let relation = if spawns && !started && string(item, "status") == Some("completed")
                 {
                     self.declare(
                         &owner,

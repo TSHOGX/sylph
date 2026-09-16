@@ -43,7 +43,7 @@ impl Context<'_, '_> {
         slot: &str,
         payload: Option<PayloadRef>,
         disposition: ResultDisposition,
-        recipient: Option<Recipient>,
+        representation: Representation,
     ) {
         self.declare(
             owner,
@@ -56,9 +56,9 @@ impl Context<'_, '_> {
                 )
                 .unwrap(),
                 operation: operation.clone(),
-                recipient,
+                recipient: None,
                 disposition,
-                representation: Representation::Runtime,
+                representation,
                 payload,
                 delivery: None,
             }),
@@ -299,7 +299,11 @@ impl Context<'_, '_> {
                     "codex/cell-result",
                     body,
                     disposition,
-                    None,
+                    if kind == "code_cell_initial_response" {
+                        Representation::CallerResult
+                    } else {
+                        Representation::Runtime
+                    },
                 );
                 let state = match status {
                     "starting" | "running" => ResourceState::Running,
@@ -510,7 +514,7 @@ impl Context<'_, '_> {
                 )
                 .unwrap();
                 if let Some(runtime) = self.raw_payload_value("runtime_payload") {
-                    self.mapped_runtime_payload(&owner, &operation, &runtime);
+                    self.mapped_runtime_payload(&owner, &operation, &runtime, true, id);
                 }
             }
             "tool_call_ended" | "tool_call_runtime_ended" => {
@@ -530,7 +534,7 @@ impl Context<'_, '_> {
                 };
                 if kind == "tool_call_runtime_ended" {
                     if let Some(runtime) = self.raw_payload_value(field) {
-                        self.mapped_runtime_payload(&owner, &reference, &runtime);
+                        self.mapped_runtime_payload(&owner, &reference, &runtime, false, id);
                     }
                 }
                 let mut body = self.raw_payload(
@@ -554,7 +558,11 @@ impl Context<'_, '_> {
                     "codex/runtime-tool-return",
                     body,
                     ResultDisposition::FinalReturn,
-                    None,
+                    if kind == "tool_call_ended" {
+                        Representation::CallerResult
+                    } else {
+                        Representation::Runtime
+                    },
                 );
                 if kind == "tool_call_ended" {
                     self.close(
@@ -637,23 +645,94 @@ impl Context<'_, '_> {
         owner: &AgentRef,
         operation: &OperationRef,
         value: &Value,
+        started: bool,
+        call_id: &str,
     ) {
-        let Some(kind) = string(value, "type") else {
+        if string(value, "call_id").or_else(|| string(value, "event_id")) != Some(call_id) {
+            self.issue(
+                owner,
+                "codex/runtime-call-mismatch",
+                DiagnosticCode::ConflictingOwner,
+                "Runtime payload identity differs from its captured tool boundary",
+            );
+            return;
+        }
+        // ToolRuntimePayload's custom Serialize implementation writes the bare
+        // protocol struct. Its surrounding raw event owns the begin/end boundary.
+        // Exec end still contains command, and synchronous exec omits process_id;
+        // neither field can distinguish the lifecycle phase. Collaboration payload
+        // structs have disjoint required fields, including a nullable new_thread_id.
+        let kind = if value.get("command").is_some_and(Value::is_array)
+            && string(value, "call_id").is_some()
+        {
+            Some(if started {
+                "exec_command_begin"
+            } else {
+                "exec_command_end"
+            })
+        } else if string(value, "sender_thread_id").is_some() {
+            if value.get("new_thread_id").is_some()
+                || (started && value.get("model").is_some() && value.get("prompt").is_some())
+            {
+                Some(if started {
+                    "collab_agent_spawn_begin"
+                } else {
+                    "collab_agent_spawn_end"
+                })
+            } else if value.get("receiver_thread_ids").is_some() || value.get("statuses").is_some()
+            {
+                Some(if started {
+                    "collab_waiting_begin"
+                } else {
+                    "collab_waiting_end"
+                })
+            } else if value.get("receiver_thread_id").is_some() && value.get("prompt").is_some() {
+                Some(if started {
+                    "collab_agent_interaction_begin"
+                } else {
+                    "collab_agent_interaction_end"
+                })
+            } else if value.get("receiver_thread_id").is_some() {
+                Some(if started {
+                    "collab_close_begin"
+                } else {
+                    "collab_close_end"
+                })
+            } else {
+                None
+            }
+        } else if value.get("changes").is_some_and(Value::is_object)
+            && value
+                .get(if started { "auto_approved" } else { "success" })
+                .is_some_and(Value::is_boolean)
+        {
+            Some(if started {
+                "patch_apply_begin"
+            } else {
+                "patch_apply_end"
+            })
+        } else if value.get("invocation").is_some_and(Value::is_object) {
+            Some(if started {
+                "mcp_tool_call_begin"
+            } else {
+                "mcp_tool_call_end"
+            })
+        } else if string(value, "event_id").is_some() && string(value, "agent_thread_id").is_some()
+        {
+            Some("sub_agent_activity")
+        } else {
+            None
+        };
+        let Some(kind) = kind else {
             self.issue(
                 owner,
                 "codex/runtime-event-shape",
                 DiagnosticCode::DecodeFailure,
-                "Retained runtime protocol payload has no type",
+                "Retained runtime protocol payload has no recognizable envelope",
             );
             return;
         };
-        if matches!(
-            kind,
-            "exec_command_begin"
-                | "exec_command_end"
-                | "exec_command_output_delta"
-                | "terminal_interaction"
-        ) {
+        if matches!(kind, "exec_command_begin" | "exec_command_end") {
             self.core_runtime(owner, kind, value);
             if let Some(id) = string(value, "call_id") {
                 let incarnation = format!(
@@ -680,12 +759,126 @@ impl Context<'_, '_> {
             }
         } else if kind.starts_with("collab_") {
             self.collaboration_event(owner, kind, value);
+        } else if kind == "sub_agent_activity" {
+            // This snapshot identifies an affected peer, never its activation or
+            // spawn parent. The native item decoder enforces the same distinction.
+            let mut item = value.clone();
+            item["type"] = Value::String("SubAgentActivity".into());
+            self.item(owner, &item, false, false, None, &Value::Null);
         } else {
-            self.issue(
+            self.structured_runtime(owner, operation, value, started, kind);
+        }
+    }
+
+    fn structured_runtime(
+        &mut self,
+        owner: &AgentRef,
+        caller: &OperationRef,
+        value: &Value,
+        started: bool,
+        kind: &str,
+    ) {
+        let patch = kind.starts_with("patch_");
+        let category = if patch {
+            OperationCategory::Edit
+        } else {
+            let (Some(server), Some(tool)) = (
+                string(&value["invocation"], "server"),
+                string(&value["invocation"], "tool"),
+            ) else {
+                return;
+            };
+            OperationCategory::Tool {
+                namespace: Some(server.into()),
+                name: tool.into(),
+            }
+        };
+        let incarnation = format!(
+            "{}:{}",
+            self.input.capture.source_position.source.encode(),
+            self.input.capture.source_position.generation
+        );
+        let reference = OperationRef::native(
+            owner.clone(),
+            if patch {
+                "codex.patch-runtime"
+            } else {
+                "codex.mcp-runtime"
+            },
+            vec![incarnation, string(value, "call_id").unwrap().into()],
+        )
+        .unwrap();
+        let key = reference.encode();
+        let previous = self.state.runtime.operations.get(&key).cloned();
+        let definition = previous.unwrap_or_else(|| Operation {
+            operation_ref: reference.clone(),
+            owner: OwnerRef::Agent {
+                agent: owner.clone(),
+            },
+            activation: string(value, "turn_id").map(|id| super::activation(owner, id)),
+            requester: None,
+            category,
+            input_revision: None,
+            argument_state: ArgumentState::Sealed,
+        });
+        let mut definition = definition;
+        if started {
+            definition.input_revision = Some(self.opaque(value, "/payload/runtime_payload"));
+        }
+        self.declare(
+            owner,
+            "codex/structured-runtime",
+            TraceObject::Operation(definition.clone()),
+        );
+        self.state.runtime.operations.insert(key, definition);
+        self.add(
+            owner,
+            "codex/structured-runtime-nesting",
+            Fact::Relation {
+                relation: Relation::Nesting {
+                    enclosing: caller.clone(),
+                    nested: reference.clone(),
+                },
+            },
+        );
+        if started {
+            self.add(
                 owner,
-                "codex/runtime-event-kind",
-                DiagnosticCode::UnsupportedKind,
-                &format!("Retained runtime protocol event {kind:?} has no mapping"),
+                "codex/structured-runtime-start",
+                Fact::Execution {
+                    execution: ExecutionRef::Operation(reference),
+                    boundary: ExecutionBoundary::Started { time: None },
+                },
+            );
+        } else {
+            let body = self.opaque(value, "/payload/runtime_payload");
+            self.runtime_result(
+                owner,
+                &reference,
+                "codex/structured-runtime-result",
+                Some(body),
+                ResultDisposition::FinalReturn,
+                Representation::Runtime,
+            );
+            let outcome = if patch {
+                if value.get("success").and_then(Value::as_bool) == Some(false) {
+                    TerminalOutcome::Failed
+                } else {
+                    runtime_outcome(string(value, "status"))
+                }
+            } else if value["result"].get("Err").is_some() {
+                TerminalOutcome::Failed
+            } else if value["result"].get("Ok").is_some() {
+                TerminalOutcome::Succeeded
+            } else {
+                TerminalOutcome::Unknown
+            };
+            self.close(
+                owner,
+                ExecutionRef::Operation(reference),
+                outcome,
+                None,
+                None,
             );
         }
     }
@@ -732,7 +925,7 @@ impl Context<'_, '_> {
                     "codex/exec-output-delta",
                     Some(body),
                     ResultDisposition::Progress,
-                    None,
+                    Representation::Runtime,
                 );
             } else {
                 self.issue(
@@ -768,7 +961,9 @@ impl Context<'_, '_> {
         } else {
             reference
         };
-        let existing = self.state.runtime.operations.get(&key).cloned();
+        let existing = (kind != "terminal_interaction")
+            .then(|| self.state.runtime.operations.get(&key).cloned())
+            .flatten();
         let operation = existing.unwrap_or_else(|| Operation {
             operation_ref: reference.clone(),
             owner: OwnerRef::Agent {
@@ -899,7 +1094,7 @@ impl Context<'_, '_> {
                         &format!("codex/exec-{channel}"),
                         Some(body),
                         ResultDisposition::FinalReturn,
-                        None,
+                        Representation::Runtime,
                     );
                 }
             }
@@ -1023,8 +1218,11 @@ pub(super) fn map_goal_database(
     ));
     // The correlation records an observed native identifier, not objective equality.
     output.correlations.insert(
-        correlation_key(&owner, "codex.goal-id", &[id.clone()]),
+        correlation_key(&owner, "codex.goal-id", std::slice::from_ref(id)),
         AnyObjectRef::Resource(resource),
     );
     output
 }
+
+#[cfg(test)]
+mod tests;
