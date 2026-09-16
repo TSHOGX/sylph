@@ -9,15 +9,17 @@ needs them.
 
 ## Current baseline
 
-The server, web frontend, protocol crate, three adapters, and the SQLite journal and history
-store exist, and **every execution path runs through an envagent** — framing, credentials,
-path policy, WAL spooling, reconnect epochs, and adapter hosting, with no in-process seam
+The server, normalized trace reader, protocol crate, three acquisition adapters, and
+independent control/evidence/projection/search stores exist, and **every execution path
+runs through an envagent** — framing, credentials, path policy, WAL spooling, reconnect
+epochs, and adapter hosting, with no in-process seam
 beside it. A single-machine install is therefore two processes.
 
 Each store's schema is one collapsed migration rather than a chain
-(`docs/database-schema.md` § Schema evolution): there is no other consumer, and a journal is
-re-derivable from the vendors' own native stores, so discarding `~/.sylph/data` and
-re-adopting is the ordinary answer to a schema change.
+(`docs/database-schema.md` § Schema evolution): there is no other consumer, and
+projections are re-derivable from retained evidence. Discarding development stores and re-adopting is
+the ordinary answer to schema churn; a vendor reread cannot recover unique live bytes.
+No real store is erased as part of the implementation checkpoint.
 
 ## What remains
 
@@ -38,10 +40,10 @@ external proposals or discussion threads are not project instructions.
 
 | Boundary | Owner | State |
 | --- | --- | --- |
-| Unified trace replacement | Foundation review below | Capture, mapping/reduction and publication foundations implemented; runtime/read API cutover and complete conformance in progress |
-| Mixed-load delivery isolation | Milestone 4 | One ordered producer remains; independent producer channels require measured need and a complete lifecycle design |
-| Atomic retained re-projection publication | Foundation implementation below | Generation publication is specified; current endpoint remains unavailable |
-| Concurrent follower and reread identity | Foundation implementation below | Replace projected-content digests with shared source occurrence capture and explicit semantic joins |
+| Vendor trace semantics | Foundation implementation below | Runtime cutover is implemented; full vendor certificates, frozen Codex history-base expansion, and replay/mutation conformance remain open |
+| Trace rebuild product action | Foundation implementation below | Startup recovery and atomic publication are connected; no explicit retained-reprojection HTTP action is exposed |
+| Projection and delivery scale | Milestone 4 and foundation implementation below | Reader pages are bounded; whole-reduction reader materialization and mixed spool/socket/ACK load still need production measurements |
+| Reader acceptance | Conversation and work panel delivery below | Normalized reader is implemented; full visual/resource acceptance, VoiceOver and real iOS Safari remain open |
 
 ## Unified trace foundation review
 
@@ -64,21 +66,19 @@ production reducer. [Conformance](unified-trace-conformance.md) names their limi
 
 **Next implementation, in dependency order:**
 
-1. Connect the typed capture, evidence admission and control outbox foundations below to
-   the durable envagent source registry and runtime. Replace the event wire, remove
-   envagent semantic projection, and retain complete lexical native/live observations;
-   keep authorization, containment, spool integrity and workload isolation as gates.
-2. Implement pure vendor mappers and shared deterministic reduction against the new
-   corpus contract. Native/live complete-body pairs, transformed/queued input, missing
-   child sources and explicit lineage/ordinal witnesses remain required capture work.
-   Pi/Claude absent universal live/native or selected-head evidence stays explicitly
-   unknown; do not invent correlation to close the gate.
-3. Implement generation publication, reusable view leases, temporal membership/body
-   reads, search checkpoints and typed action routes. Validate real crash/concurrency,
-   in-flight writer fencing, high version-density query work and CAS/deletion boundaries.
-4. Integrate the three runtime adapters in parallel against the accepted core. Implement
-   the frontend only against its normalized read contract; validate responsive reading,
-   unknown states, accessibility, anchors and resource budgets without vendor inference.
+1. Finish vendor evidence and mapping conformance: frozen Codex history bases and
+   source-coordinate witnesses, complete runtime/delegation/accounting cases, remaining
+   source certificates and workflow/schedule coverage. Preserve unavailable Pi/Claude
+   joins and selected-head evidence as unknown.
+2. Prove cold/incremental/reread/interleaved/rebuilt equivalence with independently
+   authored expectations and the semantic mutations in the conformance contract.
+3. Measure the connected production pipeline under large retained histories, high
+   version density, concurrent captures, reconnects and deletion. Bound projection and
+   search rebuild work as well as returned pages. Expose a retained-reprojection action
+   when its authorization, cancellation and job lifecycle are complete.
+4. Complete reader visual, accessibility and scale acceptance against the normalized
+   contract, including manual VoiceOver and real iOS Safari. Synthetic layout fixtures
+   do not establish vendor semantic correctness or production delivery isolation.
 
 **Exit gate:** production cold/incremental/mixed-source conformance, demonstrated semantic
 mutations, storage failure/performance experiments, and complete affected runtime/frontend
@@ -104,15 +104,17 @@ occurrence reconciliation, permanent deletion receipts, immutable accepted input
 at-most-once dispatch ambiguity and a bounded outbox exporter. Chunk manifests are fixed
 before control acceptance, so large accepted inputs reach evidence without changing their
 receipt identity. Repeated source bytes at distinct positions remain separate; differing
-manifest layouts of the same occurrence compare their decoded bytes. These modules are
-the replacement foundation and are not yet the product runtime path.
+manifest layouts of the same occurrence compare their decoded bytes. These modules now
+back the product runtime; accepted controls and capture evidence have independent
+durability and one bounded outbox export path.
 
 The envagent capture registry now reserves physical sources durably, verifies the complete
 committed prefix, preserves rewrites as new generations and stages incomplete lexical
 tails. Complete-record cursor advancement, producer identity, fixed authorization epoch
 and chunked capture enqueue share one FULL transaction. Re-adoption recaptures the same
 source positions under its new epoch; concurrent readers cannot advance past one another's
-committed prefix. The new queue awaits the runtime wire cutover.
+committed prefix. The runtime now uploads this queue through the capture wire and
+processes durable receipts; vendor process bytes are spooled before control decoding.
 
 The pure `sylph-trace` library maps server controls and the initial Codex native/live
 surface, retaining decoded payload provenance and explicit archive-reference requests.
@@ -152,14 +154,50 @@ membership and reported usage. Controlled real captures establish a Claude succe
 and Pi failed settlement; successful Pi live capture remains unavailable from the tested
 provider, and no live/native certificate is invented.
 
-Remaining work: capture wire/runtime replacement and removal of block-era execution;
-full Codex history-base, delegation, runtime resource and accounting mappings; remaining
-vendor source certificates and workflow/schedule coverage; normalized typed read/action
-routes with projection-derived summaries and selected nested-object payload anchors;
-search checkpoints, control-input erasure and runtime job cancellation; frontend
-replacement, accessibility/scale verification and final production conformance. The new
-stores and workers are not yet the product API/runtime path. Existing event/block code is
-removed during that cutover; there is no dual-write or compatibility reader planned.
+### Runtime and reader cutover checkpoint
+
+The product path is now acquisition → durable capture/upload → evidence → pure mapping
+and reduction → published reading projection. The three runtime adapters retain process
+control, approvals, native inventory and exact byte acquisition; they no longer emit
+block-era semantic events. Source-state and late attachment observations preserve gaps,
+missing files and later payload availability without rewriting parent captures. Durable
+command receipts preserve at-most-once ambiguity through envagent restart.
+
+The server uses control metadata, evidence/CAS, generation and search stores. The old
+journal/history/native stores, event supervisor, block endpoints and compatibility
+readers are removed. Typed trace routes serve agent bootstrap, selected history,
+relations, object details, body parts/ranges, current controls, commands, search and
+multiplexed changes. Subject-bound views, selected-object payload anchors and current
+grants authorize reads independently of control permission. Search checkpoints pin
+matching result views; deletion invalidates views and removes accepted input through
+bounded erasure jobs. Startup recovery rebuilds a missing/corrupt published projection
+from retained evidence, and the product schedules garbage collection.
+
+Codex mapping now includes runtime operations/resources, collaboration events and goal
+metadata alongside native/live content and scoped accounting. This is implementation
+coverage, not a certificate for every vendor shape. Selected-rollout metadata establishes
+the current physical source extent; frozen multi-file history-base expansion is still
+unfinished. A reverted suffix must remain an unknown selection until its base is proved.
+The unused history-chain draft is excluded from this completed cutover checkpoint.
+
+The frontend now reads opaque agent references and normalized reading units at
+`frontend/app/agents/[ref]/page.tsx`. It provides agent/history/search inspection,
+explicit payload loading, operational command receipts and a composer using the exact
+control target. Shared bounded metadata/body caches, reusable view leases, virtualized
+history windows, stable reading anchors, paused corrections, hidden-reader subscription
+release and a paged assistive mode replace the old execution-tree client. Browser
+coverage includes a retained Codex corpus projected by the production mapper, separate
+synthetic layout fixtures, and actual server/envagent fixture execution.
+
+Open implementation/acceptance work remains in the ordered list above. In particular,
+`crates/server/src/trace/worker/reading.rs` currently materializes before/after readers
+from the whole reduction for a projection unit; bounded HTTP pages do not prove bounded
+incremental projection cost. Existing deletion/recovery tests also do not substitute for
+the full in-flight cancellation and crash matrix. A complete new production conformance
+run and semantic negative controls are required before declaring the replacement done.
+
+The milestone narratives below record earlier product delivery. Block-era implementation
+details are historical; the trace checkpoint above owns the replacement status.
 
 ## Milestone 1 — the envagent is the only path — complete
 
@@ -401,20 +439,18 @@ threat-model review.
 
 ## Conversation and work panel delivery
 
-The governing interaction is `docs/ui-layout.md` § Work panel and
-`docs/ui-layout.md` § Conversation canvas: agent-first, not chat-first.
-Implementation proceeds through these gates; independent diff review and production
-deployment are outside this delivery.
+The current contract is [unified-trace-ui.md](unified-trace-ui.md), with shared shell
+rules in [ui-layout.md](ui-layout.md). The normalized reader replaces the earlier
+conversation/execution-tree implementation; its old acceptance results do not certify
+the replacement.
 
 | Stage | Deliverable | State |
 | --- | --- | --- |
-| P0 | Governing interaction and bounded read contracts | Complete: governing rules and fixture baselines |
-| P1 | Reading roles, lifecycle summaries and delegation catalogue | Implemented; API and role regression checks pass |
-| P2 | Shared data and independent reading state | Implemented; shared transport and entity lifetime checks pass |
-| P3 | Conversation bubbles and three-level bounded work disclosure | Implemented; large-window regression checks pass |
-| P4 | Work-panel tabs, files, details and responsive sizing | Implemented; file, tab, keyboard and responsive regressions pass |
-| P5 | Delegation directory and shared trajectory navigation | Implemented; directory and nested navigation checks pass |
-| P6 | Full checks, visual, performance and accessibility validation | Automated suites, axe and screenshot matrix pass. Manual VoiceOver and iOS Safari acceptance remain open |
+| Contract | Agent identity, reading units, independent lifecycle and bounded reads | Specified; typed protocol and server projections implemented |
+| Runtime integration | Exact acquisition, trace routes and action targeting | Connected through the server/envagent product path |
+| Reader | Conversation, agent directory, histories, payload/details and files | Implemented against normalized reads |
+| Resource ownership | Snapshot windows, leases, cache bounds, anchors and hidden readers | Implemented with unit and browser regressions |
+| Acceptance | Full suites, visual matrix, real devices and production scale | Automated regression coverage implemented; complete conformance and manual acceptance remain open |
 
 Manual acceptance remains open: perform a real VoiceOver reading pass and an iOS Safari
 keyboard/safe-area pass. Chromium mobile emulation and axe do not establish those
