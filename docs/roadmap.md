@@ -270,15 +270,20 @@ Typed reduction differences now retain changes and removals across every semanti
 with old/new dependency endpoints. Object materialization consumes this delta, and a warm
 receipt with no semantic, payload or epoch change reuses the committed reader with zero
 rows materialized. The worker reports constructed reader rows as actual work. The full
-comparison still scans both reductions; changed content still reconstructs the reader.
+comparison still scans both reductions. Independent complete-message tails now materialize
+only the new message rows and their predecessor detail boundary, using shared immutable
+row/anchor maps. The append proof rejects older unresolved references, selected boundary
+collections, submitted delivery tails and changed existing payload previews. General
+message replacement, streaming and topology updates still reconstruct the reader.
 The production replay oracle now also compares row order, authorization metadata,
 membership, counts, payload anchors and retained active payload bytes/manifests/roots.
 Same-archive replay preserves exact epochs; separate corpus archives normalize only
 verified scope identities, rejecting distinct epochs for one scope.
 
 Open implementation/acceptance work remains in the ordered list above. In particular,
-`crates/server/src/trace/worker/reading.rs` still materializes the next reader from the
-whole reduction for a projection unit, although the prior view is cached. Bounded HTTP
+`crates/server/src/trace/worker/reading.rs` still materializes general reconciliation from
+the whole reduction. Tail proof evaluation also scans semantic metadata; constant row
+construction alone does not establish bounded total update work. Bounded HTTP
 pages do not prove bounded incremental projection cost. The ignored
 `worker_projection_scaling_probe` measures this production path under
 `SYLPH_WORKER_BENCH_RECORDS`; cold replay and repeated live updates still need the full

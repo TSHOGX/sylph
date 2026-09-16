@@ -367,6 +367,21 @@ A unit with none of these changes reuses its committed reader materialization. W
 measurements count rows actually constructed, including any baseline restoration, rather
 than counting only rows whose final serialized bytes differ.
 
+Reusing a committed reader region requires a dependency proof, including absent
+references: a newly declared revision may satisfy older unresolved content. Independent
+complete message additions at a proven archive tail append rows and payload anchors
+without reconstructing earlier history rows; the predecessor's detail relations still
+update. Reused regions retain their exact order labels and
+authorization metadata. Submitted deliveries at the end of an archive, selected-history
+membership, message replacement, adjacent work grouping and changed payload availability
+can require reconciliation beyond the newly added entry.
+
+Candidate reader state shares immutable committed rows and anchors; modifying the
+candidate cannot affect an existing view or the next retry. Only the generation commit
+installs the candidate. Sharing must avoid copying the full row catalogue merely to add
+one row. This does not by itself bound semantic reduction, dependency proof evaluation or
+larger topology reconciliation.
+
 ## Generation publication
 
 A bounded interpretation continuation can advance `view_revision` while preserving

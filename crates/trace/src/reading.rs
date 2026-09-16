@@ -9,9 +9,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use sylph_protocol::trace::*;
 mod content;
 mod window;
+mod append;
+pub use append::project_independent_append;
 pub use content::ComposedPayload;
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PayloadPreview {
     pub chunks: Option<Vec<PayloadChunk>>,
     pub preview_limit: usize,

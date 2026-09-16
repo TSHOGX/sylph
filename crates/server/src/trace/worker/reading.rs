@@ -7,11 +7,12 @@ use sylph_trace::reading::{PayloadPreview, ReadingProjection};
 
 /// Immutable cache of exactly the previous committed reader rows. Cloning a
 /// candidate unit shares these bytes; failed or cancelled units cannot mutate it.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct MaterializedReading {
-    rows: BTreeMap<(String, String), ReadRowChange>,
-    anchors: BTreeMap<String, PayloadAnchor>,
-    composed: BTreeMap<PayloadRef, sylph_trace::reading::ComposedPayload>,
+    rows: imbl::OrdMap<(String, String), Arc<ReadRowChange>>,
+    anchors: imbl::OrdMap<String, PayloadAnchor>,
+    composed: imbl::OrdMap<PayloadRef, sylph_trace::reading::ComposedPayload>,
+    window_lengths: imbl::OrdMap<sylph_trace::reading::ReadingScope, usize>,
 }
 impl MaterializedReading {
     fn from_projection(
@@ -19,9 +20,17 @@ impl MaterializedReading {
         epochs: &BTreeMap<AnyObjectRef, IngestionEpoch>,
     ) -> Result<Self> {
         Ok(Self {
-            rows: rows(projection, epochs)?,
-            anchors: anchors(projection)?,
-            composed: projection.composed_payloads.clone(),
+            rows: rows(projection, epochs)?
+                .into_iter()
+                .map(|(key, row)| (key, Arc::new(row)))
+                .collect(),
+            anchors: anchors(projection)?.into_iter().collect(),
+            composed: projection.composed_payloads.clone().into_iter().collect(),
+            window_lengths: projection
+                .windows
+                .iter()
+                .map(|(scope, units)| (scope.clone(), units.len()))
+                .collect(),
         })
     }
 }
@@ -54,6 +63,7 @@ impl ProjectionWorker {
         &self,
         generation: &GenerationStore,
         old: &Reduction,
+        changes: &ReductionChanges,
         unit: &mut ProjectionUnit,
     ) -> Result<()> {
         // Reconstruct after restart before changing preview metadata. Recomputing
@@ -69,6 +79,7 @@ impl ProjectionWorker {
                 Arc::new(previous)
             }
         };
+        let mut existing_preview_changed = false;
         for (_, payload) in &unit.payloads {
             let length = payload.bytes.len();
             let limit = generation.limits().max_preview_bytes;
@@ -102,6 +113,11 @@ impl ProjectionWorker {
                 },
                 availability: Some(ReadAvailability::Available),
             };
+            existing_preview_changed |= unit
+                .next
+                .previews
+                .get(&payload.reference)
+                .is_some_and(|prior| prior != &preview);
             unit.batch.mapper_states.insert(
                 format!("read_preview:{}", payload.reference),
                 serde_json::to_value(&preview)?,
@@ -110,12 +126,11 @@ impl ProjectionWorker {
                 .previews
                 .insert(payload.reference.clone(), preview);
         }
-        let refs: BTreeSet<_> = unit
-            .next
-            .reduction
+        let refs: BTreeSet<_> = changes
             .objects
+            .changed
             .values()
-            .filter_map(|object| object.declaration.known())
+            .filter_map(|change| change.after.declaration.known())
             .flat_map(TraceObject::payload_refs)
             .cloned()
             .collect();
@@ -176,6 +191,82 @@ impl ProjectionWorker {
                 serde_json::to_value(&preview)?,
             );
             unit.next.previews.insert(payload, preview);
+        }
+        // The proof limits changes to new rows and the predecessor detail boundary.
+        // Structural sharing keeps the candidate private without copying the archive.
+        #[cfg(test)]
+        let allow_append = !self.full_reader_rebuilds;
+        #[cfg(not(test))]
+        let allow_append = true;
+        if allow_append && !existing_preview_changed {
+            if let Some(appended) = sylph_trace::reading::project_independent_append(
+                old,
+                &unit.next.reduction,
+                changes,
+                &unit.next.previews,
+                32,
+            ) {
+                let mut next = before.as_ref().clone();
+                let offsets: BTreeMap<_, _> = appended
+                    .windows
+                    .keys()
+                    .map(|scope| {
+                        (
+                            read_scope(&scope.agent, scope.selection.as_ref(), "history"),
+                            before.window_lengths.get(scope).copied().unwrap_or(0),
+                        )
+                    })
+                    .collect();
+                let additions = rows(&appended, &unit.next.object_epochs)?;
+                unit.reader_rows_materialized += additions.len();
+                for (key, mut row) in additions {
+                    if let Some(offset) = offsets.get(&row.scope) {
+                        let ordinal =
+                            u64::from_be_bytes(row.order_key.as_slice().try_into().map_err(
+                                |_| WorkerError::Task("reader append ordinal is malformed".into()),
+                            )?);
+                        row.order_key = ordinal
+                            .checked_add(*offset as u64)
+                            .ok_or(WorkerError::Limit("reader append ordinal"))?
+                            .to_be_bytes()
+                            .to_vec();
+                    }
+                    if next.rows.get(&key).is_some_and(|prior| {
+                        prior.body == row.body
+                            && prior.order_key == row.order_key
+                            && prior.anchor == row.anchor
+                            && prior.scope_epoch == row.scope_epoch
+                            && prior.required_environments == row.required_environments
+                            && prior.target_epochs == row.target_epochs
+                    }) {
+                        continue;
+                    }
+                    unit.batch.read_rows.push(row.clone());
+                    next.rows.insert(key, Arc::new(row));
+                }
+                for (key, anchor) in anchors(&appended)? {
+                    if !next.anchors.contains_key(&key) {
+                        unit.batch.payload_anchors.push(PayloadAnchorChange {
+                            anchor: anchor.clone(),
+                            present: true,
+                        });
+                        next.anchors.insert(key, anchor);
+                    }
+                }
+                for (scope, units) in &appended.windows {
+                    next.window_lengths.insert(
+                        scope.clone(),
+                        before.window_lengths.get(scope).copied().unwrap_or(0) + units.len(),
+                    );
+                }
+                if !appended.composed_payloads.is_empty() {
+                    return Err(WorkerError::Task(
+                        "independent complete messages unexpectedly composed payloads".into(),
+                    ));
+                }
+                unit.next.reading = Some(Arc::new(next));
+                return Ok(());
+            }
         }
         let after = sylph_trace::reading::project(&unit.next.reduction, &unit.next.previews, 32);
         for (reference, composed) in &after.composed_payloads {
@@ -246,14 +337,14 @@ impl ProjectionWorker {
                     || old.required_environments != row.required_environments
                     || old.target_epochs != row.target_epochs
             }) {
-                unit.batch.read_rows.push(row.clone());
+                unit.batch.read_rows.push(row.as_ref().clone());
             }
         }
         for (key, row) in &before.rows {
             if !after.rows.contains_key(key) {
                 unit.batch.read_rows.push(ReadRowChange {
                     body: None,
-                    ..row.clone()
+                    ..row.as_ref().clone()
                 });
             }
         }
@@ -305,11 +396,15 @@ fn rows(
             order_key: (index as u64 + 1).to_be_bytes().to_vec(),
             body: Some(body),
             scope_epoch: epoch.clone(),
-            required_environments: std::iter::once(subject.scope().environment().as_str().to_owned())
-                .chain(anchor.iter().map(|anchor| {
-                    anchor.object().scope().environment().as_str().to_owned()
-                }))
-                .collect(),
+            required_environments: std::iter::once(
+                subject.scope().environment().as_str().to_owned(),
+            )
+            .chain(
+                anchor
+                    .iter()
+                    .map(|anchor| anchor.object().scope().environment().as_str().to_owned()),
+            )
+            .collect(),
             target_epochs: anchor
                 .iter()
                 .filter_map(|anchor| {

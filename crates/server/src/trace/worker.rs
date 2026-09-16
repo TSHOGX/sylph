@@ -278,6 +278,8 @@ pub struct ProjectionWorker {
     states: Arc<Mutex<BTreeMap<String, Arc<Mutex<WorkerState>>>>>,
     #[cfg(test)]
     mapping_threads: Arc<std::sync::Mutex<Vec<std::thread::ThreadId>>>,
+    #[cfg(test)]
+    full_reader_rebuilds: bool,
 }
 
 impl ProjectionWorker {
@@ -339,6 +341,8 @@ impl ProjectionWorker {
             states: Arc::new(Mutex::new(BTreeMap::new())),
             #[cfg(test)]
             mapping_threads: Arc::new(std::sync::Mutex::new(Vec::new())),
+            #[cfg(test)]
+            full_reader_rebuilds: false,
         })
     }
 
@@ -1485,7 +1489,7 @@ impl ProjectionWorker {
                 });
             }
         }
-        self.materialize_reading(generation, old, unit).await?;
+        self.materialize_reading(generation, old, &changes, unit).await?;
         Ok(())
     }
 }

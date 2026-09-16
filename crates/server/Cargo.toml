@@ -71,6 +71,9 @@ aws-lc-rs = { version = "1.18.1", default-features = false, features = ["non-fip
 
 # Exact-byte content addressing for immutable trace payloads.
 blake3 = "1.5"
+# Share committed reader rows with a candidate; copying the archive on append
+# would retain the same history-sized cost that incremental rendering removes.
+imbl = "7.0.2"
 
 # No `nix`. Process groups and `killpg` were `env::LocalEnvironment::spawn`'s, and
 # it had one caller: the adapter subprocess. An adapter is linked in now and owns
