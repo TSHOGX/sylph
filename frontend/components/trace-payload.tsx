@@ -11,6 +11,7 @@ import {
 } from "@/lib/trace-cache";
 import { ApiError } from "@/lib/api";
 import { utf8Window } from "@/lib/trace-utf8";
+import { bodyWindow, nextBodyStart } from "@/lib/trace-ranges";
 import {
   availabilityLabel,
   representationLabel,
@@ -38,13 +39,14 @@ export function TracePayload({
 }) {
   const t = useT();
   const [open, setOpen] = useState(false);
-  const [start, setStart] = useState(0);
+  const [requestedStart, setStart] = useState(0);
   const [loaded, setLoaded] = useState<{
     key: string;
     bytes: Uint8Array;
     end: number;
     next: number;
     total: number | null;
+    displayStart: number;
     text: string | null;
     mediaUrl: string | null;
   } | null>(null);
@@ -59,14 +61,18 @@ export function TracePayload({
   const media = Boolean(
     access.mediaType && /^(image|audio|video)\//.test(access.mediaType),
   );
-  const length =
+  const capacity =
     media &&
     access.totalBytes !== null &&
     access.totalBytes <= Math.min(maximum, 8 * 1024 * 1024)
       ? Math.max(4, access.totalBytes)
-      : Math.max(4, Math.min(maximum, 64 * 1024) - 3);
-  const sourceStart = readable ? Math.max(0, start - 3) : start;
-  const end = Math.min(start + length, access.totalBytes ?? start + length);
+      : Math.max(4, Math.min(maximum, 64 * 1024));
+  const range = bodyWindow(access, requestedStart, capacity, readable ? 3 : 0);
+  const start = range?.start ?? 0;
+  const sourceStart = range?.sourceStart ?? 0;
+  const end = range?.end ?? 0;
+  const rangeEnd = range?.rangeEnd ?? 0;
+  const hasRange = range !== null;
   const key = tracePayloadKey(access, start, end);
   const current = loaded?.key === key ? loaded : null;
   const availabilityKind = access.availability.kind;
@@ -79,6 +85,7 @@ export function TracePayload({
   useEffect(() => {
     if (
       !open ||
+      !hasRange ||
       (availabilityKind !== "available" && availabilityKind !== "partial")
     )
       return;
@@ -132,7 +139,7 @@ export function TracePayload({
               retained,
               result.start,
               start,
-              result.end === result.total,
+              result.end === result.total || result.end === rangeEnd,
             )
           : null;
         setLoaded({
@@ -141,6 +148,7 @@ export function TracePayload({
           end: result.end,
           next: decoded?.next ?? result.end,
           total: result.total,
+          displayStart: decoded?.start ?? result.start,
           text: decoded?.text ?? null,
           mediaUrl,
         });
@@ -175,10 +183,13 @@ export function TracePayload({
     encoding,
     totalBytes,
     readable,
+    hasRange,
+    rangeEnd,
   ]);
   const availability = availabilityLabel(access.availability);
   const readableRange =
-    availabilityKind === "available" || availabilityKind === "partial";
+    hasRange && (availabilityKind === "available" || availabilityKind === "partial");
+  const next = current && range ? nextBodyStart(range, current.next, current.total) : null;
   return (
     <div className="min-w-0 space-y-2">
       {preview && !open && <Markdown text={preview} />}
@@ -212,7 +223,7 @@ export function TracePayload({
           <p className="mb-2 text-xs text-ink-muted">
             {representationLabel(access.representation, t)} ·{" "}
             {access.mediaType ?? "Media type unknown"} ·{" "}
-            {t("trace.bytes", { start, end: current?.end ?? end })}
+            {t("trace.bytes", { start: current?.displayStart ?? start, end: current?.next ?? end })}
             {access.totalBytes == null
               ? t("trace.totalUnknown")
               : t("trace.bytesTotal", { total: access.totalBytes })}
@@ -231,19 +242,15 @@ export function TracePayload({
           <div className="flex flex-wrap gap-2">
             <button
               className={button}
-              disabled={start === 0}
-              onClick={() => setStart(Math.max(0, start - length))}
+              disabled={range?.previous == null}
+              onClick={() => range?.previous != null && setStart(range.previous)}
             >
               {t("trace.previousRange")}
             </button>
             <button
               className={button}
-              disabled={
-                !current ||
-                current.next <= start ||
-                (current.total !== null && current.next >= current.total)
-              }
-              onClick={() => current && setStart(current.next)}
+              disabled={next === null}
+              onClick={() => next !== null && setStart(next)}
             >
               {t("trace.nextRange")}
             </button>
