@@ -166,6 +166,7 @@ struct WorkerState {
     previews: BTreeMap<PayloadRef, sylph_trace::reading::PayloadPreview>,
     object_epochs: BTreeMap<AnyObjectRef, IngestionEpoch>,
     reading: Option<Arc<reading::MaterializedReading>>,
+    archive_semantic:Option<(std::sync::Weak<Reduction>,Arc<mapping::ArchiveSemantic>)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1481,7 +1482,7 @@ fn source_key(admitted: &AdmittedMapping, build: &str) -> Result<String> {
     ))?)
 }
 
-fn archive_context(state: &WorkerState) -> ArchiveContext {
+fn archive_context(state: &mut WorkerState) -> ArchiveContext {
     let mut archive = ArchiveContext {
         observations: state.available_evidence.clone(),
         ..ArchiveContext::default()
@@ -1496,56 +1497,72 @@ fn archive_context(state: &WorkerState) -> ArchiveContext {
             .observations
             .extend(ownership.owner.evidence.iter().cloned());
     }
-    let claims: BTreeMap<_, _> = state
-        .reducer
-        .claims()
-        .map(|claim| (&claim.claim_ref, claim))
-        .collect();
-    for object in state.reduction.objects.values() {
-        let sylph_trace::reducer::Resolved::Known {
-            value,
-            claims: support,
-        } = &object.declaration
-        else {
-            continue;
-        };
-        match value {
-            TraceObject::Agent(agent) => {
-                archive
-                    .agents
-                    .insert(agent.agent_ref.clone(), agent.clone());
-            }
-            TraceObject::HistoryEntry(entry) => {
-                archive
-                    .history_entries
-                    .insert(entry.entry_ref.clone(), entry.clone());
-            }
-            TraceObject::Operation(operation) => {
-                archive
-                    .operations
-                    .insert(operation.operation_ref.clone(), operation.clone());
-            }
-            TraceObject::Result(result) => {
-                archive
-                    .result_operations
-                    .insert(result.result_ref.clone(), result.operation.clone());
-            }
-            _ => continue,
-        }
-        let evidence: BTreeSet<_> = support
-            .iter()
-            .filter_map(|reference| claims.get(reference))
-            .flat_map(|claim| claim.evidence.iter().cloned())
+    // Reduced object declarations are unchanged while an observation unit maps
+    // its source records. Share that immutable proof graph; refreshing it from
+    // receipt count would repeatedly clone all history despite identical facts.
+    let cached = state
+        .archive_semantic
+        .as_ref()
+        .filter(|(reduction, _)| reduction.ptr_eq(&Arc::downgrade(&state.reduction)))
+        .map(|(_, semantic)| semantic.clone());
+    archive.semantic = if let Some(semantic) = cached {
+        semantic
+    } else {
+        let mut semantic = mapping::ArchiveSemantic::default();
+        let claims: BTreeMap<_, _> = state
+            .reducer
+            .claims()
+            .map(|claim| (&claim.claim_ref, claim))
             .collect();
-        archive
-            .object_evidence
-            .insert(value.object_ref(), evidence.into_iter().collect());
-    }
-    for (alias, canonical) in &state.reduction.representatives {
-        if let Some(evidence) = archive.object_evidence.get(canonical).cloned() {
-            archive.object_evidence.insert(alias.clone(), evidence);
+        for object in state.reduction.objects.values() {
+            let sylph_trace::reducer::Resolved::Known {
+                value,
+                claims: support,
+            } = &object.declaration
+            else {
+                continue;
+            };
+            match value {
+                TraceObject::Agent(agent) => {
+                    semantic
+                        .agents
+                        .insert(agent.agent_ref.clone(), agent.clone());
+                }
+                TraceObject::HistoryEntry(entry) => {
+                    semantic
+                        .history_entries
+                        .insert(entry.entry_ref.clone(), entry.clone());
+                }
+                TraceObject::Operation(operation) => {
+                    semantic
+                        .operations
+                        .insert(operation.operation_ref.clone(), operation.clone());
+                }
+                TraceObject::Result(result) => {
+                    semantic
+                        .result_operations
+                        .insert(result.result_ref.clone(), result.operation.clone());
+                }
+                _ => continue,
+            }
+            let evidence: BTreeSet<_> = support
+                .iter()
+                .filter_map(|reference| claims.get(reference))
+                .flat_map(|claim| claim.evidence.iter().cloned())
+                .collect();
+            semantic
+                .object_evidence
+                .insert(value.object_ref(), evidence.into_iter().collect());
         }
-    }
+        for (alias, canonical) in &state.reduction.representatives {
+            if let Some(evidence) = semantic.object_evidence.get(canonical).cloned() {
+                semantic.object_evidence.insert(alias.clone(), evidence);
+            }
+        }
+        let semantic = Arc::new(semantic);
+        state.archive_semantic = Some((Arc::downgrade(&state.reduction), semantic.clone()));
+        semantic
+    };
     for (key, binding) in &state.correlations {
         archive
             .correlations

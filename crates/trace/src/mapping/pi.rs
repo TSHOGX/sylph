@@ -803,7 +803,7 @@ impl Context<'_, '_> {
             let Some(entry) = self
                 .local_history
                 .get(&reference)
-                .or_else(|| self.input.archive.history_entries.get(&reference))
+                .or_else(|| self.input.archive.semantic.history_entries.get(&reference))
             else {
                 self.output.requests.push(ArchiveRequest::Object {
                     object_ref: AnyObjectRef::HistoryEntry(reference),
@@ -852,7 +852,7 @@ impl Context<'_, '_> {
             let (entry, evidence) = if let Some(entry) = self.local_history.get(&reference) {
                 (entry, vec![self.input.canonical_observation.clone()])
             } else {
-                let Some(entry) = self.input.archive.history_entries.get(&reference) else {
+                let Some(entry) = self.input.archive.semantic.history_entries.get(&reference) else {
                     self.output
                         .requests
                         .push(ArchiveRequest::Object { object_ref: object });
@@ -861,7 +861,7 @@ impl Context<'_, '_> {
                 let Some(evidence) =
                     self.input
                         .archive
-                        .object_evidence
+                        .semantic.object_evidence
                         .get(&object)
                         .filter(|evidence| {
                             !evidence.is_empty()

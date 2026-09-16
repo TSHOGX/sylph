@@ -69,18 +69,18 @@ fn run(values: &[Value], live: bool) -> Vec<MapOutput> {
                 Fact::Declare {
                     object: TraceObject::HistoryEntry(entry),
                 } => {
-                    archive.object_evidence.insert(
+                    archive.semantic_mut().object_evidence.insert(
                         AnyObjectRef::HistoryEntry(entry.entry_ref.clone()),
                         claim.evidence.clone(),
                     );
-                    archive
+                    archive.semantic_mut()
                         .history_entries
                         .insert(entry.entry_ref.clone(), entry.clone());
                 }
                 Fact::Declare {
                     object: TraceObject::Operation(operation),
                 } => {
-                    archive
+                    archive.semantic_mut()
                         .operations
                         .insert(operation.operation_ref.clone(), operation.clone());
                 }

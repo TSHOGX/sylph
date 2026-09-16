@@ -352,7 +352,7 @@ fn identity_binding_requires_a_proof_that_names_the_actual_agent() {
     let unproved = run(&fact, &capture, &archive);
     assert!(unproved.bound_agents.is_empty());
     assert!(unproved.correlations.is_empty());
-    archive
+    archive.semantic_mut()
         .object_evidence
         .insert(AnyObjectRef::Agent(agent()), vec![observation]);
     assert_eq!(run(&fact, &capture, &archive).bound_agents, vec![agent()]);

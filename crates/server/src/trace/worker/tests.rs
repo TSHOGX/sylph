@@ -1261,3 +1261,23 @@ mod delayed_source;
 mod frozen_history;
 
 mod streaming;
+
+#[tokio::test]
+async fn shared_archive_snapshots_keep_prior_facts_and_refresh_later_reduction_proofs() {
+    let fixture=Fixture::new().await;fixture.native_fixture().await;
+    let (generation,_)=fixture.generation("shared-archive").await;
+    let worker=fixture.worker();worker.catch_up(&generation,1,2).await.unwrap();
+    let held=worker.states.lock().await.get("shared-archive").unwrap().clone();
+    let previous=archive_context(&mut *held.lock().await);
+    assert!(previous.semantic.history_entries.is_empty());
+    worker.catch_up(&generation,1,5).await.unwrap();
+    let current=archive_context(&mut *held.lock().await);
+    assert_eq!(current.semantic.history_entries.len(),2);
+    assert!(previous.semantic.history_entries.is_empty(),"old mapper inputs cannot be mutated by later projection");
+    for entry in current.semantic.history_entries.values() {
+        let evidence=current.semantic.object_evidence.get(&AnyObjectRef::HistoryEntry(entry.entry_ref.clone())).unwrap();
+        assert!(!evidence.is_empty());assert!(evidence.iter().all(|observation|current.observations.contains(observation)));
+    }
+    let mut fork=current.clone();fork.semantic_mut().history_entries.clear();
+    assert_eq!(current.semantic.history_entries.len(),2,"a candidate context cannot mutate another mapping input");
+}

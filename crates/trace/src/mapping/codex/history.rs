@@ -524,7 +524,7 @@ pub(super) fn map_selection(input: MapInput<'_>, snapshot: NativeDatabaseSnapsho
                 if position.source == segment.source
                     && position.generation == segment.generation
                     && matches!(position.locator,SourceLocator::Jsonl {record_ordinal,..} if record_ordinal<segment.local_end)
-                    && !input.archive.history_entries.contains_key(entry)
+                    && !input.archive.semantic.history_entries.contains_key(entry)
                 {
                     return Err(HistoryFailure {
                         code: DiagnosticCode::MissingSource,
@@ -540,7 +540,7 @@ pub(super) fn map_selection(input: MapInput<'_>, snapshot: NativeDatabaseSnapsho
                 // but only the native mapper's position witness establishes a
                 // physical record. Reimporting aliases duplicates ancestors and
                 // changes a continuation's candidate order after another selection.
-                let Some(entry) = input.archive.history_entries.get(entry_ref) else {
+                let Some(entry) = input.archive.semantic.history_entries.get(entry_ref) else {
                     continue;
                 };
                 if entry.containing_agent == agent {
@@ -640,7 +640,7 @@ pub(super) fn map_selection(input: MapInput<'_>, snapshot: NativeDatabaseSnapsho
             declared.evidence.extend(
                 input
                     .archive
-                    .object_evidence
+                    .semantic.object_evidence
                     .get(&AnyObjectRef::HistoryEntry(entry.entry_ref.clone()))
                     .into_iter()
                     .flatten()

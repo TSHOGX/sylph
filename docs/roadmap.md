@@ -202,6 +202,9 @@ long admitted tail no longer fills the pending envelope queue before its releasi
 can be mapped. Replay remains scoped to its source incarnation, authorization epoch and
 evidence cut, and resumes bounded pages after restart. Reader materialization reuses its
 previous committed rows and anchors; failed publication cannot advance that cache.
+Mapper inputs also share the semantic archive for each immutable reduction. A new
+reduction refreshes both object declarations and their supporting evidence, while
+source metadata remains current for the bounded observation unit.
 
 Open implementation/acceptance work remains in the ordered list above. In particular,
 `crates/server/src/trace/worker/reading.rs` still materializes the next reader from the

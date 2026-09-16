@@ -189,7 +189,7 @@ impl SemanticMapper for ServerMapper {
                 let subject = AnyObjectRef::Agent(agent_ref.clone());
                 if !input
                     .archive
-                    .object_evidence
+                    .semantic.object_evidence
                     .get(&subject)
                     .is_some_and(|proof| {
                         source_evidence

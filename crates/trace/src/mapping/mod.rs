@@ -5,10 +5,10 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use sylph_protocol::trace::*;
 
+pub mod attachment;
 pub mod claude;
 pub mod codex;
 pub mod inventory;
-pub mod attachment;
 pub mod observation;
 pub mod pi;
 pub mod server;
@@ -22,10 +22,23 @@ pub mod server;
 )]
 pub enum ArchiveRequest {
     ContinueHistory,
-    HistoryLocator { issuer: Issuer, physical_id: String },
-    HistorySource { source:SourceRef, generation:u64 },
-    CapturedPayload {parent:ObservationRef,slot:String},
-    AttachmentTarget {parent:ObservationRef,slot:String,locator:String},
+    HistoryLocator {
+        issuer: Issuer,
+        physical_id: String,
+    },
+    HistorySource {
+        source: SourceRef,
+        generation: u64,
+    },
+    CapturedPayload {
+        parent: ObservationRef,
+        slot: String,
+    },
+    AttachmentTarget {
+        parent: ObservationRef,
+        slot: String,
+        locator: String,
+    },
     Object {
         object_ref: AnyObjectRef,
     },
@@ -72,35 +85,53 @@ pub struct MapperState {
     pub values: BTreeMap<String, serde_json::Value>,
 }
 
-#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapturedPayloadBinding {
-    pub parent:ObservationRef,
-    pub slot:String,
-    pub attachment:CaptureAttachment,
-    pub evidence:Vec<ObservationRef>,
+    pub parent: ObservationRef,
+    pub slot: String,
+    pub attachment: CaptureAttachment,
+    pub evidence: Vec<ObservationRef>,
 }
-#[derive(Debug,Clone,PartialEq,Eq)]
-pub struct CapturedPayload {pub bindings:Vec<CapturedPayloadBinding>,pub bytes:Option<Vec<u8>>,pub limited:bool}
-pub fn captured_payload_key(parent:&ObservationRef,slot:&str)->String {serde_json::to_string(&(parent,slot)).expect("typed captured payload key")}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturedPayload {
+    pub bindings: Vec<CapturedPayloadBinding>,
+    pub bytes: Option<Vec<u8>>,
+    pub limited: bool,
+}
+pub fn captured_payload_key(parent: &ObservationRef, slot: &str) -> String {
+    serde_json::to_string(&(parent, slot)).expect("typed captured payload key")
+}
 
 /// Only evidence-proved inventory and correlation data may populate this context.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ArchiveContext {
-    pub captured_payloads:BTreeMap<String,CapturedPayload>,
-    pub agents: BTreeMap<AgentRef, AgentThread>,
+    pub semantic: std::sync::Arc<ArchiveSemantic>,
+    pub captured_payloads: BTreeMap<String, CapturedPayload>,
     pub correlations: BTreeMap<String, AnyObjectRef>,
     pub source_prefixes: BTreeMap<SourceRef, Vec<SourceExtent>>,
-    pub source_definitions: BTreeMap<(SourceRef,u64), codex::history::RecordedSource>,
+    pub source_definitions: BTreeMap<(SourceRef, u64), codex::history::RecordedSource>,
     pub history_records: codex::history::HistoryRecords,
     pub native_history_positions: BTreeMap<EntryRef, SourcePosition>,
     pub observations: std::collections::BTreeSet<ObservationRef>,
     pub correlation_evidence: BTreeMap<String, Vec<ObservationRef>>,
+    pub source_owners: BTreeMap<(SourceRef, u64), SourceOwner>,
+    pub observation_sources: BTreeMap<ObservationRef, SourcePosition>,
+}
+
+/// One immutable reduction supplies these facts to many source observations.
+/// Sharing this value avoids copying every historical object per captured record.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ArchiveSemantic {
+    pub agents: BTreeMap<AgentRef, AgentThread>,
     pub history_entries: BTreeMap<EntryRef, HistoryEntry>,
     pub operations: BTreeMap<OperationRef, Operation>,
-    pub source_owners: BTreeMap<(SourceRef, u64), SourceOwner>,
     pub object_evidence: BTreeMap<AnyObjectRef, Vec<ObservationRef>>,
-    pub observation_sources: BTreeMap<ObservationRef, SourcePosition>,
-    pub result_operations:BTreeMap<ResultRef,OperationRef>,
+    pub result_operations: BTreeMap<ResultRef, OperationRef>,
+}
+impl ArchiveContext {
+    pub fn semantic_mut(&mut self) -> &mut ArchiveSemantic {
+        std::sync::Arc::make_mut(&mut self.semantic)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,7 +162,7 @@ pub struct MapOutput {
     /// The current record cannot advance this source's semantic state until its
     /// payload dependencies resolve. Independent archive joins do not set this.
     pub blocks_source: bool,
-    pub capture_payload_bindings:Vec<CapturedPayloadBinding>,
+    pub capture_payload_bindings: Vec<CapturedPayloadBinding>,
     pub claims: Vec<Claim>,
     pub payloads: Vec<DerivedPayload>,
     pub state: MapperState,
@@ -159,7 +190,10 @@ pub fn correlation_key(agent: &AgentRef, namespace: &str, key: &[String]) -> Str
     serde_json::to_string(&(agent, namespace, key)).expect("typed correlation key serialization")
 }
 
-pub fn attachment_key(parent:&ObservationRef,slot:&str,locator:&str)->String {serde_json::to_string(&("source-attachment",parent,slot,locator)).expect("typed attachment relation key")}
+pub fn attachment_key(parent: &ObservationRef, slot: &str, locator: &str) -> String {
+    serde_json::to_string(&("source-attachment", parent, slot, locator))
+        .expect("typed attachment relation key")
+}
 
 pub fn command_identity_key(issuer: &Issuer, command_id: &str) -> String {
     serde_json::to_string(&("command_identity", issuer, command_id))

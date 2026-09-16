@@ -79,9 +79,9 @@ impl Fixture {
                     object: TraceObject::HistoryEntry(entry),
                 } => {
                     self.archive
-                        .history_entries
+                        .semantic_mut().history_entries
                         .insert(entry.entry_ref.clone(), entry.clone());
-                    self.archive.object_evidence.insert(
+                    self.archive.semantic_mut().object_evidence.insert(
                         AnyObjectRef::HistoryEntry(entry.entry_ref.clone()),
                         claim.evidence.clone(),
                     );
@@ -241,7 +241,7 @@ impl Fixture {
             .as_ref()
             .expect("selection must resolve")
             .iter()
-            .map(|entry| self.archive.history_entries[entry].clone())
+            .map(|entry| self.archive.semantic.history_entries[entry].clone())
             .collect()
     }
 }
@@ -302,7 +302,7 @@ fn chained_physical_bases_keep_each_frozen_cut_and_exclude_abandoned_suffixes() 
     assert_eq!(
         fixture
             .archive
-            .history_entries
+            .semantic_mut().history_entries
             .values()
             .filter(|entry| entry.containing_agent == agent("child"))
             .count(),
