@@ -109,6 +109,113 @@ async fn selection(fixture: &Fixture, physical: &str, native: &str, count: u64) 
         .await;
 }
 
+async fn first_alias_page(name: &str) -> (Fixture, GenerationStore, Snapshot) {
+    let fixture = Fixture::new().await;
+    let count = 110;
+    let bytes = native(&fixture, PARENT, "parent", None, 0, count).await;
+    native(
+        &fixture,
+        CHILD,
+        "child",
+        Some(serde_json::json!({
+            "thread_id": PARENT, "end_ordinal_exclusive": count + 1,
+            "end_byte_offset": bytes,
+        })),
+        count as u64 + 1,
+        1,
+    )
+    .await;
+    let cut = fixture.evidence.evidence_cut().await.unwrap();
+    let (generation, _) = fixture.generation(name).await;
+    let worker = fixture.worker();
+    worker.catch_up(&generation, 1, cut).await.unwrap();
+    selection(&fixture, CHILD, "child", 2).await;
+    let through = fixture.evidence.evidence_cut().await.unwrap();
+    let captures = fixture
+        .evidence
+        .admissions_after(cut, 1)
+        .await
+        .unwrap()
+        .captures;
+    let held = worker.states.lock().await.get(name).unwrap().clone();
+    let state = held.lock().await;
+    let unit = worker
+        .prepare_unit(&generation, &state, &captures, through)
+        .await
+        .unwrap();
+    assert!(unit
+        .next
+        .pending
+        .values()
+        .any(|pending| pending.requests.contains(&ArchiveRequest::ContinueHistory)));
+    worker.commit_effects(&generation, &unit).await.unwrap();
+    let snapshot = generation
+        .apply(1, state.committed_snapshot(), &unit.batch)
+        .await
+        .unwrap()
+        .snapshot;
+    drop(state);
+    (fixture, generation, snapshot)
+}
+
+#[tokio::test]
+async fn cached_projection_refreshes_after_an_independent_same_cut_continuation() {
+    let (fixture, generation, first) = first_alias_page("same-cut-cache").await;
+    let cached = fixture.worker();
+    let initial = cached.projected_snapshot(&generation).await.unwrap();
+    assert_eq!(initial.0, first);
+    assert!(initial.1.histories[&agent("child")]
+        .selected_entries
+        .is_none());
+
+    let writer = fixture.worker();
+    writer
+        .catch_up(&generation, 1, first.evidence_cut)
+        .await
+        .unwrap();
+    let expected = writer.projected_snapshot(&generation).await.unwrap();
+    assert_eq!(expected.0.evidence_cut, first.evidence_cut);
+    assert!(expected.0.view_revision > first.view_revision);
+    assert_eq!(
+        expected.1.histories[&agent("child")]
+            .selected_entries
+            .as_ref()
+            .unwrap()
+            .len(),
+        111
+    );
+    let actual = cached.projected_snapshot(&generation).await.unwrap();
+    assert_eq!(actual.0, expected.0);
+    assert_eq!(
+        actual.1, expected.1,
+        "a newer snapshot must never label the cached earlier reduction"
+    );
+    assert_eq!(
+        actual.2, expected.2,
+        "scope epochs must follow the same committed revision"
+    );
+}
+
+#[tokio::test]
+async fn cached_continuation_status_refreshes_after_an_independent_same_cut_commit() {
+    let (fixture, generation, first) = first_alias_page("same-cut-readiness").await;
+    let cached = fixture.worker();
+    cached.projected_snapshot(&generation).await.unwrap();
+    assert!(cached.has_continuations(&generation).await.unwrap());
+    fixture
+        .worker()
+        .catch_up(&generation, 1, first.evidence_cut)
+        .await
+        .unwrap();
+    let current = generation.checkpoint().await.unwrap().snapshot;
+    assert_eq!(current.evidence_cut, first.evidence_cut);
+    assert!(current.view_revision > first.view_revision);
+    assert!(
+        !cached.has_continuations(&generation).await.unwrap(),
+        "completed continuation cannot remain ready in a cache from the same evidence cut"
+    );
+}
+
 #[tokio::test]
 async fn frozen_parent_aliases_resume_after_restart_at_the_same_evidence_cut() {
     let fixture = Fixture::new().await;
@@ -148,7 +255,7 @@ async fn frozen_parent_aliases_resume_after_restart_at_the_same_evidence_cut() {
         .values()
         .any(|pending| pending.requests.contains(&ArchiveRequest::ContinueHistory)));
     worker.commit_effects(&generation, &unit).await.unwrap();
-    generation.apply(1, cut, &unit.batch).await.unwrap();
+    generation.apply(1, state.committed_snapshot(), &unit.batch).await.unwrap();
     drop(state);
     drop(held);
     drop(worker);
@@ -189,7 +296,7 @@ async fn frozen_parent_aliases_resume_after_restart_at_the_same_evidence_cut() {
     super::super::super::publication::ProjectionCatchUp::validate_generation(
         &restarted,
         &generation,
-        through,
+        &final_view,
     )
     .await
     .unwrap();

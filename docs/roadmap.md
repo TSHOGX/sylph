@@ -258,6 +258,14 @@ changes expire incompatible views and rebuild from evidence before reads resume.
 Production HTTP regressions cover hidden targets, deletion on either side of a directory,
 grant changes and multipart continuations; deliberate faults establish their sensitivity.
 
+Projection writes and worker caches now bind the full generation, evidence cut and view
+revision. A stale same-cut continuation cannot overwrite newer committed state, and an
+uninitialized cache cannot hide a durable continuation. Mapper restoration checks the exact
+snapshot in its read transaction. Recovery verifies the published revision's durable cut
+mapping, and publication validates a fixed baseline before its bounded tail. Deterministic
+regressions cover independent writers, same-cut cache refresh, zero-cut restoration and
+persisted rollback; these do not establish bounded incremental reduction cost.
+
 Open implementation/acceptance work remains in the ordered list above. In particular,
 `crates/server/src/trace/worker/reading.rs` still materializes the next reader from the
 whole reduction for a projection unit, although the prior view is cached. Bounded HTTP
@@ -267,6 +275,12 @@ pages do not prove bounded incremental projection cost. The ignored
 scale matrix. Existing deletion/recovery tests also do not substitute for
 the full in-flight cancellation and crash matrix. A complete new production conformance
 run and semantic negative controls are required before declaring the replacement done.
+The next incremental stage must identify typed semantic changes and row dependencies
+within a single long session, including an existing message row changed by a later
+revision. Acceptance compares ordering, anchors and authorization metadata as well as
+rendered bodies, and measures warm append/delta/final work at growing history sizes.
+Per-agent reconstruction alone does not meet this bound. Larger topology or equivalence
+changes require private reconciliation while the published snapshot remains readable.
 
 The milestone narratives below record earlier product delivery. Block-era implementation
 details are historical; the trace checkpoint above owns the replacement status.

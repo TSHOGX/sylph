@@ -671,7 +671,7 @@ async fn missing_identity_proof_survives_restart_and_resolves_without_another_ad
     let resolved = fixture.worker().catch_up(&generation, 1, 3).await.unwrap();
     assert_eq!(resolved.pending_mappings, 0);
     assert!(generation
-        .mapper_states()
+        .mapper_states(&generation.checkpoint().await.unwrap().snapshot)
         .await
         .unwrap()
         .iter()
@@ -805,7 +805,8 @@ async fn publication_validation_rejects_a_missing_derived_chunk_without_changing
     let (generation, _) = fixture.generation("validation").await;
     let worker = fixture.worker();
     worker.catch_up(&generation, 1, 2).await.unwrap();
-    worker.validate_generation(&generation, 2).await.unwrap();
+    let snapshot = generation.checkpoint().await.unwrap().snapshot;
+    worker.validate_generation(&generation, &snapshot).await.unwrap();
     let revision = claims(&generation)
         .await
         .into_iter()
@@ -826,7 +827,7 @@ async fn publication_validation_rejects_a_missing_derived_chunk_without_changing
         .remove(manifest.chunks[0].digest.digest())
         .await
         .unwrap();
-    assert!(worker.validate_generation(&generation, 2).await.is_err());
+    assert!(worker.validate_generation(&generation, &snapshot).await.is_err());
     assert_eq!(
         generation.checkpoint().await.unwrap().snapshot.evidence_cut,
         2
@@ -1262,6 +1263,75 @@ mod delayed_source;
 mod frozen_history;
 
 mod streaming;
+
+async fn zero_cut_continuation(fixture: &Fixture, name: &str) -> GenerationStore {
+    let (generation, _) = fixture.generation(name).await;
+    let replay = SourceReplayCursor {
+        source: SourceRef {
+            issuer: Issuer::Environment(EnvironmentId::parse("env7fk2").unwrap()),
+            instance: "empty-tail".into(),
+        },
+        generation: 0,
+        epoch: fixture.epoch.clone(),
+        after: 0,
+        through: 0,
+    };
+    let prior = generation.checkpoint().await.unwrap();
+    let committed = generation
+        .apply(
+            prior.fence_token,
+            &prior.snapshot,
+            &ProjectionBatch {
+                through_cut: 0,
+                continuation: true,
+                mapper_states: BTreeMap::from([(
+                    "source_replay:empty-tail".into(),
+                    serde_json::to_value(replay).unwrap(),
+                )]),
+                ..ProjectionBatch::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(committed.snapshot.evidence_cut, 0);
+    assert!(committed.snapshot.view_revision > prior.snapshot.view_revision);
+    generation
+}
+
+#[tokio::test]
+async fn initial_zero_cut_snapshot_load_does_not_hide_durable_continuation_state() {
+    let fixture = Fixture::new().await;
+    let generation = zero_cut_continuation(&fixture, "zero-cut-snapshot").await;
+    let worker = fixture.worker();
+    assert!(worker.has_continuations(&generation).await.unwrap());
+    let (snapshot, _, _) = worker.projected_snapshot(&generation).await.unwrap();
+    assert_eq!(snapshot, generation.checkpoint().await.unwrap().snapshot);
+    assert!(
+        worker.has_continuations(&generation).await.unwrap(),
+        "constructing an empty cache must not hide a persisted zero-cut source continuation"
+    );
+}
+
+#[tokio::test]
+async fn initial_zero_cut_catch_up_finishes_a_durable_empty_source_tail() {
+    let fixture = Fixture::new().await;
+    let generation = zero_cut_continuation(&fixture, "zero-cut-catch-up").await;
+    let prior = generation.checkpoint().await.unwrap().snapshot;
+    let worker = fixture.worker();
+    worker.catch_up(&generation, 1, 0).await.unwrap();
+    let after = generation.checkpoint().await.unwrap().snapshot;
+    assert_eq!(after.evidence_cut, 0);
+    assert!(
+        after.view_revision > prior.view_revision,
+        "the persisted empty tail must be retired in a same-cut commit"
+    );
+    assert!(generation.mapper_states(&after).await.unwrap()["source_replay:empty-tail"].is_null());
+    assert!(!fixture
+        .worker()
+        .has_continuations(&generation)
+        .await
+        .unwrap());
+}
 
 #[tokio::test]
 async fn shared_archive_snapshots_keep_prior_facts_and_refresh_later_reduction_proofs() {

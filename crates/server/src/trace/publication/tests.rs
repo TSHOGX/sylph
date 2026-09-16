@@ -7,6 +7,7 @@ use crate::{
         generation::{ObjectUpdate, ProjectionBatch},
     },
 };
+use sqlx::Connection;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use sylph_protocol::{
     trace::{
@@ -217,6 +218,7 @@ struct Worker {
     entered: Arc<tokio::sync::Notify>,
     resume: Arc<tokio::sync::Notify>,
     reject_validation: bool,
+    advance_after_validation: bool,
 }
 impl Worker {
     fn plain() -> Self {
@@ -226,6 +228,7 @@ impl Worker {
             entered: Arc::new(tokio::sync::Notify::new()),
             resume: Arc::new(tokio::sync::Notify::new()),
             reject_validation: false,
+            advance_after_validation: false,
         }
     }
     fn pausing(call: usize) -> Self {
@@ -237,9 +240,37 @@ impl Worker {
 }
 #[async_trait]
 impl ProjectionCatchUp for Worker {
-    async fn validate_generation(&self, _store: &GenerationStore, _cut: u64) -> anyhow::Result<()> {
+    async fn validate_generation(
+        &self,
+        store: &GenerationStore,
+        snapshot: &Snapshot,
+    ) -> anyhow::Result<()> {
         if self.reject_validation {
             anyhow::bail!("retained payload digest is corrupt");
+        }
+        if self.advance_after_validation {
+            let checkpoint = store.checkpoint().await?;
+            assert_eq!(&checkpoint.snapshot, snapshot);
+            let advanced = store
+                .apply(
+                    checkpoint.fence_token,
+                    snapshot,
+                    &ProjectionBatch {
+                        through_cut: checkpoint.snapshot.evidence_cut,
+                        continuation: true,
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            let mut connection = sqlx::SqliteConnection::connect_with(
+                &sqlx::sqlite::SqliteConnectOptions::new().filename(store.path()),
+            )
+            .await?;
+            sqlx::query("DELETE FROM projection_commit_proofs WHERE view_revision=?")
+                .bind(advanced.snapshot.view_revision as i64)
+                .execute(&mut connection)
+                .await?;
+            connection.close().await?;
         }
         Ok(())
     }
@@ -270,7 +301,7 @@ impl ProjectionCatchUp for Worker {
             store
                 .apply(
                     token,
-                    cut,
+                    &checkpoint.snapshot,
                     &ProjectionBatch {
                         through_cut: cut + 1,
                         objects: vec![ObjectUpdate::put(object, format!("cut {}", cut + 1))],
@@ -474,6 +505,186 @@ async fn missing_published_generation_is_an_explicit_recovery_failure() {
     assert_eq!(
         fixture.catalogue.pointer().await.unwrap().generation,
         Some("old".into())
+    );
+}
+
+#[tokio::test]
+async fn same_cut_persisted_rollback_cannot_satisfy_the_published_revision() {
+    let fixture = Fixture::new(PublicationLimits::default()).await;
+    fixture.admit(1).await;
+    let (ticket, store) = fixture
+        .coordinator
+        .begin_build(manifest("same-cut-rollback"), 100)
+        .await
+        .unwrap();
+    Worker::plain().catch_up(&store, 1, 1).await.unwrap();
+    let earlier = store.checkpoint().await.unwrap();
+    let backup = fixture.dir.path().join("before-continuation.sqlite");
+    let mut connection = sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new().filename(store.path()),
+    )
+    .await
+    .unwrap();
+    sqlx::query("VACUUM INTO ?")
+        .bind(backup.to_str().unwrap())
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    connection.close().await.unwrap();
+    store
+        .apply(
+            earlier.fence_token,
+            &earlier.snapshot,
+            &ProjectionBatch {
+                through_cut: earlier.snapshot.evidence_cut,
+                continuation: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let published = fixture
+        .coordinator
+        .publish(&ticket, &store, None, &Worker::plain())
+        .await
+        .unwrap();
+    assert_eq!(
+        published.ready.snapshot.evidence_cut,
+        earlier.snapshot.evidence_cut
+    );
+    assert!(published.ready.snapshot.view_revision > earlier.snapshot.view_revision);
+    let path = store.path().to_owned();
+    store.close().await;
+    tokio::fs::copy(&backup, &path).await.unwrap();
+    assert!(
+        matches!(
+            fixture.coordinator.recover_active(&Worker::plain()).await,
+            Err(PublicationError::Recovery(_))
+        ),
+        "A same-cut stale database cannot satisfy a newer published revision"
+    );
+    assert_eq!(
+        fixture.catalogue.pointer().await.unwrap(),
+        published.pointer
+    );
+}
+
+#[tokio::test]
+async fn recovery_checks_the_published_revision_cut_mapping_below_the_read_floor() {
+    let fixture = Fixture::new(PublicationLimits::default()).await;
+    fixture.admit(1).await;
+    let store = fixture.initial().await;
+    let published = fixture
+        .catalogue
+        .active_generation()
+        .await
+        .unwrap()
+        .unwrap();
+    let checkpoint = store.checkpoint().await.unwrap();
+    let newer = store
+        .apply(
+            checkpoint.fence_token,
+            &checkpoint.snapshot,
+            &ProjectionBatch {
+                through_cut: checkpoint.snapshot.evidence_cut,
+                continuation: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .advance_revision_floor(newer.snapshot.view_revision)
+        .await
+        .unwrap();
+    let mut connection = sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new().filename(store.path()),
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE projection_revisions SET evidence_cut=evidence_cut+1 WHERE view_revision=?",
+    )
+    .bind(published.ready.snapshot.view_revision as i64)
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    connection.close().await.unwrap();
+    store.close().await;
+    assert!(
+        matches!(
+            fixture.coordinator.recover_active(&Worker::plain()).await,
+            Err(PublicationError::Recovery(_))
+        ),
+        "The publication proof remains required after its reader revision expires"
+    );
+}
+
+#[tokio::test]
+async fn newer_same_cut_checkpoint_recovers_after_the_published_view_falls_below_the_read_floor() {
+    let fixture = Fixture::new(PublicationLimits::default()).await;
+    fixture.admit(1).await;
+    let store = fixture.initial().await;
+    let checkpoint = store.checkpoint().await.unwrap();
+    let newer = store
+        .apply(
+            checkpoint.fence_token,
+            &checkpoint.snapshot,
+            &ProjectionBatch {
+                through_cut: checkpoint.snapshot.evidence_cut,
+                continuation: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .advance_revision_floor(newer.snapshot.view_revision)
+        .await
+        .unwrap();
+    store.close().await;
+    let recovered = fixture
+        .coordinator
+        .recover_active(&Worker::plain())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        recovered.checkpoint().await.unwrap().snapshot,
+        newer.snapshot
+    );
+    recovered.close().await;
+}
+
+#[tokio::test]
+async fn same_cut_advance_during_semantic_validation_remains_in_the_validated_tail() {
+    let fixture = Fixture::new(PublicationLimits::default()).await;
+    fixture.admit(1).await;
+    let old = fixture.initial().await;
+    let pointer = fixture.catalogue.pointer().await.unwrap();
+    let (ticket, private) = fixture
+        .coordinator
+        .begin_build(manifest("validation-race"), 100)
+        .await
+        .unwrap();
+    let worker = Worker {
+        advance_after_validation: true,
+        ..Worker::plain()
+    };
+    assert!(
+        matches!(
+            fixture
+                .coordinator
+                .publish(&ticket, &private, Some(&old), &worker)
+                .await,
+            Err(PublicationError::Generation(GenerationError::Invalid(_)))
+        ),
+        "A post-validation continuation cannot become the full-validation baseline"
+    );
+    assert_eq!(fixture.catalogue.pointer().await.unwrap(), pointer);
+    assert_eq!(
+        old.checkpoint().await.unwrap().writer_mode,
+        WriterMode::Running
     );
 }
 

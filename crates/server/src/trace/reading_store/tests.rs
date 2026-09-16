@@ -41,7 +41,7 @@ async fn old_pages_and_bodies_do_not_change_when_a_late_row_moves() {
     store
         .apply(
             1,
-            0,
+            &store.checkpoint().await.unwrap().snapshot,
             &ProjectionBatch {
                 through_cut: 1,
                 read_rows: vec![
@@ -63,7 +63,7 @@ async fn old_pages_and_bodies_do_not_change_when_a_late_row_moves() {
     store
         .apply(
             1,
-            1,
+            &old,
             &ProjectionBatch {
                 through_cut: 2,
                 read_rows: vec![row("b", 4, "corrected")],
@@ -115,7 +115,7 @@ async fn newest_window_can_page_back_without_reusing_a_cursor_for_another_scope(
     store
         .apply(
             1,
-            0,
+            &store.checkpoint().await.unwrap().snapshot,
             &ProjectionBatch {
                 through_cut: 1,
                 read_rows: (1..=6)
@@ -184,7 +184,7 @@ async fn superseded_versions_exhaust_a_bounded_scan_with_a_resumable_nonempty_pr
         store
             .apply(
                 1,
-                cut - 1,
+                &store.checkpoint().await.unwrap().snapshot,
                 &ProjectionBatch {
                     through_cut: cut,
                     read_rows: vec![row("hot", 1, &format!("revision-{cut}"))],
@@ -278,7 +278,7 @@ async fn directory_filters_scan_beyond_the_first_window_and_bind_the_resume_scop
     store
         .apply(
             1,
-            0,
+            &store.checkpoint().await.unwrap().snapshot,
             &ProjectionBatch {
                 through_cut: 1,
                 read_rows: rows,
@@ -368,7 +368,7 @@ async fn continuation_size_is_independent_of_grant_count_and_still_binds_every_g
     store
         .apply(
             1,
-            0,
+            &store.checkpoint().await.unwrap().snapshot,
             &ProjectionBatch {
                 through_cut: 1,
                 read_rows: vec![
@@ -535,7 +535,7 @@ async fn projection_rejects_invalid_or_unbounded_authorization_metadata() {
         store
             .apply(
                 1,
-                0,
+                &store.checkpoint().await.unwrap().snapshot,
                 &batch(targeted_row("invalid", 1, "NOT-an-environment"))
             )
             .await,
@@ -546,7 +546,9 @@ async fn projection_rejects_invalid_or_unbounded_authorization_metadata() {
         .target_epochs
         .insert(IngestionEpoch::new("a".repeat(store.limits().max_key_bytes)).unwrap());
     assert!(matches!(
-        store.apply(1, 0, &batch(large)).await,
+        store
+            .apply(1, &store.checkpoint().await.unwrap().snapshot, &batch(large))
+            .await,
         Err(GenerationError::Limit(
             "reading authorization metadata bytes"
         ))
@@ -564,7 +566,7 @@ async fn hidden_candidates_resume_within_the_scan_budget_without_exposing_a_tota
     store
         .apply(
             1,
-            0,
+            &store.checkpoint().await.unwrap().snapshot,
             &ProjectionBatch {
                 through_cut: 1,
                 read_rows: rows,
@@ -660,7 +662,7 @@ async fn denied_environments_and_deleted_epochs_are_checked_before_body_hydratio
     store
         .apply(
             1,
-            0,
+            &store.checkpoint().await.unwrap().snapshot,
             &ProjectionBatch {
                 through_cut: 1,
                 read_rows: vec![
@@ -736,7 +738,7 @@ async fn exact_visible_counts_require_every_target_grant_and_follow_snapshot_ver
     store
         .apply(
             1,
-            0,
+            &store.checkpoint().await.unwrap().snapshot,
             &ProjectionBatch {
                 through_cut: 1,
                 read_rows: vec![joint.clone(), targeted_row("visible", 2, "first")],
@@ -766,7 +768,7 @@ async fn exact_visible_counts_require_every_target_grant_and_follow_snapshot_ver
     store
         .apply(
             1,
-            1,
+            &old,
             &ProjectionBatch {
                 through_cut: 2,
                 read_rows: vec![joint],

@@ -190,7 +190,7 @@ async fn run(delayed: bool, restart: bool) -> (Vec<TraceObject>, Vec<serde_json:
         .cloned()
         .collect();
     let states = generation
-        .mapper_states()
+        .mapper_states(&generation.checkpoint().await.unwrap().snapshot)
         .await
         .unwrap()
         .into_iter()
@@ -271,7 +271,7 @@ async fn ordered_successors_resume_in_bounded_same_cut_pages_after_restart() {
         "a long source tail is one durable cursor"
     );
     worker.commit_effects(&generation, &unit).await.unwrap();
-    generation.apply(1, before, &unit.batch).await.unwrap();
+    generation.apply(1, state.committed_snapshot(), &unit.batch).await.unwrap();
     drop(state);
     drop(held);
     drop(worker);

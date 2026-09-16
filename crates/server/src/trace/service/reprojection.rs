@@ -168,10 +168,10 @@ impl ProjectionCatchUp for CancellableReplay<'_> {
     async fn validate_generation(
         &self,
         generation: &GenerationStore,
-        through: u64,
+        snapshot: &super::super::generation::Snapshot,
     ) -> anyhow::Result<()> {
         tokio::select! {
-            result=ProjectionCatchUp::validate_generation(&self.worker,generation,through)=>result,
+            result=ProjectionCatchUp::validate_generation(&self.worker,generation,snapshot)=>result,
             error=self.cancellation()=>Err(error),
         }
     }

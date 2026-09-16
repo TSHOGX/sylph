@@ -76,8 +76,11 @@ pub enum GenerationError {
     Limit(&'static str),
     #[error("projection writer is fenced or its writer token is stale")]
     Fenced,
-    #[error("projection expected evidence cut {expected}, current cut is {actual}")]
-    StaleCut { expected: u64, actual: u64 },
+    #[error("projection expected snapshot {expected:?}, current snapshot is {actual:?}")]
+    StaleSnapshot {
+        expected: Snapshot,
+        actual: Snapshot,
+    },
     #[error("snapshot is expired or belongs to another generation")]
     SnapshotExpired,
     #[error("snapshot cut and revision do not match a published checkpoint")]
@@ -586,10 +589,31 @@ impl GenerationStore {
         Ok(Snapshot {generation:self.manifest.generation.clone(),evidence_cut:unsigned(row.try_get("evidence_cut")?)?,view_revision:revision})
     }
 
+    /// Publication proofs survive reader-floor advancement and must still match
+    /// the exact durable revision, even when later continuations kept the same cut.
+    pub(crate) async fn validate_published_snapshot(&self, snapshot: &Snapshot) -> Result<()> {
+        if snapshot.generation != self.manifest.generation {
+            return Err(GenerationError::InvalidSnapshot);
+        }
+        let row = sqlx::query("SELECT s.evidence_cut, s.view_revision, r.evidence_cut AS published_cut FROM projection_state s LEFT JOIN projection_revisions r ON r.view_revision = ? WHERE s.singleton = 1")
+            .bind(signed(snapshot.view_revision)?).fetch_one(&self.readers).await?;
+        if unsigned(row.try_get("evidence_cut")?)? < snapshot.evidence_cut
+            || unsigned(row.try_get("view_revision")?)? < snapshot.view_revision
+            || row
+                .try_get::<Option<i64>, _>("published_cut")?
+                .map(unsigned)
+                .transpose()?
+                != Some(snapshot.evidence_cut)
+        {
+            return Err(GenerationError::InvalidSnapshot);
+        }
+        Ok(())
+    }
+
     pub async fn apply(
         &self,
         expected_fence: u64,
-        expected_cut: u64,
+        expected_snapshot: &Snapshot,
         batch: &ProjectionBatch,
     ) -> Result<Checkpoint> {
         self.validate_batch(batch)?;
@@ -601,12 +625,13 @@ impl GenerationStore {
         if prior.fence_token != expected_fence || prior.writer_mode != WriterMode::Running {
             return Err(GenerationError::Fenced);
         }
-        if prior.snapshot.evidence_cut != expected_cut {
-            return Err(GenerationError::StaleCut {
-                expected: expected_cut,
-                actual: prior.snapshot.evidence_cut,
+        if &prior.snapshot != expected_snapshot {
+            return Err(GenerationError::StaleSnapshot {
+                expected: expected_snapshot.clone(),
+                actual: prior.snapshot,
             });
         }
+        let expected_cut = expected_snapshot.evidence_cut;
         if batch.through_cut < expected_cut || (batch.through_cut == expected_cut &&
             (!batch.continuation || !batch.processed_occurrences.is_empty())) {
             return Err(GenerationError::Invalid(
@@ -1328,10 +1353,39 @@ impl GenerationStore {
         Err(GenerationError::PayloadNotReachable)
     }
 
-    pub async fn mapper_states(&self) -> Result<BTreeMap<String, serde_json::Value>> {
-        let rows = sqlx::query("SELECT mapper_key, state_json FROM mapper_states")
-            .fetch_all(&self.readers)
+    pub async fn mapper_states(
+        &self,
+        expected_snapshot: &Snapshot,
+    ) -> Result<BTreeMap<String, serde_json::Value>> {
+        self.mapper_states_inner(expected_snapshot, None).await
+    }
+
+    async fn mapper_states_inner(
+        &self,
+        expected_snapshot: &Snapshot,
+        pause: Option<(&tokio::sync::Notify, &tokio::sync::Notify)>,
+    ) -> Result<BTreeMap<String, serde_json::Value>> {
+        // Mapper rows retain only their current value. Pin the checkpoint and rows
+        // in one read transaction; filtering by at_revision would lose overwritten keys.
+        let mut tx = self.readers.begin().await?;
+        let row = sqlx::query("SELECT * FROM projection_state WHERE singleton = 1")
+            .fetch_one(&mut *tx)
             .await?;
+        let actual = decode_checkpoint(&self.manifest.generation, &row)?.snapshot;
+        if &actual != expected_snapshot {
+            return Err(GenerationError::StaleSnapshot {
+                expected: expected_snapshot.clone(),
+                actual,
+            });
+        }
+        if let Some((entered, resume)) = pause {
+            entered.notify_one();
+            resume.notified().await;
+        }
+        let rows = sqlx::query("SELECT mapper_key, state_json FROM mapper_states")
+            .fetch_all(&mut *tx)
+            .await?;
+        tx.commit().await?;
         rows.into_iter()
             .map(|row| {
                 Ok((
@@ -1340,16 +1394,6 @@ impl GenerationStore {
                 ))
             })
             .collect()
-    }
-
-    pub async fn mapper_state(&self, key: &str) -> Result<Option<serde_json::Value>> {
-        let row: Option<String> =
-            sqlx::query_scalar("SELECT state_json FROM mapper_states WHERE mapper_key = ?")
-                .bind(key)
-                .fetch_optional(&self.readers)
-                .await?;
-        row.map(|value| serde_json::from_str(&value).map_err(GenerationError::from))
-            .transpose()
     }
 
     pub async fn has_processed_occurrence(&self, occurrence: u64) -> Result<bool> {

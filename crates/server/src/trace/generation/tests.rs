@@ -74,7 +74,7 @@ impl Fixture {
     async fn publish(&self, batch: ProjectionBatch) -> Snapshot {
         let prior = self.store.checkpoint().await.unwrap();
         self.store
-            .apply(prior.fence_token, prior.snapshot.evidence_cut, &batch)
+            .apply(prior.fence_token, &prior.snapshot, &batch)
             .await
             .unwrap()
             .snapshot
@@ -479,19 +479,19 @@ async fn a_fence_survives_reopen_and_rejects_every_queued_writer_with_an_old_tok
         ..Default::default()
     };
     assert!(matches!(
-        fixture.store.apply(1, 1, &batch).await,
+        fixture.store.apply(1, &snapshot, &batch).await,
         Err(GenerationError::Fenced)
     ));
     assert!(matches!(
-        fixture.store.apply(fence.token, 1, &batch).await,
+        fixture.store.apply(fence.token, &snapshot, &batch).await,
         Err(GenerationError::Fenced)
     ));
     let token = fixture.store.resume(&fence).await.unwrap();
     assert!(matches!(
-        fixture.store.apply(1, 1, &batch).await,
+        fixture.store.apply(1, &snapshot, &batch).await,
         Err(GenerationError::Fenced)
     ));
-    fixture.store.apply(token, 1, &batch).await.unwrap();
+    fixture.store.apply(token, &snapshot, &batch).await.unwrap();
     assert!(matches!(
         fixture.store.resume(&fence).await,
         Err(GenerationError::Fenced)
@@ -541,7 +541,7 @@ async fn an_in_flight_writer_commits_before_the_fence_samples_its_cut() {
             .store
             .apply(
                 1,
-                10,
+                &fence.checkpoint,
                 &ProjectionBatch {
                     through_cut: 11,
                     ..Default::default()
@@ -580,7 +580,15 @@ async fn a_failed_projection_unit_rolls_back_objects_claims_memberships_and_chec
         memberships: vec![fixture.member(&object, 1), fixture.member(&absent, 2)],
         ..Default::default()
     };
-    assert!(fixture.store.apply(1, 0, &failed).await.is_err());
+    assert!(fixture
+        .store
+        .apply(
+            1,
+            &fixture.store.checkpoint().await.unwrap().snapshot,
+            &failed,
+        )
+        .await
+        .is_err());
     assert_eq!(
         fixture
             .store
@@ -621,7 +629,7 @@ async fn a_failed_projection_unit_rolls_back_objects_claims_memberships_and_chec
             .store
             .apply(
                 1,
-                1,
+                &first,
                 &ProjectionBatch {
                     through_cut: 2,
                     claims: vec![collision],
@@ -1198,7 +1206,7 @@ async fn same_cut_interpretation_continuations_advance_view_without_claiming_new
         .store
         .apply(
             prior.fence_token,
-            0,
+            &prior.snapshot,
             &ProjectionBatch {
                 through_cut: 0,
                 continuation: true,
@@ -1215,7 +1223,7 @@ async fn same_cut_interpretation_continuations_advance_view_without_claiming_new
         .store
         .apply(
             prior.fence_token,
-            0,
+            &snapshot,
             &ProjectionBatch {
                 through_cut: 0,
                 continuation: true,
@@ -1229,7 +1237,7 @@ async fn same_cut_interpretation_continuations_advance_view_without_claiming_new
         .store
         .apply(
             prior.fence_token,
-            0,
+            &snapshot,
             &ProjectionBatch {
                 through_cut: 0,
                 continuation: true,
@@ -1247,4 +1255,258 @@ async fn same_cut_interpretation_continuations_advance_view_without_claiming_new
         .validate_tail(&baseline, &fence, 2)
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn stale_same_cut_snapshot_cannot_overwrite_committed_projection_state() {
+    let fixture = Fixture::new().await;
+    let stale = fixture.store.checkpoint().await.unwrap();
+    let entry = fixture.entry("continued");
+    let committed = fixture
+        .publish(ProjectionBatch {
+            through_cut: stale.snapshot.evidence_cut,
+            continuation: true,
+            objects: vec![ObjectUpdate::put(entry.clone(), "committed")],
+            mapper_states: BTreeMap::from([(
+                "continuation".into(),
+                serde_json::json!("committed"),
+            )]),
+            ..ProjectionBatch::default()
+        })
+        .await;
+    let rejected = fixture
+        .store
+        .apply(
+            stale.fence_token,
+            &stale.snapshot,
+            &ProjectionBatch {
+                through_cut: stale.snapshot.evidence_cut,
+                continuation: true,
+                objects: vec![ObjectUpdate::put(entry.clone(), "stale overwrite")],
+                mapper_states: BTreeMap::from([(
+                    "continuation".into(),
+                    serde_json::json!("stale overwrite"),
+                )]),
+                ..ProjectionBatch::default()
+            },
+        )
+        .await;
+    assert!(
+        matches!(rejected, Err(GenerationError::StaleSnapshot { expected, actual }) if expected == stale.snapshot && actual == committed)
+    );
+    assert_eq!(
+        fixture.store.checkpoint().await.unwrap().snapshot,
+        committed
+    );
+    assert_eq!(
+        fixture.store.mapper_states(&committed).await.unwrap()["continuation"],
+        serde_json::json!("committed")
+    );
+    assert_eq!(
+        fixture
+            .store
+            .summary(&committed, &entry.object_ref())
+            .await
+            .unwrap()
+            .preview,
+        "committed"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_writers_from_one_snapshot_commit_exactly_one_revision() {
+    let fixture = Fixture::new().await;
+    let second = GenerationStore::open(
+        fixture.store.path(),
+        fixture.store.manifest().clone(),
+        fixture.store.limits().clone(),
+    )
+    .await
+    .unwrap();
+    let expected = fixture.store.checkpoint().await.unwrap();
+    let barrier = Arc::new(tokio::sync::Barrier::new(3));
+    let spawn = |store: GenerationStore, name: &'static str| {
+        let barrier = barrier.clone();
+        let expected = expected.clone();
+        tokio::spawn(async move {
+            barrier.wait().await;
+            store
+                .apply(
+                    expected.fence_token,
+                    &expected.snapshot,
+                    &ProjectionBatch {
+                        through_cut: expected.snapshot.evidence_cut,
+                        continuation: true,
+                        mapper_states: BTreeMap::from([("winner".into(), serde_json::json!(name))]),
+                        ..ProjectionBatch::default()
+                    },
+                )
+                .await
+        })
+    };
+    let first = spawn(fixture.store.clone(), "first");
+    let second = spawn(second, "second");
+    barrier.wait().await;
+    let outcomes = [first.await.unwrap(), second.await.unwrap()];
+    assert_eq!(
+        outcomes.iter().filter(|outcome| outcome.is_ok()).count(),
+        1,
+        "both writers accepted the same snapshot: {outcomes:?}"
+    );
+    let winner = outcomes
+        .iter()
+        .find_map(|outcome| outcome.as_ref().ok())
+        .unwrap();
+    assert!(outcomes.iter().any(|outcome| matches!(outcome, Err(GenerationError::StaleSnapshot { expected: stale, actual }) if stale == &expected.snapshot && actual == &winner.snapshot)));
+    assert_eq!(
+        fixture.store.checkpoint().await.unwrap().snapshot,
+        winner.snapshot
+    );
+    assert_eq!(winner.snapshot.evidence_cut, expected.snapshot.evidence_cut);
+    assert_eq!(
+        winner.snapshot.view_revision,
+        expected.snapshot.view_revision + 1
+    );
+}
+
+async fn assert_snapshot_mismatch_rejected(change: impl FnOnce(&mut Snapshot)) {
+    let fixture = Fixture::new().await;
+    let current = fixture.store.checkpoint().await.unwrap();
+    let mut mismatch = current.snapshot.clone();
+    change(&mut mismatch);
+    let rejected = fixture
+        .store
+        .apply(
+            current.fence_token,
+            &mismatch,
+            &ProjectionBatch {
+                through_cut: current.snapshot.evidence_cut,
+                continuation: true,
+                mapper_states: BTreeMap::from([("invalid".into(), serde_json::json!(true))]),
+                ..ProjectionBatch::default()
+            },
+        )
+        .await;
+    assert!(
+        matches!(rejected, Err(GenerationError::StaleSnapshot { expected, actual }) if expected == mismatch && actual == current.snapshot)
+    );
+    assert!(matches!(fixture.store.mapper_states(&mismatch).await,
+        Err(GenerationError::StaleSnapshot { expected, actual }) if expected == mismatch && actual == current.snapshot));
+    assert_eq!(fixture.store.checkpoint().await.unwrap(), current);
+    assert!(fixture
+        .store
+        .mapper_states(&current.snapshot)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn another_generation_snapshot_cannot_write_or_restore_mapper_state() {
+    assert_snapshot_mismatch_rejected(|snapshot| snapshot.generation = "another-generation".into())
+        .await;
+}
+
+#[tokio::test]
+async fn a_mismatched_evidence_cut_cannot_write_or_restore_mapper_state() {
+    assert_snapshot_mismatch_rejected(|snapshot| snapshot.evidence_cut += 1).await;
+}
+
+#[tokio::test]
+async fn a_mismatched_view_revision_cannot_write_or_restore_mapper_state() {
+    assert_snapshot_mismatch_rejected(|snapshot| snapshot.view_revision += 1).await;
+}
+
+#[tokio::test]
+async fn mapper_restore_rejects_a_snapshot_before_a_same_cut_continuation() {
+    let fixture = Fixture::new().await;
+    let old = fixture
+        .publish(ProjectionBatch {
+            through_cut: 1,
+            mapper_states: BTreeMap::from([("source".into(), serde_json::json!("old"))]),
+            ..ProjectionBatch::default()
+        })
+        .await;
+    let current = fixture
+        .publish(ProjectionBatch {
+            through_cut: 1,
+            continuation: true,
+            mapper_states: BTreeMap::from([("source".into(), serde_json::json!("current"))]),
+            ..ProjectionBatch::default()
+        })
+        .await;
+    assert!(matches!(fixture.store.mapper_states(&old).await,
+        Err(GenerationError::StaleSnapshot { expected, actual }) if expected == old && actual == current));
+    assert_eq!(
+        fixture.store.mapper_states(&current).await.unwrap()["source"],
+        serde_json::json!("current")
+    );
+}
+
+#[tokio::test]
+async fn mapper_restore_reads_the_checkpoint_and_values_from_one_transaction() {
+    let fixture = Fixture::new().await;
+    let original = BTreeMap::from([
+        ("source".into(), serde_json::json!("original")),
+        ("unchanged".into(), serde_json::json!(true)),
+    ]);
+    let expected = fixture
+        .publish(ProjectionBatch {
+            through_cut: 1,
+            mapper_states: original.clone(),
+            ..ProjectionBatch::default()
+        })
+        .await;
+    let second = GenerationStore::open(
+        fixture.store.path(),
+        fixture.store.manifest().clone(),
+        fixture.store.limits().clone(),
+    )
+    .await
+    .unwrap();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let resume = Arc::new(tokio::sync::Notify::new());
+    let mut restore = {
+        let store = fixture.store.clone();
+        let expected = expected.clone();
+        let entered = entered.clone();
+        let resume = resume.clone();
+        tokio::spawn(async move {
+            store
+                .mapper_states_inner(&expected, Some((&entered, &resume)))
+                .await
+        })
+    };
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        entered.notified().await;
+        let current = second
+            .apply(
+                1,
+                &expected,
+                &ProjectionBatch {
+                    through_cut: expected.evidence_cut,
+                    continuation: true,
+                    mapper_states: BTreeMap::from([
+                        ("source".into(), serde_json::json!("later")),
+                        ("new-only".into(), serde_json::json!(true)),
+                    ]),
+                    ..ProjectionBatch::default()
+                },
+            )
+            .await
+            .unwrap()
+            .snapshot;
+        resume.notify_one();
+        let observed = (&mut restore).await.unwrap().unwrap();
+        assert_eq!(observed, original);
+        assert_eq!(
+            second.mapper_states(&current).await.unwrap()["source"],
+            serde_json::json!("later")
+        );
+    })
+    .await;
+    if result.is_err() {
+        restore.abort();
+    }
+    result.expect("a concurrent WAL writer must commit while mapper restore retains its snapshot");
 }

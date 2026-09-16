@@ -149,7 +149,9 @@ impl From<AdmittedCapture> for AdmittedMapping {
 
 #[derive(Clone, Default)]
 struct WorkerState {
-    cut: u64,
+    // Absence distinguishes an uninitialized cache from a committed cut-zero
+    // generation. Same-cut continuations still replace its semantic revision.
+    snapshot: Option<Snapshot>,
     reducer: Reducer,
     reduction: Arc<Reduction>,
     source_states: BTreeMap<String, MapperState>,
@@ -167,6 +169,16 @@ struct WorkerState {
     object_epochs: BTreeMap<AnyObjectRef, IngestionEpoch>,
     reading: Option<Arc<reading::MaterializedReading>>,
     archive_semantic:Option<(std::sync::Weak<Reduction>,Arc<mapping::ArchiveSemantic>)>,
+}
+
+impl WorkerState {
+    fn committed_snapshot(&self) -> &Snapshot {
+        self.snapshot.as_ref().expect("worker state is loaded before projection")
+    }
+
+    fn cut(&self) -> u64 {
+        self.committed_snapshot().evidence_cut
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -282,7 +294,7 @@ impl ProjectionWorker {
         };
         let mut state = entry.lock().await;
         let checkpoint = generation.checkpoint().await?;
-        if state.cut != checkpoint.snapshot.evidence_cut {
+        if state.snapshot.as_ref() != Some(&checkpoint.snapshot) {
             *state = self.load_state(generation, &checkpoint.snapshot).await?;
         }
         Ok((
@@ -334,9 +346,13 @@ impl ProjectionWorker {
                 .get(&generation.manifest().generation)
                 .cloned()
         };
-        if let Some(state) = state {
-            let state = state.lock().await;
-            if state.cut == generation.checkpoint().await?.snapshot.evidence_cut {
+        let state = match state.as_ref() {
+            Some(state) => Some(state.lock().await),
+            None => None,
+        };
+        let checkpoint = generation.checkpoint().await?;
+        if let Some(state) = state.as_ref() {
+            if state.snapshot.as_ref() == Some(&checkpoint.snapshot) {
                 return Ok(has_ready_continuations(
                     &state.pending,
                     &state.source_replays,
@@ -345,7 +361,7 @@ impl ProjectionWorker {
         }
         let mut pending = BTreeMap::new();
         let mut replays = BTreeMap::new();
-        for (key, value) in generation.mapper_states().await? {
+        for (key, value) in generation.mapper_states(&checkpoint.snapshot).await? {
             if value.is_null() {
                 continue;
             }
@@ -377,32 +393,32 @@ impl ProjectionWorker {
         };
         let mut state = held.lock().await;
         let checkpoint = generation.checkpoint().await?;
-        if state.cut != checkpoint.snapshot.evidence_cut {
+        if state.snapshot.as_ref() != Some(&checkpoint.snapshot) {
             *state = self.load_state(generation, &checkpoint.snapshot).await?;
         }
         let mut progress = WorkerProgress {
             evidence_cut,
-            projected_cut: state.cut,
+            projected_cut: state.cut(),
             pending_mappings: state.pending.len(),
             suspended_sources: state.gaps.len(),
             ..WorkerProgress::default()
         };
-        while state.cut < through_cut
+        while state.cut() < through_cut
             || has_ready_continuations(&state.pending, &state.source_replays)
         {
-            let page = if state.cut < through_cut {
+            let page = if state.cut() < through_cut {
                 let limit = self
                     .limits
                     .max_unit_observations
                     .min(self.evidence.limits().max_read_items)
-                    .min(usize::try_from(through_cut - state.cut).unwrap_or(usize::MAX));
-                Some(self.evidence.admissions_after(state.cut, limit).await?)
+                    .min(usize::try_from(through_cut - state.cut()).unwrap_or(usize::MAX));
+                Some(self.evidence.admissions_after(state.cut(), limit).await?)
             } else {
                 None
             };
             if page
                 .as_ref()
-                .is_some_and(|page| page.next_after <= state.cut)
+                .is_some_and(|page| page.next_after <= state.cut())
             {
                 return Err(WorkerError::FutureCut);
             }
@@ -410,7 +426,7 @@ impl ProjectionWorker {
             let mut input_bytes = 0u64;
             let mut unit_cut = page
                 .as_ref()
-                .map_or(state.cut, |page| page.next_after.min(through_cut));
+                .map_or(state.cut(), |page| page.next_after.min(through_cut));
             for capture in page
                 .into_iter()
                 .flat_map(|page| page.captures)
@@ -471,16 +487,18 @@ impl ProjectionWorker {
                 }
             };
             self.commit_effects(generation, &unit).await?;
-            generation.apply(token, state.cut, &unit.batch).await?;
+            let committed = generation
+                .apply(token, state.committed_snapshot(), &unit.batch)
+                .await?;
             // No mutable source state or graph escapes before the atomic generation
             // commit. Cancellation drops this unit and leaves the prior cache intact.
-            progress.projected_cut = unit_cut;
+            progress.projected_cut = committed.snapshot.evidence_cut;
             progress.pending_mappings = unit.next.pending.len();
             progress.suspended_sources = unit.next.gaps.len();
             progress.unmapped_observations += unit.unmapped;
             progress.diagnostics.extend(unit.diagnostics);
             *state = unit.next;
-            state.cut = unit_cut;
+            state.snapshot = Some(committed.snapshot);
             tokio::task::yield_now().await;
         }
         Ok(progress)
@@ -494,7 +512,7 @@ impl ProjectionWorker {
         through: u64,
     ) -> Result<ProjectionUnit> {
         let mut unit = ProjectionUnit::new(state, through);
-        unit.batch.continuation = through == state.cut;
+        unit.batch.continuation = through == state.cut();
         let mut processed = BTreeSet::new();
         for captured in captures {
             unit.next
@@ -788,7 +806,7 @@ impl ProjectionWorker {
         snapshot: &Snapshot,
     ) -> Result<WorkerState> {
         let mut state = WorkerState {
-            cut: snapshot.evidence_cut,
+            snapshot: Some(snapshot.clone()),
             ..WorkerState::default()
         };
         let mut after = None;
@@ -817,7 +835,10 @@ impl ProjectionWorker {
             }
             after = page.next;
         }
-        let values = generation.mapper_states().await?;
+        // Claims are temporal, while mapper state is latest-only. The store
+        // checks this exact snapshot and reads the mapper rows in one transaction;
+        // a concurrent continuation rejects restoration instead of mixing revisions.
+        let values = generation.mapper_states(snapshot).await?;
         if serde_json::to_vec(&values)?.len() > self.limits.max_state_bytes {
             return Err(WorkerError::Limit("restored mapper checkpoint bytes"));
         }
@@ -1845,12 +1866,8 @@ impl super::publication::ProjectionCatchUp for ProjectionWorker {
     async fn validate_generation(
         &self,
         generation: &GenerationStore,
-        through_cut: u64,
+        snapshot: &Snapshot,
     ) -> anyhow::Result<()> {
-        let checkpoint = generation.checkpoint().await?;
-        if checkpoint.snapshot.evidence_cut != through_cut {
-            return Err(WorkerError::FutureCut.into());
-        }
         let mut after = None::<(PayloadRef, IngestionEpoch)>;
         let mut pinned = BTreeSet::new();
         loop {
@@ -1877,7 +1894,7 @@ impl super::publication::ProjectionCatchUp for ProjectionWorker {
         loop {
             let page = generation
                 .retained_claims(
-                    &checkpoint.snapshot,
+                    snapshot,
                     cursor.as_ref(),
                     generation.limits().max_candidates,
                     generation.limits().max_batch_bytes,
@@ -1893,7 +1910,7 @@ impl super::publication::ProjectionCatchUp for ProjectionWorker {
                     }
                 }
                 for observation in claim.evidence {
-                    if checked.insert(observation.clone()) && !self.evidence.receipt(&observation).await?.is_some_and(|receipt|matches!(receipt.disposition,ReceiptDisposition::Retained { admission_seq } if admission_seq<=through_cut)) {return Err(WorkerError::Task("claim evidence is outside the publication cut".into()).into());}
+                    if checked.insert(observation.clone()) && !self.evidence.receipt(&observation).await?.is_some_and(|receipt|matches!(receipt.disposition,ReceiptDisposition::Retained { admission_seq } if admission_seq<=snapshot.evidence_cut)) {return Err(WorkerError::Task("claim evidence is outside the publication cut".into()).into());}
                 }
             }
             if !page.has_more {

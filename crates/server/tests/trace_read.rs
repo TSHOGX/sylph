@@ -349,7 +349,7 @@ async fn change_replay_names_committed_objects_and_accepts_multiple_views_of_one
     generation
         .apply(
             checkpoint.fence_token,
-            checkpoint.snapshot.evidence_cut,
+            &checkpoint.snapshot,
             &ProjectionBatch {
                 through_cut: checkpoint.snapshot.evidence_cut,
                 continuation: true,

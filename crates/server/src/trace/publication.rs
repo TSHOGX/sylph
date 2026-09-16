@@ -16,7 +16,7 @@ use super::{
     },
     generation::{
         FenceLease, GenerationError, GenerationManifest, GenerationStore, GenerationValidation,
-        QueryLimits, WriterMode,
+        QueryLimits, Snapshot, WriterMode,
     },
 };
 
@@ -35,7 +35,7 @@ pub trait ProjectionCatchUp: Send + Sync {
     async fn validate_generation(
         &self,
         generation: &GenerationStore,
-        through_cut: u64,
+        snapshot: &Snapshot,
     ) -> anyhow::Result<()>;
 }
 
@@ -224,11 +224,13 @@ impl PublicationCoordinator {
             .await
             .map_err(PublicationError::Worker)?;
         require_cut(private, background_cut).await?;
+        // Semantic validation covers this exact baseline. A concurrent same-cut
+        // continuation remains in the tail instead of silently joining the baseline.
+        let baseline = private.validate_for_publication().await?;
         worker
-            .validate_generation(private, background_cut)
+            .validate_generation(private, &baseline.checkpoint)
             .await
             .map_err(PublicationError::Worker)?;
-        let baseline = private.validate_for_publication().await?;
         let _barrier = self.barrier.lock().await;
         if self.catalogue.pointer().await? != ticket.expected_pointer {
             return Err(CatalogueError::PublicationConflict.into());
@@ -360,15 +362,21 @@ impl PublicationCoordinator {
         )
         .await?;
         let validation = store.validate_for_publication().await?;
-        if validation.database_identity != published.ready.database_identity
-            || validation.checkpoint.evidence_cut < published.ready.snapshot.evidence_cut
-        {
+        if validation.database_identity != published.ready.database_identity {
             return Err(PublicationError::Recovery(
-                "published generation identity/checkpoint failed validation".into(),
+                "published generation identity failed validation".into(),
             ));
         }
+        store
+            .validate_published_snapshot(&published.ready.snapshot)
+            .await
+            .map_err(|error| {
+                PublicationError::Recovery(format!(
+                    "published generation checkpoint failed validation: {error}"
+                ))
+            })?;
         worker
-            .validate_generation(&store, validation.checkpoint.evidence_cut)
+            .validate_generation(&store, &validation.checkpoint)
             .await
             .map_err(PublicationError::Worker)?;
         resume_observed(&store).await?;

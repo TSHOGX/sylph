@@ -326,6 +326,20 @@ advances only after the complete observation is resolved or explicitly quarantin
 Parser failure retains a diagnostic and coverage gap at the cut; it does not publish
 guessed values. Dependent unresolved claims are indexed for reevaluation on later evidence.
 
+Every projection commit compares the writer fence and the complete prior snapshot
+`(generation, evidence_cut, view_revision)` inside its write transaction. A continuation
+can advance the revision without advancing admission, so checking the evidence cut alone
+cannot reject a stale prepared unit. Rejection leaves both durable checkpoints and the
+worker's committed cache unchanged; retry restores the current snapshot first.
+
+Worker caches name that same complete snapshot and have an explicit uninitialized state.
+A default zero evidence cut is not proof that a cache reflects a persisted zero-cut
+continuation. Claims restore from their fixed temporal snapshot; mutable mapper
+checkpoints restore only after that exact snapshot is validated in the same database read
+transaction. A stale restore fails instead of combining older claims with newer mapper
+state. The worker installs the checkpoint returned by a successful commit, never one
+predicted before the transaction.
+
 A stateful source awaiting an external payload retains one blocked head and a replay
 cursor over its admitted tail. Successor envelopes stay in evidence instead of consuming
 one pending slot per record. The replay index binds source, generation and ingestion epoch,
@@ -400,6 +414,11 @@ Startup compares the published projection manifest with the current semantic, ma
 reducer and encoding contracts before serving it. A differing contract enters explicit
 recovery, cancels views of that generation and rebuilds from retained evidence. It does
 not query older row layouts or add compatibility readers.
+The recovered database must reach at least the published evidence cut and view revision,
+and its durable revision record must map the published revision to the published cut.
+Advancing the reader's revision floor does not discard this publication proof. Background
+semantic validation names the exact snapshot used as the baseline for bounded tail
+validation; a continuation committed during validation belongs to that tail.
 
 ### Crash obligations
 
