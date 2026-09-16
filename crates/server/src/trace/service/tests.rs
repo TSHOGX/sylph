@@ -4,6 +4,236 @@ use sylph_protocol::{AgentName, EnvironmentId, SessionId};
 const NATIVE: &[u8] =
     include_bytes!("../../../../../fixtures/native/codex/user-input-response-item.jsonl");
 
+#[tokio::test]
+async fn retained_reader_cursor_and_lease_survive_service_restart() {
+    use crate::trace::cursor::CursorBinding;
+    let directory = tempfile::tempdir().unwrap();
+    let service = TraceService::open(directory.path()).await.unwrap();
+    admit_native(&service).await;
+    service.project_pending().await.unwrap();
+    let lease = service.lease_guard("reader", None).await.unwrap();
+    let token = lease.token.clone();
+    let snapshot = lease.snapshot.clone();
+    let binding = || CursorBinding {
+        domain: "sylph.reader.position",
+        subject: "reader",
+        lease: &token,
+        query_digest: "retained-query-and-grants",
+    };
+    let cursor = service
+        .cursors()
+        .seal("retained-private-position", binding())
+        .unwrap();
+    lease.retain();
+    drop(lease);
+    close(service).await;
+    let restarted = TraceService::open(directory.path()).await.unwrap();
+    assert_eq!(
+        restarted.lease_guard("reader", Some(&token)).await.unwrap().snapshot,
+        snapshot
+    );
+    assert_eq!(
+        restarted.cursors().open(&cursor, binding()).unwrap(),
+        "retained-private-position"
+    );
+    close(restarted).await;
+}
+
+#[tokio::test]
+async fn incompatible_projection_contract_rebuilds_before_serving_retained_views() {
+    let directory = tempfile::tempdir().unwrap();
+    let service = TraceService::open(directory.path()).await.unwrap();
+    admit_native(&service).await;
+    service.project_pending().await.unwrap();
+    let mut incompatible = TraceService::manifest("incompatible-projection".into());
+    incompatible.semantic_schema = "unrecognized-contract".into();
+    let (ticket, private) = service
+        .publication
+        .begin_build(incompatible, crate::models::now_ms())
+        .await
+        .unwrap();
+    let old = service.active().await.unwrap();
+    service
+        .publication
+        .publish(&ticket, &private, Some(old.as_ref()), &service.worker)
+        .await
+        .unwrap();
+    let snapshot = private.checkpoint().await.unwrap().snapshot;
+    private.close().await;
+    drop(old);
+    let pending = service
+        .catalogue
+        .begin_lease("reader", crate::models::now_ms(), 120_000)
+        .await
+        .unwrap();
+    let cursor = service
+        .catalogue
+        .finish_lease(&pending, &snapshot, crate::models::now_ms())
+        .await
+        .unwrap();
+    let token = cursor.token.clone();
+    drop(cursor);
+    let evidence_cut = service.evidence.evidence_cut().await.unwrap();
+    close(service).await;
+    let restarted = TraceService::open(directory.path()).await.unwrap();
+    assert!(
+        restarted.active().await.is_err(),
+        "an incompatible projection must not serve old rows"
+    );
+    assert!(restarted.lease_guard("reader", Some(&token)).await.is_err());
+    restarted.project_pending().await.unwrap();
+    let active = restarted.active().await.unwrap();
+    assert_eq!(
+        active.manifest(),
+        &TraceService::manifest(active.manifest().generation.clone())
+    );
+    assert_eq!(restarted.evidence.evidence_cut().await.unwrap(), evidence_cut);
+    assert_eq!(
+        active.checkpoint().await.unwrap().snapshot.evidence_cut,
+        evidence_cut
+    );
+    drop(active);
+    close(restarted).await;
+}
+
+struct RetainedContractFixture {
+    _directory: tempfile::TempDir,
+    service: TraceService,
+    manifest: GenerationManifest,
+    path: PathBuf,
+    snapshot: super::super::generation::Snapshot,
+    token: String,
+}
+
+impl RetainedContractFixture {
+    async fn new() -> Self {
+        let directory = tempfile::tempdir().unwrap();
+        let service = TraceService::open(directory.path()).await.unwrap();
+        admit_native(&service).await;
+        service.project_pending().await.unwrap();
+        let previous = service.active().await.unwrap();
+        let mut manifest = TraceService::manifest("retained-previous-contract".into());
+        manifest.semantic_schema = "retired-reader-contract".into();
+        let (ticket, incompatible) = service
+            .publication
+            .begin_build(manifest.clone(), crate::models::now_ms())
+            .await
+            .unwrap();
+        service
+            .publication
+            .publish(&ticket, &incompatible, Some(&previous), &service.worker)
+            .await
+            .unwrap();
+        let snapshot = incompatible.checkpoint().await.unwrap().snapshot;
+        let path = incompatible.path().to_owned();
+        // The prior server issued this view before a newer contract was published.
+        let pending = service
+            .catalogue
+            .begin_lease("reader", crate::models::now_ms(), 120_000)
+            .await
+            .unwrap();
+        let token = service
+            .catalogue
+            .finish_lease(&pending, &snapshot, crate::models::now_ms())
+            .await
+            .unwrap()
+            .token;
+        let (ticket, current) = service
+            .publication
+            .begin_build(
+                TraceService::manifest("current-contract".into()),
+                crate::models::now_ms(),
+            )
+            .await
+            .unwrap();
+        service
+            .publication
+            .publish(&ticket, &current, Some(&incompatible), &service.worker)
+            .await
+            .unwrap();
+        incompatible.close().await;
+        current.close().await;
+        drop(previous);
+        close(service).await;
+        let service = TraceService::open(directory.path()).await.unwrap();
+        assert_eq!(
+            service.active().await.unwrap().manifest().generation,
+            "current-contract"
+        );
+        Self {
+            _directory: directory,
+            service,
+            manifest,
+            path,
+            snapshot,
+            token,
+        }
+    }
+
+    async fn assert_expired(&self, result: anyhow::Result<()>) {
+        assert!(matches!(
+            result.as_ref().err().and_then(|error| {
+                error.downcast_ref::<super::super::evidence::catalogue::CatalogueError>()
+            }),
+            Some(super::super::evidence::catalogue::CatalogueError::SnapshotExpired)
+        ), "An incompatible retained contract must expire its view: {result:?}");
+        assert!(matches!(
+            self.service
+                .catalogue
+                .resolve_lease("reader", &self.token, crate::models::now_ms())
+                .await,
+            Err(super::super::evidence::catalogue::CatalogueError::SnapshotExpired)
+        ));
+    }
+}
+
+#[tokio::test]
+async fn retained_incompatible_contract_cannot_load_from_disk() {
+    let fixture = RetainedContractFixture::new().await;
+    fixture
+        .assert_expired(fixture.service.generation(&fixture.manifest.generation).await.map(|_| ()))
+        .await;
+    close(fixture.service).await;
+}
+
+#[tokio::test]
+async fn retained_incompatible_contract_cannot_return_a_cached_store() {
+    let fixture = RetainedContractFixture::new().await;
+    let cached = GenerationStore::open(
+        &fixture.path,
+        fixture.manifest.clone(),
+        QueryLimits::default(),
+    )
+    .await
+    .unwrap();
+    fixture.service.generations.write().await.insert(
+        fixture.manifest.generation.clone(),
+        Arc::new(cached),
+    );
+    fixture
+        .assert_expired(fixture.service.generation(&fixture.manifest.generation).await.map(|_| ()))
+        .await;
+    close(fixture.service).await;
+}
+
+#[tokio::test]
+async fn retained_incompatible_contract_cannot_borrow_an_existing_lease() {
+    let fixture = RetainedContractFixture::new().await;
+    fixture
+        .assert_expired(fixture.service.lease_guard("reader", Some(&fixture.token)).await.map(|_| ()))
+        .await;
+    close(fixture.service).await;
+}
+
+#[tokio::test]
+async fn retained_incompatible_contract_cannot_acquire_a_snapshot_lease() {
+    let fixture = RetainedContractFixture::new().await;
+    fixture
+        .assert_expired(fixture.service.lease_at_snapshot("reader", &fixture.snapshot).await.map(|_| ()))
+        .await;
+    close(fixture.service).await;
+}
+
 pub(super) async fn admit_native(service: &TraceService) {
     let environment = EnvironmentId::parse("env7fk2").unwrap();
     let issuer = Issuer::Environment(environment.clone());

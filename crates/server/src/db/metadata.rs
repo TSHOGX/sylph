@@ -8,6 +8,12 @@ use crate::{
 use sqlx::SqlitePool;
 use sylph_protocol::SessionId;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CapabilityPartition {
+    Unrestricted,
+    Environments(std::collections::BTreeSet<String>),
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionFilter {
     pub limit: i64,
@@ -203,39 +209,37 @@ impl ControlStore {
         capability: &str,
     ) -> Result<bool> {
         if subject_id == "bootstrap" {
-            // Bootstrap is a first-run local identity. It is active only until
-            // the first registered Subject exists; after that every environment
-            // is governed by durable grants.
-            let active: Option<i64> =
-                sqlx::query_scalar("SELECT 1 FROM subjects WHERE id <> 'bootstrap' LIMIT 1")
-                    .fetch_optional(&self.readers)
-                    .await
-                    .map_err(Error::Database)?;
-            if active.is_some() {
-                return Ok(false);
-            }
-            return Ok(true);
+            return self.bootstrap_is_active().await;
         }
         let found: Option<i64> = sqlx::query_scalar("SELECT 1 FROM env_grants WHERE subject_id = ? AND environment_id = ? AND capability = ? AND (expires_at_ms IS NULL OR expires_at_ms > ?)")
             .bind(subject_id).bind(environment_id).bind(capability).bind(now_ms()).fetch_optional(&self.readers).await.map_err(Error::Database)?;
         Ok(found.is_some())
     }
 
+    async fn bootstrap_is_active(&self) -> Result<bool> {
+        // First-run authority covers retained environments, including ones without
+        // installation rows. The first registered Subject disables it everywhere.
+        let registered: Option<i64> =
+            sqlx::query_scalar("SELECT 1 FROM subjects WHERE id <> 'bootstrap' LIMIT 1")
+                .fetch_optional(&self.readers)
+                .await
+                .map_err(Error::Database)?;
+        Ok(registered.is_none())
+    }
+
     pub async fn capable_environments(
         &self,
         subject_id: &str,
         capability: &str,
-    ) -> Result<Vec<String>> {
+    ) -> Result<CapabilityPartition> {
         if subject_id == "bootstrap" {
-            return sqlx::query_scalar(
-                "SELECT environment_id FROM env_installations
-                 WHERE NOT EXISTS (SELECT 1 FROM subjects WHERE id <> 'bootstrap')",
-            )
-            .fetch_all(&self.readers)
-            .await
-            .map_err(Error::Database);
+            return Ok(if self.bootstrap_is_active().await? {
+                CapabilityPartition::Unrestricted
+            } else {
+                CapabilityPartition::Environments(Default::default())
+            });
         }
-        sqlx::query_scalar(
+        let environments = sqlx::query_scalar(
             "SELECT environment_id FROM env_grants
              WHERE subject_id = ? AND capability = ?
                AND (expires_at_ms IS NULL OR expires_at_ms > ?)",
@@ -245,7 +249,10 @@ impl ControlStore {
         .bind(now_ms())
         .fetch_all(&self.readers)
         .await
-        .map_err(Error::Database)
+        .map_err(Error::Database)?;
+        Ok(CapabilityPartition::Environments(
+            environments.into_iter().collect(),
+        ))
     }
 
     pub async fn authorization_status(
@@ -255,15 +262,11 @@ impl ControlStore {
         capability: &str,
     ) -> Result<Option<&'static str>> {
         if subject_id == "bootstrap" {
-            let active: Option<i64> =
-                sqlx::query_scalar("SELECT 1 FROM subjects WHERE id <> 'bootstrap' LIMIT 1")
-                    .fetch_optional(&self.readers)
-                    .await
-                    .map_err(Error::Database)?;
-            if active.is_some() {
-                return Ok(Some("not_granted"));
-            }
-            return Ok(Some("granted"));
+            return Ok(Some(if self.bootstrap_is_active().await? {
+                "granted"
+            } else {
+                "not_granted"
+            }));
         }
         let row: Option<Option<i64>> = sqlx::query_scalar(
             "SELECT expires_at_ms FROM env_grants WHERE subject_id = ? AND environment_id = ? AND capability = ?",
@@ -283,12 +286,7 @@ impl ControlStore {
 
     pub async fn is_admin(&self, subject_id: &str) -> Result<bool> {
         if subject_id == "bootstrap" {
-            let active: Option<i64> =
-                sqlx::query_scalar("SELECT 1 FROM subjects WHERE id <> 'bootstrap' LIMIT 1")
-                    .fetch_optional(&self.readers)
-                    .await
-                    .map_err(Error::Database)?;
-            return Ok(active.is_none());
+            return self.bootstrap_is_active().await;
         }
         let value: Option<i64> = sqlx::query_scalar("SELECT is_admin FROM subjects WHERE id = ?")
             .bind(subject_id)

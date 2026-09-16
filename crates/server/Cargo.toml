@@ -66,6 +66,8 @@ chrono = { workspace = true }
 sha2 = "0.10"
 hex = "0.4"
 base64 = { workspace = true }
+# Randomized authenticated pagination tokens; already shared with the TLS stack.
+aws-lc-rs = { version = "1.18.1", default-features = false, features = ["non-fips", "alloc"] }
 
 # Exact-byte content addressing for immutable trace payloads.
 blake3 = "1.5"

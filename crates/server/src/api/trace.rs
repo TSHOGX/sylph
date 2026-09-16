@@ -5,7 +5,7 @@ use crate::{
     trace::{
         evidence::catalogue::ViewLease,
         generation::GenerationError,
-        reading_store::{read_scope, ReadFilter, ReadRow},
+        reading_store::{read_scope, ReadCandidate, ReadFilter, ReadRow, ReadWindow},
     },
     AppState,
 };
@@ -810,37 +810,160 @@ async fn check_row(
     lease: &ViewLease,
     row: &ReadRow,
 ) -> Result<()> {
-    let proof = state
-        .trace
-        .catalogue()
-        .scope_proof(&row.epoch)
-        .await
-        .map_err(internal)?;
-    if !state
-        .store
-        .has_capability(subject, proof.scope.environment().as_str(), "observe")
-        .await
-        .map_err(internal)?
-    {
-        return Err(TraceError {
-            status: StatusCode::NOT_FOUND,
-            code: "trace_object_not_found",
-            message: "Trace object not found".into(),
-            response: None,
-        });
+    for environment in &row.required_environments {
+        if !state
+            .store
+            .has_capability(subject, environment, "observe")
+            .await
+            .map_err(internal)?
+        {
+            return Err(storage(GenerationError::NotFound));
+        }
     }
-    state
-        .trace
-        .catalogue()
-        .bind_lease_scope(subject, &lease.token, &proof, crate::models::now_ms())
-        .await
-        .map_err(|error| TraceError {
-            status: StatusCode::GONE,
-            code: "snapshot_expired",
-            message: error.to_string(),
-            response: None,
-        })?;
+    for epoch in std::iter::once(&row.epoch)
+        .chain(&row.target_epochs)
+        .collect::<std::collections::BTreeSet<_>>()
+    {
+        let proof = state
+            .trace
+            .catalogue()
+            .scope_proof(epoch)
+            .await
+            .map_err(internal)?;
+        if !state
+            .store
+            .has_capability(subject, proof.scope.environment().as_str(), "observe")
+            .await
+            .map_err(internal)?
+        {
+            return Err(storage(GenerationError::NotFound));
+        }
+        state
+            .trace
+            .catalogue()
+            .bind_lease_scope(subject, &lease.token, &proof, crate::models::now_ms())
+            .await
+            .map_err(|error| lease_error(error.into()))?;
+    }
     Ok(())
+}
+
+async fn authorized_environments(
+    state: &AppState,
+    subject: &str,
+) -> Result<Option<std::collections::BTreeSet<String>>> {
+    Ok(match state
+        .store
+        .capable_environments(subject, "observe")
+        .await
+        .map_err(internal)? {
+        crate::db::metadata::CapabilityPartition::Unrestricted => None,
+        crate::db::metadata::CapabilityPartition::Environments(environments) => Some(environments),
+    })
+}
+
+async fn candidate_is_readable(
+    state: &AppState,
+    subject: &str,
+    candidate: ReadCandidate,
+) -> std::result::Result<bool, GenerationError> {
+    for epoch in std::iter::once(&candidate.epoch)
+        .chain(&candidate.target_epochs)
+        .collect::<std::collections::BTreeSet<_>>()
+    {
+        let catalogue = state.trace.catalogue();
+        let proof = catalogue
+            .scope_proof(epoch)
+            .await
+            .map_err(|error| GenerationError::Invalid(error.to_string()))?;
+        if !state
+            .store
+            .has_capability(subject, proof.scope.environment().as_str(), "observe")
+            .await
+            .map_err(|error| GenerationError::Invalid(error.to_string()))?
+            || !catalogue
+                .scope_is_readable(&proof)
+                .await
+                .map_err(|error| GenerationError::Invalid(error.to_string()))?
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn cursor_error(error: crate::trace::cursor::CursorError) -> TraceError {
+    match error {
+        crate::trace::cursor::CursorError::InvalidCursor
+        | crate::trace::cursor::CursorError::Limit => invalid("Invalid or mismatched read cursor"),
+        crate::trace::cursor::CursorError::Crypto => internal(error),
+    }
+}
+
+fn cursor_digest(scope: &str, filter: &ReadFilter, backward: bool) -> Result<String> {
+    Ok(
+        blake3::hash(&serde_json::to_vec(&(scope, filter, backward)).map_err(internal)?)
+            .to_hex()
+            .to_string(),
+    )
+}
+
+fn seal_cursor(
+    state: &AppState,
+    subject: &str,
+    lease: &ViewLease,
+    scope: &str,
+    filter: &ReadFilter,
+    backward: bool,
+    position: Option<String>,
+) -> Result<Option<String>> {
+    position
+        .map(|position| {
+            let digest = cursor_digest(scope, filter, backward)?;
+            state
+                .trace
+                .cursors()
+                .seal(
+                    &position,
+                    crate::trace::cursor::CursorBinding {
+                        domain: "sylph.reader.position",
+                        subject,
+                        lease: &lease.token,
+                        query_digest: &digest,
+                    },
+                )
+                .map_err(cursor_error)
+        })
+        .transpose()
+}
+
+fn open_cursor(
+    state: &AppState,
+    subject: &str,
+    lease: &ViewLease,
+    scope: &str,
+    filter: &ReadFilter,
+    backward: bool,
+    cursor: Option<&str>,
+) -> Result<Option<String>> {
+    cursor
+        .map(|cursor| {
+            let digest = cursor_digest(scope, filter, backward)?;
+            state
+                .trace
+                .cursors()
+                .open(
+                    cursor,
+                    crate::trace::cursor::CursorBinding {
+                        domain: "sylph.reader.position",
+                        subject,
+                        lease: &lease.token,
+                        query_digest: &digest,
+                    },
+                )
+                .map_err(cursor_error)
+        })
+        .transpose()
 }
 
 async fn authorized_value(
@@ -1039,6 +1162,24 @@ pub async fn bootstrap(
     let mut header: AgentHeader =
         serde_json::from_value(authorized_value(&state, &subject.0, row.body).await?)
             .map_err(internal)?;
+    let count_filter = ReadFilter {
+        allowed_environments: authorized_environments(&state, &subject.0).await?,
+        ..ReadFilter::default()
+    };
+    let count = generation
+        .read_authorized_count(
+            &lease.snapshot,
+            &read_scope(&agent, None, "relations"),
+            &count_filter,
+            |candidate| candidate_is_readable(&state, &subject.0, candidate),
+        )
+        .await
+        .map_err(storage)?;
+    header.descendant_count = ReadCount {
+        value: count,
+        scope: "authorized direct spawned agents".into(),
+        complete: count.is_some(),
+    };
     if let AgentRef::Session(session_id) = &agent {
         if let Some(session) = state
             .store
@@ -1092,7 +1233,7 @@ pub async fn bootstrap(
         true,
     )
     .await?;
-    hydrate_parts(&mut window, &lease)?;
+    hydrate_parts(&state, &subject.0, &mut window, &lease).await?;
     let progress = state.trace.progress().await;
     let outbox = state
         .store
@@ -1159,7 +1300,7 @@ async fn page<T: serde::de::DeserializeOwned + Serialize>(
         .map(TraceAddress::parse)
         .transpose()
         .map_err(|error| invalid(error.to_string()))?;
-    let filter = if collection == "relations" {
+    let mut filter = if collection == "relations" {
         if query.q.as_ref().is_some_and(|text| text.len() > 512) {
             return Err(invalid("Directory search exceeds its limit"));
         }
@@ -1188,20 +1329,44 @@ async fn page<T: serde::de::DeserializeOwned + Serialize>(
             } else {
                 state.into()
             },
+            ..ReadFilter::default()
         }
     } else {
         ReadFilter::default()
     };
+    filter.allowed_environments = authorized_environments(state, subject).await?;
+    let scope = read_scope(agent, selection, collection);
+    let before = open_cursor(
+        state,
+        subject,
+        lease,
+        &scope,
+        &filter,
+        true,
+        query.before.as_deref(),
+    )?;
+    let after = open_cursor(
+        state,
+        subject,
+        lease,
+        &scope,
+        &filter,
+        false,
+        query.after.as_deref(),
+    )?;
     let rows = generation
-        .read_filtered_page(
+        .read_authorized_page(
             &lease.snapshot,
-            &read_scope(agent, selection, collection),
-            query.before.as_deref(),
-            query.after.as_deref(),
-            around.as_ref(),
-            query.limit.unwrap_or(state.trace.limits().max_items),
-            latest,
+            &scope,
+            ReadWindow {
+                before: before.as_deref(),
+                after: after.as_deref(),
+                around: around.as_ref(),
+                limit: query.limit.unwrap_or(state.trace.limits().max_items),
+                latest,
+            },
             &filter,
+            |candidate| candidate_is_readable(state, subject, candidate),
         )
         .await
         .map_err(storage)?;
@@ -1218,14 +1383,19 @@ async fn page<T: serde::de::DeserializeOwned + Serialize>(
         returned_items: items.len(),
         returned_bytes: bytes,
         items,
-        before_cursor: rows.before,
-        after_cursor: rows.after,
+        before_cursor: seal_cursor(state, subject, lease, &scope, &filter, true, rows.before)?,
+        after_cursor: seal_cursor(state, subject, lease, &scope, &filter, false, rows.after)?,
         has_before: rows.has_before,
         has_after: rows.has_after,
         total: ReadCount {
-            value: filter.is_empty().then_some(rows.total),
-            scope: collection.into(),
-            complete: filter.is_empty(),
+            value: rows.total,
+            scope: if collection == "relations" {
+                "authorized direct spawned agents"
+            } else {
+                collection
+            }
+            .into(),
+            complete: rows.total.is_some(),
         },
         state: if rows.work_exhausted {
             ReadPageState::WorkBudgetExhausted
@@ -1264,12 +1434,21 @@ async fn history(
         true,
     )
     .await?;
-    hydrate_parts(&mut page, &lease)?;
+    hydrate_parts(&state, &subject.0, &mut page, &lease).await?;
     lease.retain();
     Ok(Json(page))
 }
 
-fn hydrate_parts(page: &mut ReadPage<ReadingUnit>, lease: &ViewLease) -> Result<()> {
+async fn hydrate_parts(
+    state: &AppState,
+    subject: &str,
+    page: &mut ReadPage<ReadingUnit>,
+    lease: &ViewLease,
+) -> Result<()> {
+    let filter = ReadFilter {
+        allowed_environments: authorized_environments(state, subject).await?,
+        ..ReadFilter::default()
+    };
     for unit in &mut page.items {
         if let ReadingContent::Message {
             revision_ref,
@@ -1287,15 +1466,24 @@ fn hydrate_parts(page: &mut ReadPage<ReadingUnit>, lease: &ViewLease) -> Result<
                         &unit.anchor.object(),
                         revision_ref,
                     );
-                    *parts_cursor = Some(
-                        crate::trace::reading_store::cursor_after(
-                            &lease.snapshot,
-                            &scope,
-                            &last.part_ref.encode(),
-                            parts.len() - 1,
-                        )
-                        .map_err(storage)?,
-                    );
+                    *parts_cursor = seal_cursor(
+                        state,
+                        subject,
+                        lease,
+                        &scope,
+                        &filter,
+                        false,
+                        Some(
+                            crate::trace::reading_store::cursor_after(
+                                &lease.snapshot,
+                                &scope,
+                                &last.part_ref.encode(),
+                                parts.len() - 1,
+                                &filter,
+                            )
+                            .map_err(storage)?,
+                        ),
+                    )?;
                 }
             }
         }
@@ -1334,18 +1522,32 @@ async fn parts(
         &anchor,
         &revision,
     );
+    let filter = ReadFilter {
+        allowed_environments: authorized_environments(&state, &subject.0).await?,
+        ..ReadFilter::default()
+    };
+    let after = open_cursor(
+        &state,
+        &subject.0,
+        &lease,
+        &scope,
+        &filter,
+        false,
+        query.after.as_deref(),
+    )?;
     let rows = generation
-        .read_page(
+        .read_authorized_page(
             &lease.snapshot,
             &scope,
-            None,
-            query.after.as_deref(),
-            None,
-            query
-                .limit
-                .unwrap_or(32)
-                .min(state.trace.limits().max_items),
-            false,
+            ReadWindow {
+                before: None,
+                after: after.as_deref(),
+                around: None,
+                limit: query.limit.unwrap_or(32).min(state.trace.limits().max_items),
+                latest: false,
+            },
+            &filter,
+            |candidate| candidate_is_readable(&state, &subject.0, candidate),
         )
         .await
         .map_err(storage)?;
@@ -1359,14 +1561,24 @@ async fn parts(
         returned_items: items.len(),
         returned_bytes: serde_json::to_vec(&items).map_err(internal)?.len(),
         items,
-        before_cursor: rows.before,
-        after_cursor: rows.after,
+        before_cursor: seal_cursor(
+            &state,
+            &subject.0,
+            &lease,
+            &scope,
+            &filter,
+            true,
+            rows.before,
+        )?,
+        after_cursor: seal_cursor(
+            &state, &subject.0, &lease, &scope, &filter, false, rows.after,
+        )?,
         has_before: rows.has_before,
         has_after: rows.has_after,
         total: ReadCount {
-            value: Some(rows.total),
+            value: rows.total,
             scope: "ordered message parts".into(),
-            complete: true,
+            complete: rows.total.is_some(),
         },
         state: if rows.work_exhausted {
             ReadPageState::WorkBudgetExhausted
@@ -1378,6 +1590,7 @@ async fn parts(
         limits: state.trace.limits().clone(),
     }))
 }
+
 async fn relations(
     State(state): State<AppState>,
     Extension(subject): Extension<SubjectId>,

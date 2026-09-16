@@ -238,6 +238,8 @@ impl ProjectionWorker {
                 old.body != row.body
                     || old.order_key != row.order_key
                     || old.scope_epoch != row.scope_epoch
+                    || old.required_environments != row.required_environments
+                    || old.target_epochs != row.target_epochs
             }) {
                 unit.batch.read_rows.push(row.clone());
             }
@@ -294,10 +296,25 @@ fn rows(
         let row = ReadRowChange {
             scope: scope.clone(),
             address: address.clone(),
-            anchor,
+            anchor: anchor.clone(),
             order_key: (index as u64 + 1).to_be_bytes().to_vec(),
             body: Some(body),
             scope_epoch: epoch.clone(),
+            required_environments: std::iter::once(subject.scope().environment().as_str().to_owned())
+                .chain(anchor.iter().map(|anchor| {
+                    anchor.object().scope().environment().as_str().to_owned()
+                }))
+                .collect(),
+            target_epochs: anchor
+                .iter()
+                .filter_map(|anchor| {
+                    let object = anchor.object();
+                    epochs
+                        .get(&object)
+                        .or_else(|| epochs.get(&AnyObjectRef::Agent(object.scope().clone())))
+                        .cloned()
+                })
+                .collect(),
         };
         rows.insert((scope, address), row);
         Ok(())
@@ -334,7 +351,7 @@ fn rows(
                 ))),
                 index,
                 serde_json::to_value(row)?,
-                &AnyObjectRef::Agent(row.agent.address.agent()),
+                &AnyObjectRef::Agent(agent.clone()),
             )?;
         }
     }
@@ -587,3 +604,7 @@ fn anchors(projection: &ReadingProjection) -> Result<BTreeMap<String, PayloadAnc
     }
     Ok(anchors)
 }
+
+#[cfg(test)]
+#[path = "reading/visibility_tests.rs"]
+mod visibility_tests;

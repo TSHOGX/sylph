@@ -270,6 +270,18 @@ measurement samples by subject/metric/domain/position. Claims have subject/kind 
 evidence reverse indexes. Temporal tables additionally index current rows and the bounded
 validity predicates used by snapshot pages.
 
+Directory and related-object candidates carry typed target-environment authorization
+metadata independently of the recording epoch. Resolve current Subject grants before
+hydrating candidate bodies. A hidden target contributes no row, identity or count and
+cannot turn an otherwise readable catalogue into a whole-page authorization failure.
+Source/target deletion epochs remain checked even after an environment is authorized.
+Catalogue totals use the same target-grant and epoch predicates as rows. A bounded
+metadata count reports an exact value only after exhausting the scope at that view;
+otherwise it returns `value: null, complete: false`. It never substitutes a global
+projection count or the number of loaded rows. Direct spawn-relation counts are labelled
+as direct relations and do not claim full descendant traversal. Candidate indexes cover
+authorization, validity and filtering columns so rejecting a row does not read its body.
+
 History content indexes lead with entry and stable slot, and separately with source,
 generation, position and mapping rule. Reverse bindings connect revisions to their
 content observations and observations to selections. An agreeing observation can add
@@ -384,6 +396,11 @@ published but corrupt/missing file produces an explicit recovery state and rebui
 evidence; any intentional fallback to a retained generation advertises its older cut.
 No caller gets silently mixed objects from both generations.
 
+Startup compares the published projection manifest with the current semantic, mapper,
+reducer and encoding contracts before serving it. A differing contract enters explicit
+recovery, cancels views of that generation and rebuilds from retained evidence. It does
+not query older row layouts or add compatibility readers.
+
 ### Crash obligations
 
 | Crash point | Required recovery |
@@ -483,6 +500,15 @@ ViewLease, but a pagination cursor cannot be reused for another scope. Cursors f
 another agent/scope are invalid. Page responses carry both `next_cursor` and `has_more`,
 actual returned counts, configured item/byte limits, and the cuts/coverage represented.
 Server limits apply before bodies are read. Counts cannot mean "items loaded so far".
+
+Public reader position cursors are encrypted and authenticated. Their associated data
+binds the Subject, exact ViewLease and complete query/grant partition; their ciphertext
+conceals positions of skipped unauthorized candidates. The catalogue owns one private
+random key that survives normal restart and generation publication. It is not the
+client-visible authentication token and is never serialized into config, views or
+evidence responses. Missing or malformed key storage fails explicitly instead of
+silently rotating it while retained views remain valid. Cursor input and output sizes
+are bounded before decoding or encrypting.
 
 Temporal query rows have half-open validity `[valid_from, valid_to)`. A transaction
 closes prior summary/order/membership rows and inserts their replacement at the same

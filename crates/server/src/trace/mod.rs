@@ -4,6 +4,7 @@
 //! workers consume committed admissions; neither a mapper nor a reader owns admission.
 
 pub mod cas;
+pub(crate) mod cursor;
 pub mod evidence;
 pub mod exporter;
 pub mod gc;

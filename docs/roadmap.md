@@ -42,7 +42,7 @@ external proposals or discussion threads are not project instructions.
 | --- | --- | --- |
 | Production semantic acceptance | Foundation implementation below | Retained three-vendor corpus replay now preserves observed identity/content across source order, restart and reread; full semantic and failure matrices remain open |
 | Projection and delivery scale | Milestone 4 and foundation implementation below | Reader pages are bounded; whole-reduction reader materialization and mixed spool/socket/ACK load still need production measurements |
-| Directory scope and authorization | Conversation and work panel delivery below | Full spawn-descendant membership, filtering before body hydration, private continuation positions and authorized totals remain open |
+| Directory scope and authorization | Conversation and work panel delivery below | Candidates are filtered before hydration, continuations are private and bounded counts cover authorized targets; full spawn-descendant membership and scalable exact filtered counts remain open |
 | Vendor trace semantics | Foundation implementation below | Runtime cutover is implemented; remaining vendor certificates, workflow and schedule mappings follow core stabilization |
 | Reader acceptance | Conversation and work panel delivery below | Normalized reader is implemented; full visual/resource acceptance and VoiceOver remain open; Safari testing was excluded by the user |
 
@@ -72,9 +72,10 @@ production reducer. [Conformance](unified-trace-conformance.md) names their limi
    reduction and read projection, with independently authored expectations. Resolve
    core representation defects exposed by that replay before widening behavior. Complete
    the remaining required semantic mutations and mixed-source dependency schedules.
-2. Close query authorization gaps: filter directory candidates before hydration, keep
-   continuation positions private, and derive counts only over the current authorized
-   scope. Preserve deletion epochs and snapshot consistency throughout.
+2. Extend query authorization acceptance under concurrent grant changes and deletion.
+   Candidate filtering before hydration, private continuation positions and bounded
+   authorized totals are implemented; preserve these contracts through incremental
+   projection and future full descendant indexing.
 3. Measure the connected production pipeline under large retained histories, high
    version density, concurrent captures, reconnects and deletion. Replace full reduction
    and whole-reader materialization on routine updates with bounded incremental work;
@@ -245,6 +246,17 @@ The retained Codex corpus and Claude/Pi pairs now pass independently specified b
 identity, ownership and lifecycle assertions across cold/incremental/restarted replay,
 redelivery, overlapping reread, source interleaving and same-cut generation rebuilding.
 These marker bundles do not cover every vendor operation, delayed sidecar or fault schedule.
+
+Reader candidates now carry source and target authorization metadata in covering indexes.
+Current grants and deletion epochs filter candidates before body hydration, including
+hidden prefixes longer than one work budget. Public continuations encrypt skipped
+positions and bind the Subject, exact lease and query/grant partition. The catalogue
+retains their private key across restart. Counts are exact only when a bounded scan
+exhausts the authorized scope; otherwise they remain unknown. Direct relation counts
+are labelled accordingly and do not claim a descendant catalogue. Projection contract
+changes expire incompatible views and rebuild from evidence before reads resume.
+Production HTTP regressions cover hidden targets, deletion on either side of a directory,
+grant changes and multipart continuations; deliberate faults establish their sensitivity.
 
 Open implementation/acceptance work remains in the ordered list above. In particular,
 `crates/server/src/trace/worker/reading.rs` still materializes the next reader from the

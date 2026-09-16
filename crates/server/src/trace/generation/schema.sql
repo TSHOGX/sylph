@@ -164,9 +164,13 @@ CREATE TABLE read_rows (
   search_text TEXT NOT NULL,
   directory_state TEXT NOT NULL,
   needs_input INTEGER NOT NULL,
+  required_environments_json TEXT NOT NULL,
+  target_epochs_json TEXT NOT NULL,
   PRIMARY KEY(scope_key,address,valid_from)
 ) WITHOUT ROWID;
-CREATE INDEX read_window ON read_rows(scope_key,order_key,address,valid_from);
-CREATE INDEX read_anchor ON read_rows(scope_key,anchor_ref,valid_from,order_key,address);
+-- Cover candidate selection so hidden or oversized body overflow pages are never
+-- touched before authorization. Body hydration uses the primary key separately.
+CREATE INDEX read_window ON read_rows(scope_key,order_key,address,valid_from,valid_to,present,body_bytes,scope_epoch,search_text,directory_state,needs_input,required_environments_json,target_epochs_json,anchor_ref);
+CREATE INDEX read_anchor ON read_rows(scope_key,anchor_ref,valid_from,order_key,address,valid_to,present,scope_epoch,search_text,directory_state,needs_input,required_environments_json,target_epochs_json);
 CREATE UNIQUE INDEX current_read_row ON read_rows(scope_key,address) WHERE valid_to IS NULL;
 CREATE TABLE read_counts(scope_key TEXT NOT NULL,valid_from INTEGER NOT NULL,count INTEGER NOT NULL CHECK(count>=0),PRIMARY KEY(scope_key,valid_from)) WITHOUT ROWID;

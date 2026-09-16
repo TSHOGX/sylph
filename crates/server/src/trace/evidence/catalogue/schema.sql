@@ -5,6 +5,12 @@ CREATE TABLE trace_catalogue_clock (
 );
 INSERT INTO trace_catalogue_clock VALUES(1,0);
 
+-- This key is private server state, never a payload, trace fact, or export row.
+CREATE TABLE trace_cursor_secret (
+  singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+  key_bytes BLOB NOT NULL CHECK(typeof(key_bytes)='blob' AND length(key_bytes)=32)
+);
+
 CREATE TABLE trace_generations (
   generation TEXT PRIMARY KEY,
   manifest_json TEXT NOT NULL,

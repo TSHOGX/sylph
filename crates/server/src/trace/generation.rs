@@ -1508,6 +1508,16 @@ impl GenerationStore {
         for row in &batch.read_rows {
             if row.scope.len()>self.limits.max_key_bytes||row.address.len()>self.limits.max_key_bytes||row.order_key.len()>self.limits.max_key_bytes {return Err(GenerationError::Limit("reading row key"));}
             if row.body.as_ref().map(serde_json::to_vec).transpose()?.is_some_and(|body|body.len()>self.limits.max_summary_bytes) {return Err(GenerationError::Limit("individual reading row bytes"));}
+            if serde_json::to_vec(&row.required_environments)?.len()
+                + serde_json::to_vec(&row.target_epochs)?.len()
+                > self.limits.max_key_bytes
+            {
+                return Err(GenerationError::Limit("reading authorization metadata bytes"));
+            }
+            for environment in &row.required_environments {
+                sylph_protocol::EnvironmentId::parse(environment)
+                    .map_err(|error| GenerationError::Invalid(error.to_string()))?;
+            }
         }
         for claim in &batch.claims {
             claim

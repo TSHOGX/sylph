@@ -2,6 +2,32 @@ use super::*;
 use sylph_protocol::SessionId;
 
 #[tokio::test]
+async fn first_run_authority_is_not_limited_to_registered_environment_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store(&dir.path().join("control.db")).await;
+    assert!(store
+        .has_capability("bootstrap", "unlisted-retained-environment", "observe")
+        .await
+        .unwrap());
+    assert_eq!(
+        store.capable_environments("bootstrap", "observe").await.unwrap(),
+        crate::db::metadata::CapabilityPartition::Unrestricted
+    );
+    store
+        .upsert_subject("registered", "Registered reader", "opaque-token-hash", false)
+        .await
+        .unwrap();
+    assert!(!store
+        .has_capability("bootstrap", "unlisted-retained-environment", "observe")
+        .await
+        .unwrap());
+    assert_eq!(
+        store.capable_environments("bootstrap", "observe").await.unwrap(),
+        crate::db::metadata::CapabilityPartition::Environments(Default::default())
+    );
+}
+
+#[tokio::test]
 async fn queued_edits_keep_original_bytes_and_dispatch_the_exact_selected_immutable_revision() {
     let dir = tempfile::tempdir().unwrap();
     let store = ControlStore::open(

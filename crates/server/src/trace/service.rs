@@ -35,6 +35,7 @@ pub struct TraceService {
     root: PathBuf,
     _archive_lock: Arc<std::fs::File>,
     evidence: EvidenceStore,
+    cursors: Arc<super::cursor::CursorCodec>,
     catalogue: EvidenceCatalogue,
     uploads: CaptureUploads,
     worker: ProjectionWorker,
@@ -151,6 +152,10 @@ impl TraceService {
             admission.clone(),
         )
         .await?;
+        let cursors = Arc::new(super::cursor::CursorCodec::new(
+            &evidence.cursor_key().await?,
+            queries.max_key_bytes,
+        )?);
         let catalogue = EvidenceCatalogue::new(evidence.clone(), CatalogueLimits::default())?;
         let uploads = CaptureUploads::new(catalogue.clone(), UploadLimits::default())?;
         let worker =
@@ -182,6 +187,7 @@ impl TraceService {
             root: root.into(),
             _archive_lock: Arc::new(archive_lock),
             evidence,
+            cursors,
             catalogue,
             uploads,
             worker,
@@ -221,7 +227,24 @@ impl TraceService {
                 .cancel_build(&ticket, "startup discarded unpublished work")
                 .await?;
         }
-        match service.publication.recover_active(&service.worker).await {
+        // Projection files are disposable and may have an older row/security
+        // contract. Reject the manifest before opening those files for reads.
+        let contract_changed = service
+            .catalogue
+            .active_generation()
+            .await?
+            .is_some_and(|published| {
+                published.ready.manifest
+                    != Self::manifest(published.ready.manifest.generation.clone())
+            });
+        let recovered = if contract_changed {
+            Err(super::publication::PublicationError::Recovery(
+                "Published projection contract differs from this server".into(),
+            ))
+        } else {
+            service.publication.recover_active(&service.worker).await
+        };
+        match recovered {
             Ok(Some(active)) => {
                 service
                     .generations
@@ -254,6 +277,10 @@ impl TraceService {
 
     pub fn evidence(&self) -> &EvidenceStore {
         &self.evidence
+    }
+
+    pub(crate) fn cursors(&self) -> &super::cursor::CursorCodec {
+        &self.cursors
     }
     pub fn catalogue(&self) -> &EvidenceCatalogue {
         &self.catalogue
@@ -436,13 +463,16 @@ impl TraceService {
     pub async fn generation(&self, generation: &str) -> anyhow::Result<Arc<GenerationStore>> {
         self.require_available().await?;
         if let Some(store) = self.generations.read().await.get(generation) {
+            self.require_generation_contract(store.manifest()).await?;
             return Ok(store.clone());
         }
         let mut generations = self.generations.write().await;
         if let Some(store) = generations.get(generation) {
+            self.require_generation_contract(store.manifest()).await?;
             return Ok(store.clone());
         }
         let ready = self.catalogue.ready_generation(generation).await?;
+        self.require_generation_contract(&ready.manifest).await?;
         let store = Arc::new(
             GenerationStore::open(
                 self.root.join(&ready.relative_file),
@@ -455,6 +485,18 @@ impl TraceService {
         Ok(store)
     }
 
+    async fn require_generation_contract(&self, manifest: &GenerationManifest) -> anyhow::Result<()> {
+        if manifest != &Self::manifest(manifest.generation.clone()) {
+            // Retained views can outlive an active contract change. Reject them
+            // before opening an older row layout, including already cached stores.
+            self.catalogue
+                .cancel_generation_views(&manifest.generation)
+                .await?;
+            return Err(super::evidence::catalogue::CatalogueError::SnapshotExpired.into());
+        }
+        Ok(())
+    }
+
     pub async fn lease_guard(
         &self,
         subject: &str,
@@ -463,8 +505,10 @@ impl TraceService {
         self.require_available().await?;
         let now = crate::models::now_ms();
         if let Some(token) = token {
+            let view = self.catalogue.resolve_lease(subject, token, now).await?;
+            self.generation(&view.snapshot.generation).await?;
             return Ok(LeaseGuard {
-                view: self.catalogue.resolve_lease(subject, token, now).await?,
+                view,
                 release: None,
             });
         }
@@ -488,6 +532,7 @@ impl TraceService {
         snapshot: &super::generation::Snapshot,
     ) -> anyhow::Result<LeaseGuard> {
         self.require_available().await?;
+        self.generation(&snapshot.generation).await?;
         let now = crate::models::now_ms();
         let pending = self.catalogue.begin_lease(subject, now, 120_000).await?;
         let release = self.pending_release(subject, &pending.lease_id);
@@ -559,7 +604,7 @@ impl TraceService {
     fn manifest(generation: String) -> GenerationManifest {
         GenerationManifest {
             generation: generation.clone(),
-            semantic_schema: "trace-2".into(),
+            semantic_schema: "trace-3".into(),
             mapper_builds: [
                 ("server", mapping::server::ServerMapper.build()),
                 ("codex", mapping::codex::CodexMapper.build()),

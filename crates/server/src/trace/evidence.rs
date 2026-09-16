@@ -206,6 +206,13 @@ impl EvidenceStore {
                 sqlx::raw_sql(include_str!("evidence/catalogue/schema.sql"))
                     .execute(&mut *tx)
                     .await?;
+                let mut key = [0u8; 32];
+                aws_lc_rs::rand::fill(&mut key)
+                    .map_err(|_| EvidenceError::Invalid("cursor key generation failed".into()))?;
+                sqlx::query("INSERT INTO trace_cursor_secret(singleton,key_bytes) VALUES(1,?)")
+                    .bind(key.as_slice())
+                    .execute(&mut *tx)
+                    .await?;
                 sqlx::query("PRAGMA user_version = 1")
                     .execute(&mut *tx)
                     .await?;
@@ -213,6 +220,9 @@ impl EvidenceStore {
             1 => {}
             _ => return Err(EvidenceError::Invalid("unsupported evidence schema".into())),
         }
+        // Existing archives must retain their key. Regeneration would silently
+        // invalidate outstanding cursors and conceal damaged server state.
+        read_cursor_key(&mut tx).await?;
         tx.commit().await?;
         let readers = SqlitePoolOptions::new()
             .max_connections(4)
@@ -234,6 +244,11 @@ impl EvidenceStore {
 
     pub fn limits(&self) -> &AdmissionLimits {
         &self.limits
+    }
+
+    pub(crate) async fn cursor_key(&self) -> Result<[u8; 32]> {
+        let mut connection = self.readers.acquire().await?;
+        read_cursor_key(&mut connection).await
     }
 
     /// Issue/persist an inventory before capture. Reconnect reuses its epoch.
@@ -1357,5 +1372,19 @@ fn fail_at(selected: Option<CrashPoint>, point: CrashPoint) -> Result<()> {
     Ok(())
 }
 
+async fn read_cursor_key(connection: &mut SqliteConnection) -> Result<[u8; 32]> {
+    // Filter size and storage class in SQLite before hydrating private bytes.
+    let key: Option<Vec<u8>> = sqlx::query_scalar(
+        "SELECT key_bytes FROM trace_cursor_secret \
+         WHERE singleton=1 AND typeof(key_bytes)='blob' AND length(key_bytes)=32",
+    )
+    .fetch_optional(connection)
+    .await?;
+    key.and_then(|bytes| bytes.try_into().ok())
+        .ok_or_else(|| EvidenceError::Invalid("missing or malformed cursor key".into()))
+}
+
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod cursor_tests;
