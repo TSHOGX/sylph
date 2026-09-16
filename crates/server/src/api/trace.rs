@@ -39,6 +39,9 @@ impl IntoResponse for TraceError {
     }
 }
 type Result<T> = std::result::Result<T, TraceError>;
+
+#[cfg(test)]
+mod visibility_tests;
 fn invalid(message: impl Into<String>) -> TraceError {
     TraceError {
         status: StatusCode::BAD_REQUEST,
@@ -852,14 +855,19 @@ async fn authorized_environments(
     state: &AppState,
     subject: &str,
 ) -> Result<Option<std::collections::BTreeSet<String>>> {
-    Ok(match state
-        .store
-        .capable_environments(subject, "observe")
-        .await
-        .map_err(internal)? {
-        crate::db::metadata::CapabilityPartition::Unrestricted => None,
-        crate::db::metadata::CapabilityPartition::Environments(environments) => Some(environments),
-    })
+    Ok(
+        match state
+            .store
+            .capable_environments(subject, "observe")
+            .await
+            .map_err(internal)?
+        {
+            crate::db::metadata::CapabilityPartition::Unrestricted => None,
+            crate::db::metadata::CapabilityPartition::Environments(environments) => {
+                Some(environments)
+            }
+        },
+    )
 }
 
 async fn candidate_is_readable(
@@ -969,9 +977,11 @@ fn open_cursor(
 async fn authorized_value(
     state: &AppState,
     subject: &str,
+    generation: &crate::trace::generation::GenerationStore,
+    snapshot: &crate::trace::generation::Snapshot,
     mut value: serde_json::Value,
 ) -> Result<serde_json::Value> {
-    fn collect(value: &serde_json::Value, environments: &mut std::collections::BTreeSet<String>) {
+    fn collect(value: &serde_json::Value, agents: &mut std::collections::BTreeSet<AgentRef>) {
         match value {
             serde_json::Value::Object(object) => {
                 if object.contains_key("identitySuffix") && object.contains_key("vendor") {
@@ -980,22 +990,22 @@ async fn authorized_value(
                         .and_then(serde_json::Value::as_str)
                         .and_then(|address| AgentAddress::parse(address).ok())
                     {
-                        environments.insert(address.agent().environment().as_str().into());
+                        agents.insert(address.agent());
                     }
                 }
                 for value in object.values() {
-                    collect(value, environments);
+                    collect(value, agents);
                 }
             }
             serde_json::Value::Array(values) => {
                 for value in values {
-                    collect(value, environments);
+                    collect(value, agents);
                 }
             }
             _ => {}
         }
     }
-    fn redact(value: &mut serde_json::Value, denied: &std::collections::BTreeSet<String>) {
+    fn redact(value: &mut serde_json::Value, denied: &std::collections::BTreeSet<AgentRef>) {
         match value {
             serde_json::Value::Object(object) => {
                 let forbidden = object.contains_key("identitySuffix")
@@ -1004,9 +1014,7 @@ async fn authorized_value(
                         .get("address")
                         .and_then(serde_json::Value::as_str)
                         .and_then(|address| AgentAddress::parse(address).ok())
-                        .is_some_and(|address| {
-                            denied.contains(address.agent().environment().as_str())
-                        });
+                        .is_some_and(|address| denied.contains(&address.agent()));
                 if forbidden {
                     *value = serde_json::Value::Null;
                     return;
@@ -1031,17 +1039,44 @@ async fn authorized_value(
             _ => {}
         }
     }
-    let mut environments = std::collections::BTreeSet::new();
-    collect(&value, &mut environments);
+    let mut agents = std::collections::BTreeSet::new();
+    collect(&value, &mut agents);
+    if agents.len() > generation.limits().max_candidates {
+        return Err(storage(GenerationError::WorkBudget));
+    }
     let mut denied = std::collections::BTreeSet::new();
-    for environment in environments {
+    for agent in agents {
         if !state
             .store
-            .has_capability(subject, &environment, "observe")
+            .has_capability(subject, agent.environment().as_str(), "observe")
             .await
             .map_err(internal)?
         {
-            denied.insert(environment);
+            denied.insert(agent);
+            continue;
+        }
+        let candidate = match generation
+            .read_candidate(
+                snapshot,
+                &read_scope(&agent, None, "header"),
+                &TraceAddress::of(&AnyObjectRef::Agent(agent.clone())),
+            )
+            .await
+        {
+            Ok(candidate) => candidate,
+            Err(GenerationError::NotFound) => {
+                denied.insert(agent);
+                continue;
+            }
+            Err(error) => return Err(storage(error)),
+        };
+        // Check the epoch retained in this view, never the agent's current epoch:
+        // re-adoption cannot authorize metadata from a deleted generation.
+        if !candidate_is_readable(state, subject, candidate)
+            .await
+            .map_err(storage)?
+        {
+            denied.insert(agent);
         }
     }
     redact(&mut value, &denied);
@@ -1159,9 +1194,10 @@ pub async fn bootstrap(
         Err(error) => return Err(storage(error)),
     };
     check_row(&state, &subject.0, &lease, &row).await?;
-    let mut header: AgentHeader =
-        serde_json::from_value(authorized_value(&state, &subject.0, row.body).await?)
-            .map_err(internal)?;
+    let mut header: AgentHeader = serde_json::from_value(
+        authorized_value(&state, &subject.0, &generation, &lease.snapshot, row.body).await?,
+    )
+    .map_err(internal)?;
     let count_filter = ReadFilter {
         allowed_environments: authorized_environments(&state, &subject.0).await?,
         ..ReadFilter::default()
@@ -1373,7 +1409,8 @@ async fn page<T: serde::de::DeserializeOwned + Serialize>(
     let mut items = Vec::new();
     for row in rows.rows {
         check_row(state, subject, lease, &row).await?;
-        let mut body = authorized_value(state, subject, row.body).await?;
+        let mut body =
+            authorized_value(state, subject, &generation, &lease.snapshot, row.body).await?;
         select_payloads(&mut body, selection);
         items.push(serde_json::from_value(body).map_err(internal)?);
     }
@@ -1543,7 +1580,10 @@ async fn parts(
                 before: None,
                 after: after.as_deref(),
                 around: None,
-                limit: query.limit.unwrap_or(32).min(state.trace.limits().max_items),
+                limit: query
+                    .limit
+                    .unwrap_or(32)
+                    .min(state.trace.limits().max_items),
                 latest: false,
             },
             &filter,
@@ -1731,7 +1771,8 @@ async fn object(
         .await
         .map_err(storage)?;
     check_row(&state, &subject.0, &lease, &row).await?;
-    let mut body = authorized_value(&state, &subject.0, row.body).await?;
+    let mut body =
+        authorized_value(&state, &subject.0, &generation, &lease.snapshot, row.body).await?;
     select_payloads(&mut body, selected.as_ref());
     let mut object: ReadObjectDetail = serde_json::from_value(body).map_err(internal)?;
     object.view = read_view(&lease);

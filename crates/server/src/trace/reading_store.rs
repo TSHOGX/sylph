@@ -240,6 +240,24 @@ pub(crate) async fn apply_rows(
 }
 
 impl GenerationStore {
+    pub async fn read_candidate(
+        &self,
+        snapshot: &Snapshot,
+        scope: &str,
+        anchor: &TraceAddress,
+    ) -> Result<ReadCandidate, GenerationError> {
+        let (mut conn, _) = self.read_connection(snapshot).await?;
+        // This covering index keeps a hidden target's body out of the point lookup.
+        let row = sqlx::query("SELECT scope_epoch,required_environments_json,target_epochs_json,present FROM read_rows INDEXED BY read_anchor WHERE scope_key=? AND anchor_ref=? AND valid_from<=? ORDER BY valid_from DESC LIMIT 1")
+            .bind(scope).bind(anchor.as_str()).bind(snapshot.view_revision as i64)
+            .fetch_optional(&mut *conn).await.map_err(super::generation::map_query_error)?
+            .ok_or(GenerationError::NotFound)?;
+        if row.get::<i64, _>("present") == 0 {
+            return Err(GenerationError::NotFound);
+        }
+        decode_candidate(&row)
+    }
+
     pub async fn read_row(
         &self,
         snapshot: &Snapshot,

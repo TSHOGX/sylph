@@ -275,6 +275,9 @@ metadata independently of the recording epoch. Resolve current Subject grants be
 hydrating candidate bodies. A hidden target contributes no row, identity or count and
 cannot turn an otherwise readable catalogue into a whole-page authorization failure.
 Source/target deletion epochs remain checked even after an environment is authorized.
+Embedded agent links use the target header epoch at the same snapshot. A missing or
+deleted target is redacted without withholding the containing row; re-adoption cannot
+authorize an older target epoch. Target checks read bounded indexed metadata, not bodies.
 Catalogue totals use the same target-grant and epoch predicates as rows. A bounded
 metadata count reports an exact value only after exhausting the scope at that view;
 otherwise it returns `value: null, complete: false`. It never substitutes a global

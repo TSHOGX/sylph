@@ -257,6 +257,11 @@ are labelled accordingly and do not claim a descendant catalogue. Projection con
 changes expire incompatible views and rebuild from evidence before reads resume.
 Production HTTP regressions cover hidden targets, deletion on either side of a directory,
 grant changes and multipart continuations; deliberate faults establish their sensitivity.
+Embedded agent links now check the target header's retained epoch through a metadata-only
+point lookup. Deleting or re-adopting a parent cannot expose its old metadata in a surviving
+child view. Missing target headers are redacted; lookup work uses the candidate budget
+independently of page size. HTTP regressions cover retained views, re-adoption and unreadable
+target body cells, with deliberate authorization and hydration faults observed failing.
 
 Projection writes and worker caches now bind the full generation, evidence cut and view
 revision. A stale same-cut continuation cannot overwrite newer committed state, and an
