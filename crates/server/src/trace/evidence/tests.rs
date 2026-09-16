@@ -168,6 +168,171 @@ struct Fixture {
     epoch: IngestionEpoch,
 }
 
+#[tokio::test]
+async fn cancelled_custom_begin_cannot_poison_the_next_capture_upload() {
+    use sqlx::Connection;
+    use std::{
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc, Arc, Condvar, Mutex,
+        },
+        task::{Context, Poll, Wake, Waker},
+        time::Duration,
+    };
+
+    struct Gate {
+        entered: mpsc::Sender<()>,
+        released: Mutex<bool>,
+        resume: Condvar,
+        used: AtomicBool,
+    }
+    impl Gate {
+        fn block_once(&self) {
+            if self.used.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            self.entered.send(()).unwrap();
+            let released = self.released.lock().unwrap();
+            let (released, timeout) = self
+                .resume
+                .wait_timeout_while(released, Duration::from_secs(5), |released| !*released)
+                .unwrap();
+            assert!(
+                *released && !timeout.timed_out(),
+                "test must release the SQLite worker"
+            );
+        }
+        fn release(&self) {
+            *self.released.lock().unwrap() = true;
+            self.resume.notify_all();
+        }
+    }
+    impl Wake for Gate {
+        fn wake(self: Arc<Self>) {
+            self.block_once();
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.block_once();
+        }
+    }
+    struct Unblock(Arc<Gate>);
+    impl Drop for Unblock {
+        fn drop(&mut self) {
+            self.0.release();
+        }
+    }
+    fn gate() -> (Arc<Gate>, mpsc::Receiver<()>) {
+        let (tx, rx) = mpsc::channel();
+        (
+            Arc::new(Gate {
+                entered: tx,
+                released: Mutex::new(false),
+                resume: Condvar::new(),
+                used: AtomicBool::new(false),
+            }),
+            rx,
+        )
+    }
+
+    let fixture = Fixture::new().await;
+    let mut connection = fixture.store.writer.acquire().await.unwrap();
+    let (begin_entered, begin_signal) = gate();
+    let (ack_entered, ack_signal) = gate();
+    let _begin_unblock = Unblock(begin_entered.clone());
+    let _ack_unblock = Unblock(ack_entered.clone());
+    let callback = begin_entered.clone();
+    connection
+        .lock_handle()
+        .await
+        .unwrap()
+        .set_progress_handler(1, move || {
+            callback.block_once();
+            true
+        });
+    let waker = Waker::from(ack_entered.clone());
+    let mut context = Context::from_waker(&waker);
+    let mut begin = connection.begin_with("BEGIN IMMEDIATE");
+    assert!(matches!(begin.as_mut().poll(&mut context), Poll::Pending));
+    begin_signal.recv_timeout(Duration::from_secs(2)).unwrap();
+    begin_entered.release();
+    ack_signal.recv_timeout(Duration::from_secs(2)).unwrap();
+    // The worker is paused in the acknowledgement's wake. Receiving that ack
+    // advances begin_with to its handle-verification await, before Transaction
+    // exists to roll back on drop. No scheduler timing decides this window.
+    assert!(matches!(begin.as_mut().poll(&mut context), Poll::Pending));
+    drop(begin);
+    ack_entered.release();
+    connection.ping().await.unwrap();
+    assert!(
+        connection.is_in_transaction(),
+        "reproduction must cancel after BEGIN succeeds"
+    );
+    connection
+        .lock_handle()
+        .await
+        .unwrap()
+        .remove_progress_handler();
+    drop(connection);
+
+    let capture = fixture.capture(1, 1, RAW).await;
+    let admitted = fixture
+        .store
+        .admit_batch(
+            &capture.observation_ref.issuer,
+            std::slice::from_ref(&capture),
+        )
+        .await
+        .unwrap();
+    assert_eq!(admitted.evidence_cut, 1);
+    assert_eq!(
+        fixture
+            .store
+            .capture_payload(&capture.observation_ref, RAW.len())
+            .await
+            .unwrap()
+            .unwrap(),
+        RAW
+    );
+    let mut connection = fixture.store.writer.acquire().await.unwrap();
+    assert!(!connection.is_in_transaction());
+    let transaction = connection.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    transaction.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn ordinary_dropped_transaction_rolls_back_and_reuses_its_physical_connection() {
+    use sqlx::Connection;
+    let fixture = Fixture::new().await;
+    let mut connection = fixture.store.writer.acquire().await.unwrap();
+    // TEMP state belongs to the physical connection and disappears on close.
+    sqlx::query("CREATE TEMP TABLE release_probe(value TEXT)")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO release_probe VALUES('committed')")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    let mut transaction = connection.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    sqlx::query("INSERT INTO release_probe VALUES('rolled back')")
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+    drop(transaction);
+    drop(connection);
+    let mut connection = fixture.store.writer.acquire().await.unwrap();
+    assert!(!connection.is_in_transaction());
+    let values: Vec<String> = sqlx::query_scalar("SELECT value FROM release_probe")
+        .fetch_all(&mut *connection)
+        .await
+        .unwrap();
+    assert_eq!(
+        values,
+        vec!["committed"],
+        "normal rollback must preserve the existing connection"
+    );
+}
+
 impl Fixture {
     async fn new() -> Self {
         Self::with_limits(AdmissionLimits::default()).await

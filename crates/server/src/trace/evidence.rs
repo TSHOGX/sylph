@@ -189,6 +189,9 @@ impl EvidenceStore {
             .busy_timeout(std::time::Duration::from_secs(5));
         let writer = SqlitePoolOptions::new()
             .max_connections(1)
+            .after_release(|connection, _| {
+                Box::pin(crate::db::sqlite::reusable_after_release(connection))
+            })
             .connect_with(options.clone())
             .await?;
         let mut tx = writer.begin_with("BEGIN IMMEDIATE").await?;

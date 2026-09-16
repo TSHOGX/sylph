@@ -1608,6 +1608,7 @@ impl GenerationStore {
 async fn writer_pool(path: &Path) -> Result<SqlitePool> {
     Ok(SqlitePoolOptions::new()
         .max_connections(1)
+        .after_release(|connection,_|Box::pin(crate::db::sqlite::reusable_after_release(connection)))
         .connect_with(
             SqliteConnectOptions::new()
                 .filename(path)

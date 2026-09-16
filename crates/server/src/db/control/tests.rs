@@ -194,6 +194,13 @@ fn authorization() -> AuthorizationReceipt {
     }
 }
 
+#[tokio::test]
+async fn control_writer_discards_an_acknowledged_begin_without_a_transaction_guard() {
+    let dir=tempfile::tempdir().unwrap();
+    let store=store(&dir.path().join("control.db")).await;
+    crate::db::sqlite::assert_abandoned_begin_is_discarded(&store.pool).await;
+}
+
 fn acceptance(id: &str) -> CommandAcceptance {
     CommandAcceptance {
         command_id: id.into(),

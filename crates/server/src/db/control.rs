@@ -226,6 +226,7 @@ impl ControlStore {
         // vendor request or evidence admission holds this connection/transaction.
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
+            .after_release(|connection,_|Box::pin(crate::db::sqlite::reusable_after_release(connection)))
             .connect_with(options.clone())
             .await?;
         sqlx::raw_sql(include_str!("schema.sql"))

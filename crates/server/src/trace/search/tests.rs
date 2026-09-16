@@ -2,6 +2,12 @@ use super::*;
 fn agent() -> AgentRef {
     AgentRef::Session(sylph_protocol::SessionId::decode("env7:codex:search").unwrap())
 }
+
+#[tokio::test]
+async fn search_writer_discards_an_acknowledged_begin_without_a_transaction_guard() {
+    let (_dir,store)=open(SearchLimits::default()).await;
+    crate::db::sqlite::assert_abandoned_begin_is_discarded(&store.writer).await;
+}
 fn snapshot(revision: u64) -> Snapshot {
     Snapshot {
         generation: "search-generation".into(),

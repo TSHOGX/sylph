@@ -66,6 +66,16 @@ impl Spool {
             .busy_timeout(std::time::Duration::from_secs(5));
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
+            .after_release(|connection, _| {
+                Box::pin(async move {
+                    use sqlx::Connection;
+                    // SQLx 0.8 custom BEGIN has a cancellation await before its RAII
+                    // transaction exists. Flush queued rollback first, then close an
+                    // orphaned transaction instead of giving it to another capture.
+                    connection.ping().await?;
+                    Ok(!connection.is_in_transaction())
+                })
+            })
             .connect_with(options.clone())
             .await?;
         sqlx::migrate!("./migrations/spool")
@@ -148,5 +158,63 @@ impl Spool {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod release_tests {
+    use super::*;
+    use sqlx::{sqlite::SqliteTransactionManager, Connection, TransactionManager};
+
+    #[tokio::test]
+    async fn spool_reuses_ordinary_rollbacks_but_discards_orphaned_custom_begins() {
+        let dir = tempfile::tempdir().unwrap();
+        let spool = Spool::open(SpoolConfig::new(dir.path().join("spool.db"), 1024 * 1024))
+            .await
+            .unwrap();
+        let mut connection = spool.pool.acquire().await.unwrap();
+        sqlx::query("CREATE TEMP TABLE release_probe(value TEXT)")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        let mut transaction = connection.begin_with("BEGIN IMMEDIATE").await.unwrap();
+        sqlx::query("INSERT INTO release_probe VALUES('rollback')")
+            .execute(&mut *transaction)
+            .await
+            .unwrap();
+        drop(transaction);
+        drop(connection);
+        let mut connection = spool.pool.acquire().await.unwrap();
+        assert!(!connection.is_in_transaction());
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM release_probe")
+                .fetch_one(&mut *connection)
+                .await
+                .unwrap(),
+            0
+        );
+        SqliteTransactionManager::begin(&mut connection, Some("BEGIN IMMEDIATE".into()))
+            .await
+            .unwrap();
+        drop(connection);
+        let mut connection = spool.pool.acquire().await.unwrap();
+        assert!(!connection.is_in_transaction());
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM sqlite_temp_master WHERE name='release_probe'"
+            )
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap(),
+            0,
+            "orphaned begin requires a fresh connection"
+        );
+        connection
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .unwrap()
+            .rollback()
+            .await
+            .unwrap();
     }
 }

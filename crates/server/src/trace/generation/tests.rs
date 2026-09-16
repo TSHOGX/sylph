@@ -14,6 +14,12 @@ struct Fixture {
     selection: SelectionRef,
 }
 
+#[tokio::test]
+async fn projection_writer_discards_an_acknowledged_begin_without_a_transaction_guard() {
+    let fixture=Fixture::new().await;
+    crate::db::sqlite::assert_abandoned_begin_is_discarded(&fixture.store.writer).await;
+}
+
 impl Fixture {
     async fn new() -> Self {
         Self::with_limits(QueryLimits::default()).await
