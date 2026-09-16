@@ -3,6 +3,7 @@
 use super::*;
 use base64::Engine;
 mod protocol_event;
+mod agent_result;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(super) struct RuntimeState {
@@ -196,6 +197,7 @@ impl Context<'_, '_> {
         }
         let first_claim = self.output.claims.len();
         match kind {
+            "agent_result_observed" => self.agent_result(&owner, value, payload),
             "protocol_event_observed" => self.protocol_boundary(&owner, value, payload),
             "rollout_started" | "thread_started" => {
                 self.announce_agent(&owner, &Value::Null, true);

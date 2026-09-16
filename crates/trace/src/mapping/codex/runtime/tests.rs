@@ -609,3 +609,236 @@ fn wrapped_boundaries_wait_for_retained_payload_and_cite_its_distinct_observatio
     assert!(detail.evidence.contains(&sidecar));
     assert_eq!(detail.selector, "/payload/event_payload/error");
 }
+
+fn recorded_agent_result() -> (Value, Value) {
+    // The notice bytes and agent identities are retained native evidence. Only the
+    // raw-trace envelope is constructed from the pinned ThreadTraceContext producer;
+    // the repository does not claim this envelope was captured in that older run.
+    let parent: Vec<Value> = include_str!("../../../../../../fixtures/native/codex/subagent-parent-collab-namespace-newest-format-spawn-agent.jsonl")
+        .lines().map(|line|serde_json::from_str(line).unwrap()).collect();
+    let child: Vec<Value> = include_str!("../../../../../../fixtures/native/codex/subagent-child-collab-namespace-newest-format-of-parent-019ff38d.jsonl")
+        .lines().map(|line|serde_json::from_str(line).unwrap()).collect();
+    let notice = parent
+        .iter()
+        .map(|row| &row["payload"])
+        .find(|payload| {
+            payload["type"] == "agent_message"
+                && payload["author"] == "/root/auth_lifecycle"
+                && payload
+                    .pointer("/content/0/text")
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| text.starts_with("Message Type: FINAL_ANSWER\n"))
+        })
+        .unwrap();
+    let message = notice["content"][0]["text"].as_str().unwrap();
+    let turn = child
+        .iter()
+        .find(|row| row["payload"]["type"] == "task_complete")
+        .unwrap()["payload"]["turn_id"]
+        .clone();
+    let child_id = child[0]["payload"]["id"].clone();
+    let parent_id = parent[0]["payload"]["id"].clone();
+    let carried = json!({"child_agent_path":notice["author"],"message":message,"status":{"completed":"retained status detail"},"future_vendor_field":{"preserve":true}});
+    let envelope = json!({"schema_version":1,"seq":1,"rollout_id":"recorded-result-runtime","thread_id":child_id,"codex_turn_id":turn,"wall_time_unix_ms":987654321,
+        "payload":{"type":"agent_result_observed","edge_id":"edge:agent-result","child_thread_id":child_id,"child_codex_turn_id":turn,"parent_thread_id":parent_id,"message":message,
+        "carried_payload":{"raw_payload_id":"notice","kind":{"type":"agent_result"},"path":"notice.json"}}});
+    (envelope, carried)
+}
+
+#[test]
+fn agent_result_keeps_retained_notice_bytes_and_explicit_delivery_without_execution_claims() {
+    let (event, carried) = recorded_agent_result();
+    let output = map(
+        1,
+        event.clone(),
+        &MapperState::default(),
+        Some(("carried_payload", carried)),
+    );
+    let child = agent(event["payload"]["child_thread_id"].as_str().unwrap());
+    let parent = agent(event["payload"]["parent_thread_id"].as_str().unwrap());
+    let delivery = output
+        .claims
+        .iter()
+        .find_map(|claim| match &claim.fact {
+            Fact::Declare {
+                object: TraceObject::Delivery(delivery),
+            } => Some(delivery),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        delivery.sender,
+        Author::Agent {
+            agent: OwnerRef::Agent {
+                agent: child.clone()
+            }
+        }
+    );
+    assert_eq!(
+        delivery.recipient,
+        Recipient::Agent {
+            agent: OwnerRef::Agent {
+                agent: parent.clone()
+            }
+        }
+    );
+    assert!(
+        matches!(&delivery.route,DeliveryRoute::VendorMailbox {occurrence,..} if occurrence.contains(&event["payload"]["child_codex_turn_id"].as_str().unwrap().to_owned()))
+    );
+    assert!(output.claims.iter().any(|claim|matches!(&claim.fact,Fact::Declare {object:TraceObject::Message(message)} if matches!(message.author,Author::Harness {..}) && message.purpose==MessagePurpose::Notice && message.production.is_none())));
+    assert!(output.claims.iter().any(|claim|matches!(&claim.fact,Fact::Declare {object:TraceObject::MessageRevision(revision)} if revision.representation==Representation::Runtime && revision.parts.len()==2)));
+    assert!(output
+        .payloads
+        .iter()
+        .any(|payload| payload.bytes == event["payload"]["message"].as_str().unwrap().as_bytes()));
+    assert!(output.claims.iter().any(|claim| matches!(
+        claim.fact,
+        Fact::DeliveryStage {
+            stage: DeliveryStage::Accepted,
+            ..
+        }
+    )));
+    assert!(output.claims.iter().any(|claim|matches!(&claim.fact,Fact::Relation {relation:Relation::Interaction {sender,recipient,delivery:Some(reference),operation:None}} if sender==&child && recipient==&parent && reference==&delivery.delivery_ref)));
+    assert!(!output.claims.iter().any(|claim| matches!(
+        claim.fact,
+        Fact::Execution { .. }
+            | Fact::Relation {
+                relation: Relation::Spawn { .. } | Relation::Trigger { .. }
+            }
+            | Fact::Declare {
+                object: TraceObject::Activation(_)
+                    | TraceObject::HistoryEntry(_)
+                    | TraceObject::Operation(_)
+                    | TraceObject::Result(_)
+                    | TraceObject::Agent(_)
+            }
+            | Fact::DeliveryStage {
+                stage: DeliveryStage::Admitted { .. } | DeliveryStage::Included { .. },
+                ..
+            }
+    )));
+    assert!(output
+        .claims
+        .iter()
+        .all(|claim| claim.evidence.contains(&capture(1001).observation_ref)));
+    let evidence = output.claims.iter().flat_map(|claim| claim.evidence.clone()).collect();
+    let mut reducer = crate::reducer::Reducer::default();
+    reducer.apply(&output.claims, &evidence, 100).unwrap();
+    let once = reducer.resolve();
+    reducer.apply(&output.claims, &evidence, 100).unwrap();
+    assert_eq!(reducer.resolve(), once);
+    assert!(once.executions.is_empty());
+}
+
+#[test]
+fn repeated_agent_result_edges_preserve_occurrences_without_merging_equal_notice_bodies() {
+    let (event, carried) = recorded_agent_result();
+    let first = map(
+        1,
+        event.clone(),
+        &MapperState::default(),
+        Some(("carried_payload", carried.clone())),
+    );
+    let second = map(2, event, &first.state, Some(("carried_payload", carried)));
+    let delivery = |output: &MapOutput| {
+        output
+            .claims
+            .iter()
+            .find_map(|claim| match &claim.fact {
+                Fact::Declare {
+                    object: TraceObject::Delivery(delivery),
+                } => Some(delivery.delivery_ref.clone()),
+                _ => None,
+            })
+            .unwrap()
+    };
+    assert_ne!(delivery(&first), delivery(&second));
+    assert_eq!(first.payloads[0].bytes, second.payloads[0].bytes);
+    assert!(!second
+        .claims
+        .iter()
+        .any(|claim| matches!(claim.fact, Fact::Equivalence { .. })));
+}
+
+#[test]
+fn agent_result_rejects_conflicting_child_turn_and_carried_message_identity() {
+    let (event, carried) = recorded_agent_result();
+    for mismatch in ["child", "turn", "message"] {
+        let mut event = event.clone();
+        let mut carried = carried.clone();
+        match mismatch {
+            "child" => event["thread_id"] = json!("wrong-child"),
+            "turn" => event["codex_turn_id"] = json!("wrong-turn"),
+            _ => carried["message"] = json!("different-notice"),
+        }
+        let output = map(
+            1,
+            event,
+            &MapperState::default(),
+            Some(("carried_payload", carried)),
+        );
+        assert!(
+            !output.claims.iter().any(|claim| matches!(
+                claim.fact,
+                Fact::Declare {
+                    object: TraceObject::Delivery(_)
+                }
+            )),
+            "{mismatch}"
+        );
+        assert!(output.claims.iter().any(|claim|matches!(&claim.fact,Fact::Diagnostic {diagnostic} if diagnostic.code==DiagnosticCode::ConflictingOwner)),"{mismatch}");
+    }
+}
+
+#[test]
+fn agent_result_without_optional_carried_payload_still_records_only_observed_delivery() {
+    let (mut event, _) = recorded_agent_result();
+    event["payload"]["carried_payload"] = Value::Null;
+    let output = map(1, event, &MapperState::default(), None);
+    assert!(output.requests.is_empty());
+    assert!(output.claims.iter().any(|claim|matches!(&claim.fact,Fact::Declare {object:TraceObject::MessageRevision(revision)} if revision.parts.len()==1)));
+    assert!(output.claims.iter().any(|claim| matches!(
+        claim.fact,
+        Fact::DeliveryStage {
+            stage: DeliveryStage::Accepted,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn agent_result_missing_native_identity_or_message_never_borrows_a_route_from_prose() {
+    let (event, carried) = recorded_agent_result();
+    for field in [
+        "child_thread_id",
+        "child_codex_turn_id",
+        "parent_thread_id",
+        "edge_id",
+        "message",
+    ] {
+        let mut event = event.clone();
+        event["payload"].as_object_mut().unwrap().remove(field);
+        let output = map(
+            1,
+            event,
+            &MapperState::default(),
+            Some(("carried_payload", carried.clone())),
+        );
+        assert!(
+            !output.claims.iter().any(|claim| matches!(
+                claim.fact,
+                Fact::Declare {
+                    object: TraceObject::Delivery(_)
+                }
+            )),
+            "{field}"
+        );
+        assert!(
+            output
+                .claims
+                .iter()
+                .any(|claim| matches!(claim.fact, Fact::Diagnostic { .. })),
+            "{field}"
+        );
+    }
+}

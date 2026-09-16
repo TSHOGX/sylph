@@ -250,8 +250,22 @@ wait or terminal poll is linked only when the corresponding cell/process creatio
 retained; equal handle text alone is insufficient. Caller-facing tool results and raw
 runtime output remain separate representations.
 
-A raw child-to-parent result observation, when retained, remains separate from child
-activation and turn claims until its explicit child and parent identities are available.
+The raw `agent_result_observed` producer names `child_thread_id`,
+`child_codex_turn_id`, `parent_thread_id`, `edge_id` and the exact carried `message`.
+The optional `AgentResultTracePayload` retains `child_agent_path`, `message`, `status`
+and any additional fields. The [pinned producer](https://github.com/openai/codex/blob/968835997714baaff199cfed5f89a2c65d8ca77d/codex-rs/core/src/session/mod.rs)
+records it only after successful harness submission to the parent.
+
+Sylph keeps the formatted notification as a harness-authored runtime Notice and its
+structured carried metadata as a separate part. Its Delivery names the explicit child
+as sender and parent as recipient, with an accepted stage. The child turn remains route
+metadata: this observation creates no Activation, spawn edge, execution outcome, history
+admission or inference inclusion. It does not identify the child's original answer or
+the parent's later transcript occurrence by text matching. Repeated notifications remain
+distinct source occurrences even when edge identifiers and bodies repeat. An explicit
+envelope identity or carried-message mismatch produces a diagnostic instead of a guessed
+delivery.
+
 `collabAgentToolCall`
 items use camelCase names in the live app-server and snake_case in native rollout records;
 that transport distinction is part of the vendor contract.
