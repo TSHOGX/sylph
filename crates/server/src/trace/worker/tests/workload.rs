@@ -1,0 +1,256 @@
+//! S1.4 workload dimensions for the production projection path.
+//!
+//! `docs/unified-trace-conformance.md` § Performance fixtures names seven
+//! independent dimensions. History length and superseded versions of hot objects
+//! are bounded on the read side in `crate::trace::reading_store`, and the
+//! cumulative reducer-claim ceiling is answered in `super::reconciliation`. This
+//! module measures the two ingestion dimensions that had no measurement at all:
+//! concurrent sources and child fan-out.
+//!
+//! These are workload measurements, not correctness replays. Source order
+//! correctness lives in `super::corpus` and delegation semantics in
+//! `super::delegation`; neither varies its dimension to observe cost.
+
+use super::*;
+
+/// Independent sessions on independent sources, admitted interleaved.
+struct ConcurrentSources {
+    fixture: Fixture,
+    through: u64,
+    sources: usize,
+    records_each: usize,
+}
+
+async fn concurrent_sources(sources: usize, records_each: usize) -> ConcurrentSources {
+    let fixture = Fixture::new().await;
+    let mut offsets = vec![0u64; sources];
+    let mut sequence = 0u64;
+    // One header per source first, so every source is declared before any of them
+    // grows. Admitting them interleaved is what makes this a concurrency measure
+    // rather than a sequence of independent single-source imports.
+    for index in 0..sources {
+        let mut header = serde_json::to_vec(&serde_json::json!({
+            "type":"session_meta","ordinal":0,
+            "payload":{"id":format!("concurrent-{index}")}
+        }))
+        .unwrap();
+        header.push(b'\n');
+        sequence += 1;
+        fixture
+            .native_on(&format!("source-{index}"), sequence, offsets[index], &header)
+            .await;
+        offsets[index] += header.len() as u64;
+    }
+    for record in 0..records_each {
+        for index in 0..sources {
+            let mut bytes = serde_json::to_vec(&serde_json::json!({
+                "type":"response_item","ordinal":record+1,
+                "payload":{"type":"message","id":format!("concurrent-{index}-{record}"),
+                    "role":"assistant",
+                    "content":[{"type":"output_text","text":format!("source {index} record {record}")}]}
+            }))
+            .unwrap();
+            bytes.push(b'\n');
+            sequence += 1;
+            fixture
+                .native_on(&format!("source-{index}"), sequence, offsets[index], &bytes)
+                .await;
+            offsets[index] += bytes.len() as u64;
+        }
+    }
+    let through = fixture.evidence.evidence_cut().await.unwrap();
+    ConcurrentSources {
+        fixture,
+        through,
+        sources,
+        records_each,
+    }
+}
+
+/// Per-record projection cost must not depend on how many other sources are live.
+///
+/// A source's own history is its own scan; sharing a worker must not make one
+/// source's tail proportional to the number of concurrent producers. The
+/// measurement holds total records constant so the only variable is how they are
+/// distributed, which separates fan-in cost from ingest volume.
+#[tokio::test]
+async fn concurrent_source_count_does_not_change_per_record_projection_work() {
+    let mut samples = Vec::new();
+    for (sources, records_each) in [(1usize, 24usize), (4, 6), (12, 2)] {
+        let setup = concurrent_sources(sources, records_each).await;
+        let (generation, _) = setup.fixture.generation("concurrent").await;
+        let worker = setup.fixture.worker();
+        let progress = worker
+            .catch_up(&generation, 1, setup.through)
+            .await
+            .unwrap();
+        let total_records = sources * records_each;
+        assert_eq!(progress.suspended_sources, 0, "no source may be suspended");
+        assert_eq!(progress.unmapped_observations, 0);
+        assert_eq!(
+            progress.projected_cut, setup.through,
+            "every concurrent source must reach the same projected cut"
+        );
+        let held = worker
+            .states
+            .lock()
+            .await
+            .get("concurrent")
+            .unwrap()
+            .clone();
+        let claims = held.lock().await.reducer.len();
+        samples.push((
+            sources,
+            records_each,
+            total_records,
+            claims,
+            progress.reduction.claims_resolved,
+            progress.reader_rows_materialized,
+        ));
+    }
+    for (sources, each, total, claims, resolved, rows) in &samples {
+        eprintln!(
+            "concurrent_source_workload sources={sources} records_each={each} total_records={total} retained_claims={claims} claims_resolved={resolved} reader_rows={rows}"
+        );
+    }
+    // Every arrangement admitted the same number of content records, so retained
+    // claims may differ only by the per-source header, never by a fan-in term.
+    let baseline = &samples[0];
+    for sample in &samples[1..] {
+        let extra_headers = sample.0 - baseline.0;
+        let claim_growth = sample.3 as i64 - baseline.3 as i64;
+        assert!(
+            claim_growth >= 0 && claim_growth <= (extra_headers * 16) as i64,
+            "retained claims grew with concurrent source count beyond per-source declarations: {baseline:?} to {sample:?}"
+        );
+        assert!(
+            sample.5 <= baseline.5 + sample.0 * 8,
+            "reader rows grew with concurrent source count beyond per-source rows: {baseline:?} to {sample:?}"
+        );
+    }
+}
+
+/// Fan-out: one parent declaring many children in one source.
+async fn fan_out(children: usize) -> (Fixture, u64) {
+    let fixture = Fixture::new().await;
+    let mut offset = 0u64;
+    let mut sequence = 0u64;
+    let mut header = serde_json::to_vec(&serde_json::json!({
+        "type":"session_meta","ordinal":0,"payload":{"id":"fan-parent"}
+    }))
+    .unwrap();
+    header.push(b'\n');
+    sequence += 1;
+    fixture
+        .native_on("fan-source", sequence, offset, &header)
+        .await;
+    offset += header.len() as u64;
+    for child in 0..children {
+        let mut bytes = serde_json::to_vec(&serde_json::json!({
+            "type":"event_msg","ordinal":child+1,
+            "payload":{"type":"collab_agent_spawn_end","sender_thread_id":"fan-parent",
+                "call_id":format!("spawn-{child}"),
+                "new_thread_id":format!("fan-child-{child}"),
+                "new_agent_nickname":format!("Child {child}")}
+        }))
+        .unwrap();
+        bytes.push(b'\n');
+        sequence += 1;
+        fixture
+            .native_on("fan-source", sequence, offset, &bytes)
+            .await;
+        offset += bytes.len() as u64;
+    }
+    let through = fixture.evidence.evidence_cut().await.unwrap();
+    (fixture, through)
+}
+
+/// Fan-out stays bounded at the observed corpus ceiling, and the growth term
+/// between scales is reported rather than assumed.
+///
+/// A parent's relation set is the structure most at risk of superlinear work:
+/// admitting child N changes the parent's directory, which re-materializes the
+/// directory rows already emitted for children 1..N. The retained Codex roots in
+/// `docs/measurements/unified-trace/codex-structure.json` declare 9, 17 and 3
+/// direct children, so 17 is the observed ceiling and 40 is deliberately past it.
+///
+/// Measuring both is the point: the ceiling establishes what the delivery must
+/// support, and the over-provisioned point exposes where the cost goes. The
+/// superlinear per-child term is real and is recorded as such; it is bounded here
+/// rather than removed, because removing it means incremental directory
+/// maintenance, which `docs/roadmap.md` defers explicitly.
+#[tokio::test]
+async fn child_fan_out_stays_bounded_at_the_observed_corpus_ceiling() {
+    // The largest direct-child count among the three retained long roots.
+    const OBSERVED_CEILING: usize = 17;
+    let mut samples = Vec::new();
+    for children in [4usize, OBSERVED_CEILING, 40] {
+        let (fixture, through) = fan_out(children).await;
+        let (generation, _) = fixture.generation("fan-out").await;
+        let worker = fixture.worker();
+        let progress = worker.catch_up(&generation, 1, through).await.unwrap();
+        assert_eq!(progress.suspended_sources, 0);
+        assert_eq!(progress.projected_cut, through);
+        let held = worker.states.lock().await.get("fan-out").unwrap().clone();
+        let state = held.lock().await;
+        let claims = state.reducer.len();
+        let spawn_relations = state
+            .reduction
+            .relations
+            .iter()
+            .filter(|relation| matches!(&relation.relation, Relation::Spawn { .. }))
+            .count();
+        drop(state);
+        assert_eq!(
+            spawn_relations, children,
+            "each declared child must contribute exactly one spawn relation"
+        );
+        samples.push((
+            children,
+            claims,
+            progress.reduction.claims_resolved,
+            progress.reader_rows_materialized,
+            progress.membership.objects_examined,
+        ));
+    }
+    for (children, claims, resolved, rows, examined) in &samples {
+        eprintln!(
+            "fan_out_workload children={children} retained_claims={claims} claims_resolved={resolved} reader_rows={rows} membership_objects_examined={examined}"
+        );
+    }
+    for window in samples.windows(2) {
+        let (small_children, _, _, small_rows, _) = window[0];
+        let (large_children, _, _, large_rows, _) = window[1];
+        let factor = large_children as f64 / small_children as f64;
+        eprintln!(
+            "fan_out_growth children={small_children}->{large_children} children_factor={factor:.2} row_growth={:.2} rows_per_child={:.1}->{:.1}",
+            large_rows as f64 / small_rows as f64,
+            small_rows as f64 / small_children as f64,
+            large_rows as f64 / large_children as f64,
+        );
+    }
+    // Retained claims are the durable record, and they must stay linear in the
+    // children actually declared: a pairwise claim would mean the graph itself
+    // encoded every parent/child pair.
+    let (ceiling_children, ceiling_claims, _, ceiling_rows, _) = samples[1];
+    assert_eq!(ceiling_children, OBSERVED_CEILING);
+    assert!(
+        ceiling_claims <= OBSERVED_CEILING * 16,
+        "retained claims at the observed ceiling are not linear in declared children: {ceiling_claims}"
+    );
+    // Reader rows at the observed ceiling are the foreground cost this delivery
+    // has to carry. Bounding the absolute figure, rather than a ratio, is what
+    // makes this a supported-workload statement instead of a trend line.
+    assert!(
+        ceiling_rows <= OBSERVED_CEILING * 32,
+        "reader materialization at the observed ceiling exceeds its bound: {ceiling_rows} rows for {OBSERVED_CEILING} children"
+    );
+    // The re-materialization term is superlinear per child. It is measured and
+    // reported above; assert only that it has not become quadratic, which at this
+    // decade would put rows past the square of the child count.
+    let (largest_children, _, _, largest_rows, _) = samples[2];
+    assert!(
+        largest_rows < largest_children * largest_children,
+        "reader materialization went quadratic in children: {largest_rows} rows for {largest_children} children"
+    );
+}

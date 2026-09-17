@@ -175,11 +175,21 @@ impl Fixture {
         capture
     }
     async fn native(&self, sequence: u64, offset: u64, raw: &[u8]) -> Capture {
+        self.native_on("native-file", sequence, offset, raw).await
+    }
+    /// A capture on a named physical source, for fixtures with several live at once.
+    async fn native_on(
+        &self,
+        instance: &str,
+        sequence: u64,
+        offset: u64,
+        raw: &[u8],
+    ) -> Capture {
         let observation = native_observation(sequence);
         let position = SourcePosition {
             source: SourceRef {
                 issuer: observation.issuer.clone(),
-                instance: "native-file".into(),
+                instance: instance.into(),
             },
             generation: 0,
             locator: SourceLocator::Jsonl {
@@ -1584,6 +1594,7 @@ mod reconciliation;
 mod state_sharing;
 
 mod streaming;
+mod workload;
 
 async fn zero_cut_continuation(fixture: &Fixture, name: &str) -> GenerationStore {
     let (generation, _) = fixture.generation(name).await;
