@@ -1,6 +1,7 @@
 use super::*;
 use crate::trace::evidence::catalogue::{PayloadPin, PinOwnerKind};
 use crate::trace::search::{SearchDocument, SearchHistoryMode, SearchIndexWork, SearchStore};
+use crate::trace::worker::ProvenanceMap;
 use std::collections::BTreeSet;
 use sylph_trace::reducer::{Reduction, Resolved};
 
@@ -57,7 +58,8 @@ impl TraceService {
         // temporal reclamation can never pass through the handoff window.
         let prepared = async {
             let generation = self.generation(&pending.generation).await?;
-            let (snapshot, reduction, epochs) = self.worker.projected_snapshot(&generation).await?;
+            let (snapshot, reduction, provenance) =
+                self.worker.projected_snapshot(&generation).await?;
             self.catalogue
                 .finish_lease(&pending, &snapshot, now)
                 .await?;
@@ -71,18 +73,18 @@ impl TraceService {
             self.catalogue
                 .pin_revision(PinOwnerKind::Search, &snapshot.generation, &snapshot)
                 .await?;
-            Ok::<_, anyhow::Error>((snapshot, reduction, epochs, index, update))
+            Ok::<_, anyhow::Error>((snapshot, reduction, provenance, index, update))
         }
         .await;
         self.catalogue
             .expire_lease("trace-search-index", &pending.lease_id)
             .await?;
-        let (snapshot, reduction, epochs, index, update) = prepared?;
+        let (snapshot, reduction, provenance, index, update) = prepared?;
         let mut work = SearchIndexWork::default();
         let Some(update) = update else {
             return Ok(work);
         };
-        let (sources, composed) = self.search_sources(&reduction, &epochs).await?;
+        let (sources, composed) = self.search_sources(&reduction, &provenance).await?;
         for source in sources {
             work.sources_examined += 1;
             let source_key = blake3::hash(&serde_json::to_vec(&source)?)
@@ -96,16 +98,20 @@ impl TraceService {
                 self.stage_search_composed(&snapshot, &source, payload)
                     .await?;
             }
-            self.catalogue
-                .pin_payloads(
-                    PinOwnerKind::Search,
-                    &snapshot.generation,
-                    &[PayloadPin {
-                        payload: source.part.payload.clone(),
-                        epoch: source.epoch.clone(),
-                    }],
-                )
-                .await?;
+            // Each supporting recipient epoch is an independent retention root.
+            // Original authorship does not add an origin-environment dependency.
+            for epoch in &source.dependency_epochs {
+                self.catalogue
+                    .pin_payloads(
+                        PinOwnerKind::Search,
+                        &snapshot.generation,
+                        &[PayloadPin {
+                            payload: source.part.payload.clone(),
+                            epoch: epoch.clone(),
+                        }],
+                    )
+                    .await?;
+            }
             let Some(length) = self.evidence.payload_length(&source.part.payload).await? else {
                 return Err(anyhow::anyhow!("search source payload is unavailable"));
             };
@@ -158,6 +164,7 @@ impl TraceService {
                         byte_start: offset,
                         text: text.clone(),
                         ingestion_epoch: source.epoch.clone(),
+                        dependency_epochs: source.dependency_epochs.clone(),
                     };
                     let size = serde_json::to_vec(&document)?.len() + 1;
                     if documents.len() >= index.limits().max_documents_per_batch
@@ -200,6 +207,7 @@ pub(super) struct IndexSource {
     representation: Representation,
     part: ContentPart,
     epoch: IngestionEpoch,
+    dependency_epochs: BTreeSet<IngestionEpoch>,
     scopes: Vec<(SearchHistoryMode, Option<SelectionRef>)>,
 }
 
@@ -211,6 +219,7 @@ struct IndexVariant {
     message: MessageRef,
     representation: Representation,
     epoch: IngestionEpoch,
+    dependency_epochs: BTreeSet<IngestionEpoch>,
     scopes: Vec<(SearchHistoryMode, Option<SelectionRef>)>,
 }
 
@@ -218,12 +227,12 @@ impl TraceService {
     pub(super) async fn search_sources(
         &self,
         reduction: &Reduction,
-        epochs: &imbl::OrdMap<AnyObjectRef, IngestionEpoch>,
+        provenance: &ProvenanceMap,
     ) -> anyhow::Result<(
         Vec<IndexSource>,
         BTreeMap<PayloadRef, sylph_trace::reading::ComposedPayload>,
     )> {
-        let variants = source_variants(reduction, epochs)?;
+        let variants = source_variants(reduction, provenance)?;
         let mut metadata = sylph_trace::reading::PayloadPreviews::new();
         let requested = variants
             .iter()
@@ -281,18 +290,31 @@ impl TraceService {
             anyhow::bail!("search composed payload digest mismatch");
         }
         self.catalogue.finish_upload(&upload).await?;
+        for epoch in source
+            .dependency_epochs
+            .iter()
+            .filter(|epoch| *epoch != &source.epoch)
+        {
+            self.catalogue
+                .pin_payloads(
+                    PinOwnerKind::Search,
+                    &snapshot.generation,
+                    &[PayloadPin {
+                        payload: source.part.payload.clone(),
+                        epoch: epoch.clone(),
+                    }],
+                )
+                .await?;
+        }
         Ok(())
     }
 }
 
 #[cfg(test)]
-fn sources(
-    reduction: &Reduction,
-    epochs: &imbl::OrdMap<AnyObjectRef, IngestionEpoch>,
-) -> anyhow::Result<Vec<IndexSource>> {
+fn sources(reduction: &Reduction, provenance: &ProvenanceMap) -> anyhow::Result<Vec<IndexSource>> {
     Ok(compose_sources(
         reduction,
-        source_variants(reduction, epochs)?,
+        source_variants(reduction, provenance)?,
         &mut sylph_trace::reading::PayloadPreviews::new(),
     )
     .0)
@@ -300,7 +322,7 @@ fn sources(
 
 fn source_variants(
     reduction: &Reduction,
-    epochs: &imbl::OrdMap<AnyObjectRef, IngestionEpoch>,
+    provenance: &ProvenanceMap,
 ) -> anyhow::Result<Vec<IndexVariant>> {
     let mut result = Vec::new();
     for (agent, history) in &reduction.histories {
@@ -370,10 +392,12 @@ fn source_variants(
             ) else {
                 continue;
             };
-            let epoch = epochs
-                .get(&AnyObjectRef::HistoryEntry(entry_ref.clone()))
-                .or_else(|| epochs.get(&AnyObjectRef::Agent(agent.clone())))
-                .ok_or_else(|| anyhow::anyhow!("search entry lacks evidence scope"))?;
+            let resolved_entry = reduction
+                .object(&AnyObjectRef::HistoryEntry(entry_ref.clone()))
+                .ok_or_else(|| anyhow::anyhow!("search entry lacks its resolved declaration"))?;
+            let support = provenance
+                .get(&resolved_entry.reference)
+                .ok_or_else(|| anyhow::anyhow!("search entry lacks evidence provenance"))?;
             let original_owner = match &entry.original_owner {
                 Some(OwnerRef::Agent { agent }) => agent.clone(),
                 _ => entry.containing_agent.clone(),
@@ -385,7 +409,8 @@ fn source_variants(
                 revision: revision_ref,
                 message: revision.message.clone(),
                 representation: revision.representation,
-                epoch: epoch.clone(),
+                epoch: support.primary_epoch.clone(),
+                dependency_epochs: support.dependency_epochs.iter().cloned().collect(),
                 scopes,
             });
         }
@@ -436,6 +461,7 @@ fn compose_sources(
                     representation: variant.representation,
                     part: part.clone(),
                     epoch: variant.epoch.clone(),
+                    dependency_epochs: variant.dependency_epochs.clone(),
                     scopes: variant.scopes.clone(),
                 });
             }
@@ -465,6 +491,7 @@ fn bound_revisions(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::trace::worker::ObjectProvenance;
     use sylph_trace::reducer::Reducer;
 
     fn agent() -> AgentRef {
@@ -484,6 +511,35 @@ mod tests {
 
     fn reference(index: u64) -> ClaimRef {
         ClaimRef::occurrence(agent(), position(index), vec!["fixture".into()]).unwrap()
+    }
+
+    fn entry_provenance(reduction: &Reduction, epochs: &[IngestionEpoch]) -> ProvenanceMap {
+        reduction
+            .objects
+            .iter()
+            .filter_map(|(reference, object)| {
+                if !matches!(reference, AnyObjectRef::HistoryEntry(_)) {
+                    return None;
+                }
+                let Resolved::Known { claims, .. } = &object.declaration else {
+                    return None;
+                };
+                Some((
+                    reference.clone(),
+                    Arc::new(ObjectProvenance {
+                        primary_claim: claims[0].clone(),
+                        primary_observation: ObservationRef {
+                            issuer: Issuer::Server("fixture".into()),
+                            producer_id: "entry-provenance".into(),
+                            producer_epoch: "one".into(),
+                            producer_seq: 1,
+                        },
+                        primary_epoch: epochs[0].clone(),
+                        dependency_epochs: epochs.iter().cloned().collect(),
+                    }),
+                ))
+            })
+            .collect()
     }
 
     struct StreamFixture {
@@ -660,13 +716,11 @@ mod tests {
             BTreeMap<PayloadRef, sylph_trace::reading::ComposedPayload>,
         ) {
             let reduction = self.reduction();
-            let epochs = imbl::OrdMap::from(vec![(
-                AnyObjectRef::Agent(agent()),
-                IngestionEpoch::new("stream-epoch").unwrap(),
-            )]);
+            let provenance =
+                entry_provenance(&reduction, &[IngestionEpoch::new("stream-epoch").unwrap()]);
             compose_sources(
                 &reduction,
-                source_variants(&reduction, &epochs).unwrap(),
+                source_variants(&reduction, &provenance).unwrap(),
                 metadata,
             )
         }
@@ -692,6 +746,41 @@ mod tests {
                     .collect(),
             }
         }
+    }
+
+    #[test]
+    fn copied_search_content_uses_recipient_support_without_origin_provenance() {
+        let mut fixture = StreamFixture::new(2);
+        let origin =
+            AgentRef::Session(sylph_protocol::SessionId::decode("private:codex:origin").unwrap());
+        for claim in &mut fixture.claims {
+            if let Fact::Declare {
+                object: TraceObject::HistoryEntry(entry),
+            } = &mut claim.fact
+            {
+                entry.original_owner = Some(OwnerRef::Agent {
+                    agent: origin.clone(),
+                });
+            }
+        }
+        let reduction = fixture.reduction();
+        let epochs = ["recipient-primary", "recipient-support"]
+            .map(|value| IngestionEpoch::new(value).unwrap());
+        let provenance = entry_provenance(&reduction, &epochs);
+        let variants = source_variants(&reduction, &provenance).unwrap();
+        assert_eq!(variants.len(), fixture.entries.len());
+        for source in variants {
+            assert_eq!(source.agent, agent());
+            assert_eq!(source.original_owner, origin);
+            assert_eq!(source.epoch, epochs[0]);
+            assert_eq!(source.dependency_epochs, BTreeSet::from(epochs.clone()));
+            assert!(
+                !source
+                    .scopes
+                    .iter()
+                    .any(|(mode, _)| mode == &SearchHistoryMode::Authored)
+            );
+    }
     }
 
     #[test]
@@ -735,9 +824,11 @@ mod tests {
                 fixture.body(selected_sources[0], &composed),
                 expected[selected].as_bytes()
             );
-            assert!(sources
+            assert!(
+                sources
                 .iter()
-                .all(|source| serde_json::to_vec(source).is_ok()));
+                    .all(|source| serde_json::to_vec(source).is_ok())
+            );
         }
     }
 
@@ -749,14 +840,18 @@ mod tests {
         missing_metadata.remove(&first);
         let (sources, _) = fixture.sources(&mut missing_metadata);
         for index in [1, 2] {
-            assert!(!sources
+            assert!(
+                !sources
                 .iter()
-                .any(|source| source.revision == fixture.revisions[index]));
+                    .any(|source| source.revision == fixture.revisions[index])
+            );
         }
-        assert!(!sources.iter().any(|source| source
+        assert!(!sources.iter().any(|source| {
+            source
             .scopes
             .iter()
-            .any(|(mode, _)| mode == &SearchHistoryMode::SelectedContext)));
+                .any(|(mode, _)| mode == &SearchHistoryMode::SelectedContext)
+        }));
 
         let mut missing_predecessor = StreamFixture::new(2);
         missing_predecessor.claims.retain(|claim| {
@@ -765,13 +860,17 @@ mod tests {
                 if revision.revision_ref == fixture.revisions[0])
         });
         let (sources, _) = missing_predecessor.sources(&mut missing_predecessor.metadata());
-        assert!(!sources
+        assert!(
+            !sources
             .iter()
             .any(|source| source.revision == fixture.revisions[1]
-                || source.revision == fixture.revisions[2]));
-        assert!(sources
+                    || source.revision == fixture.revisions[2])
+        );
+        assert!(
+            sources
             .iter()
-            .any(|source| source.revision == fixture.revisions[4]));
+                .any(|source| source.revision == fixture.revisions[4])
+        );
     }
 
     #[tokio::test]
@@ -790,19 +889,33 @@ mod tests {
             .authorize_scope(&IngestionScope::Agent(agent()), &[agent()])
             .await
             .unwrap();
-        let generation = service.active().await.unwrap();
-        let snapshot = generation.checkpoint().await.unwrap().snapshot;
-        let epochs = imbl::OrdMap::from(vec![(AnyObjectRef::Agent(agent()), epoch.clone())]);
-        let (sources, composed) = service
-            .search_sources(&fixture.reduction(), &epochs)
+        let supporting_agent = AgentRef::Session(
+            sylph_protocol::SessionId::decode("env7:codex:search-support").unwrap(),
+        );
+        let supporting_epoch = service
+            .evidence
+            .authorize_scope(
+                &IngestionScope::Agent(supporting_agent.clone()),
+                &[supporting_agent],
+            )
             .await
             .unwrap();
-        assert!(service
+        let generation = service.active().await.unwrap();
+        let snapshot = generation.checkpoint().await.unwrap().snapshot;
+        let reduction = fixture.reduction();
+        let provenance = entry_provenance(&reduction, &[epoch.clone(), supporting_epoch.clone()]);
+        let (sources, composed) = service
+            .search_sources(&reduction, &provenance)
+            .await
+            .unwrap();
+        assert!(
+            service
             .catalogue
             .payload_pins(PinOwnerKind::Search, &snapshot.generation, None, 10)
             .await
             .unwrap()
-            .is_empty());
+                .is_empty()
+        );
         let source = sources
             .iter()
             .find(|source| source.revision == fixture.revisions[2])
@@ -824,9 +937,14 @@ mod tests {
             .payload_pins(PinOwnerKind::Search, &snapshot.generation, None, 10)
             .await
             .unwrap();
-        assert_eq!(pins.len(), 1);
-        assert_eq!(pins[0].payload, source.part.payload);
-        assert_eq!(pins[0].epoch, epoch);
+        assert_eq!(pins.len(), 2);
+        assert!(pins.iter().all(|pin| pin.payload == source.part.payload));
+        assert_eq!(
+            pins.into_iter()
+                .map(|pin| pin.epoch)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([epoch, supporting_epoch])
+        );
         drop(generation);
         super::super::tests::close(service).await;
     }
@@ -947,12 +1065,10 @@ mod tests {
                     100,
                 )
                 .unwrap();
+            let reduction = reducer.resolve();
             let sources = sources(
-                &reducer.resolve(),
-                &imbl::OrdMap::from(vec![(
-                    AnyObjectRef::Agent(agent()),
-                    IngestionEpoch::new("epoch").unwrap(),
-                )]),
+                &reduction,
+                &entry_provenance(&reduction, &[IngestionEpoch::new("epoch").unwrap()]),
             )
             .unwrap();
             let archived: BTreeSet<_> = sources
