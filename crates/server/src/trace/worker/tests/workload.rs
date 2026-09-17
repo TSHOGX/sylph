@@ -17,8 +17,6 @@ use super::*;
 struct ConcurrentSources {
     fixture: Fixture,
     through: u64,
-    sources: usize,
-    records_each: usize,
 }
 
 async fn concurrent_sources(sources: usize, records_each: usize) -> ConcurrentSources {
@@ -59,12 +57,7 @@ async fn concurrent_sources(sources: usize, records_each: usize) -> ConcurrentSo
         }
     }
     let through = fixture.evidence.evidence_cut().await.unwrap();
-    ConcurrentSources {
-        fixture,
-        through,
-        sources,
-        records_each,
-    }
+    ConcurrentSources { fixture, through }
 }
 
 /// Per-record projection cost must not depend on how many other sources are live.
