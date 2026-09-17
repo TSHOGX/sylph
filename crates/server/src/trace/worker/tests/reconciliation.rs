@@ -470,3 +470,85 @@ async fn failed_final_reconciliation_commit_keeps_the_old_cut_until_a_retry_publ
         .unwrap();
     assert_complete(&setup, &restarted).await;
 }
+
+/// S1.4 asks whether the cumulative reducer-claim limit blocks the required
+/// histories. The largest retained Codex root in
+/// `docs/measurements/unified-trace/codex-structure.json` is 13009 records, and
+/// `WorkerLimits::max_reducer_claims` defaults to 250000, so the answer is a rate
+/// rather than an opinion: measure claims per retained record at two scales and
+/// project the ceiling. A rate measured at one size could be a fixed overhead.
+#[tokio::test]
+async fn retained_claims_per_record_leave_the_largest_corpus_history_within_its_limit() {
+    // The three named long roots peak at this many records for one logical thread.
+    const LARGEST_RETAINED_HISTORY: usize = 13009;
+    let mut samples = Vec::new();
+    for records in [50usize, 200] {
+        let setup = selected_history(records, QueryLimits::default().max_batch_changes).await;
+        setup
+            .worker
+            .catch_up(&setup.generation, 1, setup.through)
+            .await
+            .unwrap();
+        let held = setup
+            .worker
+            .states
+            .lock()
+            .await
+            .get("large-selection")
+            .unwrap()
+            .clone();
+        let claims = held.lock().await.reducer.len();
+        samples.push((records, claims));
+    }
+    let (small_records, small_claims) = samples[0];
+    let (large_records, large_claims) = samples[1];
+    // Separate the per-record slope from fixed header/inventory overhead, so the
+    // projection does not inherit a constant as though it scaled.
+    let slope = (large_claims - small_claims) as f64 / (large_records - small_records) as f64;
+    let fixed = large_claims as f64 - slope * large_records as f64;
+    let projected = (slope * LARGEST_RETAINED_HISTORY as f64 + fixed).ceil() as usize;
+    let limit = setup_limit();
+    eprintln!(
+        "reducer_claim_rate small=({small_records},{small_claims}) large=({large_records},{large_claims}) claims_per_record={slope:.3} fixed_overhead={fixed:.1} projected_at_{LARGEST_RETAINED_HISTORY}={projected} max_reducer_claims={limit}"
+    );
+    assert!(
+        slope > 0.0,
+        "a per-record claim rate of zero would mean the measurement observed no growth"
+    );
+    assert!(
+        projected < limit,
+        "the largest retained history projects to {projected} claims against a {limit} limit, so the cumulative reducer-claim limit blocks a required history"
+    );
+    // The synthetic sweep above holds one record shape constant, which measures
+    // the slope cleanly but understates a real history's mix of lifecycle,
+    // content and completion records. Measure the retained fixture's actual mix
+    // so the headroom is stated against an observed shape, not an invented one.
+    let fixture = Fixture::new().await;
+    let captures = fixture.native_fixture().await;
+    let (generation, _) = fixture.generation("claim-rate-mixed").await;
+    let worker = fixture.worker();
+    let cut = fixture.evidence.evidence_cut().await.unwrap();
+    worker.catch_up(&generation, 1, cut).await.unwrap();
+    let mixed = worker
+        .states
+        .lock()
+        .await
+        .get("claim-rate-mixed")
+        .unwrap()
+        .clone();
+    let mixed_claims = mixed.lock().await.reducer.len();
+    let mixed_rate = mixed_claims as f64 / captures.len() as f64;
+    let mixed_projection = (mixed_rate * LARGEST_RETAINED_HISTORY as f64).ceil() as usize;
+    let mixed_records = captures.len();
+    eprintln!(
+        "reducer_claim_rate_mixed records={mixed_records} claims={mixed_claims} claims_per_record={mixed_rate:.3} projected_at_{LARGEST_RETAINED_HISTORY}={mixed_projection} max_reducer_claims={limit}"
+    );
+    assert!(
+        mixed_projection < limit,
+        "the retained mixed-shape rate projects to {mixed_projection} claims at {LARGEST_RETAINED_HISTORY} records against a {limit} limit"
+    );
+}
+
+fn setup_limit() -> usize {
+    WorkerLimits::default().max_reducer_claims
+}
