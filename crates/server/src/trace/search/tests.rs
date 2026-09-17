@@ -34,6 +34,7 @@ fn document(key: &str, text: &str) -> SearchDocument {
         byte_start: 0,
         text: text.into(),
         ingestion_epoch: IngestionEpoch::new("epoch").unwrap(),
+        dependency_epochs: BTreeSet::new(),
     }
 }
 fn scope() -> SearchScope {

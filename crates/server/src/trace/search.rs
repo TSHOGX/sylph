@@ -122,6 +122,7 @@ pub struct SearchDocument {
     pub byte_start: u64,
     pub text: String,
     pub ingestion_epoch: IngestionEpoch,
+    pub dependency_epochs: BTreeSet<IngestionEpoch>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -138,6 +139,7 @@ pub struct SearchHit {
     pub byte_start: u64,
     pub snippet: String,
     pub ingestion_epoch: IngestionEpoch,
+    pub dependency_epochs: BTreeSet<IngestionEpoch>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -374,6 +376,7 @@ impl SearchStore {
                 byte_start: document.byte_start,
                 snippet: String::new(),
                 ingestion_epoch: document.ingestion_epoch.clone(),
+                dependency_epochs: document.dependency_epochs.clone(),
             })?;
             if json.len() > self.limits.max_document_metadata_bytes {
                 return Err(SearchError::Limit("document metadata bytes"));

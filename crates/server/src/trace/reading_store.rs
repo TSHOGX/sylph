@@ -8,10 +8,10 @@ use sylph_protocol::trace::*;
 
 use super::generation::{GenerationError, GenerationStore, Snapshot};
 
-const READ_FORWARD_SQL: &str = "SELECT order_key,address,anchor_ref,valid_from,valid_to,present,body_bytes,scope_epoch,search_text,directory_state,needs_input,required_environments_json,target_epochs_json FROM read_rows WHERE scope_key=? AND (order_key,address,valid_from)>(?,?,?) ORDER BY order_key,address,valid_from LIMIT ?";
-const READ_BACKWARD_SQL: &str = "SELECT order_key,address,anchor_ref,valid_from,valid_to,present,body_bytes,scope_epoch,search_text,directory_state,needs_input,required_environments_json,target_epochs_json FROM read_rows WHERE scope_key=? AND (order_key,address,valid_from)<(?,?,?) ORDER BY order_key DESC,address DESC,valid_from DESC LIMIT ?";
-const READ_ANCHOR_SQL: &str = "SELECT order_key,address,valid_from,scope_epoch,required_environments_json,target_epochs_json,search_text,directory_state,needs_input FROM read_rows WHERE scope_key=? AND anchor_ref=? AND valid_from<=? AND (valid_to IS NULL OR valid_to>?) AND present=1 ORDER BY order_key,address,valid_from LIMIT 1";
-const READ_COUNT_SQL: &str = "SELECT valid_from,valid_to,present,scope_epoch,search_text,directory_state,needs_input,required_environments_json,target_epochs_json FROM read_rows WHERE scope_key=? ORDER BY order_key,address,valid_from LIMIT ?";
+const READ_FORWARD_SQL: &str = "SELECT order_key,address,anchor_ref,valid_from,valid_to,present,body_bytes,scope_epoch,search_text,directory_state,needs_input,required_environments_json,dependency_epochs_json FROM read_rows WHERE scope_key=? AND (order_key,address,valid_from)>(?,?,?) ORDER BY order_key,address,valid_from LIMIT ?";
+const READ_BACKWARD_SQL: &str = "SELECT order_key,address,anchor_ref,valid_from,valid_to,present,body_bytes,scope_epoch,search_text,directory_state,needs_input,required_environments_json,dependency_epochs_json FROM read_rows WHERE scope_key=? AND (order_key,address,valid_from)<(?,?,?) ORDER BY order_key DESC,address DESC,valid_from DESC LIMIT ?";
+const READ_ANCHOR_SQL: &str = "SELECT order_key,address,valid_from,scope_epoch,required_environments_json,dependency_epochs_json,search_text,directory_state,needs_input FROM read_rows WHERE scope_key=? AND anchor_ref=? AND valid_from<=? AND (valid_to IS NULL OR valid_to>?) AND present=1 ORDER BY order_key,address,valid_from LIMIT 1";
+const READ_COUNT_SQL: &str = "SELECT valid_from,valid_to,present,scope_epoch,search_text,directory_state,needs_input,required_environments_json,dependency_epochs_json FROM read_rows WHERE scope_key=? ORDER BY order_key,address,valid_from LIMIT ?";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReadRowChange {
@@ -22,7 +22,7 @@ pub struct ReadRowChange {
     pub body: Option<serde_json::Value>,
     pub scope_epoch: IngestionEpoch,
     pub required_environments: BTreeSet<String>,
-    pub target_epochs: BTreeSet<IngestionEpoch>,
+    pub dependency_epochs: BTreeSet<IngestionEpoch>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,7 +32,7 @@ pub struct ReadRow {
     pub body: serde_json::Value,
     pub epoch: IngestionEpoch,
     pub required_environments: BTreeSet<String>,
-    pub target_epochs: BTreeSet<IngestionEpoch>,
+    pub dependency_epochs: BTreeSet<IngestionEpoch>,
 }
 
 /// Authorization inputs are stored separately so denied bodies are never hydrated.
@@ -40,7 +40,7 @@ pub struct ReadRow {
 pub struct ReadCandidate {
     pub epoch: IngestionEpoch,
     pub required_environments: BTreeSet<String>,
-    pub target_epochs: BTreeSet<IngestionEpoch>,
+    pub dependency_epochs: BTreeSet<IngestionEpoch>,
 }
 
 #[derive(Debug, Clone)]
@@ -211,8 +211,8 @@ pub(crate) async fn apply_rows(
         let present = i64::from(row.body.is_some());
         let (search_text, directory_state, needs_input) = directory_metadata(row.body.as_ref());
         let body = serde_json::to_string(&row.body)?;
-        sqlx::query("INSERT INTO read_rows(scope_key,address,anchor_ref,order_key,valid_from,valid_to,present,body_json,body_bytes,scope_epoch,search_text,directory_state,needs_input,required_environments_json,target_epochs_json) VALUES(?,?,?,?,?,NULL,?,?,?,?,?,?,?,?,?)")
-            .bind(&row.scope).bind(&row.address).bind(row.anchor.as_ref().map(TraceAddress::as_str)).bind(&row.order_key).bind(revision as i64).bind(present).bind(&body).bind(body.len() as i64).bind(row.scope_epoch.as_str()).bind(search_text).bind(directory_state).bind(needs_input).bind(serde_json::to_string(&row.required_environments)?).bind(serde_json::to_string(&row.target_epochs)?).execute(&mut *conn).await.map_err(super::generation::map_query_error)?;
+        sqlx::query("INSERT INTO read_rows(scope_key,address,anchor_ref,order_key,valid_from,valid_to,present,body_json,body_bytes,scope_epoch,search_text,directory_state,needs_input,required_environments_json,dependency_epochs_json) VALUES(?,?,?,?,?,NULL,?,?,?,?,?,?,?,?,?)")
+            .bind(&row.scope).bind(&row.address).bind(row.anchor.as_ref().map(TraceAddress::as_str)).bind(&row.order_key).bind(revision as i64).bind(present).bind(&body).bind(body.len() as i64).bind(row.scope_epoch.as_str()).bind(search_text).bind(directory_state).bind(needs_input).bind(serde_json::to_string(&row.required_environments)?).bind(serde_json::to_string(&row.dependency_epochs)?).execute(&mut *conn).await.map_err(super::generation::map_query_error)?;
         *changes.entry(row.scope.clone()).or_default() += present - prior.unwrap_or(0);
     }
     for (scope, delta) in changes {
@@ -248,7 +248,7 @@ impl GenerationStore {
     ) -> Result<ReadCandidate, GenerationError> {
         let (mut conn, _) = self.read_connection(snapshot).await?;
         // This covering index keeps a hidden target's body out of the point lookup.
-        let row = sqlx::query("SELECT scope_epoch,required_environments_json,target_epochs_json,present FROM read_rows INDEXED BY read_anchor WHERE scope_key=? AND anchor_ref=? AND valid_from<=? ORDER BY valid_from DESC LIMIT 1")
+        let row = sqlx::query("SELECT scope_epoch,required_environments_json,dependency_epochs_json,present FROM read_rows INDEXED BY read_anchor WHERE scope_key=? AND anchor_ref=? AND valid_from<=? ORDER BY valid_from DESC LIMIT 1")
             .bind(scope).bind(anchor.as_str()).bind(snapshot.view_revision as i64)
             .fetch_optional(&mut *conn).await.map_err(super::generation::map_query_error)?
             .ok_or(GenerationError::NotFound)?;
@@ -265,7 +265,7 @@ impl GenerationStore {
         address: &str,
     ) -> Result<ReadRow, GenerationError> {
         let (mut conn, _) = self.read_connection(snapshot).await?;
-        let row=sqlx::query("SELECT address,anchor_ref,body_json,scope_epoch,present,required_environments_json,target_epochs_json FROM read_rows WHERE scope_key=? AND address=? AND valid_from<=? ORDER BY valid_from DESC LIMIT 1")
+        let row=sqlx::query("SELECT address,anchor_ref,body_json,scope_epoch,present,required_environments_json,dependency_epochs_json FROM read_rows WHERE scope_key=? AND address=? AND valid_from<=? ORDER BY valid_from DESC LIMIT 1")
             .bind(scope).bind(address).bind(snapshot.view_revision as i64).fetch_optional(&mut *conn).await.map_err(super::generation::map_query_error)?.ok_or(GenerationError::NotFound)?;
         if row.get::<i64, _>("present") == 0 {
             return Err(GenerationError::NotFound);
@@ -494,7 +494,7 @@ impl GenerationStore {
                     more = true;
                     break;
                 }
-                let body=sqlx::query("SELECT address,anchor_ref,body_json,scope_epoch,required_environments_json,target_epochs_json FROM read_rows WHERE scope_key=? AND address=? AND valid_from=?")
+                let body=sqlx::query("SELECT address,anchor_ref,body_json,scope_epoch,required_environments_json,dependency_epochs_json FROM read_rows WHERE scope_key=? AND address=? AND valid_from=?")
                     .bind(scope).bind(&position.address).bind(valid_from as i64).fetch_one(&mut *conn).await.map_err(super::generation::map_query_error)?;
                 result.push(decode(body)?);
                 bytes += size;
@@ -606,7 +606,7 @@ fn decode_candidate(row: &sqlx::sqlite::SqliteRow) -> Result<ReadCandidate, Gene
         required_environments: serde_json::from_str(
             &row.try_get::<String, _>("required_environments_json")?,
         )?,
-        target_epochs: serde_json::from_str(&row.try_get::<String, _>("target_epochs_json")?)?,
+        dependency_epochs: serde_json::from_str(&row.try_get::<String, _>("dependency_epochs_json")?)?,
     })
 }
 
@@ -622,7 +622,7 @@ fn decode(row: sqlx::sqlite::SqliteRow) -> Result<ReadRow, GenerationError> {
         body: serde_json::from_str(&row.try_get::<String, _>("body_json")?)?,
         epoch: candidate.epoch,
         required_environments: candidate.required_environments,
-        target_epochs: candidate.target_epochs,
+        dependency_epochs: candidate.dependency_epochs,
     })
 }
 

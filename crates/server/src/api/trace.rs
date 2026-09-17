@@ -824,7 +824,7 @@ async fn check_row(
         }
     }
     for epoch in std::iter::once(&row.epoch)
-        .chain(&row.target_epochs)
+        .chain(&row.dependency_epochs)
         .collect::<std::collections::BTreeSet<_>>()
     {
         let proof = state
@@ -876,7 +876,7 @@ async fn candidate_is_readable(
     candidate: ReadCandidate,
 ) -> std::result::Result<bool, GenerationError> {
     for epoch in std::iter::once(&candidate.epoch)
-        .chain(&candidate.target_epochs)
+        .chain(&candidate.dependency_epochs)
         .collect::<std::collections::BTreeSet<_>>()
     {
         let catalogue = state.trace.catalogue();

@@ -69,7 +69,7 @@ fn header_row(header: AgentHeader, epoch: &IngestionEpoch) -> ReadRowChange {
         body: Some(serde_json::to_value(header).unwrap()),
         scope_epoch: epoch.clone(),
         required_environments: [agent.environment().as_str().to_owned()].into(),
-        target_epochs: [epoch.clone()].into(),
+        dependency_epochs: [epoch.clone()].into(),
     }
 }
 

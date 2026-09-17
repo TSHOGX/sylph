@@ -1553,7 +1553,7 @@ impl GenerationStore {
             if row.scope.len()>self.limits.max_key_bytes||row.address.len()>self.limits.max_key_bytes||row.order_key.len()>self.limits.max_key_bytes {return Err(GenerationError::Limit("reading row key"));}
             if row.body.as_ref().map(serde_json::to_vec).transpose()?.is_some_and(|body|body.len()>self.limits.max_summary_bytes) {return Err(GenerationError::Limit("individual reading row bytes"));}
             if serde_json::to_vec(&row.required_environments)?.len()
-                + serde_json::to_vec(&row.target_epochs)?.len()
+                + serde_json::to_vec(&row.dependency_epochs)?.len()
                 > self.limits.max_key_bytes
             {
                 return Err(GenerationError::Limit("reading authorization metadata bytes"));

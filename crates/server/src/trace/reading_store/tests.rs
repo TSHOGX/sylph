@@ -31,7 +31,7 @@ fn row(address: &str, position: u64, text: &str) -> ReadRowChange {
         body: Some(serde_json::json!({"text":text})),
         scope_epoch: IngestionEpoch::new("epoch").unwrap(),
         required_environments: BTreeSet::new(),
-        target_epochs: BTreeSet::new(),
+        dependency_epochs: BTreeSet::new(),
     }
 }
 
@@ -357,7 +357,7 @@ fn targeted_row(address: &str, position: u64, environment: &str) -> ReadRowChang
     let mut change = row(address, position, address);
     change.required_environments.insert(environment.into());
     change
-        .target_epochs
+        .dependency_epochs
         .insert(IngestionEpoch::new(format!("epoch-{environment}")).unwrap());
     change
 }
@@ -543,7 +543,7 @@ async fn projection_rejects_invalid_or_unbounded_authorization_metadata() {
     ));
     let mut large = row("large", 1, "body");
     large
-        .target_epochs
+        .dependency_epochs
         .insert(IngestionEpoch::new("a".repeat(store.limits().max_key_bytes)).unwrap());
     assert!(matches!(
         store
@@ -687,7 +687,7 @@ async fn denied_environments_and_deleted_epochs_are_checked_before_body_hydratio
         assert!(!candidate.required_environments.contains("private"));
         assert_eq!(candidate.epoch.as_str(), "epoch");
         Ok(!candidate
-            .target_epochs
+            .dependency_epochs
             .contains(&IngestionEpoch::new("epoch-deleted").unwrap()))
     };
     let page = store
@@ -733,7 +733,7 @@ async fn exact_visible_counts_require_every_target_grant_and_follow_snapshot_ver
     let mut joint = targeted_row("joint", 1, "first");
     joint.required_environments.insert("second".into());
     joint
-        .target_epochs
+        .dependency_epochs
         .insert(IngestionEpoch::new("epoch-second").unwrap());
     store
         .apply(

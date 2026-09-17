@@ -107,7 +107,7 @@ async fn assign_old_entry_epoch(
     assert_eq!(changed.source_epoch, OracleEpoch::Exact(epoch.clone()),
         "{name}: a reconstructed baseline must not absorb the candidate epoch before row comparison");
     assert_eq!(
-        changed.target_epochs,
+        changed.dependency_epochs,
         BTreeSet::from([OracleEpoch::Exact(epoch.clone())])
     );
     let old_row = generation
