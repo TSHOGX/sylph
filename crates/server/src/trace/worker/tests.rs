@@ -1556,8 +1556,10 @@ async fn retained_companion_inventory_resolves_metadata_owner_after_restart_with
 
 mod append;
 mod corpus;
+mod delegation;
 mod delayed_source;
 mod epoch_cache;
+mod epoch_order;
 mod frozen_history;
 mod message_update;
 mod state_sharing;

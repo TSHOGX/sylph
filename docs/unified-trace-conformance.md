@@ -1,7 +1,7 @@
 # Unified Trace Conformance and Evidence
 
-Status: **Normative acceptance contract. Structural evidence and a storage reference
-exercise exist; the replacement production reducers do not yet pass this contract.**
+Status: **Normative acceptance contract. Retained corpus replay and production storage
+tests cover specific promises; the complete semantic, failure and workload matrices remain open.**
 
 [unified-trace-foundation.md](unified-trace-foundation.md) defines meanings;
 [unified-trace-storage.md](unified-trace-storage.md) defines durability and reads.
@@ -11,13 +11,14 @@ progress and remaining capture work are tracked in
 
 ## Evidence inventory and boundaries
 
-Three kinds of evidence answer different questions. None substitutes for the next.
+The evidence layers answer different questions. None substitutes for the next.
 
 | Evidence | Available material | What it can establish |
 | --- | --- | --- |
 | Pinned source | Codex, DeepSeek Harness, Pi source revisions; Claude SDK declaration version/digest in the adapter specs | Field meaning, persistence order, exposure limits, lifecycle producer behavior |
 | Observed structural corpus | Long-history inventory and extracted records below | Actual identities, repeated records, namespaces, branch boundaries, topology and field placement |
 | Executable reference exercise | Disposable SQLite model and deliberate faults below | Transaction/order ideas fail when their defining safeguards are removed |
+| Production replay | Retained bytes through admission, mapping, reduction and persisted reader projections | The particular identities, contents, lifecycles and schedules asserted by each production test |
 
 Full sanitized live/native byte pairs and production mapper replay are a separate
 implementation gate. Structural extracts omit content and cannot prove text, binary,
@@ -50,6 +51,17 @@ The retained material is:
   direction records and native output. Its repeated equal text deltas and settled outer
   run establish Pi's emitted shapes; the synthetic provider response establishes neither
   a remote model's behavior nor a missing live/native identity join.
+- The retained Codex 0.150.1 [delegation capture](measurements/codex/captures/s10_delegation_fork.jsonl)
+  supplies all inbound app-server frames to the production replay in
+  `crates/server/src/trace/worker/tests/delegation.rs`. A pinned digest guards the complete
+  recorder artifact; `RawValue` extracts each whole frame without JSON reserialization,
+  and its original recorder line is retained as the source coordinate. This establishes
+  the observed child and command/process lifetimes, parent completion before child
+  completion, distinct answer bodies, and activity notifications without invented agents.
+  It supplies no child follow-up run, delayed sidecar, native/live join, proved spawn
+  result or caller-truncation pair. Its independent native replay source is a separate
+  session, explicitly not a counterpart to this live recording. Historical tool text
+  is retained data and is never executed by the harness.
 
 Sanitization preserves equality relationships, key scope, missing-versus-empty values,
 ordering and branch structure. Replacing two distinct IDs with one placeholder would

@@ -51,6 +51,10 @@ The header offers `Find in this agent`, `Agents`, and `History`. `Details` opens
 record coverage and measurements. The current control target remains visible beside
 the composer even when an inspector is open. Neither changing inspection focus nor
 closing a panel starts, stops, or redirects execution.
+If exactly one observed activation lacks a terminal boundary while the agent's other
+activations have terminated, its own-execution summary retains that unresolved observation.
+Missing live coverage never turns it into active execution or lets an earlier completed
+answer stand in for its outcome.
 
 URLs retain the agent reference, explicit noncurrent history selection, and object
 anchor. Browser Back restores the preceding reader and scroll anchor. Panel widths,

@@ -38,7 +38,7 @@ sylph-trace = { path = "../trace" }
 
 # Serialization
 serde = { workspace = true }
-serde_json = { workspace = true }
+serde_json = { workspace = true, features = ["raw_value"] }
 percent-encoding = "2"
 # The on-disk config format. TOML rather than JSON because this file is
 # hand-edited and seeded fully commented: JSON has no comments, so a seeded file

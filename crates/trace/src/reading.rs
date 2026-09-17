@@ -914,6 +914,17 @@ impl Index<'_> {
         if active.len() == 1 {
             return active[0].clone();
         }
+        // Losing live coverage is not a terminal boundary. When every other own
+        // activation has terminated, retain the sole unclosed observation instead
+        // of presenting a previous answer's completed run as the whole agent state.
+        let unclosed: Vec<_> = known.iter().filter(|summary| {
+            !matches!(summary.state, ReadExecutionState::Terminated { .. })
+        }).collect();
+        if unclosed.len() == 1
+            && matches!(unclosed[0].state, ReadExecutionState::ObservationEnded { .. })
+        {
+            return unclosed[0].clone();
+        }
         if let Some(history) = self.reduction.histories.get(agent).filter(|history| {
             history.selected_entries.is_some() || history.candidate_heads.len() == 1
         }) {

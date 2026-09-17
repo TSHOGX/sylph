@@ -71,16 +71,24 @@ production reducer. [Conformance](unified-trace-conformance.md) names their limi
    cold/incremental/reread/interleaved/rebuilt equivalence through production admission,
    reduction and read projection, with independently authored expectations. Resolve
    core representation defects exposed by that replay before widening behavior. Complete
-   the remaining required semantic mutations and mixed-source dependency schedules.
+   the remaining required semantic mutations and mixed-source dependency schedules,
+   including reusable children, independent resources and distinct result representations.
 2. Extend query authorization acceptance under concurrent grant changes and deletion.
    Candidate filtering before hydration, private continuation positions and bounded
    authorized totals are implemented; preserve these contracts through incremental
-   projection and future full descendant indexing.
+   projection and future full descendant indexing. Replace first-arriving declaration
+   epochs with deterministic retained-support provenance; the independently scoped
+   parent/child replay currently produces different header and target epoch metadata
+   under reversed source arrival. `crates/server/src/trace/worker/tests/epoch_order.rs` is an explicit ignored
+   known-failure gate, not passing acceptance. Its fix must cover supporting evidence,
+   contributor deletion, aliases, search and recipient-copy authorization together.
 3. Measure the connected production pipeline under large retained histories, high
    version density, concurrent captures, reconnects and deletion. Replace full reduction
    and whole-reader materialization on routine updates with bounded incremental work;
    bound search indexing as well as returned pages. Extend fault coverage beyond job
    lifecycle and publication cancellation to the production storage and delivery matrix.
+   Prove a valid correction larger than one projection batch completes through private
+   reconciliation, and exercise the connected spool/socket/ACK path under concurrent load.
 4. After these core gates stabilize, finish adapter evidence and mapping conformance:
    remaining runtime/delegation/accounting cases, source certificates and workflow/schedule
    coverage. Unavailable joins and selected-head evidence stay unknown.
@@ -246,6 +254,14 @@ The retained Codex corpus and Claude/Pi pairs now pass independently specified b
 identity, ownership and lifecycle assertions across cold/incremental/restarted replay,
 redelivery, overlapping reread, source interleaving and same-cut generation rebuilding.
 These marker bundles do not cover every vendor operation, delayed sidecar or fault schedule.
+The observed Codex app-server delegation replay now also checks child command/resource
+lifetimes, exact runtime output, parent completion before the child's own end, retained
+answer rows and activity notifications across restart, replay, unrelated-source interleaving
+and same-cut rebuilding. It retains all inbound frame bytes from the pinned recorder
+artifact. A sole unclosed observed activation now remains visible in its agent header after
+an earlier activation terminates, even without live following coverage. The capture supplies
+no child follow-up, spawn result, delayed sidecar or native/live pair; these remain separate
+conformance work. Distinct-scope epoch provenance fails the gate above and remains open.
 
 Reader candidates now carry source and target authorization metadata in covering indexes.
 Current grants and deletion epochs filter candidates before body hydration, including
@@ -362,12 +378,15 @@ pages do not prove bounded incremental projection cost. The ignored
 scale matrix. Existing deletion/recovery tests also do not substitute for
 the full in-flight cancellation and crash matrix. A complete new production conformance
 run and semantic negative controls are required before declaring the replacement done.
-The next incremental stage must identify typed semantic changes and row dependencies
-within a single long session, including an existing message row changed by a later
-revision. Acceptance compares ordering, anchors and authorization metadata as well as
-rendered bodies, and measures warm append/delta/final work at growing history sizes.
-Per-agent reconstruction alone does not meet this bound. Larger topology or equivalence
-changes require private reconciliation while the published snapshot remains readable.
+One full browser run timed out waiting for a fixture reply while the page showed only
+submitted inputs; the complete commands test file passed on a clean rerun. The saved
+snapshot responses did not establish the cause. Connected-load acceptance must reproduce
+or explain this intermittent visibility failure rather than treating a retry as a fix.
+Acceptance compares ordering, anchors and authorization metadata as well as rendered
+bodies, and measures warm append/delta/final work at growing history sizes. Full
+reconciliation remains valid for uncommon topology or equivalence changes, provided it
+finishes privately within bounded writer units while the published snapshot stays readable.
+Universal constant-time graph updates are not a completion requirement.
 
 The milestone narratives below record earlier product delivery. Block-era implementation
 details are historical; the trace checkpoint above owns the replacement status.
