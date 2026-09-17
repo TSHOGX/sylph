@@ -414,6 +414,15 @@ It replaces the affected row, parts and payload anchors together, preserving old
 Work may grow with the affected message's revision/part chain, never unrelated history.
 Flat payload manifests still require work proportional to their chunk count; delta-only
 total work is not claimed for arbitrarily long streaming bodies.
+Revision selection indexes ordered coordinates by source, generation and locator kind.
+Frame ordinals and JSONL byte starts are separate domains; missing, snapshot and opaque
+occurrence positions never imply strict order. Surviving final/correction candidates take
+precedence together, retaining conflicts and every supporting claim in their original
+order. Otherwise each domain retains all candidates tied at its maximum coordinate.
+Late append detection uses the earliest surviving seal in the same ordered domain.
+Selected-history filtering precedes both correction and order evaluation. Selection and
+late detection take O(K log K) comparison work for K eligible revision candidates;
+one long message must not cause pairwise scans merely to select its current revision.
 
 Reader invalidation consumes typed changes in every resolved semantic family, including
 old and new endpoints and removed values. Object declarations alone cannot invalidate

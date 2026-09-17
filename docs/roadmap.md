@@ -330,9 +330,11 @@ and payload anchors atomically; prior views retain their exact bodies. Selected,
 mixed-content and cross-agent regions reconcile conservatively, as do excessive dependencies.
 The production 20/200 phase comparison covers turn-bearing frames, exact repeated text,
 replacement/final/late behavior, retained-view authorization, restart and failed/cancelled
-publication. The local revision selector can still be quadratic in that message's revision
-count, and flat composed manifests require chunk-sized work. These are independent of
-unrelated history and remain performance work for long streaming chains.
+publication. Revision selection and late-segment detection now use source-domain extrema
+and stable identity grouping instead of pairwise scans. Exact pairwise-oracle comparisons
+cover corrections, ties, incomparable positions and support order; comparison-count tests
+cover 256/4096 candidates. Repeated message-local resolution and flat composed manifests
+still revisit the affected chain and require further long-stream performance work.
 
 Search reconciliation now persists complete source fingerprints and reuses unchanged
 FTS text across process restarts. Bounded source writes and stale-source removal remain

@@ -163,48 +163,10 @@ impl MessageHistory {
         )
     }
 }
+mod revision_selection;
+
 fn select_revision(values: &[&RevisionCandidate]) -> Resolved<MessageRevisionRef> {
-    let replaced: BTreeSet<_> = values
-        .iter()
-        .filter_map(|value| match &value.form {
-            RevisionForm::Correction { replaces } => Some(replaces),
-            _ => None,
-        })
-        .collect();
-    let finals: Vec<_> = values
-        .iter()
-        .copied()
-        .filter(|value| {
-            !replaced.contains(&value.reference)
-                && matches!(
-                    value.form,
-                    RevisionForm::Complete
-                        | RevisionForm::Final { .. }
-                        | RevisionForm::Correction { .. }
-                )
-        })
-        .collect();
-    let selected = if finals.is_empty() {
-        values
-            .iter()
-            .copied()
-            .filter(|a| {
-                !values.iter().any(|b| {
-                    a.position
-                        .as_ref()
-                        .zip(b.position.as_ref())
-                        .is_some_and(|(a, b)| source_order(a, b) == Some(std::cmp::Ordering::Less))
-                })
-            })
-            .collect()
-    } else {
-        finals
-    };
-    resolve_values(
-        selected
-            .into_iter()
-            .map(|value| (value.reference.clone(), value.claim.clone())),
-    )
+    revision_selection::RevisionSelection::new(values).select()
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -849,22 +811,7 @@ fn claim_position(claim: &Claim) -> Option<&SourcePosition> {
     }
 }
 
-fn source_order(a: &SourcePosition, b: &SourcePosition) -> Option<std::cmp::Ordering> {
-    if a.source != b.source || a.generation != b.generation {
-        return None;
-    }
-    match (&a.locator, &b.locator) {
-        (
-            SourceLocator::Jsonl { byte_start: a, .. },
-            SourceLocator::Jsonl { byte_start: b, .. },
-        ) => Some(a.cmp(b)),
-        (SourceLocator::Frame { ordinal: a }, SourceLocator::Frame { ordinal: b }) => {
-            Some(a.cmp(b))
-        }
-        (a, b) if a == b => Some(std::cmp::Ordering::Equal),
-        _ => None,
-    }
-}
+use revision_selection::source_order;
 
 fn resolve_messages(active: &[&Claim], result: &mut Reduction) {
     let mut revisions: BTreeMap<MessageRef, Vec<(&MessageRevision, &Claim)>> = BTreeMap::new();
@@ -894,45 +841,6 @@ fn resolve_messages(active: &[&Claim], result: &mut Reduction) {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
-        let replaced: BTreeSet<_> = values
-            .iter()
-            .filter_map(|(revision, _)| match &revision.form {
-                RevisionForm::Correction { replaces } => Some(replaces.clone()),
-                _ => None,
-            })
-            .collect();
-        let finals: Vec<_> = values
-            .iter()
-            .filter(|(revision, _)| {
-                !replaced.contains(&revision.revision_ref)
-                    && matches!(
-                        revision.form,
-                        RevisionForm::Final { .. }
-                            | RevisionForm::Correction { .. }
-                            | RevisionForm::Complete
-                    )
-            })
-            .collect();
-        let mut late_segments = Vec::new();
-        for (revision, claim) in &values {
-            if !matches!(revision.form, RevisionForm::Append { .. }) {
-                continue;
-            }
-            let later_than_seal = finals.iter().any(|(_, sealed)| {
-                claim_position(claim)
-                    .zip(claim_position(sealed))
-                    .is_some_and(|(a, b)| source_order(a, b) == Some(std::cmp::Ordering::Greater))
-            });
-            if later_than_seal {
-                late_segments.push(revision.revision_ref.clone());
-                diagnostic(
-                    result,
-                    DiagnosticCode::LateSegment,
-                    vec![claim.claim_ref.clone()],
-                    "Late ordinary segment is retained without reopening sealed content",
-                );
-            }
-        }
         let candidates: Vec<_> = values
             .iter()
             .map(|(revision, claim)| RevisionCandidate {
@@ -942,8 +850,24 @@ fn resolve_messages(active: &[&Claim], result: &mut Reduction) {
                 claim: claim.claim_ref.clone(),
             })
             .collect();
+        let candidate_refs: Vec<_> = candidates.iter().collect();
+        let selection = revision_selection::RevisionSelection::new(&candidate_refs);
+        let mut late_segments = Vec::new();
+        for candidate in &candidates {
+            if matches!(candidate.form, RevisionForm::Append { .. })
+                && selection.is_late(candidate.position.as_ref())
+            {
+                late_segments.push(candidate.reference.clone());
+                diagnostic(
+                    result,
+                    DiagnosticCode::LateSegment,
+                    vec![candidate.claim.clone()],
+                    "Late ordinary segment is retained without reopening sealed content",
+                );
+            }
+        }
         let selected = if conflicted_revisions.is_empty() {
-            select_revision(&candidates.iter().collect::<Vec<_>>())
+            selection.select()
         } else {
             Resolved::Unknown
         };
@@ -955,7 +879,7 @@ fn resolve_messages(active: &[&Claim], result: &mut Reduction) {
                     .map(|(revision, _)| revision.revision_ref.clone())
                     .collect(),
                 selected,
-                sealed: !finals.is_empty(),
+                sealed: selection.sealed(),
                 late_segments,
                 conflicted_revisions,
                 candidates,
