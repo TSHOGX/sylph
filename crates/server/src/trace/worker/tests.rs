@@ -393,6 +393,10 @@ impl ReaderProjection {
 async fn reader_projection(fixture: &Fixture, store: &GenerationStore) -> ReaderProjection {
     let snapshot = store.checkpoint().await.unwrap().snapshot;
     let (mut conn, _) = store.read_connection(&snapshot).await.unwrap();
+    // This oracle intentionally exports the whole retained projection. Foreground
+    // page VM limits are tested through the public read APIs, not this comparison;
+    // leaving their progress handler installed truncates large scale experiments.
+    conn.lock_handle().await.unwrap().remove_progress_handler();
     let revision = snapshot.view_revision as i64;
     let rows = sqlx::query(
         "SELECT scope_key,address,body_json,order_key,anchor_ref,scope_epoch,target_epochs_json,required_environments_json,body_bytes,search_text,directory_state,needs_input FROM read_rows \
@@ -1555,6 +1559,7 @@ mod corpus;
 mod delayed_source;
 mod epoch_cache;
 mod frozen_history;
+mod message_update;
 mod state_sharing;
 
 mod streaming;

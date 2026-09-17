@@ -22,17 +22,28 @@ impl AppendWork {
     }
 }
 
-/// Snapshot-bound reverse references needed only by the reader's append guard.
+/// Snapshot-bound reverse references needed by the reader's certified update guards.
 /// General semantic changes rebuild this index with the full reader projection.
 #[derive(Debug, Clone)]
 pub struct AppendIndex {
-    pub(super) reduction: Arc<Reduction>,
-    pub(super) relations: imbl::OrdMap<AnyObjectRef, imbl::OrdMap<ClaimRef, ResolvedRelation>>,
-    pub(super) coverage: imbl::OrdMap<AgentRef, imbl::OrdMap<ClaimRef, Coverage>>,
-    pub(super) selected_entries: imbl::OrdSet<EntryRef>,
-    pub(super) submitted_agents: imbl::OrdSet<AgentRef>,
+    pub(in crate::reading) reduction: Arc<Reduction>,
+    pub(in crate::reading) relations:
+        imbl::OrdMap<AnyObjectRef, imbl::OrdMap<ClaimRef, ResolvedRelation>>,
+    pub(in crate::reading) coverage: imbl::OrdMap<AgentRef, imbl::OrdMap<ClaimRef, Coverage>>,
+    pub(in crate::reading) selected_entries: imbl::OrdSet<EntryRef>,
+    pub(in crate::reading) submitted_agents: imbl::OrdSet<AgentRef>,
+    pub(in crate::reading) message_entries: imbl::OrdMap<MessageRef, MessageEntries>,
+    pub(in crate::reading) selected_messages: imbl::OrdSet<MessageRef>,
+    pub(in crate::reading) delivered_messages: imbl::OrdSet<MessageRef>,
+    pub(in crate::reading) delivered_entries: imbl::OrdSet<EntryRef>,
     references: usize,
     max_references: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(in crate::reading) struct MessageEntries {
+    pub(in crate::reading) entries: imbl::OrdMap<(AgentRef, usize), EntryRef>,
+    pub(in crate::reading) unsupported: bool,
 }
 
 impl AppendIndex {
@@ -49,6 +60,10 @@ impl AppendIndex {
             coverage: imbl::OrdMap::new(),
             selected_entries: imbl::OrdSet::new(),
             submitted_agents: imbl::OrdSet::new(),
+            message_entries: imbl::OrdMap::new(),
+            selected_messages: imbl::OrdSet::new(),
+            delivered_messages: imbl::OrdSet::new(),
+            delivered_entries: imbl::OrdSet::new(),
             references: 0,
             max_references,
         };
@@ -77,6 +92,57 @@ impl AppendIndex {
                     index.reserve(work)?;
                     index.selected_entries.insert(entry.clone());
                 }
+                for observation in reduction
+                    .history_contents
+                    .get(entry)
+                    .into_iter()
+                    .flat_map(|observations| observations.values())
+                {
+                    for slot in &observation.slots {
+                        work.index_records_examined += 1;
+                        if let HistoryContent::Message(revision) = &slot.content {
+                            if let Some(TraceObject::MessageRevision(revision)) = reduction
+                                .object(&AnyObjectRef::MessageRevision(revision.clone()))
+                                .and_then(|object| object.declaration.known())
+                            {
+                                if !index.selected_messages.contains(&revision.message) {
+                                    index.reserve(work)?;
+                                    index.selected_messages.insert(revision.message.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for (agent, history) in &reduction.histories {
+            for (ordinal, entry) in history.archive_order.iter().enumerate() {
+                index.add_history_entry(&reduction, agent, ordinal, entry, work)?;
+            }
+        }
+        for observations in reduction.delivery_revisions.values() {
+            for revision in observations.values() {
+                work.index_records_examined += 1;
+                if let Some(TraceObject::MessageRevision(revision)) = reduction
+                    .object(&AnyObjectRef::MessageRevision(revision.clone()))
+                    .and_then(|object| object.declaration.known())
+                {
+                    if !index.delivered_messages.contains(&revision.message) {
+                        index.reserve(work)?;
+                        index.delivered_messages.insert(revision.message.clone());
+                    }
+                }
+            }
+        }
+        for stages in reduction.delivery_stages.values() {
+            for (stage, _) in stages {
+                work.index_records_examined += 1;
+                if let DeliveryStage::Admitted { entry: Some(entry) } = stage {
+                    if !index.delivered_entries.contains(entry) {
+                        index.reserve(work)?;
+                        index.delivered_entries.insert(entry.clone());
+                    }
+                }
             }
         }
         for relation in &reduction.relations {
@@ -93,7 +159,7 @@ impl AppendIndex {
         Some(index)
     }
 
-    pub(super) fn add_relation(
+    pub(in crate::reading) fn add_relation(
         &mut self,
         relation: &ResolvedRelation,
         work: &mut AppendWork,
@@ -111,6 +177,77 @@ impl AppendIndex {
         Some(())
     }
 
+    pub(in crate::reading) fn add_history_entry(
+        &mut self,
+        reduction: &Reduction,
+        agent: &AgentRef,
+        ordinal: usize,
+        entry: &EntryRef,
+        work: &mut AppendWork,
+    ) -> Option<()> {
+        work.index_records_examined += 1;
+        let contents = reduction.entry_contents(entry, None);
+        let mut unsupported = !contents.complete || contents.slots.is_empty();
+        let mut messages = BTreeSet::new();
+        for slot in contents.slots.values() {
+            work.index_records_examined += 1;
+            let Some(alternatives) = slot.known() else {
+                unsupported = true;
+                continue;
+            };
+            unsupported |= alternatives.len() != 1;
+            for content in alternatives {
+                work.index_records_examined += 1;
+                let HistoryContent::Message(reference) = content else {
+                    unsupported = true;
+                    continue;
+                };
+                let Some(TraceObject::MessageRevision(_)) = reduction
+                    .object(&AnyObjectRef::MessageRevision(reference.clone()))
+                    .and_then(|object| object.declaration.known())
+                else {
+                    unsupported = true;
+                    continue;
+                };
+            }
+        }
+        for observation in reduction
+            .history_contents
+            .get(entry)
+            .into_iter()
+            .flat_map(|observations| observations.values())
+        {
+            for slot in &observation.slots {
+                work.index_records_examined += 1;
+                let HistoryContent::Message(reference) = &slot.content else {
+                    continue;
+                };
+                if let Some(TraceObject::MessageRevision(revision)) = reduction
+                    .object(&AnyObjectRef::MessageRevision(reference.clone()))
+                    .and_then(|object| object.declaration.known())
+                {
+                    messages.insert(revision.message.clone());
+                }
+            }
+        }
+        unsupported |= messages.len() != 1;
+        for message in messages {
+            let mut indexed = self
+                .message_entries
+                .get(&message)
+                .cloned()
+                .unwrap_or_default();
+            let location = (agent.clone(), ordinal);
+            if !indexed.entries.contains_key(&location) {
+                self.reserve(work)?;
+                indexed.entries.insert(location, entry.clone());
+            }
+            indexed.unsupported |= unsupported;
+            self.message_entries.insert(message, indexed);
+        }
+        Some(())
+    }
+
     fn reserve(&mut self, work: &mut AppendWork) -> Option<()> {
         if self.references >= self.max_references {
             work.index_unavailable = true;
@@ -122,23 +259,30 @@ impl AppendIndex {
     }
 }
 
-pub(super) struct GuardBudget<'a> {
+pub(in crate::reading) struct GuardBudget<'a> {
     remaining: usize,
     work: &'a mut AppendWork,
 }
 
 impl<'a> GuardBudget<'a> {
-    pub(super) fn new(remaining: usize, work: &'a mut AppendWork) -> Self {
+    pub(in crate::reading) fn new(remaining: usize, work: &'a mut AppendWork) -> Self {
         Self { remaining, work }
     }
 
-    pub(super) fn examine(&mut self) -> Option<()> {
+    pub(in crate::reading) fn examine(&mut self) -> Option<()> {
         if self.remaining == 0 {
             self.work.guard_budget_exhausted = true;
             return None;
         }
         self.remaining -= 1;
         self.work.guard_references_examined += 1;
+        Some(())
+    }
+
+    pub(in crate::reading) fn examine_many(&mut self, count: usize) -> Option<()> {
+        for _ in 0..count {
+            self.examine()?;
+        }
         Some(())
     }
 }

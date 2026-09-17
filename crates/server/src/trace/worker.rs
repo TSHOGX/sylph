@@ -21,7 +21,10 @@ use sylph_trace::{
         self, ArchiveContext, ArchiveRequest, DerivedPayload, MapInput, MapOutput, MapperState,
         MappingDiagnostic, SemanticMapper,
     },
-    reducer::{IndependentAppend, Reducer, Reduction, ReductionChanges, ReductionWork, Resolution},
+    reducer::{
+        IndependentAppend, MessageUpdate, Reducer, Reduction, ReductionChanges, ReductionWork,
+        Resolution,
+    },
 };
 use tokio::sync::{Mutex, Semaphore};
 
@@ -107,6 +110,7 @@ pub struct WorkerProgress {
     pub unmapped_observations: usize,
     /// Rows constructed by reader materialization during this worker pass.
     pub reader_rows_materialized: usize,
+    pub message_updates: usize,
     pub reduction: ReductionWork,
     pub membership: MembershipWork,
     pub reader_append: sylph_trace::reading::AppendWork,
@@ -239,11 +243,13 @@ struct ProjectionUnit {
     bindings: Vec<(IngestionEpoch, ObservationRef, AgentRef)>,
     pins: BTreeSet<(PayloadRef, IngestionEpoch)>,
     reader_rows_materialized: usize,
+    message_updates: usize,
     reduction_changes: ReductionChanges,
     reduction_work: ReductionWork,
     membership_work: MembershipWork,
     reader_append_work: sylph_trace::reading::AppendWork,
     append: Option<IndependentAppend>,
+    message_update: Option<MessageUpdate>,
     append_eligible: bool,
 }
 
@@ -265,11 +271,13 @@ impl ProjectionUnit {
             bindings: vec![],
             pins: BTreeSet::new(),
             reader_rows_materialized: 0,
+            message_updates: 0,
             reduction_changes: ReductionChanges::default(),
             reduction_work: ReductionWork::default(),
             membership_work: MembershipWork::default(),
             reader_append_work: sylph_trace::reading::AppendWork::default(),
             append: None,
+            message_update: None,
             append_eligible: true,
         }
     }
@@ -513,6 +521,7 @@ impl ProjectionWorker {
                     .await?;
                 // Oversized candidates still spent this work before batch splitting.
                 progress.reader_rows_materialized += prepared.reader_rows_materialized;
+                progress.message_updates += prepared.message_updates;
                 progress.reduction.accumulate(&prepared.reduction_work);
                 progress.membership.accumulate(&prepared.membership_work);
                 progress
@@ -800,8 +809,7 @@ impl ProjectionWorker {
         if unit.next.reducer.len() > self.limits.max_reducer_claims {
             return Err(WorkerError::Limit("retained reducer claims"));
         }
-        self.materialize(generation, state, &mut unit)
-            .await?;
+        self.materialize(generation, state, &mut unit).await?;
         if serde_json::to_vec(&unit.batch.mapper_states)?.len() > self.limits.max_state_bytes {
             return Err(WorkerError::Limit("mapper checkpoint bytes"));
         }
@@ -811,29 +819,57 @@ impl ProjectionWorker {
     async fn reduce_unit(&self, unit: &mut ProjectionUnit) -> Result<()> {
         let resolved = self.reduce(&mut unit.next.reducer).await?;
         let claims = unit.next.reducer.claim_snapshot();
-        let advanced = unit.next.archive_semantic.as_ref()
+        let advanced = unit
+            .next
+            .archive_semantic
+            .as_ref()
             .zip(resolved.append.as_ref())
             .filter(|(_, proof)| proof.matches(&unit.next.reduction, &resolved.reduction))
-            .and_then(|(cache, proof)| cache.advance(
-                proof, &claims, &mut unit.next.semantic_work,
-            ));
+            .and_then(|(cache, proof)| cache.advance(proof, &claims, &mut unit.next.semantic_work))
+            .or_else(|| {
+                unit.next
+                    .archive_semantic
+                    .as_ref()
+                    .zip(resolved.message_update.as_ref())
+                    .filter(|(_, proof)| proof.matches(&unit.next.reduction, &resolved.reduction))
+                    .and_then(|(cache, proof)| {
+                        cache.advance_message(proof, &claims, &mut unit.next.semantic_work)
+                    })
+            });
         // Full reconciliation pays for its mapper view before publication. Leaving
         // this lazy would charge the first ordinary append a hidden archive scan.
         unit.next.archive_semantic = Some(advanced.unwrap_or_else(|| {
             semantic::SemanticCache::rebuild(
-                resolved.reduction.clone(), &claims, &mut unit.next.semantic_work,
+                resolved.reduction.clone(),
+                &claims,
+                &mut unit.next.semantic_work,
             )
         }));
-        if unit.append_eligible {
-            unit.append = match (unit.append.take(), resolved.append) {
-                (Some(previous), Some(next)) => previous.compose(next),
-                (None, Some(next)) if next.matches(&unit.next.reduction, &resolved.reduction) => {
-                    Some(next)
+        if unit.append_eligible && !Arc::ptr_eq(&unit.next.reduction, &resolved.reduction) {
+            let (append, message_update) = match (
+                unit.append.take(),
+                unit.message_update.take(),
+                resolved.append,
+                resolved.message_update,
+            ) {
+                (Some(previous), None, Some(next), None) => (previous.compose(next), None),
+                (None, Some(previous), None, Some(next)) => (None, previous.compose(next)),
+                (None, None, Some(next), None)
+                    if next.matches(&unit.next.reduction, &resolved.reduction) =>
+                {
+                    (Some(next), None)
                 }
-                _ => None,
+                (None, None, None, Some(next))
+                    if next.matches(&unit.next.reduction, &resolved.reduction) =>
+                {
+                    (None, Some(next))
+                }
+                _ => (None, None),
             };
+            unit.append = append;
+            unit.message_update = message_update;
             // A later tail cannot erase an earlier unproved change in this unit.
-            unit.append_eligible = unit.append.is_some();
+            unit.append_eligible = unit.append.is_some() || unit.message_update.is_some();
         }
         unit.next.reduction = resolved.reduction;
         unit.reduction_changes.compose(resolved.changes);
@@ -1590,12 +1626,19 @@ impl ProjectionWorker {
             });
         }
         let previous_count = batch.memberships.len();
-        if let Some(proof) = unit
+        let tails = unit
             .append
             .as_ref()
             .filter(|proof| proof.matches(old, new))
-        {
-            for (agent, tail) in proof.agents() {
+            .map(IndependentAppend::agents)
+            .or_else(|| {
+                unit.message_update
+                    .as_ref()
+                    .filter(|proof| proof.matches(old, new))
+                    .map(MessageUpdate::agents)
+            });
+        if let Some(tails) = tails {
+            for (agent, tail) in tails {
                 for (offset, entry) in tail.added_entries().iter().enumerate() {
                     unit.membership_work.entries_examined += 1;
                     let ordinal = tail
@@ -1613,8 +1656,17 @@ impl ProjectionWorker {
         // These are the only declaration families consumed by memberships().
         // Epoch, payload and lifecycle-only changes leave every collection intact.
         } else if !changes.histories.is_empty()
-            || changes.objects.changed.keys().chain(changes.objects.removed.keys())
-                .any(|reference| matches!(reference, AnyObjectRef::Activation(_) | AnyObjectRef::Operation(_)))
+            || changes
+                .objects
+                .changed
+                .keys()
+                .chain(changes.objects.removed.keys())
+                .any(|reference| {
+                    matches!(
+                        reference,
+                        AnyObjectRef::Activation(_) | AnyObjectRef::Operation(_)
+                    )
+                })
         {
             unit.membership_work.full_reconciliations += 1;
             let old_members = memberships(old, &mut unit.membership_work)?;
@@ -1701,7 +1753,9 @@ fn archive_context(state: &mut WorkerState) -> ArchiveContext {
             &state.reducer.claim_snapshot(),
             &mut state.semantic_work,
         );
-        let semantic = cache.get(&state.reduction).expect("rebuilt cache binds this reduction");
+        let semantic = cache
+            .get(&state.reduction)
+            .expect("rebuilt cache binds this reduction");
         state.archive_semantic = Some(cache);
         semantic
     };
@@ -1742,7 +1796,9 @@ fn index_history_record(
 }
 
 fn save_source_state(unit: &mut ProjectionUnit, key: &str, state: &MapperState) -> Result<()> {
-    unit.next.source_states.insert(key.into(), Arc::new(state.clone()));
+    unit.next
+        .source_states
+        .insert(key.into(), Arc::new(state.clone()));
     unit.batch
         .mapper_states
         .insert(format!("source:{key}"), serde_json::to_value(state)?);

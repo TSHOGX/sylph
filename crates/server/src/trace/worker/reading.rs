@@ -300,66 +300,118 @@ impl ProjectionWorker {
                 unit.next.reading = Some(Arc::new(next));
                 return Ok(());
             }
+            let updated = before
+                .append_index
+                .as_ref()
+                .zip(unit.message_update.as_ref())
+                .filter(|(_, proof)| proof.matches(old, &unit.next.reduction))
+                .and_then(|(index, proof)| {
+                    sylph_trace::reading::project_message_update(
+                        index,
+                        proof,
+                        &committed.previews,
+                        &unit.next.previews,
+                        32,
+                        generation.limits().max_candidates,
+                        &mut unit.reader_append_work,
+                    )
+                });
+            if let Some(updated) = updated {
+                let previous = rows(&updated.before, &committed.object_epochs)?;
+                let mut replacements = rows(&updated.after, &unit.next.object_epochs)?;
+                unit.reader_rows_materialized += previous.len() + replacements.len();
+                let history_scopes: BTreeSet<_> = updated
+                    .before
+                    .windows
+                    .keys()
+                    .map(|scope| read_scope(&scope.agent, scope.selection.as_ref(), "history"))
+                    .collect();
+                // A partial projection keeps its message anchor, while its local
+                // window ordinal is unrelated to the committed full-window position.
+                let mut matched = true;
+                for (key, row) in &previous {
+                    matched &= before.rows.get(key).is_some_and(|stored| {
+                        stored.body == row.body
+                            && stored.anchor == row.anchor
+                            && stored.scope_epoch == row.scope_epoch
+                            && stored.required_environments == row.required_environments
+                            && stored.target_epochs == row.target_epochs
+                            && (history_scopes.contains(&row.scope)
+                                || stored.order_key == row.order_key)
+                    });
+                }
+                for (key, row) in &mut replacements {
+                    if history_scopes.contains(&row.scope) {
+                        if let Some(stored) = before.rows.get(key) {
+                            row.order_key = stored.order_key.clone();
+                        } else {
+                            matched = false;
+                        }
+                    }
+                }
+                let old_anchors = anchors(&updated.before)?;
+                let new_anchors = anchors(&updated.after)?;
+                matched &= old_anchors
+                    .keys()
+                    .all(|key| before.anchors.contains_key(key));
+                if matched {
+                    prepare_composed(&before, &updated.after, unit)?;
+                    let mut next = before.as_ref().clone();
+                    next.append_index = Some(updated.index);
+                    for (key, row) in &previous {
+                        if !replacements.contains_key(key) {
+                            next.rows.remove(key);
+                            unit.batch.read_rows.push(ReadRowChange {
+                                body: None,
+                                ..row.clone()
+                            });
+                        }
+                    }
+                    for (key, row) in replacements {
+                        if next.rows.get(&key).is_none_or(|stored| {
+                            stored.body != row.body
+                                || stored.order_key != row.order_key
+                                || stored.anchor != row.anchor
+                                || stored.scope_epoch != row.scope_epoch
+                                || stored.required_environments != row.required_environments
+                                || stored.target_epochs != row.target_epochs
+                        }) {
+                            unit.batch.read_rows.push(row.clone());
+                            next.rows.insert(key, Arc::new(row));
+                        }
+                    }
+                    for (key, anchor) in old_anchors {
+                        if !new_anchors.contains_key(&key) {
+                            next.anchors.remove(&key);
+                            unit.batch.payload_anchors.push(PayloadAnchorChange {
+                                anchor,
+                                present: false,
+                            });
+                        }
+                    }
+                    for (key, anchor) in new_anchors {
+                        if !next.anchors.contains_key(&key) {
+                            unit.batch.payload_anchors.push(PayloadAnchorChange {
+                                anchor: anchor.clone(),
+                                present: true,
+                            });
+                            next.anchors.insert(key, anchor);
+                        }
+                    }
+                    // These entries suppress redundant derivation staging only.
+                    // Removing a cached composition never releases retained evidence.
+                    for reference in updated.before.composed_payloads.keys() {
+                        next.composed.remove(reference);
+                    }
+                    next.composed.extend(updated.after.composed_payloads);
+                    unit.message_updates += 1;
+                    unit.next.reading = Some(Arc::new(next));
+                    return Ok(());
+                }
+            }
         }
         let after = sylph_trace::reading::project(&unit.next.reduction, &unit.next.previews, 32);
-        for (reference, composed) in &after.composed_payloads {
-            if before
-                .composed
-                .get(reference)
-                .is_some_and(|previous| previous.revisions == composed.revisions)
-            {
-                continue;
-            }
-            let epochs: BTreeSet<_> = composed
-                .revisions
-                .iter()
-                .map(|revision| {
-                    unit.next
-                        .object_epochs
-                        .get(&AnyObjectRef::MessageRevision(revision.clone()))
-                        .cloned()
-                        .ok_or_else(|| {
-                            WorkerError::Task("composed content lacks its revision epoch".into())
-                        })
-                })
-                .collect::<Result<_>>()?;
-            let claims: BTreeSet<_> = composed
-                .revisions
-                .iter()
-                .filter_map(|revision| {
-                    unit.next
-                        .reduction
-                        .object(&AnyObjectRef::MessageRevision(revision.clone()))
-                })
-                .filter_map(|object| match &object.declaration {
-                    sylph_trace::reducer::Resolved::Known { claims, .. } => Some(claims),
-                    _ => None,
-                })
-                .flatten()
-                .cloned()
-                .collect();
-            let evidence = unit
-                .next
-                .reducer
-                .claims()
-                .filter(|claim| claims.contains(&claim.claim_ref))
-                .flat_map(|claim| claim.evidence.iter().cloned())
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect();
-            unit.batch.payload_derivations.push(PayloadDerivation {
-                payload: reference.clone(),
-                evidence,
-                selector: serde_json::to_string(&composed.revisions)?,
-                rule: "trace/append-chain".into(),
-                media_type: composed.manifest.media_type.clone(),
-                encoding: composed.manifest.encoding,
-            });
-            for epoch in epochs {
-                unit.composed_payloads
-                    .push((epoch, reference.clone(), composed.manifest.clone()));
-            }
-        }
+        prepare_composed(&before, &after, unit)?;
         let after = MaterializedReading::from_projection(
             &after,
             &unit.next.object_epochs,
@@ -406,6 +458,71 @@ impl ProjectionWorker {
         unit.next.reading = Some(Arc::new(after));
         Ok(())
     }
+}
+
+fn prepare_composed(
+    before: &MaterializedReading,
+    after: &ReadingProjection,
+    unit: &mut ProjectionUnit,
+) -> Result<()> {
+    let retained = unit.next.reducer.claim_snapshot();
+    for (reference, composed) in &after.composed_payloads {
+        if before
+            .composed
+            .get(reference)
+            .is_some_and(|previous| previous.revisions == composed.revisions)
+        {
+            continue;
+        }
+        let epochs: BTreeSet<_> = composed
+            .revisions
+            .iter()
+            .map(|revision| {
+                unit.next
+                    .object_epochs
+                    .get(&AnyObjectRef::MessageRevision(revision.clone()))
+                    .cloned()
+                    .ok_or_else(|| {
+                        WorkerError::Task("composed content lacks its revision epoch".into())
+                    })
+            })
+            .collect::<Result<_>>()?;
+        let claims: BTreeSet<_> = composed
+            .revisions
+            .iter()
+            .filter_map(|revision| {
+                unit.next
+                    .reduction
+                    .object(&AnyObjectRef::MessageRevision(revision.clone()))
+            })
+            .filter_map(|object| match &object.declaration {
+                sylph_trace::reducer::Resolved::Known { claims, .. } => Some(claims),
+                _ => None,
+            })
+            .flatten()
+            .cloned()
+            .collect();
+        let evidence = claims
+            .iter()
+            .filter_map(|reference| retained.get(reference))
+            .flat_map(|claim| claim.evidence.iter().cloned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        unit.batch.payload_derivations.push(PayloadDerivation {
+            payload: reference.clone(),
+            evidence,
+            selector: serde_json::to_string(&composed.revisions)?,
+            rule: "trace/append-chain".into(),
+            media_type: composed.manifest.media_type.clone(),
+            encoding: composed.manifest.encoding,
+        });
+        for epoch in epochs {
+            unit.composed_payloads
+                .push((epoch, reference.clone(), composed.manifest.clone()));
+        }
+    }
+    Ok(())
 }
 
 fn rows(

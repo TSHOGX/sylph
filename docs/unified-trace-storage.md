@@ -405,6 +405,16 @@ cannot borrow the proof, even when its values compare equal. Full reconciliation
 tail proof. Reader-only boundary dependencies remain indexed and separately bounded;
 payload availability and source/target epochs are still independent invalidations.
 
+An update to an existing message may resolve that message's retained declaration and
+revision claims locally while appending fresh history entries. Its opaque proof names the
+exact reductions and affected message; prior references to newly declared identities,
+corrections, equivalences, selections and non-tail topology still require reconciliation.
+The reader retains the first rendering location, its observed bindings and order position.
+It replaces the affected row, parts and payload anchors together, preserving old snapshots.
+Work may grow with the affected message's revision/part chain, never unrelated history.
+Flat payload manifests still require work proportional to their chunk count; delta-only
+total work is not claimed for arbitrarily long streaming bodies.
+
 Reader invalidation consumes typed changes in every resolved semantic family, including
 old and new endpoints and removed values. Object declarations alone cannot invalidate
 execution, delivery bindings, content observations, selected membership, equivalence or

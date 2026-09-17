@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use sylph_protocol::trace::*;
 use sylph_trace::{
     mapping::{ArchiveHistoryContent, ArchiveSemantic},
-    reducer::{IndependentAppend, Reduction, Resolved, ResolvedObject},
+    reducer::{IndependentAppend, MessageUpdate, Reduction, Resolved, ResolvedObject},
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -17,6 +17,7 @@ pub struct SemanticWork {
     pub aliases_examined: usize,
     pub full_rebuilds: usize,
     pub append_updates: usize,
+    pub message_updates: usize,
 }
 
 impl SemanticWork {
@@ -27,6 +28,7 @@ impl SemanticWork {
         self.aliases_examined += other.aliases_examined;
         self.full_rebuilds += other.full_rebuilds;
         self.append_updates += other.append_updates;
+        self.message_updates += other.message_updates;
     }
 }
 
@@ -37,6 +39,40 @@ pub(super) struct SemanticCache {
 }
 
 impl SemanticCache {
+    pub(super) fn advance_message(
+        &self,
+        proof: &MessageUpdate,
+        claims: &imbl::OrdMap<ClaimRef, Claim>,
+        work: &mut SemanticWork,
+    ) -> Option<Self> {
+        if !proof.matches(&self.reduction, proof.after()) {
+            return None;
+        }
+        let mut semantic = self.semantic.as_ref().clone();
+        for reference in proof.updated_objects() {
+            work.objects_examined += 1;
+            include_object(
+                &mut semantic,
+                proof.after().objects.get(reference)?,
+                claims,
+                work,
+            );
+        }
+        for tail in proof.agents().values() {
+            for entry in tail.added_entries() {
+                semantic.history_contents.insert(
+                    entry.clone(),
+                    content_proofs(proof.after().history_contents.get(entry)?, claims, work),
+                );
+            }
+        }
+        work.message_updates += 1;
+        Some(Self {
+            reduction: proof.after().clone(),
+            semantic: Arc::new(semantic),
+        })
+    }
+
     pub(super) fn get(&self, reduction: &Arc<Reduction>) -> Option<Arc<ArchiveSemantic>> {
         Arc::ptr_eq(&self.reduction, reduction).then(|| self.semantic.clone())
     }

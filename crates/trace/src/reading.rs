@@ -10,9 +10,11 @@ use std::sync::Arc;
 use sylph_protocol::trace::*;
 mod append;
 mod content;
+mod message_update;
 mod window;
 pub use append::{project_independent_append, AppendIndex, AppendProjection, AppendWork};
 pub use content::{compose_revisions, composition_payloads, ComposedPayload, ComposedRevisions};
+pub use message_update::{project_message_update, MessageProjection};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PayloadPreview {

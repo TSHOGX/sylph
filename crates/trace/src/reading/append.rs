@@ -2,7 +2,7 @@
 use super::*;
 use crate::reducer::{HistoryView, IndependentAppend};
 
-mod index;
+pub(super) mod index;
 use index::GuardBudget;
 pub use index::{AppendIndex, AppendWork};
 
@@ -130,6 +130,17 @@ pub fn project_independent_append(
         }
     }
     let mut next_index = index.clone();
+    for (agent, append) in proof.agents() {
+        for (offset, entry) in append.added_entries().iter().enumerate() {
+            next_index.add_history_entry(
+                after,
+                agent,
+                append.previous_archive_len().checked_add(offset)?,
+                entry,
+                work,
+            )?;
+        }
+    }
     for relation in proof.predecessor_relations() {
         next_index.add_relation(relation, work)?;
     }
