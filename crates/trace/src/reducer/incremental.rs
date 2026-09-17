@@ -1,6 +1,9 @@
-//! Incremental resolution over a proved independent native-history tail.
+//! Incremental resolution over proved history tails and message-local revisions.
 use super::*;
 use std::sync::Arc;
+
+mod message_update;
+pub use message_update::MessageUpdate;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReductionWork {
@@ -27,6 +30,7 @@ pub struct Resolution {
     pub changes: ReductionChanges,
     pub work: ReductionWork,
     pub append: Option<IndependentAppend>,
+    pub message_update: Option<MessageUpdate>,
 }
 
 /// Reducer-issued evidence that only fresh independent history tails changed.
@@ -157,6 +161,8 @@ struct DependencyIndex {
     selection_agents: imbl::OrdSet<AgentRef>,
     ordered_agents: imbl::OrdSet<AgentRef>,
     selection_sources: imbl::OrdSet<(SourceRef, u64)>,
+    message_claims: imbl::OrdMap<MessageRef, imbl::OrdSet<ClaimRef>>,
+    message_claim_count: usize,
 }
 
 impl DependencyIndex {
@@ -167,6 +173,27 @@ impl DependencyIndex {
         work: &mut ReductionWork,
     ) -> bool {
         for claim in claims {
+            let message = match &claim.fact {
+                Fact::Declare {
+                    object: TraceObject::Message(message),
+                } => Some(&message.message_ref),
+                Fact::Declare {
+                    object: TraceObject::MessageRevision(revision),
+                } => Some(&revision.message),
+                _ => None,
+            };
+            if let Some(message) = message {
+                if self
+                    .message_claims
+                    .entry(message.clone())
+                    .or_default()
+                    .insert(claim.claim_ref.clone())
+                    .is_none()
+                {
+                    self.message_claim_count += 1;
+                    work.dependency_references_indexed += 1;
+                }
+            }
             let objects = dependencies::references(&claim.fact);
             let mut referenced_claims = dependencies::claim_references(&claim.fact);
             referenced_claims.extend(claim.supersedes.iter().cloned());
@@ -204,7 +231,8 @@ impl DependencyIndex {
                 .saturating_add(self.claims.len())
                 .saturating_add(self.selection_agents.len())
                 .saturating_add(self.selection_sources.len())
-                .saturating_add(self.ordered_agents.len());
+                .saturating_add(self.ordered_agents.len())
+                .saturating_add(self.message_claim_count);
             if size > limit {
                 return false;
             }
@@ -222,6 +250,7 @@ impl Reducer {
             if let Some(reduction) = previous {
                 return Resolution {
                     append: Some(IndependentAppend::unchanged(reduction.clone())),
+                    message_update: None,
                     reduction,
                     changes: ReductionChanges::default(),
                     work: ReductionWork {
@@ -243,39 +272,69 @@ impl Reducer {
             .zip(self.incremental.index.as_ref())
             .filter(|_| self.incremental.index_limit == max_dependencies)
             .and_then(|(before, index)| resolve_tail(before, index, &pending));
-        let (reduction, changes, append) = if let Some((reduction, changes, witness)) = incremental
-        {
-            work.claims_resolved = pending.len();
-            work.history_entries_updated = witness
-                .agents
-                .values()
-                .map(|agent| agent.added_entries.len())
-                .sum();
-            let reduction = Arc::new(reduction);
-            let append = IndependentAppend {
-                before: previous
-                    .as_ref()
-                    .expect("tail resolution has an initialized predecessor")
-                    .clone(),
-                after: reduction.clone(),
-                witness,
-            };
-            (reduction, changes, Some(append))
+        let message_incremental = if incremental.is_none() {
+            previous
+                .as_deref()
+                .zip(self.incremental.index.as_ref())
+                .filter(|_| self.incremental.index_limit == max_dependencies)
+                .and_then(|(before, index)| {
+                    message_update::resolve_message_update(before, index, &pending, &self.claims)
+                })
         } else {
-            let reduction = Arc::new(self.resolve());
-            work.claims_resolved = self.claims.len();
-            work.full_resolutions = 1;
-            work.history_entries_updated = reduction
-                .histories
-                .values()
-                .map(|history| history.archive_order.len())
-                .sum();
-            let changes = ReductionChanges::between(
-                previous.as_deref().unwrap_or(&Reduction::default()),
-                &reduction,
-            );
-            (reduction, changes, None)
+            None
         };
+        let (reduction, changes, append, message_update) =
+            if let Some((reduction, changes, witness)) = incremental {
+                work.claims_resolved = pending.len();
+                work.history_entries_updated = witness
+                    .agents
+                    .values()
+                    .map(|agent| agent.added_entries.len())
+                    .sum();
+                let reduction = Arc::new(reduction);
+                let append = IndependentAppend {
+                    before: previous
+                        .as_ref()
+                        .expect("tail resolution has an initialized predecessor")
+                        .clone(),
+                    after: reduction.clone(),
+                    witness,
+                };
+                (reduction, changes, Some(append), None)
+            } else if let Some((reduction, changes, witness, resolved_claims)) = message_incremental
+            {
+                work.claims_resolved = resolved_claims;
+                work.history_entries_updated = witness
+                    .tail
+                    .agents
+                    .values()
+                    .map(|agent| agent.added_entries.len())
+                    .sum();
+                let reduction = Arc::new(reduction);
+                let message_update = MessageUpdate::new(
+                    previous
+                        .as_ref()
+                        .expect("message update has predecessor")
+                        .clone(),
+                    reduction.clone(),
+                    witness,
+                );
+                (reduction, changes, None, Some(message_update))
+            } else {
+                let reduction = Arc::new(self.resolve());
+                work.claims_resolved = self.claims.len();
+                work.full_resolutions = 1;
+                work.history_entries_updated = reduction
+                    .histories
+                    .values()
+                    .map(|history| history.archive_order.len())
+                    .sum();
+                let changes = ReductionChanges::between(
+                    previous.as_deref().unwrap_or(&Reduction::default()),
+                    &reduction,
+                );
+                (reduction, changes, None, None)
+            };
         if previous.is_none() || self.incremental.index_limit != max_dependencies {
             let mut index = DependencyIndex::default();
             self.incremental.index = index
@@ -295,6 +354,7 @@ impl Reducer {
             changes,
             work,
             append,
+            message_update,
         }
     }
 }
@@ -457,6 +517,15 @@ fn resolve_tail(
     if observed_entries.len() != entries.len() {
         return None;
     }
+    install_tail(before, local, &entries, declared)
+}
+
+fn install_tail(
+    before: &Reduction,
+    local: Reduction,
+    entries: &BTreeMap<EntryRef, HistoryEntry>,
+    declared: BTreeSet<AnyObjectRef>,
+) -> Option<(Reduction, ReductionChanges, AppendWitness)> {
     let mut by_agent = BTreeMap::<AgentRef, BTreeMap<EntryRef, EntryRef>>::new();
     for entry in entries.values() {
         let parent = entry.predecessor.as_ref()?;
@@ -518,6 +587,9 @@ fn resolve_tail(
         );
     }
     for (reference, object) in &local.objects {
+        if before.objects.get(reference) == Some(object) {
+            continue;
+        }
         result.objects.insert(reference.clone(), object.clone());
         result
             .representatives
@@ -525,24 +597,30 @@ fn resolve_tail(
         changes.objects.changed.insert(
             reference.clone(),
             ChangedValue {
-                before: None,
+                before: before.objects.get(reference).cloned(),
                 after: object.clone(),
             },
         );
-        changes.representatives.changed.insert(
-            reference.clone(),
-            ChangedValue {
-                before: None,
-                after: reference.clone(),
-            },
-        );
+        if !before.representatives.contains_key(reference) {
+            changes.representatives.changed.insert(
+                reference.clone(),
+                ChangedValue {
+                    before: None,
+                    after: reference.clone(),
+                },
+            );
+        }
     }
     for (message, history) in local.messages {
+        let previous = before.messages.get(&message);
+        if previous == Some(&history) {
+            continue;
+        }
         result.messages.insert(message.clone(), history.clone());
         changes.messages.changed.insert(
             message,
             ChangedValue {
-                before: None,
+                before: previous.cloned(),
                 after: history,
             },
         );

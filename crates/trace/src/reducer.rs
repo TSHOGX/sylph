@@ -123,8 +123,8 @@ pub struct HistoryView {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MessageHistory {
-    // Independent tail updates add fresh singleton messages. Growing revisions
-    // within an existing message still needs its own incremental storage boundary.
+    // Message-local updates may revisit this revision chain; unrelated histories
+    // remain structurally shared through the outer reduction maps.
     pub revisions: Vec<MessageRevisionRef>,
     pub selected: Resolved<MessageRevisionRef>,
     pub sealed: bool,
@@ -1209,7 +1209,9 @@ mod history;
 use history::resolve_histories;
 
 mod incremental;
-pub use incremental::{IndependentAppend, IndependentAppendAgent, ReductionWork, Resolution};
+pub use incremental::{
+    IndependentAppend, IndependentAppendAgent, MessageUpdate, ReductionWork, Resolution,
+};
 mod dependencies;
 
 mod changes;
