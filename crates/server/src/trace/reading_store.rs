@@ -52,6 +52,17 @@ pub struct ReadRowsPage {
     pub has_after: bool,
     pub work_exhausted: bool,
     pub total: Option<u64>,
+    /// SQLite VM steps this page's own scans spent, summed over every reader
+    /// connection it acquired — the anchor/candidate/body reads and, for an
+    /// unfiltered page, the separate `read_counts` lookup. A page read is not one
+    /// connection, and the progress handler is removed on release, so each
+    /// acquisition contributes before it drops.
+    ///
+    /// This measures the store's scan, *not* the cost of serving the page: the
+    /// `authorize` callback runs a caller's own queries per candidate, which
+    /// belong to that caller's accounting. `work_exhausted` reports the same
+    /// budget from the candidate side and is not recomputed from this value.
+    pub vm_steps: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -323,10 +334,13 @@ impl GenerationStore {
             )
             .await?;
         if filter.is_empty() {
-            let (mut conn, _) = self.read_connection(snapshot).await?;
+            let (mut conn, steps) = self.read_connection(snapshot).await?;
             let count: Option<i64> = sqlx::query_scalar("SELECT count FROM read_counts WHERE scope_key=? AND valid_from<=? ORDER BY valid_from DESC LIMIT 1")
                 .bind(scope).bind(snapshot.view_revision as i64).fetch_optional(&mut *conn).await.map_err(super::generation::map_query_error)?;
             page.total = Some(count.unwrap_or(0) as u64);
+            // This lookup is a second connection with its own counter, so the
+            // page's scan cost accumulates rather than being replaced.
+            page.vm_steps += steps.load(std::sync::atomic::Ordering::Relaxed);
         }
         Ok(page)
     }
@@ -385,7 +399,7 @@ impl GenerationStore {
                 Ok(cursor)
             })
             .transpose()?;
-        let (mut conn, _) = self.read_connection(snapshot).await?;
+        let (mut conn, steps) = self.read_connection(snapshot).await?;
         let anchor = if let Some(around) = around {
             sqlx::query(READ_ANCHOR_SQL)
                 .bind(scope)
@@ -552,6 +566,8 @@ impl GenerationStore {
             has_after: if backward { has_opposite } else { more },
             work_exhausted: budget,
             total,
+            // Read before `conn` drops: release removes the progress handler.
+            vm_steps: steps.load(std::sync::atomic::Ordering::Relaxed),
         })
     }
 

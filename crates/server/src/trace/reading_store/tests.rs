@@ -826,3 +826,175 @@ async fn exact_visible_counts_require_every_target_grant_and_follow_snapshot_ver
         .await;
     assert!(matches!(previous, Err(GenerationError::InvalidCursor)));
 }
+
+#[tokio::test]
+async fn a_page_reports_the_scan_of_every_connection_it_acquired() {
+    let (_dir, store) = store().await;
+    store
+        .apply(
+            1,
+            &store.checkpoint().await.unwrap().snapshot,
+            &ProjectionBatch {
+                through_cut: 1,
+                read_rows: (1..=6)
+                    .map(|index| row(&format!("row-{index}"), index, "measured"))
+                    .collect(),
+                ..ProjectionBatch::default()
+            },
+        )
+        .await
+        .unwrap();
+    let snapshot = store.checkpoint().await.unwrap().snapshot;
+    // The candidate scan alone. This page acquires exactly one reader connection.
+    let scan_only = store
+        .read_authorized_page(
+            &snapshot,
+            "history",
+            ReadWindow {
+                before: None,
+                after: None,
+                around: None,
+                limit: 2,
+                latest: false,
+            },
+            &ReadFilter::default(),
+            |_| async { Ok(true) },
+        )
+        .await
+        .unwrap();
+    assert!(
+        scan_only.vm_steps > 0,
+        "a page that read rows cannot report zero scan work"
+    );
+    // An unfiltered page additionally proves its whole-scope count on a second
+    // connection with its own counter, so the reported cost must include it.
+    let with_count = store
+        .read_page(&snapshot, "history", None, None, None, 2, false)
+        .await
+        .unwrap();
+    assert_eq!(with_count.rows.len(), scan_only.rows.len());
+    assert_eq!(with_count.total, Some(6));
+    assert!(
+        with_count.vm_steps > scan_only.vm_steps,
+        "the count lookup's connection is unaccounted: {} vs {}",
+        with_count.vm_steps,
+        scan_only.vm_steps
+    );
+}
+
+/// S1.4 workload bound for the primary reading workflow.
+///
+/// `docs/unified-trace-conformance.md` § Performance fixtures requires that at a
+/// fixed visible page size, tenfold history growth and tenfold superseded-version
+/// density must not cause an unbounded foreground scan, and that a budget-exhausted
+/// scan is never a complete empty result. The query-page path has its own bound in
+/// `crate::trace::generation`; this pins the reader rows the frontend actually pages
+/// through, which is a separate scan over a separate table.
+///
+/// Superseded versions of hot objects are the dimension that decides the design
+/// here: they occupy candidate budget while contributing no visible row, so the
+/// accepted answer is a resumable continuation rather than a wider scan.
+#[tokio::test]
+async fn reader_pages_stay_bounded_as_history_and_superseded_density_grow_tenfold() {
+    let mut measurements = Vec::new();
+    for history in [100usize, 1000] {
+        for versions in [1u64, 10] {
+            let (_dir, store) = store().await;
+            let mut snapshot = store.checkpoint().await.unwrap().snapshot;
+            for version in 0..versions {
+                snapshot = store
+                    .apply(
+                        1,
+                        &snapshot,
+                        &ProjectionBatch {
+                            through_cut: version + 1,
+                            read_rows: (1..=history)
+                                .map(|index| {
+                                    row(
+                                        &format!("row-{index:06}"),
+                                        index as u64,
+                                        &format!("revision {version}"),
+                                    )
+                                })
+                                .collect(),
+                            ..ProjectionBatch::default()
+                        },
+                    )
+                    .await
+                    .unwrap()
+                    .snapshot;
+            }
+            // Walk continuations until the visible page fills, so a budget-exhausted
+            // scan is measured as resumable progress instead of an empty answer.
+            let mut cursor: Option<String> = None;
+            let mut pages = 0usize;
+            let mut worst_page_steps = 0u64;
+            let mut total_steps = 0u64;
+            let mut rows = Vec::new();
+            while rows.len() < 4 {
+                let page = store
+                    .read_page(&snapshot, "history", None, cursor.as_deref(), None, 4, false)
+                    .await
+                    .unwrap();
+                pages += 1;
+                worst_page_steps = worst_page_steps.max(page.vm_steps);
+                total_steps += page.vm_steps;
+                assert_eq!(page.total, Some(history as u64));
+                if page.rows.is_empty() {
+                    assert!(
+                        page.work_exhausted,
+                        "an empty page that did not exhaust its budget is a complete empty result"
+                    );
+                }
+                assert!(
+                    page.has_after && page.after.is_some(),
+                    "an unfinished walk must offer a resumable continuation"
+                );
+                assert!(pages <= 64, "continuations must make progress, not loop");
+                cursor = page.after;
+                rows.extend(page.rows);
+            }
+            let addresses: Vec<_> = rows.iter().take(4).map(|row| row.address.clone()).collect();
+            assert_eq!(
+                addresses,
+                (1..=4)
+                    .map(|index| format!("row-{index:06}"))
+                    .collect::<Vec<_>>(),
+                "continuations must deliver the visible prefix in order"
+            );
+            let bytes: usize = rows
+                .iter()
+                .take(4)
+                .map(|row| serde_json::to_vec(&row.body).unwrap().len())
+                .sum();
+            measurements.push((history, versions, pages, worst_page_steps, total_steps, bytes));
+        }
+    }
+    for (history, versions, pages, worst, total, bytes) in &measurements {
+        eprintln!(
+            "reader_page_workload history={history} superseded_versions={versions} pages_to_fill={pages} worst_page_vm_steps={worst} total_vm_steps={total} first_page_bytes={bytes}"
+        );
+    }
+    for versions in [1u64, 10] {
+        let small = measurements
+            .iter()
+            .find(|entry| entry.0 == 100 && entry.1 == versions)
+            .unwrap();
+        let large = measurements
+            .iter()
+            .find(|entry| entry.0 == 1000 && entry.1 == versions)
+            .unwrap();
+        assert!(
+            large.3 <= small.3 + 128,
+            "tenfold history growth widened one foreground reader page: {small:?} to {large:?}"
+        );
+        assert_eq!(
+            large.2, small.2,
+            "tenfold history growth changed how many continuations a page costs: {small:?} to {large:?}"
+        );
+        assert_eq!(
+            large.5, small.5,
+            "a fixed page size must return the same body bytes at either history length"
+        );
+    }
+}
