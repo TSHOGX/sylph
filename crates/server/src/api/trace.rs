@@ -424,18 +424,40 @@ async fn search_inner(
     let mut hits = Vec::new();
     for hit in result.hits {
         observe(&state, &subject.0, &hit.agent).await?;
-        let proof = state
-            .trace
-            .catalogue()
-            .scope_proof(&hit.ingestion_epoch)
-            .await
-            .map_err(internal)?;
-        state
-            .trace
-            .catalogue()
-            .bind_lease_scope(&subject.0, &lease.token, &proof, now)
-            .await
-            .map_err(internal)?;
+        // Search metadata can contain a snippet before the containing header is
+        // hydrated. Check every retained provenance dependency at this boundary;
+        // a primary epoch alone cannot authorize a merged declaration or payload.
+        for epoch in std::iter::once(&hit.ingestion_epoch)
+            .chain(&hit.dependency_epochs)
+            .collect::<std::collections::BTreeSet<_>>()
+        {
+            let proof = state
+                .trace
+                .catalogue()
+                .scope_proof(epoch)
+                .await
+                .map_err(internal)?;
+            if !state
+                .store
+                .has_capability(&subject.0, proof.scope.environment().as_str(), "observe")
+                .await
+                .map_err(internal)?
+                || !state
+                    .trace
+                    .catalogue()
+                    .scope_is_readable(&proof)
+                    .await
+                    .map_err(internal)?
+            {
+                return Err(storage(GenerationError::NotFound));
+            }
+            state
+                .trace
+                .catalogue()
+                .bind_lease_scope(&subject.0, &lease.token, &proof, now)
+                .await
+                .map_err(internal)?;
+        }
         let row = generation
             .read_row(
                 &lease.snapshot,
