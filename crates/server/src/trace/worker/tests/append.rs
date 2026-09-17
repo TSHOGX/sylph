@@ -25,7 +25,7 @@ async fn append_message(
 
 async fn warm_append_after(
     records: usize,
-) -> (usize, MembershipWork, sylph_trace::reading::AppendWork) {
+) -> (usize, MembershipWork, sylph_trace::reading::AppendWork, SemanticWork) {
     let fixture = Fixture::new().await;
     let header = CODEX_NATIVE
         .split_inclusive(|byte| *byte == b'\n')
@@ -86,6 +86,11 @@ async fn warm_append_after(
     assert!(!appended.reader_append.index_unavailable);
     assert!(!appended.reader_append.guard_budget_exhausted);
     assert!(appended.reader_append.guard_references_examined <= warm.limits().max_candidates);
+    assert_eq!(appended.semantic.full_rebuilds, 0);
+    assert_eq!(appended.semantic.append_updates, 1);
+    assert_eq!(appended.semantic.objects_examined, 3);
+    assert_eq!(appended.semantic.content_observations_examined, 1);
+    assert_eq!(appended.semantic.aliases_examined, 0);
     let warm_projection = reader_projection(&fixture, &warm).await;
     assert_eq!(
         warm_projection
@@ -133,6 +138,7 @@ async fn warm_append_after(
         appended.reader_rows_materialized,
         appended.membership,
         appended.reader_append,
+        appended.semantic,
     )
 }
 

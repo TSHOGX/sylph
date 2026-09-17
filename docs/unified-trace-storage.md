@@ -351,6 +351,16 @@ generation and local ordinal. Conflicting byte coordinates, vendor ordinals or h
 at one native coordinate fail explicitly while raw captures remain retained. Frozen-history
 resolution derives its completeness and entry-position witnesses from the retained claim
 snapshot when that operation needs them.
+Candidate worker state shares persistent roots for source checkpoints, pending work,
+payload previews, epoch bindings and captured-payload bindings. Large mapper-state and
+preview values are shared independently so changing one tree leaf does not copy neighboring
+bodies or chunk lists. Semantic mapper inputs also share persistent roots. A valid
+independent-tail proof updates only its new declarations, content observations and keyed
+supporting claims; an unsupported transition rebuilds that cache with full reconciliation
+before publication, from the exact reduction. Initial/restored state initializes it once
+before use. Held mapper inputs remain immutable across both successful
+publication and discarded candidates. Work reports full semantic refreshes separately
+from the objects, observations, aliases and supporting claims actually examined.
 
 A stateful source awaiting an external payload retains one blocked head and a replay
 cursor over its admitted tail. Successor envelopes stay in evidence instead of consuming

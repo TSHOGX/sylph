@@ -9,7 +9,7 @@ struct Sample {
     before: Arc<Reduction>,
     resolution: Resolution,
     identity: Resolution,
-    previews: BTreeMap<PayloadRef, PayloadPreview>,
+    previews: PayloadPreviews,
 }
 
 fn sample(old_messages: usize, extra: impl Fn(&Reduction, &[Claim]) -> Vec<Fact>) -> Sample {
@@ -38,7 +38,7 @@ fn sample(old_messages: usize, extra: impl Fn(&Reduction, &[Claim]) -> Vec<Fact>
     let mut reducer = Reducer::default();
     let mut evidence = imbl::OrdSet::new();
     let mut before = None;
-    let mut previews = BTreeMap::new();
+    let mut previews = PayloadPreviews::new();
     let mut offset = 0;
     for (index, raw) in lines.iter().enumerate() {
         let observation_ref = ObservationRef {
@@ -114,7 +114,7 @@ fn sample(old_messages: usize, extra: impl Fn(&Reduction, &[Claim]) -> Vec<Fact>
         for payload in output.payloads {
             previews.insert(
                 payload.reference,
-                PayloadPreview {
+                Arc::new(PayloadPreview {
                     preview: String::from_utf8(payload.bytes.clone()).unwrap(),
                     preview_limit: 2048,
                     total_bytes: Some(payload.bytes.len() as u64),
@@ -124,7 +124,7 @@ fn sample(old_messages: usize, extra: impl Fn(&Reduction, &[Claim]) -> Vec<Fact>
                     }],
                     availability: Some(ReadAvailability::Available),
                     ..Default::default()
-                },
+                }),
             );
         }
         offset += raw.len() as u64;

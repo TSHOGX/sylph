@@ -51,7 +51,7 @@ fn streamed_answer_is_one_reading_unit_and_retains_the_complete_final_body() {
     ];
     let mut state = MapperState::default();
     let mut reducer = Reducer::default();
-    let mut previews = BTreeMap::new();
+    let mut previews = PayloadPreviews::new();
     for (index, frame) in frames.iter().enumerate() {
         let capture = capture(index as u64 + 1);
         let raw = serde_json::to_vec(frame).unwrap();
@@ -72,7 +72,7 @@ fn streamed_answer_is_one_reading_unit_and_retains_the_complete_final_body() {
         for payload in output.payloads {
             previews.insert(
                 payload.reference,
-                PayloadPreview {
+                Arc::new(PayloadPreview {
                     chunks: payload
                         .manifest
                         .as_ref()
@@ -82,7 +82,7 @@ fn streamed_answer_is_one_reading_unit_and_retains_the_complete_final_body() {
                     total_bytes: Some(payload.bytes.len() as u64),
                     availability: Some(ReadAvailability::Available),
                     ..PayloadPreview::default()
-                },
+                }),
             );
         }
     }
@@ -184,7 +184,7 @@ fn duplicate_deliveries_keep_distinct_reading_rows_without_inventing_history_ent
         )
         .unwrap();
     let reduction = reducer.resolve();
-    let projection = project(&reduction, &BTreeMap::new(), 32);
+    let projection = project(&reduction, &PayloadPreviews::new(), 32);
     let window = &projection.windows[&ReadingScope {
         agent: agent(),
         selection: None,
@@ -214,17 +214,14 @@ fn objects_projection(
                 .map(|observation| Fact::HistoryContentObserved { observation }),
         )
         .collect();
-    facts_projection(facts, &BTreeMap::new())
+    facts_projection(facts, &PayloadPreviews::new())
 }
 
 fn reader_claim_ref(index: usize) -> ClaimRef {
     ClaimRef::native(agent(), "reader-test-claim", vec![index.to_string()]).unwrap()
 }
 
-fn facts_projection(
-    facts: Vec<Fact>,
-    payloads: &BTreeMap<PayloadRef, PayloadPreview>,
-) -> ReadingProjection {
+fn facts_projection(facts: Vec<Fact>, payloads: &PayloadPreviews) -> ReadingProjection {
     let claims: Vec<_> = facts
         .into_iter()
         .enumerate()
@@ -514,13 +511,74 @@ fn observed_content_fixture(
     (facts, entry, revisions)
 }
 
-fn text_preview(value: &str) -> PayloadPreview {
-    PayloadPreview {
+fn text_preview(value: &str) -> Arc<PayloadPreview> {
+    Arc::new(PayloadPreview {
         preview: value.into(),
         preview_limit: 2048,
         total_bytes: Some(value.len() as u64),
         availability: Some(ReadAvailability::Available),
         ..PayloadPreview::default()
+    })
+}
+
+#[test]
+fn composing_previews_shares_source_metadata_without_mutating_the_committed_snapshot() {
+    let first = PayloadRef::bytes("a".repeat(64)).unwrap();
+    let second = PayloadRef::bytes("b".repeat(64)).unwrap();
+    let (facts, _, revisions) = observed_content_fixture([&first, &second]);
+    let part = MessagePartRef::native(agent(), "part", vec!["stream".into()]).unwrap();
+    let mut reduction = Reduction::default();
+    for fact in facts {
+        let Fact::Declare {
+            object: TraceObject::MessageRevision(mut revision),
+        } = fact
+        else {
+            continue;
+        };
+        revision.form = RevisionForm::Append {
+            predecessor: (revision.revision_ref == revisions[1]).then(|| revisions[0].clone()),
+        };
+        revision.parts[0].part_ref = part.clone();
+        let object = TraceObject::MessageRevision(revision);
+        let reference = object.object_ref();
+        reduction.objects.insert(
+            reference.clone(),
+            crate::reducer::ResolvedObject {
+                reference,
+                declaration: Resolved::Known {
+                    value: object,
+                    claims: vec![],
+                },
+            },
+        );
+    }
+    let committed = PayloadPreviews::from_iter([
+        (first, text_preview("first")),
+        (second, text_preview("second")),
+    ]);
+    let snapshot = || {
+        serde_json::to_value(
+            committed
+                .iter()
+                .map(|(reference, preview)| (reference, preview.as_ref()))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap()
+    };
+    let before = snapshot();
+    let mut candidate = committed.clone();
+    let composed = compose_revisions(
+        &reduction,
+        &BTreeSet::from([revisions[1].clone()]),
+        &mut candidate,
+    );
+    assert_eq!(composed.payloads.len(), 1);
+    let composed_ref = composed.payloads.keys().next().unwrap();
+    assert_eq!(candidate[composed_ref].preview, "firstsecond");
+    assert!(!committed.contains_key(composed_ref));
+    assert_eq!(snapshot(), before);
+    for (reference, preview) in &committed {
+        assert!(Arc::ptr_eq(preview, &candidate[reference]));
     }
 }
 
@@ -565,7 +623,7 @@ fn selected_entry_body_and_detail_reachability_exclude_other_source_observations
     });
     let projection = facts_projection(
         facts,
-        &BTreeMap::from([
+        &PayloadPreviews::from_iter([
             (first, text_preview("selected source")),
             (second, text_preview("unselected source")),
         ]),
@@ -601,7 +659,7 @@ fn equal_complete_observations_render_once_but_different_content_retains_the_ent
         let (facts, entry, _) = observed_content_fixture([&first, other]);
         let projection = facts_projection(
             facts,
-            &BTreeMap::from([
+            &PayloadPreviews::from_iter([
                 (first.clone(), text_preview("first")),
                 (second.clone(), text_preview("different")),
             ]),
@@ -687,7 +745,7 @@ fn repeated_native_admission_observations_render_one_delivery_occurrence() {
     }
     let projection = facts_projection(
         facts,
-        &BTreeMap::from([(payload, text_preview("one observed delivery"))]),
+        &PayloadPreviews::from_iter([(payload, text_preview("one observed delivery"))]),
     );
     let rows = &projection.windows[&ReadingScope {
         agent: agent(),
@@ -753,7 +811,7 @@ fn message_corrections_do_not_rewrite_submitted_delivery_observations() {
         }
         let projection = facts_projection(
             facts,
-            &BTreeMap::from([
+            &PayloadPreviews::from_iter([
                 (first.clone(), text_preview("dispatched")),
                 (second.clone(), text_preview("corrected message")),
             ]),
@@ -792,7 +850,7 @@ fn an_unfinished_stream_retains_both_identical_append_occurrences_in_the_reader(
     ];
     let mut state = MapperState::default();
     let mut reducer = Reducer::default();
-    let mut previews = BTreeMap::new();
+    let mut previews = PayloadPreviews::new();
     for (index, frame) in frames.iter().enumerate() {
         let capture = capture(index as u64 + 1);
         let raw = serde_json::to_vec(frame).unwrap();
@@ -813,7 +871,7 @@ fn an_unfinished_stream_retains_both_identical_append_occurrences_in_the_reader(
         for payload in output.payloads {
             previews.insert(
                 payload.reference,
-                PayloadPreview {
+                Arc::new(PayloadPreview {
                     chunks: payload
                         .manifest
                         .as_ref()
@@ -823,7 +881,7 @@ fn an_unfinished_stream_retains_both_identical_append_occurrences_in_the_reader(
                     total_bytes: Some(payload.bytes.len() as u64),
                     availability: Some(ReadAvailability::Available),
                     ..PayloadPreview::default()
-                },
+                }),
             );
         }
     }
@@ -853,7 +911,7 @@ fn a_selected_stream_prefix_assembles_its_latest_included_revision_after_a_later
     ];
     let mut state = MapperState::default();
     let mut reducer = Reducer::default();
-    let mut previews = BTreeMap::new();
+    let mut previews = PayloadPreviews::new();
     let mut prefix = vec![];
     for (index, frame) in frames.iter().enumerate() {
         let capture = capture(index as u64 + 1);
@@ -888,13 +946,13 @@ fn a_selected_stream_prefix_assembles_its_latest_included_revision_after_a_later
         for payload in output.payloads {
             previews.insert(
                 payload.reference,
-                PayloadPreview {
+                Arc::new(PayloadPreview {
                     preview: String::from_utf8(payload.bytes.clone()).unwrap(),
                     total_bytes: Some(payload.bytes.len() as u64),
                     availability: Some(ReadAvailability::Available),
                     preview_limit: 128,
                     ..PayloadPreview::default()
-                },
+                }),
             );
         }
     }

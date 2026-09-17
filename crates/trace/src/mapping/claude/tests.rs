@@ -713,11 +713,11 @@ fn part_bodies(parts: &[PartSummary]) -> Vec<(&MessagePartRef, ContentKind, &str
         .collect()
 }
 fn stream_reading(outputs: &[MapOutput]) -> Vec<PartSummary> {
-    let mut previews = BTreeMap::new();
+    let mut previews = crate::reading::PayloadPreviews::new();
     for payload in outputs.iter().flat_map(|output| &output.payloads) {
         previews.insert(
             payload.reference.clone(),
-            crate::reading::PayloadPreview {
+            std::sync::Arc::new(crate::reading::PayloadPreview {
                 chunks: payload
                     .manifest
                     .as_ref()
@@ -727,7 +727,7 @@ fn stream_reading(outputs: &[MapOutput]) -> Vec<PartSummary> {
                 total_bytes: Some(payload.bytes.len() as u64),
                 availability: Some(ReadAvailability::Available),
                 ..Default::default()
-            },
+            }),
         );
     }
     let projection = crate::reading::project(&reduce(outputs), &previews, 32);

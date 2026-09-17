@@ -204,7 +204,7 @@ mod tests {
             },
         };
         let archive = ArchiveContext {
-            semantic:std::sync::Arc::new(super::super::ArchiveSemantic {object_evidence:[(AnyObjectRef::Agent(agent.clone()),vec![proof.clone()])].into(),..Default::default()}),
+            semantic:std::sync::Arc::new(super::super::ArchiveSemantic {object_evidence:[(AnyObjectRef::Agent(agent.clone()),imbl::vector![proof.clone()])].into_iter().collect(),..Default::default()}),
             source_owners: [(
                 (definition.source.clone(), 0),
                 SourceOwner {

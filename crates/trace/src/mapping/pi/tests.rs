@@ -71,7 +71,7 @@ fn run(values: &[Value], live: bool) -> Vec<MapOutput> {
                 } => {
                     archive.semantic_mut().object_evidence.insert(
                         AnyObjectRef::HistoryEntry(entry.entry_ref.clone()),
-                        claim.evidence.clone(),
+                        claim.evidence.clone().into(),
                     );
                     archive
                         .semantic_mut()
@@ -92,7 +92,7 @@ fn run(values: &[Value], live: bool) -> Vec<MapOutput> {
                         .history_contents
                         .entry(observation.entry.clone())
                         .or_default()
-                        .push(ArchiveHistoryContent {
+                        .push_back(ArchiveHistoryContent {
                             claim_ref: claim.claim_ref.clone(),
                             observation: observation.clone(),
                             evidence: claim.evidence.clone(),

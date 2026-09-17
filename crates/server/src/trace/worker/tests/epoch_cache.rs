@@ -87,6 +87,8 @@ async fn assign_old_entry_epoch(
         .materialize(&generation, &committed, &mut unit)
         .await
         .unwrap();
+    assert_eq!(unit.membership_work, MembershipWork::default(),
+        "An epoch-only row update cannot change any membership collection");
     worker.commit_effects(&generation, &unit).await.unwrap();
     let published = generation
         .apply(unbound.fence_token, &unbound.snapshot, &unit.batch)

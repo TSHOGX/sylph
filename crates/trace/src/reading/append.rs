@@ -17,7 +17,7 @@ pub struct AppendProjection {
 pub fn project_independent_append(
     index: &AppendIndex,
     proof: &IndependentAppend,
-    payloads: &BTreeMap<PayloadRef, PayloadPreview>,
+    payloads: &PayloadPreviews,
     max_parts: usize,
     max_guard_work: usize,
     work: &mut AppendWork,
@@ -124,13 +124,9 @@ pub fn project_independent_append(
             partial.objects.insert(reference, object.clone());
         }
     }
-    let mut needed_payloads = BTreeMap::new();
     for object in partial.objects.values() {
-        for reference in object.declaration.known()?.payload_refs() {
+        for _ in object.declaration.known()?.payload_refs() {
             guard.examine()?;
-            if let Some(preview) = payloads.get(reference) {
-                needed_payloads.insert(reference.clone(), preview.clone());
-            }
         }
     }
     let mut next_index = index.clone();
@@ -138,7 +134,7 @@ pub fn project_independent_append(
         next_index.add_relation(relation, work)?;
     }
     next_index.reduction = after.clone();
-    let mut projected = project(&partial, &needed_payloads, max_parts);
+    let mut projected = project(&partial, payloads, max_parts);
     // Tail rows have no activation and cannot change agent execution. Headers and
     // directories retain their committed values, including the complete history.
     projected.headers.clear();

@@ -218,13 +218,13 @@ impl TraceService {
     pub(super) async fn search_sources(
         &self,
         reduction: &Reduction,
-        epochs: &BTreeMap<AnyObjectRef, IngestionEpoch>,
+        epochs: &imbl::OrdMap<AnyObjectRef, IngestionEpoch>,
     ) -> anyhow::Result<(
         Vec<IndexSource>,
         BTreeMap<PayloadRef, sylph_trace::reading::ComposedPayload>,
     )> {
         let variants = source_variants(reduction, epochs)?;
-        let mut metadata = BTreeMap::new();
+        let mut metadata = sylph_trace::reading::PayloadPreviews::new();
         let requested = variants
             .iter()
             .map(|variant| variant.revision.clone())
@@ -244,7 +244,7 @@ impl TraceService {
                     .is_none_or(|manifest| manifest.completeness == PayloadCompleteness::Complete);
             metadata.insert(
                 payload.clone(),
-                sylph_trace::reading::PayloadPreview {
+                Arc::new(sylph_trace::reading::PayloadPreview {
                     total_bytes: length,
                     availability: Some(if available {
                         ReadAvailability::Available
@@ -255,7 +255,7 @@ impl TraceService {
                     }),
                     chunks: manifest.map(|manifest| manifest.chunks),
                     ..Default::default()
-                },
+                }),
             );
         }
         Ok(compose_sources(reduction, variants, &mut metadata))
@@ -288,19 +288,19 @@ impl TraceService {
 #[cfg(test)]
 fn sources(
     reduction: &Reduction,
-    epochs: &BTreeMap<AnyObjectRef, IngestionEpoch>,
+    epochs: &imbl::OrdMap<AnyObjectRef, IngestionEpoch>,
 ) -> anyhow::Result<Vec<IndexSource>> {
     Ok(compose_sources(
         reduction,
         source_variants(reduction, epochs)?,
-        &mut BTreeMap::new(),
+        &mut sylph_trace::reading::PayloadPreviews::new(),
     )
     .0)
 }
 
 fn source_variants(
     reduction: &Reduction,
-    epochs: &BTreeMap<AnyObjectRef, IngestionEpoch>,
+    epochs: &imbl::OrdMap<AnyObjectRef, IngestionEpoch>,
 ) -> anyhow::Result<Vec<IndexVariant>> {
     let mut result = Vec::new();
     for (agent, history) in &reduction.histories {
@@ -396,7 +396,7 @@ fn source_variants(
 fn compose_sources(
     reduction: &Reduction,
     variants: Vec<IndexVariant>,
-    metadata: &mut BTreeMap<PayloadRef, sylph_trace::reading::PayloadPreview>,
+    metadata: &mut sylph_trace::reading::PayloadPreviews,
 ) -> (
     Vec<IndexSource>,
     BTreeMap<PayloadRef, sylph_trace::reading::ComposedPayload>,
@@ -636,17 +636,17 @@ mod tests {
             reducer.resolve()
         }
 
-        fn metadata(&self) -> BTreeMap<PayloadRef, sylph_trace::reading::PayloadPreview> {
+        fn metadata(&self) -> sylph_trace::reading::PayloadPreviews {
             self.payloads
                 .iter()
                 .map(|(payload, bytes)| {
                     (
                         payload.clone(),
-                        sylph_trace::reading::PayloadPreview {
+                        Arc::new(sylph_trace::reading::PayloadPreview {
                             total_bytes: Some(bytes.len() as u64),
                             availability: Some(ReadAvailability::Available),
                             ..Default::default()
-                        },
+                        }),
                     )
                 })
                 .collect()
@@ -654,13 +654,13 @@ mod tests {
 
         fn sources(
             &self,
-            metadata: &mut BTreeMap<PayloadRef, sylph_trace::reading::PayloadPreview>,
+            metadata: &mut sylph_trace::reading::PayloadPreviews,
         ) -> (
             Vec<IndexSource>,
             BTreeMap<PayloadRef, sylph_trace::reading::ComposedPayload>,
         ) {
             let reduction = self.reduction();
-            let epochs = BTreeMap::from([(
+            let epochs = imbl::OrdMap::from(vec![(
                 AnyObjectRef::Agent(agent()),
                 IngestionEpoch::new("stream-epoch").unwrap(),
             )]);
@@ -792,7 +792,7 @@ mod tests {
             .unwrap();
         let generation = service.active().await.unwrap();
         let snapshot = generation.checkpoint().await.unwrap().snapshot;
-        let epochs = BTreeMap::from([(AnyObjectRef::Agent(agent()), epoch.clone())]);
+        let epochs = imbl::OrdMap::from(vec![(AnyObjectRef::Agent(agent()), epoch.clone())]);
         let (sources, composed) = service
             .search_sources(&fixture.reduction(), &epochs)
             .await
@@ -949,7 +949,7 @@ mod tests {
                 .unwrap();
             let sources = sources(
                 &reducer.resolve(),
-                &BTreeMap::from([(
+                &imbl::OrdMap::from(vec![(
                     AnyObjectRef::Agent(agent()),
                     IngestionEpoch::new("epoch").unwrap(),
                 )]),

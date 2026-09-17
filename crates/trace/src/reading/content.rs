@@ -32,7 +32,7 @@ pub fn composition_payloads(
 
 pub(super) fn resolve(
     reduction: &Reduction,
-    payloads: &mut BTreeMap<PayloadRef, PayloadPreview>,
+    payloads: &mut PayloadPreviews,
 ) -> (
     BTreeMap<MessageRevisionRef, Vec<ContentPart>>,
     BTreeMap<PayloadRef, ComposedPayload>,
@@ -103,7 +103,7 @@ pub(super) fn resolve(
 pub fn compose_revisions(
     reduction: &Reduction,
     requested: &BTreeSet<MessageRevisionRef>,
-    payloads: &mut BTreeMap<PayloadRef, PayloadPreview>,
+    payloads: &mut PayloadPreviews,
 ) -> ComposedRevisions {
     let mut parts = BTreeMap::new();
     let mut composed = BTreeMap::new();
@@ -166,7 +166,7 @@ pub fn compose_revisions(
                             manifest,
                             revisions,
                         });
-                    payloads.insert(reference.clone(), preview);
+                    payloads.insert(reference.clone(), Arc::new(preview));
                     part.payload = reference;
                 } else {
                     unavailable.insert(
@@ -228,7 +228,7 @@ fn chain<'a>(
 fn compose(
     part: &ContentPart,
     segments: &[PayloadRef],
-    payloads: &BTreeMap<PayloadRef, PayloadPreview>,
+    payloads: &PayloadPreviews,
 ) -> Option<(PayloadRef, PayloadManifest, PayloadPreview)> {
     let mut chunks = Vec::new();
     let mut length = 0u64;

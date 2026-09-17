@@ -87,7 +87,7 @@ impl Fixture {
                         .insert(entry.entry_ref.clone(), entry.clone());
                     self.archive.semantic_mut().object_evidence.insert(
                         AnyObjectRef::HistoryEntry(entry.entry_ref.clone()),
-                        claim.evidence.clone(),
+                        claim.evidence.clone().into(),
                     );
                 }
                 Fact::HistoryContentObserved { observation } => {
@@ -96,7 +96,7 @@ impl Fixture {
                         .history_contents
                         .entry(observation.entry.clone())
                         .or_default()
-                        .push(crate::mapping::ArchiveHistoryContent {
+                        .push_back(crate::mapping::ArchiveHistoryContent {
                             claim_ref: claim.claim_ref.clone(),
                             observation: observation.clone(),
                             evidence: claim.evidence.clone(),
@@ -328,7 +328,7 @@ fn frozen_alias_waits_for_content_at_the_proven_physical_position_and_rule() {
             .archive
             .semantic_mut()
             .history_contents
-            .insert(entry.clone(), unavailable);
+            .insert(entry.clone(), unavailable.into());
         let output = fixture.map(CHILD, "child", &MapperState::default());
         assert!(
             output.claims.is_empty(),
@@ -348,7 +348,7 @@ fn frozen_alias_waits_for_content_at_the_proven_physical_position_and_rule() {
         .archive
         .semantic_mut()
         .history_contents
-        .insert(entry, vec![other_position, original.clone(), other_rule]);
+        .insert(entry, imbl::vector![other_position, original.clone(), other_rule]);
     fixture.select(CHILD, "child");
     let selected = fixture.selected("child");
     assert_eq!(selected.len(), 1);

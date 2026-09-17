@@ -1,6 +1,6 @@
 use super::*;
 use crate::mapping::{ArchiveContext, MapperState};
-use crate::reading::{project, PayloadPreview, ReadingScope};
+use crate::reading::{project, PayloadPreview, PayloadPreviews, ReadingScope};
 use crate::reducer::Reducer;
 use sylph_protocol::trace::read::{ReadAuthor, ReadAvailability, ReadingContent};
 use sylph_protocol::EnvironmentId;
@@ -9,7 +9,7 @@ use sylph_protocol::EnvironmentId;
 struct Stream {
     state: MapperState,
     reducer: Reducer,
-    payloads: BTreeMap<PayloadRef, PayloadPreview>,
+    payloads: PayloadPreviews,
     outputs: Vec<MapOutput>,
 }
 
@@ -88,7 +88,8 @@ impl Stream {
                     total_bytes: Some(payload.bytes.len() as u64),
                     availability: Some(ReadAvailability::Available),
                     ..PayloadPreview::default()
-                },
+                }
+                .into(),
             );
         }
         self.outputs.push(output);

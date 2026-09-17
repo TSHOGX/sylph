@@ -18,7 +18,7 @@ pub(super) struct MaterializedReading {
 impl MaterializedReading {
     fn from_projection(
         projection: &ReadingProjection,
-        epochs: &BTreeMap<AnyObjectRef, IngestionEpoch>,
+        epochs: &imbl::OrdMap<AnyObjectRef, IngestionEpoch>,
         reduction: Arc<Reduction>,
         max_references: usize,
         work: &mut AppendWork,
@@ -126,14 +126,14 @@ impl ProjectionWorker {
                 .next
                 .previews
                 .get(&payload.reference)
-                .is_some_and(|prior| prior != &preview);
+                .is_some_and(|prior| prior.as_ref() != &preview);
             unit.batch.mapper_states.insert(
                 format!("read_preview:{}", payload.reference),
                 serde_json::to_value(&preview)?,
             );
             unit.next
                 .previews
-                .insert(payload.reference.clone(), preview);
+                .insert(payload.reference.clone(), Arc::new(preview));
         }
         let refs: BTreeSet<_> = changes
             .objects
@@ -199,7 +199,7 @@ impl ProjectionWorker {
                 format!("read_preview:{payload}"),
                 serde_json::to_value(&preview)?,
             );
-            unit.next.previews.insert(payload, preview);
+            unit.next.previews.insert(payload, Arc::new(preview));
         }
         // The proof limits changes to new rows and the predecessor detail boundary.
         // Structural sharing keeps the candidate private without copying the archive.
@@ -410,7 +410,7 @@ impl ProjectionWorker {
 
 fn rows(
     projection: &ReadingProjection,
-    epochs: &BTreeMap<AnyObjectRef, IngestionEpoch>,
+    epochs: &imbl::OrdMap<AnyObjectRef, IngestionEpoch>,
 ) -> Result<BTreeMap<(String, String), ReadRowChange>> {
     let mut rows = BTreeMap::new();
     let mut insert = |scope: String,

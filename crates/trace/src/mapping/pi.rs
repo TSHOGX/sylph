@@ -116,7 +116,7 @@ struct Context<'a, 'b> {
     output: &'a mut MapOutput,
     state: &'a mut PiState,
     local_history: BTreeMap<EntryRef, HistoryEntry>,
-    local_history_contents: BTreeMap<EntryRef, Vec<ArchiveHistoryContent>>,
+    local_history_contents: BTreeMap<EntryRef, imbl::Vector<ArchiveHistoryContent>>,
 }
 
 impl Context<'_, '_> {
@@ -161,7 +161,7 @@ impl Context<'_, '_> {
         self.local_history_contents
             .entry(entry)
             .or_default()
-            .push(ArchiveHistoryContent {
+            .push_back(ArchiveHistoryContent {
                 claim_ref: claim.claim_ref.clone(),
                 observation,
                 evidence: claim.evidence.clone(),
@@ -969,7 +969,7 @@ impl Context<'_, '_> {
             }
             let object = AnyObjectRef::HistoryEntry(reference.clone());
             let (entry, evidence) = if let Some(entry) = self.local_history.get(&reference) {
-                (entry, vec![self.input.canonical_observation.clone()])
+                (entry, imbl::vector![self.input.canonical_observation.clone()])
             } else {
                 let Some(entry) = self.input.archive.semantic.history_entries.get(&reference)
                 else {

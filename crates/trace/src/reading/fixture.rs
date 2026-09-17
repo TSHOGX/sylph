@@ -13,7 +13,7 @@ pub(super) fn fixture() -> serde_json::Value {
     };
     let mut state = MapperState::default();
     let mut reducer = Reducer::default();
-    let mut previews = BTreeMap::new();
+    let mut previews = PayloadPreviews::new();
     let mut payloads = serde_json::Map::new();
     let mut available = imbl::OrdSet::new();
     let mut offset = 0;
@@ -67,7 +67,7 @@ pub(super) fn fixture() -> serde_json::Value {
             payloads.insert(payload.reference.to_string(), serde_json::json!(text));
             previews.insert(
                 payload.reference,
-                PayloadPreview {
+                Arc::new(PayloadPreview {
                     chunks: payload
                         .manifest
                         .as_ref()
@@ -81,7 +81,7 @@ pub(super) fn fixture() -> serde_json::Value {
                         end_exclusive: payload.bytes.len() as u64,
                     }],
                     availability: Some(ReadAvailability::Available),
-                },
+                }),
             );
         }
     }

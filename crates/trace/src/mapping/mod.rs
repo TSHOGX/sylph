@@ -126,12 +126,12 @@ pub struct ArchiveContext {
 /// Sharing this value avoids copying every historical object per captured record.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ArchiveSemantic {
-    pub agents: BTreeMap<AgentRef, AgentThread>,
-    pub history_entries: BTreeMap<EntryRef, HistoryEntry>,
-    pub history_contents: BTreeMap<EntryRef, Vec<ArchiveHistoryContent>>,
-    pub operations: BTreeMap<OperationRef, Operation>,
-    pub object_evidence: BTreeMap<AnyObjectRef, Vec<ObservationRef>>,
-    pub result_operations: BTreeMap<ResultRef, OperationRef>,
+    pub agents: imbl::OrdMap<AgentRef, AgentThread>,
+    pub history_entries: imbl::OrdMap<EntryRef, HistoryEntry>,
+    pub history_contents: imbl::OrdMap<EntryRef, imbl::Vector<ArchiveHistoryContent>>,
+    pub operations: imbl::OrdMap<OperationRef, Operation>,
+    pub object_evidence: imbl::OrdMap<AnyObjectRef, imbl::Vector<ObservationRef>>,
+    pub result_operations: imbl::OrdMap<ResultRef, OperationRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

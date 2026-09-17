@@ -313,6 +313,15 @@ persisted rows, payload anchors and authorization metadata. Restoring a missing 
 uses committed previews and epochs, so a new binding for an old entry cannot mask the row
 update required at the next view revision.
 
+Worker candidates now share persistent source, pending, replay, gap, captured-binding,
+preview and epoch maps; large mapper states and previews share their values independently.
+The mapper semantic cache shares persistent declaration/provenance maps and applies proved
+tails using only new references and keyed supporting claims. Full reconciliation prepares
+its semantic input before publication rather than deferring an archive scan to the next
+append. Work counters distinguish full refreshes from actual object, content, alias and
+claim visits. Epoch-only updates also skip unrelated membership reconstruction. General
+semantic changes still rebuild the mapper view alongside full reader reconciliation.
+
 Search reconciliation now persists complete source fingerprints and reuses unchanged
 FTS text across process restarts. Bounded source writes and stale-source removal remain
 private until a fenced update publishes its exact snapshot; interruption and invalidation
@@ -329,9 +338,10 @@ negative controls also do not establish that every new dependency guard was muta
 
 Open implementation/acceptance work remains in the ordered list above. In particular,
 `crates/server/src/trace/worker/reading.rs` still materializes general reconciliation from
-the whole reduction. Candidate worker-state cloning and semantic mapper-context refresh
-still grow with retained metadata; bounded membership and reader-proof work alone does
-not establish bounded total update work. Bounded HTTP
+the whole reduction. Ordinary complete-message tails now share candidate state and update
+mapper inputs, memberships and reader guards from certified additions. Existing-message
+streaming/replacement and other semantic changes still need incremental reconciliation;
+bounded complete-message work does not establish bounded total update work for those paths. Bounded HTTP
 pages do not prove bounded incremental projection cost. The ignored
 `worker_projection_scaling_probe` measures this production path under
 `SYLPH_WORKER_BENCH_RECORDS`; cold replay and repeated live updates still need the full

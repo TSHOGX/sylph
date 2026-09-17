@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 
 mod budget;
 mod reading;
+mod semantic;
+pub use semantic::SemanticWork;
 use sylph_protocol::trace::*;
 use sylph_trace::{
     mapping::{
@@ -108,6 +110,7 @@ pub struct WorkerProgress {
     pub reduction: ReductionWork,
     pub membership: MembershipWork,
     pub reader_append: sylph_trace::reading::AppendWork,
+    pub semantic: SemanticWork,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -178,22 +181,25 @@ struct WorkerState {
     snapshot: Option<Snapshot>,
     reducer: Reducer,
     reduction: Arc<Reduction>,
-    source_states: BTreeMap<String, MapperState>,
+    // A candidate shares tree roots and heavy leaf values. Persistent maps clone
+    // neighboring values on leaf mutation; Arc keeps that cost off mapper bodies.
+    source_states: imbl::OrdMap<String, Arc<MapperState>>,
     correlations: imbl::OrdMap<String, AnyObjectRef>,
     correlation_evidence: imbl::OrdMap<String, Vec<ObservationRef>>,
-    pending: BTreeMap<String, PendingMapping>,
-    source_replays: BTreeMap<String, SourceReplayCursor>,
+    pending: imbl::OrdMap<String, Arc<PendingMapping>>,
+    source_replays: imbl::OrdMap<String, SourceReplayCursor>,
     available_evidence: imbl::OrdSet<ObservationRef>,
-    gaps: BTreeMap<String, SourceGap>,
+    gaps: imbl::OrdMap<String, SourceGap>,
     source_owners: imbl::OrdMap<(SourceRef, u64), mapping::SourceOwner>,
     source_definitions: imbl::OrdMap<(SourceRef, u64), mapping::codex::history::RecordedSource>,
     history_records: mapping::codex::history::HistoryRecords,
-    captured_payloads: BTreeMap<String, Vec<mapping::CapturedPayloadBinding>>,
+    captured_payloads: imbl::OrdMap<String, imbl::Vector<mapping::CapturedPayloadBinding>>,
     observation_sources: imbl::OrdMap<ObservationRef, SourcePosition>,
-    previews: BTreeMap<PayloadRef, sylph_trace::reading::PayloadPreview>,
-    object_epochs: BTreeMap<AnyObjectRef, IngestionEpoch>,
+    previews: sylph_trace::reading::PayloadPreviews,
+    object_epochs: imbl::OrdMap<AnyObjectRef, IngestionEpoch>,
     reading: Option<Arc<reading::MaterializedReading>>,
-    archive_semantic: Option<(std::sync::Weak<Reduction>, Arc<mapping::ArchiveSemantic>)>,
+    archive_semantic: Option<semantic::SemanticCache>,
+    semantic_work: semantic::SemanticWork,
 }
 
 impl WorkerState {
@@ -243,8 +249,10 @@ struct ProjectionUnit {
 
 impl ProjectionUnit {
     fn new(state: &WorkerState, through: u64) -> Self {
+        let mut next = state.clone();
+        next.semantic_work = semantic::SemanticWork::default();
         Self {
-            next: state.clone(),
+            next,
             batch: ProjectionBatch {
                 through_cut: through,
                 ..ProjectionBatch::default()
@@ -326,7 +334,7 @@ impl ProjectionWorker {
     ) -> Result<(
         Snapshot,
         Arc<Reduction>,
-        BTreeMap<AnyObjectRef, IngestionEpoch>,
+        imbl::OrdMap<AnyObjectRef, IngestionEpoch>,
     )> {
         let entry = {
             let mut states = self.states.lock().await;
@@ -405,14 +413,14 @@ impl ProjectionWorker {
                 ));
             }
         }
-        let mut pending = BTreeMap::new();
-        let mut replays = BTreeMap::new();
+        let mut pending = imbl::OrdMap::new();
+        let mut replays = imbl::OrdMap::new();
         for (key, value) in generation.mapper_states(&checkpoint.snapshot).await? {
             if value.is_null() {
                 continue;
             }
             if key.starts_with("pending:") {
-                pending.insert(key, serde_json::from_value(value)?);
+                pending.insert(key, Arc::new(serde_json::from_value(value)?));
             } else if let Some(key) = key.strip_prefix("source_replay:") {
                 replays.insert(key.into(), serde_json::from_value(value)?);
             }
@@ -510,6 +518,7 @@ impl ProjectionWorker {
                 progress
                     .reader_append
                     .accumulate(&prepared.reader_append_work);
+                progress.semantic.accumulate(&prepared.next.semantic_work);
                 match generation.validate_batch(&prepared.batch) {
                     Ok(()) => break prepared,
                     Err(GenerationError::Limit(_)) if captures.len() > 1 => {
@@ -722,7 +731,7 @@ impl ProjectionWorker {
                         .cloned()
                         .unwrap_or_default()
                 } else {
-                    pending.state.clone()
+                    Arc::new(pending.state.clone())
                 };
                 let mapped = self
                     .map_record(
@@ -801,6 +810,20 @@ impl ProjectionWorker {
 
     async fn reduce_unit(&self, unit: &mut ProjectionUnit) -> Result<()> {
         let resolved = self.reduce(&mut unit.next.reducer).await?;
+        let claims = unit.next.reducer.claim_snapshot();
+        let advanced = unit.next.archive_semantic.as_ref()
+            .zip(resolved.append.as_ref())
+            .filter(|(_, proof)| proof.matches(&unit.next.reduction, &resolved.reduction))
+            .and_then(|(cache, proof)| cache.advance(
+                proof, &claims, &mut unit.next.semantic_work,
+            ));
+        // Full reconciliation pays for its mapper view before publication. Leaving
+        // this lazy would charge the first ordinary append a hidden archive scan.
+        unit.next.archive_semantic = Some(advanced.unwrap_or_else(|| {
+            semantic::SemanticCache::rebuild(
+                resolved.reduction.clone(), &claims, &mut unit.next.semantic_work,
+            )
+        }));
         if unit.append_eligible {
             unit.append = match (unit.append.take(), resolved.append) {
                 (Some(previous), Some(next)) => previous.compose(next),
@@ -935,7 +958,7 @@ impl ProjectionWorker {
             if let Some(key) = key.strip_prefix("source:") {
                 state
                     .source_states
-                    .insert(key.into(), serde_json::from_value(value)?);
+                    .insert(key.into(), Arc::new(serde_json::from_value(value)?));
             } else if let Some(key) = key.strip_prefix("correlation:") {
                 let binding: CorrelationBinding = serde_json::from_value(value)?;
                 state.correlations.insert(key.into(), binding.reference);
@@ -949,7 +972,7 @@ impl ProjectionWorker {
             } else if let Some(key) = key.strip_prefix("pending:") {
                 state
                     .pending
-                    .insert(key.into(), serde_json::from_value(value)?);
+                    .insert(key.into(), Arc::new(serde_json::from_value(value)?));
             } else if let Some(key) = key.strip_prefix("gap:") {
                 state
                     .gaps
@@ -987,7 +1010,7 @@ impl ProjectionWorker {
             } else if let Some(key) = key.strip_prefix("read_preview:") {
                 state.previews.insert(
                     PayloadRef::parse(key).map_err(|error| WorkerError::Task(error.to_string()))?,
-                    serde_json::from_value(value)?,
+                    Arc::new(serde_json::from_value(value)?),
                 );
             }
         }
@@ -999,7 +1022,7 @@ impl ProjectionWorker {
     async fn map_record(
         &self,
         admitted: &AdmittedMapping,
-        original: &MapperState,
+        original: &Arc<MapperState>,
         state: &mut WorkerState,
         through_cut: u64,
         vendor: &str,
@@ -1007,7 +1030,7 @@ impl ProjectionWorker {
         if admitted.capture.transport_kind == TransportKind::PayloadBytes {
             return Ok(RecordMapping {
                 output: MapOutput {
-                    state: original.clone(),
+                    state: original.as_ref().clone(),
                     ..MapOutput::default()
                 },
                 gap: None,
@@ -1082,7 +1105,7 @@ impl ProjectionWorker {
                             captured_payloads.insert(
                                 key,
                                 mapping::CapturedPayload {
-                                    bindings: bindings.clone(),
+                                    bindings: bindings.iter().cloned().collect(),
                                     bytes,
                                     limited,
                                 },
@@ -1133,7 +1156,7 @@ impl ProjectionWorker {
                 .iter()
                 .any(|old| old.attachment == binding.attachment)
             {
-                values.push(binding.clone());
+                values.push_back(binding.clone());
             }
             unit.batch.mapper_states.insert(
                 format!("captured_payload:{key}"),
@@ -1336,7 +1359,7 @@ impl ProjectionWorker {
         unit.batch
             .mapper_states
             .insert(format!("pending:{id}"), serde_json::to_value(&pending)?);
-        unit.next.pending.insert(id, pending);
+        unit.next.pending.insert(id, Arc::new(pending));
         if unit.next.pending.len() > self.limits.max_pending {
             return Err(WorkerError::Limit("pending mappings"));
         }
@@ -1587,7 +1610,12 @@ impl ProjectionWorker {
                     });
                 }
             }
-        } else {
+        // These are the only declaration families consumed by memberships().
+        // Epoch, payload and lifecycle-only changes leave every collection intact.
+        } else if !changes.histories.is_empty()
+            || changes.objects.changed.keys().chain(changes.objects.removed.keys())
+                .any(|reference| matches!(reference, AnyObjectRef::Activation(_) | AnyObjectRef::Operation(_)))
+        {
             unit.membership_work.full_reconciliations += 1;
             let old_members = memberships(old, &mut unit.membership_work)?;
             let new_members = memberships(new, &mut unit.membership_work)?;
@@ -1659,86 +1687,22 @@ fn archive_context(state: &mut WorkerState) -> ArchiveContext {
         claims: state.reducer.claim_snapshot(),
         ..ArchiveContext::default()
     };
-    // Reduced object declarations are unchanged while an observation unit maps
-    // its source records. Share that immutable proof graph; refreshing it from
-    // receipt count would repeatedly clone all history despite identical facts.
+    // Reduction advances this cache before publication. Initial/restored state
+    // builds it once on demand; each mapper input retains immutable shared roots.
     let cached = state
         .archive_semantic
         .as_ref()
-        .filter(|(reduction, _)| reduction.ptr_eq(&Arc::downgrade(&state.reduction)))
-        .map(|(_, semantic)| semantic.clone());
+        .and_then(|cache| cache.get(&state.reduction));
     archive.semantic = if let Some(semantic) = cached {
         semantic
     } else {
-        let mut semantic = mapping::ArchiveSemantic::default();
-        let claims: BTreeMap<_, _> = state
-            .reducer
-            .claims()
-            .map(|claim| (&claim.claim_ref, claim))
-            .collect();
-        for object in state.reduction.objects.values() {
-            let sylph_trace::reducer::Resolved::Known {
-                value,
-                claims: support,
-            } = &object.declaration
-            else {
-                continue;
-            };
-            match value {
-                TraceObject::Agent(agent) => {
-                    semantic
-                        .agents
-                        .insert(agent.agent_ref.clone(), agent.clone());
-                }
-                TraceObject::HistoryEntry(entry) => {
-                    semantic
-                        .history_entries
-                        .insert(entry.entry_ref.clone(), entry.clone());
-                }
-                TraceObject::Operation(operation) => {
-                    semantic
-                        .operations
-                        .insert(operation.operation_ref.clone(), operation.clone());
-                }
-                TraceObject::Result(result) => {
-                    semantic
-                        .result_operations
-                        .insert(result.result_ref.clone(), result.operation.clone());
-                }
-                _ => continue,
-            }
-            let evidence: BTreeSet<_> = support
-                .iter()
-                .filter_map(|reference| claims.get(reference))
-                .flat_map(|claim| claim.evidence.iter().cloned())
-                .collect();
-            semantic
-                .object_evidence
-                .insert(value.object_ref(), evidence.into_iter().collect());
-        }
-        for (entry, observations) in &state.reduction.history_contents {
-            semantic.history_contents.insert(
-                entry.clone(),
-                observations
-                    .iter()
-                    .filter_map(|(reference, observation)| {
-                        let proof = claims.get(reference)?;
-                        Some(mapping::ArchiveHistoryContent {
-                            claim_ref: reference.clone(),
-                            observation: observation.clone(),
-                            evidence: proof.evidence.clone(),
-                        })
-                    })
-                    .collect(),
-            );
-        }
-        for (alias, canonical) in &state.reduction.representatives {
-            if let Some(evidence) = semantic.object_evidence.get(canonical).cloned() {
-                semantic.object_evidence.insert(alias.clone(), evidence);
-            }
-        }
-        let semantic = Arc::new(semantic);
-        state.archive_semantic = Some((Arc::downgrade(&state.reduction), semantic.clone()));
+        let cache = semantic::SemanticCache::rebuild(
+            state.reduction.clone(),
+            &state.reducer.claim_snapshot(),
+            &mut state.semantic_work,
+        );
+        let semantic = cache.get(&state.reduction).expect("rebuilt cache binds this reduction");
+        state.archive_semantic = Some(cache);
         semantic
     };
     archive
@@ -1778,15 +1742,15 @@ fn index_history_record(
 }
 
 fn save_source_state(unit: &mut ProjectionUnit, key: &str, state: &MapperState) -> Result<()> {
-    unit.next.source_states.insert(key.into(), state.clone());
+    unit.next.source_states.insert(key.into(), Arc::new(state.clone()));
     unit.batch
         .mapper_states
         .insert(format!("source:{key}"), serde_json::to_value(state)?);
     Ok(())
 }
 fn has_ready_continuations(
-    all: &BTreeMap<String, PendingMapping>,
-    replays: &BTreeMap<String, SourceReplayCursor>,
+    all: &imbl::OrdMap<String, Arc<PendingMapping>>,
+    replays: &imbl::OrdMap<String, SourceReplayCursor>,
 ) -> bool {
     all.values()
         .any(|pending| pending.requests.contains(&ArchiveRequest::ContinueHistory))

@@ -354,7 +354,7 @@ fn identity_binding_requires_a_proof_that_names_the_actual_agent() {
     assert!(unproved.correlations.is_empty());
     archive.semantic_mut()
         .object_evidence
-        .insert(AnyObjectRef::Agent(agent()), vec![observation]);
+        .insert(AnyObjectRef::Agent(agent()), imbl::vector![observation]);
     assert_eq!(run(&fact, &capture, &archive).bound_agents, vec![agent()]);
 }
 

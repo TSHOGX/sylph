@@ -6,6 +6,7 @@
 use crate::reducer::{ReadingOrderBasis, Reduction, Resolved};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 use sylph_protocol::trace::*;
 mod append;
 mod content;
@@ -23,6 +24,10 @@ pub struct PayloadPreview {
     pub ranges: Vec<PayloadRange>,
     pub availability: Option<ReadAvailability>,
 }
+
+/// A shared metadata snapshot; composition changes only its private map paths.
+/// Values are shared too: copying a tree leaf must not copy neighboring manifests.
+pub type PayloadPreviews = imbl::OrdMap<PayloadRef, Arc<PayloadPreview>>;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ReadingScope {
@@ -47,7 +52,7 @@ pub struct ReadingProjection {
 
 struct Index<'a> {
     reduction: &'a Reduction,
-    payloads: &'a BTreeMap<PayloadRef, PayloadPreview>,
+    payloads: &'a PayloadPreviews,
     composed_parts: BTreeMap<MessageRevisionRef, Vec<ContentPart>>,
     content_errors: BTreeMap<MessageRevisionRef, String>,
     max_parts: usize,
@@ -68,7 +73,7 @@ struct Index<'a> {
 
 pub fn project(
     reduction: &Reduction,
-    payloads: &BTreeMap<PayloadRef, PayloadPreview>,
+    payloads: &PayloadPreviews,
     max_parts: usize,
 ) -> ReadingProjection {
     let mut payloads = payloads.clone();

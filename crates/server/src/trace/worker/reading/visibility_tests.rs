@@ -75,7 +75,7 @@ impl Fixture {
             .map(|index| agent(&denied, format!("private-child-{index:04}")))
             .collect();
         let mut facts = Vec::new();
-        let mut epochs = BTreeMap::new();
+        let mut epochs = imbl::OrdMap::new();
         for agent in std::iter::once(&parent)
             .chain(hidden.iter())
             .chain(std::iter::once(&visible))
@@ -159,7 +159,7 @@ impl Fixture {
             "{:?}",
             reduction.diagnostics
         );
-        let projection = sylph_trace::reading::project(&reduction, &BTreeMap::new(), 32);
+        let projection = sylph_trace::reading::project(&reduction, &Default::default(), 32);
         assert_eq!(projection.directories[&parent].len(), hidden_count + 1);
         assert_eq!(
             projection.directories[&parent]
@@ -227,14 +227,14 @@ impl Fixture {
                 .unwrap();
         let entry =
             EntryRef::native(self.parent.clone(), "multipart", vec!["entry".into()]).unwrap();
-        let mut previews = BTreeMap::new();
+        let mut previews = sylph_trace::reading::PayloadPreviews::new();
         let parts = (0..count)
             .map(|index| {
                 let text = format!("Observed part {index}");
                 let payload = PayloadRef::bytes(blake3::hash(text.as_bytes()).to_hex()).unwrap();
                 previews.insert(
                     payload.clone(),
-                    PayloadPreview {
+                    Arc::new(PayloadPreview {
                         preview: text.clone(),
                         preview_limit: 2048,
                         total_bytes: Some(text.len() as u64),
@@ -244,7 +244,7 @@ impl Fixture {
                         }],
                         availability: Some(ReadAvailability::Available),
                         ..PayloadPreview::default()
-                    },
+                    }),
                 );
                 ContentPart {
                     part_ref: MessagePartRef::native(
@@ -356,7 +356,7 @@ impl Fixture {
             )
             .await
             .unwrap();
-        let epochs = BTreeMap::from([(AnyObjectRef::Agent(self.parent.clone()), epoch)]);
+        let epochs = imbl::OrdMap::from(vec![(AnyObjectRef::Agent(self.parent.clone()), epoch)]);
         let history = read_scope(&self.parent, None, "history");
         let parts = sylph_trace::reading::parts_key(
             &self.parent,

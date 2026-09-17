@@ -1180,10 +1180,10 @@ async fn worker_projection_scaling_probe() {
     );
     let warm_snapshot = generation.checkpoint().await.unwrap().snapshot;
     eprintln!(
-        "worker scaling: records={records} admission_ms={admission_ms} projection_ms={projection_ms} cold_rows={} warm_append_ms={warm_ms} warm_rows={} warm_claims_resolved={} warm_history_entries={} warm_full_resolutions={} membership={:?} reader_append={:?} revision={}",
+        "worker scaling: records={records} admission_ms={admission_ms} projection_ms={projection_ms} cold_rows={} warm_append_ms={warm_ms} warm_rows={} warm_claims_resolved={} warm_history_entries={} warm_full_resolutions={} membership={:?} reader_append={:?} semantic={:?} revision={}",
         cold.reader_rows_materialized, warm.reader_rows_materialized,
         warm.reduction.claims_resolved, warm.reduction.history_entries_updated,
-        warm.reduction.full_resolutions, warm.membership, warm.reader_append,
+        warm.reduction.full_resolutions, warm.membership, warm.reader_append, warm.semantic,
         warm_snapshot.view_revision,
     );
 }
@@ -1555,6 +1555,7 @@ mod corpus;
 mod delayed_source;
 mod epoch_cache;
 mod frozen_history;
+mod state_sharing;
 
 mod streaming;
 
