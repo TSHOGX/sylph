@@ -20,6 +20,27 @@ CREATE TABLE projection_revisions (
 );
 INSERT INTO projection_revisions VALUES (0, 0);
 
+-- A complete prepared plan is replayable after cancellation or process death.
+-- Its future revision stays invisible until the checkpoint commits.
+CREATE TABLE projection_reconciliation (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  previous_revision INTEGER NOT NULL,
+  previous_cut INTEGER NOT NULL,
+  target_revision INTEGER NOT NULL,
+  target_cut INTEGER NOT NULL,
+  fence_token INTEGER NOT NULL,
+  unit_digest TEXT NOT NULL,
+  chunks INTEGER NOT NULL,
+  next_chunk INTEGER NOT NULL DEFAULT 0,
+  ready INTEGER NOT NULL DEFAULT 0,
+  change_json TEXT NOT NULL,
+  change_bytes INTEGER NOT NULL
+);
+CREATE TABLE reconciliation_chunks (
+  ordinal INTEGER PRIMARY KEY,
+  batch_json TEXT NOT NULL
+);
+
 -- Each validated, atomic projection unit certifies the contiguous tail after a
 -- background full validation. Publication checks only a bounded tail of proofs.
 CREATE TABLE projection_commit_proofs (
@@ -122,6 +143,7 @@ CREATE TABLE payload_anchor_versions (
   valid_from INTEGER NOT NULL REFERENCES projection_revisions(view_revision),
   valid_to INTEGER REFERENCES projection_revisions(view_revision),
   ranges_json TEXT NOT NULL,
+  dependency_epochs_json TEXT NOT NULL,
   PRIMARY KEY (anchor_key, valid_from),
   CHECK (valid_to IS NULL OR valid_to > valid_from)
 ) WITHOUT ROWID;
@@ -129,9 +151,10 @@ CREATE UNIQUE INDEX current_payload_anchor ON payload_anchor_versions(anchor_key
 CREATE INDEX anchors_by_container ON payload_anchor_versions(via_ref, containing_agent, selection_ref, valid_from);
 
 CREATE TABLE mapper_states (
-  mapper_key TEXT PRIMARY KEY,
+  mapper_key TEXT NOT NULL,
   state_json TEXT NOT NULL,
-  at_revision INTEGER NOT NULL REFERENCES projection_revisions(view_revision)
+  at_revision INTEGER NOT NULL REFERENCES projection_revisions(view_revision),
+  PRIMARY KEY (mapper_key, at_revision)
 ) WITHOUT ROWID;
 CREATE TABLE processed_occurrences (
   occurrence_id INTEGER PRIMARY KEY CHECK(occurrence_id > 0),

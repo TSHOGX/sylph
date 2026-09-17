@@ -3,10 +3,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::{mpsc, oneshot, watch, Semaphore};
+use tokio::sync::{Semaphore, mpsc, oneshot, watch};
 
 const MAX_INTERACTIVE_COMMANDS: usize = 8;
 const MAX_HISTORY_COMMANDS: usize = 2;
@@ -430,17 +430,39 @@ fn command_session_key(command: &sylph_protocol::EnvironmentCommand) -> Option<S
 }
 
 /// Keep an envagent attached while the server or network is temporarily
-/// unavailable. The spool is reopened at the same path on every iteration;
-/// no event is dropped or re-numbered.
+/// unavailable. Socket reconnects keep the acquisition runtime; process restarts
+/// reopen its durable spool without dropping or re-numbering queued observations.
 pub async fn run_runtime_reconnecting(
+    address: String,
+    hello: sylph_protocol::Hello,
+    credential: String,
+    config: crate::runtime::EnvAgentConfig,
+) -> Result<()> {
+    run_runtime_reconnecting_with_adapters(
+        address,
+        hello,
+        credential,
+        config,
+        crate::adapters::linked(),
+    )
+    .await
+}
+
+/// Keep one acquisition runtime across socket reconnects with an explicit adapter source.
+/// This uses the production reconnect, command, capture and receipt paths while allowing
+/// acceptance workloads to supply deterministic vendor records.
+pub async fn run_runtime_reconnecting_with_adapters(
     address: String,
     mut hello: sylph_protocol::Hello,
     credential: String,
     config: crate::runtime::EnvAgentConfig,
+    adapters: Arc<dyn crate::adapters::AdapterSource>,
 ) -> Result<()> {
     let mut backoff = crate::transport::Backoff::default();
-    let runtime =
-        Arc::new(crate::runtime::EnvAgent::open(config, Arc::new(DisconnectedSink)).await?);
+    let runtime = Arc::new(
+        crate::runtime::EnvAgent::open_with_adapters(config, Arc::new(DisconnectedSink), adapters)
+            .await?,
+    );
     loop {
         match connect(address.clone(), hello.clone(), credential.clone()).await {
             Ok(connection) => match run_connection(runtime.clone(), connection).await {

@@ -402,6 +402,47 @@ fn source_variants(
                 Some(OwnerRef::Agent { agent }) => agent.clone(),
                 _ => entry.containing_agent.clone(),
             };
+            let mut dependency_epochs: BTreeSet<_> =
+                support.dependency_epochs.iter().cloned().collect();
+            // The entry binds a representation, while its bytes and authored
+            // fields have their own retained support. Follow only the actual
+            // append chain; author/original-owner links do not own copied bytes.
+            let mut pending = vec![
+                AnyObjectRef::MessageRevision(revision_ref.clone()),
+                AnyObjectRef::Message(revision.message.clone()),
+            ];
+            let mut visited = BTreeSet::new();
+            // A chain link whose declaration or retained support is unavailable
+            // leaves part of the body unbacked. Indexing the variant anyway would
+            // expose those trailing bytes without their evidence, so drop it.
+            let mut supported = true;
+            while let Some(reference) = pending.pop() {
+                let Some(object) = reduction.object(&reference) else {
+                    supported = false;
+                    break;
+                };
+                if !visited.insert(object.reference.clone()) {
+                    continue;
+                }
+                let Some(contribution) = provenance.get(&object.reference) else {
+                    supported = false;
+                    break;
+                };
+                dependency_epochs.extend(contribution.dependency_epochs.iter().cloned());
+                if let Some(TraceObject::MessageRevision(MessageRevision {
+                    form:
+                        RevisionForm::Append {
+                            predecessor: Some(predecessor),
+                        },
+                    ..
+                })) = object.declaration.known()
+                {
+                    pending.push(AnyObjectRef::MessageRevision(predecessor.clone()));
+                }
+            }
+            if !supported {
+                continue;
+            }
             result.push(IndexVariant {
                 agent: agent.clone(),
                 original_owner,
@@ -410,7 +451,7 @@ fn source_variants(
                 message: revision.message.clone(),
                 representation: revision.representation,
                 epoch: support.primary_epoch.clone(),
-                dependency_epochs: support.dependency_epochs.iter().cloned().collect(),
+                dependency_epochs,
                 scopes,
             });
         }
@@ -518,9 +559,6 @@ mod tests {
             .objects
             .iter()
             .filter_map(|(reference, object)| {
-                if !matches!(reference, AnyObjectRef::HistoryEntry(_)) {
-                    return None;
-                }
                 let Resolved::Known { claims, .. } = &object.declaration else {
                     return None;
                 };
@@ -780,7 +818,7 @@ mod tests {
                     .iter()
                     .any(|(mode, _)| mode == &SearchHistoryMode::Authored)
             );
-    }
+        }
     }
 
     #[test]
@@ -826,7 +864,7 @@ mod tests {
             );
             assert!(
                 sources
-                .iter()
+                    .iter()
                     .all(|source| serde_json::to_vec(source).is_ok())
             );
         }
@@ -842,14 +880,14 @@ mod tests {
         for index in [1, 2] {
             assert!(
                 !sources
-                .iter()
+                    .iter()
                     .any(|source| source.revision == fixture.revisions[index])
             );
         }
         assert!(!sources.iter().any(|source| {
             source
-            .scopes
-            .iter()
+                .scopes
+                .iter()
                 .any(|(mode, _)| mode == &SearchHistoryMode::SelectedContext)
         }));
 
@@ -862,13 +900,13 @@ mod tests {
         let (sources, _) = missing_predecessor.sources(&mut missing_predecessor.metadata());
         assert!(
             !sources
-            .iter()
-            .any(|source| source.revision == fixture.revisions[1]
+                .iter()
+                .any(|source| source.revision == fixture.revisions[1]
                     || source.revision == fixture.revisions[2])
         );
         assert!(
             sources
-            .iter()
+                .iter()
                 .any(|source| source.revision == fixture.revisions[4])
         );
     }
@@ -910,10 +948,10 @@ mod tests {
             .unwrap();
         assert!(
             service
-            .catalogue
-            .payload_pins(PinOwnerKind::Search, &snapshot.generation, None, 10)
-            .await
-            .unwrap()
+                .catalogue
+                .payload_pins(PinOwnerKind::Search, &snapshot.generation, None, 10)
+                .await
+                .unwrap()
                 .is_empty()
         );
         let source = sources

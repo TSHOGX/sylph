@@ -3,8 +3,8 @@ use crate::{
     trace::cas::BlobStore,
     trace::{
         evidence::{
-            catalogue::{BuildTicket, CatalogueLimits},
             AdmissionLimits,
+            catalogue::{BuildTicket, CatalogueLimits},
         },
         generation::{GenerationManifest, QueryLimits},
     },
@@ -935,13 +935,15 @@ async fn missing_identity_proof_survives_restart_and_resolves_without_another_ad
     fixture.native(1, 0, header).await;
     let resolved = fixture.worker().catch_up(&generation, 1, 3).await.unwrap();
     assert_eq!(resolved.pending_mappings, 0);
-    assert!(generation
-        .mapper_states(&generation.checkpoint().await.unwrap().snapshot)
-        .await
-        .unwrap()
-        .iter()
-        .filter(|(key, _)| key.starts_with("diagnostic:"))
-        .all(|(_, value)| value.is_null()));
+    assert!(
+        generation
+            .mapper_states(&generation.checkpoint().await.unwrap().snapshot)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|(key, _)| key.starts_with("diagnostic:"))
+            .all(|(_, value)| value.is_null())
+    );
     assert_submitted(&fixture, &generation).await;
 }
 
@@ -973,8 +975,8 @@ async fn native_identity_binding_links_pre_identity_evidence_to_the_agent_deleti
 }
 
 #[tokio::test]
-async fn missing_native_identity_proof_keeps_submission_unprojected_despite_matching_agent_metadata(
-) {
+async fn missing_native_identity_proof_keeps_submission_unprojected_despite_matching_agent_metadata()
+ {
     let fixture = Fixture::new().await;
     fixture.control(1, fixture.accepted()).await;
     fixture.control(2, binding(native_observation(1))).await;
@@ -1054,8 +1056,8 @@ async fn derived_payload_provenance_survives_projection_restart_with_exact_sourc
 }
 
 #[tokio::test]
-async fn publication_validation_rejects_a_missing_derived_chunk_without_changing_evidence_or_projection_cuts(
-) {
+async fn publication_validation_rejects_a_missing_derived_chunk_without_changing_evidence_or_projection_cuts()
+ {
     use crate::trace::publication::ProjectionCatchUp;
     let fixture = Fixture::new().await;
     let header = CODEX_NATIVE
@@ -1095,10 +1097,12 @@ async fn publication_validation_rejects_a_missing_derived_chunk_without_changing
         .remove(manifest.chunks[0].digest.digest())
         .await
         .unwrap();
-    assert!(worker
-        .validate_generation(&generation, &snapshot)
-        .await
-        .is_err());
+    assert!(
+        worker
+            .validate_generation(&generation, &snapshot)
+            .await
+            .is_err()
+    );
     assert_eq!(
         generation.checkpoint().await.unwrap().snapshot.evidence_cut,
         2
@@ -1185,9 +1189,14 @@ async fn worker_projection_scaling_probe() {
     let warm_snapshot = generation.checkpoint().await.unwrap().snapshot;
     eprintln!(
         "worker scaling: records={records} admission_ms={admission_ms} projection_ms={projection_ms} cold_rows={} warm_append_ms={warm_ms} warm_rows={} warm_claims_resolved={} warm_history_entries={} warm_full_resolutions={} membership={:?} reader_append={:?} semantic={:?} revision={}",
-        cold.reader_rows_materialized, warm.reader_rows_materialized,
-        warm.reduction.claims_resolved, warm.reduction.history_entries_updated,
-        warm.reduction.full_resolutions, warm.membership, warm.reader_append, warm.semantic,
+        cold.reader_rows_materialized,
+        warm.reader_rows_materialized,
+        warm.reduction.claims_resolved,
+        warm.reduction.history_entries_updated,
+        warm.reduction.full_resolutions,
+        warm.membership,
+        warm.reader_append,
+        warm.semantic,
         warm_snapshot.view_revision,
     );
 }
@@ -1216,10 +1225,12 @@ async fn structural_decode_limit_retains_raw_bytes_and_suspends_uncertain_source
     let limited = worker.catch_up(&generation, 1, 2).await.unwrap();
     assert_eq!(limited.suspended_sources, 1);
     assert_eq!(limited.unmapped_observations, 1);
-    assert!(limited
-        .diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic.code == DiagnosticCode::ResourceLimit));
+    assert!(
+        limited
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == DiagnosticCode::ResourceLimit)
+    );
     assert_eq!(worker.mapping_threads.lock().unwrap().len(), calls);
     assert_eq!(
         fixture
@@ -1236,9 +1247,11 @@ async fn structural_decode_limit_retains_raw_bytes_and_suspends_uncertain_source
     let continued = fixture.worker().catch_up(&generation, 1, 3).await.unwrap();
     assert_eq!(continued.suspended_sources, 1);
     assert_eq!(continued.unmapped_observations, 1);
-    assert!(revision_bytes(&fixture, &generation, &message("after-gap"))
-        .await
-        .is_empty());
+    assert!(
+        revision_bytes(&fixture, &generation, &message("after-gap"))
+            .await
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -1265,13 +1278,17 @@ async fn malformed_record_never_reuses_a_pre_gap_activation_for_later_content() 
     let progress = fixture.worker().catch_up(&generation, 1, 4).await.unwrap();
     assert_eq!(progress.suspended_sources, 1);
     assert_eq!(progress.unmapped_observations, 2);
-    assert!(progress
-        .diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic.code == DiagnosticCode::DecodeFailure));
-    assert!(revision_bytes(&fixture, &generation, &message("answer-1"))
-        .await
-        .is_empty());
+    assert!(
+        progress
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == DiagnosticCode::DecodeFailure)
+    );
+    assert!(
+        revision_bytes(&fixture, &generation, &message("answer-1"))
+            .await
+            .is_empty()
+    );
     assert_eq!(
         fixture
             .evidence
@@ -1415,8 +1432,8 @@ async fn observation_units_split_at_generation_bounds_without_changing_claims_or
 }
 
 #[tokio::test]
-async fn retained_companion_inventory_resolves_metadata_owner_after_restart_without_filesystem_reads(
-) {
+async fn retained_companion_inventory_resolves_metadata_owner_after_restart_without_filesystem_reads()
+ {
     let fixture = Fixture::for_vendor("claude").await;
     let root = SessionId::decode("env7fk2:claude:root-session").unwrap();
     let child = AgentRef::Embedded {
@@ -1556,12 +1573,14 @@ async fn retained_companion_inventory_resolves_metadata_owner_after_restart_with
 
 mod append;
 mod corpus;
-mod delegation;
 mod delayed_source;
+mod delegation;
 mod epoch_cache;
 mod epoch_order;
 mod frozen_history;
 mod message_update;
+mod provenance;
+mod reconciliation;
 mod state_sharing;
 
 mod streaming;
@@ -1628,11 +1647,13 @@ async fn initial_zero_cut_catch_up_finishes_a_durable_empty_source_tail() {
         "the persisted empty tail must be retired in a same-cut commit"
     );
     assert!(generation.mapper_states(&after).await.unwrap()["source_replay:empty-tail"].is_null());
-    assert!(!fixture
-        .worker()
-        .has_continuations(&generation)
-        .await
-        .unwrap());
+    assert!(
+        !fixture
+            .worker()
+            .has_continuations(&generation)
+            .await
+            .unwrap()
+    );
 }
 
 #[tokio::test]
@@ -1657,18 +1678,24 @@ async fn shared_archive_snapshots_keep_prior_facts_and_refresh_later_reduction_p
     let repeated = archive_context(&mut *held.lock().await);
     assert!(current.claims.ptr_eq(&repeated.claims));
     assert!(current.observations.ptr_eq(&repeated.observations));
-    assert!(current
-        .observation_sources
-        .ptr_eq(&repeated.observation_sources));
+    assert!(
+        current
+            .observation_sources
+            .ptr_eq(&repeated.observation_sources)
+    );
     assert!(current.history_records.ptr_eq(&repeated.history_records));
     assert!(current.source_owners.ptr_eq(&repeated.source_owners));
-    assert!(current
-        .source_definitions
-        .ptr_eq(&repeated.source_definitions));
+    assert!(
+        current
+            .source_definitions
+            .ptr_eq(&repeated.source_definitions)
+    );
     assert!(current.correlations.ptr_eq(&repeated.correlations));
-    assert!(current
-        .correlation_evidence
-        .ptr_eq(&repeated.correlation_evidence));
+    assert!(
+        current
+            .correlation_evidence
+            .ptr_eq(&repeated.correlation_evidence)
+    );
     assert!(
         previous.semantic.history_entries.is_empty(),
         "old mapper inputs cannot be mutated by later projection"
@@ -1680,9 +1707,11 @@ async fn shared_archive_snapshots_keep_prior_facts_and_refresh_later_reduction_p
             .get(&AnyObjectRef::HistoryEntry(entry.entry_ref.clone()))
             .unwrap();
         assert!(!evidence.is_empty());
-        assert!(evidence
-            .iter()
-            .all(|observation| current.observations.contains(observation)));
+        assert!(
+            evidence
+                .iter()
+                .all(|observation| current.observations.contains(observation))
+        );
     }
     let mut fork = current.clone();
     fork.semantic_mut().history_entries.clear();

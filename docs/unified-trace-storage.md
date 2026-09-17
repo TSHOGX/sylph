@@ -381,6 +381,18 @@ incrementally, while a larger relabel/reconciliation rebuild runs as unpublished
 This keeps admission and already-published pages available without pretending that
 arbitrary graph updates have an O(1) algorithm.
 
+A valid reconciliation exceeding one writer batch reserves a future view revision and
+persists a bounded chunk plan. Each chunk commits privately, including temporal mapper
+state, while every read and processed-occurrence lookup remains restricted to the
+published checkpoint. The final transaction publishes its change notice, commit proof
+and checkpoint together. Cancellation before the plan is complete discards only its
+private preparation; a complete plan resumes after cancellation or restart. A generation
+writer reservation spans these bounded transactions and is released on process death;
+fencing drains a pending reconciliation before sampling its cut. Per-observation decode,
+identity and semantic-expansion bounds still apply: a valid large change to existing
+rows is not an excessive source record. Oversized change notices use the existing
+backlog-exhaustion response to require a fresh view.
+
 The incremental resolver retains structurally shared reduction maps, history order and
 relation sequences. Newly validated claims are pending inputs until resolution commits;
 exact redelivery creates no new pending work. A fresh predecessor chain can update its

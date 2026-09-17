@@ -8,16 +8,16 @@ use std::{collections::BTreeSet, path::Path};
 
 use serde::{Deserialize, Serialize};
 use sqlx::{
-    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
     Row, SqliteConnection, SqlitePool,
+    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
 use sylph_protocol::trace::{
+    IngestionScope,
     capture::{
         AttachmentAvailability, Capture, IngestionEpoch, PayloadCompleteness, PayloadManifest,
         PayloadRef,
     },
     identity::{AgentRef, Issuer, ObservationRef},
-    IngestionScope,
 };
 
 use crate::trace::cas::BlobStore;
@@ -825,6 +825,26 @@ impl EvidenceStore {
         .transpose()
     }
 
+    /// Resolve a retained observation's fixed ingestion epoch at an evidence cut
+    /// through indexed metadata only. Tombstoned epochs remain provenance: callers
+    /// must retain that dependency and apply current authorization independently.
+    pub async fn observation_epoch(
+        &self,
+        observation: &ObservationRef,
+        through_cut: u64,
+    ) -> Result<Option<IngestionEpoch>> {
+        let epoch: Option<String> = sqlx::query_scalar(
+            "SELECT c.ingestion_epoch FROM observations o \
+             JOIN occurrences c ON c.occurrence_id=o.occurrence_id \
+             WHERE o.observation_ref=? AND o.admission_seq<=?",
+        )
+        .bind(observation.encode())
+        .bind(signed(through_cut)?)
+        .fetch_optional(&self.readers)
+        .await?;
+        epoch.map(IngestionEpoch::new).transpose().map_err(invalid)
+    }
+
     /// A source proof is read from admitted occurrence metadata, never from a
     /// routing hint or a reconstructed filename. Deleted epochs remain invisible.
     pub async fn observation_source(
@@ -1385,6 +1405,6 @@ async fn read_cursor_key(connection: &mut SqliteConnection) -> Result<[u8; 32]> 
 }
 
 #[cfg(test)]
-mod tests;
-#[cfg(test)]
 mod cursor_tests;
+#[cfg(test)]
+mod tests;

@@ -133,6 +133,7 @@ async fn live_append_payloads_remain_snapshot_readable_across_replacement_final_
                 body_revision: body.body_revision.clone(),
                 representation: body.representation,
                 ranges: vec![],
+                dependency_epochs: BTreeSet::new(),
             },
             0,
             8,

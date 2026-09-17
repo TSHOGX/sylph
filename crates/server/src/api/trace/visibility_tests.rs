@@ -1,7 +1,7 @@
 use super::*;
 use crate::trace::{generation::ProjectionBatch, reading_store::ReadRowChange};
 use axum::{body::Body, http::Request};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use tower::ServiceExt;
 
@@ -12,6 +12,7 @@ struct Fixture {
     parent: AgentRef,
     child: AgentRef,
     parent_epoch: IngestionEpoch,
+    relation_source: AgentRef,
 }
 
 fn header(agent: &AgentRef, name: &str, parent: Option<AgentLink>) -> AgentHeader {
@@ -97,6 +98,9 @@ impl Fixture {
         let child = AgentRef::Session(
             sylph_protocol::SessionId::decode("env7:codex:surviving-child").unwrap(),
         );
+        let relation_source = AgentRef::Session(
+            sylph_protocol::SessionId::decode("env7:codex:relation-witness").unwrap(),
+        );
         state
             .store
             .upsert_environment(
@@ -122,7 +126,7 @@ impl Fixture {
             .unwrap();
         let generation = state.trace.active().await.unwrap();
         let mut epochs = Vec::new();
-        for agent in [&parent, &child] {
+        for agent in [&parent, &child, &relation_source] {
             let epoch = state
                 .trace
                 .evidence()
@@ -150,6 +154,16 @@ impl Fixture {
         let mut read_rows = vec![header_row(child_header, &epochs[1])];
         if include_parent {
             read_rows.push(header_row(parent_header, &epochs[0]));
+            read_rows.push(ReadRowChange {
+                scope: read_scope(&parent, None, "relations"),
+                address: child.encode(),
+                anchor: Some(TraceAddress::of(&AnyObjectRef::Agent(child.clone()))),
+                order_key: 1u64.to_be_bytes().to_vec(),
+                body: Some(json!({})),
+                scope_epoch: epochs[2].clone(),
+                required_environments: [parent.environment().as_str().to_owned()].into(),
+                dependency_epochs: [epochs[0].clone(), epochs[1].clone()].into(),
+            });
         }
         let checkpoint = generation.checkpoint().await.unwrap();
         generation
@@ -175,6 +189,7 @@ impl Fixture {
             parent,
             child,
             parent_epoch: epochs.remove(0),
+            relation_source,
         }
     }
 
@@ -214,9 +229,11 @@ impl Fixture {
             json!(AgentAddress::of(&self.child))
         );
         assert!(!child.to_string().contains("Sensitive parent metadata"));
-        assert!(!child
-            .to_string()
-            .contains(self.parent.anchor_session().native_id.as_str()));
+        assert!(
+            !child
+                .to_string()
+                .contains(self.parent.anchor_session().native_id.as_str())
+        );
     }
 }
 
@@ -259,13 +276,15 @@ async fn readoption_cannot_reauthorize_parent_metadata_from_a_retained_child_vie
         .scope_proof(&fresh_epoch)
         .await
         .unwrap();
-    assert!(fixture
-        .state
-        .trace
-        .catalogue()
-        .scope_is_readable(&proof)
-        .await
-        .unwrap());
+    assert!(
+        fixture
+            .state
+            .trace
+            .catalogue()
+            .scope_is_readable(&proof)
+            .await
+            .unwrap()
+    );
     fixture.assert_parent_hidden(&fixture.bootstrap(&fixture.child, Some(view)).await);
 }
 
@@ -273,6 +292,42 @@ async fn readoption_cannot_reauthorize_parent_metadata_from_a_retained_child_vie
 async fn an_embedded_link_without_a_retained_target_header_is_unresolved() {
     let fixture = Fixture::new(false).await;
     fixture.assert_parent_hidden(&fixture.bootstrap(&fixture.child, None).await);
+}
+
+#[tokio::test]
+async fn deleting_relationship_evidence_redacts_the_link_while_both_endpoints_remain_readable() {
+    let fixture = Fixture::new(true).await;
+    let before = fixture.bootstrap(&fixture.child, None).await;
+    assert_eq!(
+        before["header"]["parent"]["name"],
+        "Sensitive parent metadata"
+    );
+    let view = before["view"]["token"].as_str().unwrap();
+    fixture
+        .state
+        .trace
+        .evidence()
+        .delete_scope(&IngestionScope::Agent(fixture.relation_source.clone()))
+        .await
+        .unwrap();
+    fixture
+        .state
+        .trace
+        .evidence()
+        .readopt_scope(
+            &IngestionScope::Agent(fixture.relation_source.clone()),
+            std::slice::from_ref(&fixture.relation_source),
+        )
+        .await
+        .unwrap();
+    let child = fixture.bootstrap(&fixture.child, Some(view)).await;
+    fixture.assert_parent_hidden(&child);
+    assert_eq!(child["view"], before["view"]);
+    let parent = fixture.bootstrap(&fixture.parent, None).await;
+    assert_eq!(
+        parent["header"]["agent"]["name"],
+        "Sensitive parent metadata"
+    );
 }
 
 #[tokio::test]
@@ -287,6 +342,9 @@ async fn embedded_link_authorization_does_not_hydrate_the_target_header_body() {
     .unwrap();
     assert_eq!(sqlx::query("UPDATE read_rows SET body_json='not JSON' WHERE scope_key=? AND address=? AND valid_to IS NULL")
         .bind(read_scope(&fixture.parent, None, "header")).bind(fixture.parent.encode())
+        .execute(&mut connection).await.unwrap().rows_affected(), 1);
+    assert_eq!(sqlx::query("UPDATE read_rows SET body_json='not JSON' WHERE scope_key=? AND address=? AND valid_to IS NULL")
+        .bind(read_scope(&fixture.parent, None, "relations")).bind(fixture.child.encode())
         .execute(&mut connection).await.unwrap().rows_affected(), 1);
     let child = fixture.bootstrap(&fixture.child, None).await;
     assert_eq!(

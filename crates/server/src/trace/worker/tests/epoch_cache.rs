@@ -27,34 +27,15 @@ async fn assign_old_entry_epoch(
         .object();
     assert!(matches!(reference, AnyObjectRef::HistoryEntry(_)));
     assert_eq!(row.source_epoch, OracleEpoch::Exact(fixture.epoch.clone()));
-    let checkpoint_key = format!("read_epoch:{}", reference.encode());
+    let checkpoint_key = format!("object_provenance:{}", reference.encode());
     let held = worker.states.lock().await.get(name).unwrap().clone();
     let mut committed = held.lock().await.clone();
     assert!(committed.reading.is_some());
 
-    // The stored row already uses the governing agent epoch. A missing per-entry
-    // checkpoint binding has the same fallback, so clearing it changes no served row.
-    let checkpoint = generation.checkpoint().await.unwrap();
-    let unbound = generation
-        .apply(
-            checkpoint.fence_token,
-            &checkpoint.snapshot,
-            &ProjectionBatch {
-                through_cut: cut,
-                continuation: true,
-                mapper_states: BTreeMap::from([(checkpoint_key.clone(), serde_json::Value::Null)]),
-                ..ProjectionBatch::default()
-            },
-        )
-        .await
-        .unwrap();
-    committed.snapshot = Some(unbound.snapshot.clone());
-    assert_eq!(
-        committed.object_epochs.remove(&reference),
-        Some(fixture.epoch.clone())
-    );
-    assert_eq!(reader_projection(fixture, &generation).await, original);
-
+    // Both caches retain the old committed support. A later provenance-only
+    // update must compare against that snapshot, including after restoration.
+    let unbound = generation.checkpoint().await.unwrap();
+    let previous = committed.object_provenance[&reference].clone();
     if restart {
         let path = generation.path().to_path_buf();
         let manifest = generation.manifest().clone();
@@ -69,26 +50,37 @@ async fn assign_old_entry_epoch(
             .unwrap()
             .0;
         assert!(committed.reading.is_none());
-        assert!(!committed.object_epochs.contains_key(&reference));
+        assert_eq!(committed.object_provenance[&reference], previous);
     }
 
     let mut unit = ProjectionUnit::new(&committed, cut);
     unit.batch.continuation = true;
+    let mut support = previous.as_ref().clone();
+    support.primary_epoch = epoch.clone();
+    support.dependency_epochs = imbl::ordset![epoch.clone()];
     unit.next
-        .object_epochs
-        .insert(reference.clone(), epoch.clone());
+        .object_provenance
+        .insert(reference.clone(), Arc::new(support.clone()));
     unit.batch
         .mapper_states
-        .insert(checkpoint_key, serde_json::to_value(epoch).unwrap());
+        .insert(checkpoint_key, serde_json::to_value(&support).unwrap());
     unit.scopes.push((epoch.clone(), cut));
     assert!(Arc::ptr_eq(&committed.reduction, &unit.next.reduction));
     assert!(unit.reduction_changes.is_empty());
     worker
-        .materialize(&generation, &committed, &mut unit)
+        .materialize_reading(
+            &generation,
+            &committed,
+            &ReductionChanges::default(),
+            &mut unit,
+        )
         .await
         .unwrap();
-    assert_eq!(unit.membership_work, MembershipWork::default(),
-        "An epoch-only row update cannot change any membership collection");
+    assert_eq!(
+        unit.membership_work,
+        MembershipWork::default(),
+        "An epoch-only row update cannot change any membership collection"
+    );
     worker.commit_effects(&generation, &unit).await.unwrap();
     let published = generation
         .apply(unbound.fence_token, &unbound.snapshot, &unit.batch)
@@ -104,11 +96,20 @@ async fn assign_old_entry_epoch(
     let changed = &actual.rows[key];
     assert_eq!(changed.body, row.body);
     assert_eq!(changed.order_key, row.order_key);
-    assert_eq!(changed.source_epoch, OracleEpoch::Exact(epoch.clone()),
-        "{name}: a reconstructed baseline must not absorb the candidate epoch before row comparison");
+    assert_eq!(
+        changed.source_epoch,
+        OracleEpoch::Exact(epoch.clone()),
+        "{name}: a reconstructed baseline must not absorb the candidate epoch before row comparison"
+    );
+    // Only the anchored entry's support was reassigned. The row still renders its
+    // message and revision, whose own provenance keeps the governing agent epoch,
+    // so both contribute and the reassignment cannot narrow the row's authorization.
     assert_eq!(
         changed.dependency_epochs,
-        BTreeSet::from([OracleEpoch::Exact(epoch.clone())])
+        BTreeSet::from([
+            OracleEpoch::Exact(epoch.clone()),
+            OracleEpoch::Exact(fixture.epoch.clone()),
+        ])
     );
     let old_row = generation
         .read_row(&unbound.snapshot, &key.0, &key.1)
@@ -118,8 +119,8 @@ async fn assign_old_entry_epoch(
     assert_eq!(old_row.body, row.body);
     assert_eq!(
         generation.mapper_states(&published.snapshot).await.unwrap()
-            [&format!("read_epoch:{}", reference.encode())],
-        serde_json::to_value(epoch).unwrap(),
+            [&format!("object_provenance:{}", reference.encode())],
+        serde_json::to_value(&support).unwrap(),
     );
     generation.close().await;
     actual
@@ -144,6 +145,8 @@ async fn restored_reader_baseline_preserves_old_epoch_until_new_binding_is_commi
     assert_ne!(epoch, fixture.epoch);
     let warm = assign_old_entry_epoch(&fixture, &epoch, false).await;
     let restored = assign_old_entry_epoch(&fixture, &epoch, true).await;
-    assert_eq!(restored, warm,
-        "Restarted full materialization must match warm rows, order, memberships, payloads and exact authorization epochs");
+    assert_eq!(
+        restored, warm,
+        "Restarted full materialization must match warm rows, order, memberships, payloads and exact authorization epochs"
+    );
 }

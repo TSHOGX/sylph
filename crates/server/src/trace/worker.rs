@@ -12,7 +12,10 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 mod budget;
+mod provenance;
 mod reading;
+mod reconciliation;
+pub(super) use provenance::{ObjectProvenance, ProvenanceMap};
 mod semantic;
 pub use semantic::SemanticWork;
 use sylph_protocol::trace::*;
@@ -200,7 +203,8 @@ struct WorkerState {
     captured_payloads: imbl::OrdMap<String, imbl::Vector<mapping::CapturedPayloadBinding>>,
     observation_sources: imbl::OrdMap<ObservationRef, SourcePosition>,
     previews: sylph_trace::reading::PayloadPreviews,
-    object_epochs: imbl::OrdMap<AnyObjectRef, IngestionEpoch>,
+    object_provenance: ProvenanceMap,
+    provenance_index: Option<provenance::SupportIndex>,
     reading: Option<Arc<reading::MaterializedReading>>,
     archive_semantic: Option<semantic::SemanticCache>,
     semantic_work: semantic::SemanticWork,
@@ -336,14 +340,10 @@ pub struct ProjectionWorker {
 }
 
 impl ProjectionWorker {
-    pub async fn projected_snapshot(
+    pub(crate) async fn projected_snapshot(
         &self,
         generation: &GenerationStore,
-    ) -> Result<(
-        Snapshot,
-        Arc<Reduction>,
-        imbl::OrdMap<AnyObjectRef, IngestionEpoch>,
-    )> {
+    ) -> Result<(Snapshot, Arc<Reduction>, ProvenanceMap)> {
         let entry = {
             let mut states = self.states.lock().await;
             states
@@ -359,7 +359,7 @@ impl ProjectionWorker {
         Ok((
             checkpoint.snapshot,
             state.reduction.clone(),
-            state.object_epochs.clone(),
+            state.object_provenance.clone(),
         ))
     }
     pub fn new(
@@ -446,6 +446,7 @@ impl ProjectionWorker {
         if through_cut > evidence_cut {
             return Err(WorkerError::FutureCut);
         }
+        generation.resume_reconciliation(token).await?;
         let held = {
             let mut states = self.states.lock().await;
             states
@@ -528,7 +529,16 @@ impl ProjectionWorker {
                     .reader_append
                     .accumulate(&prepared.reader_append_work);
                 progress.semantic.accumulate(&prepared.next.semantic_work);
-                match generation.validate_batch(&prepared.batch) {
+                let mut validation = generation.validate_batch(&prepared.batch);
+                if captures.len() <= 1
+                    && validation
+                        .as_ref()
+                        .err()
+                        .is_some_and(reconciliation::is_aggregate_limit)
+                {
+                    validation = reconciliation::validate(generation, &prepared.batch);
+                }
+                match validation {
                     Ok(()) => break prepared,
                     Err(GenerationError::Limit(_)) if captures.len() > 1 => {
                         captures.truncate(captures.len().div_ceil(2));
@@ -562,9 +572,9 @@ impl ProjectionWorker {
                 }
             };
             self.commit_effects(generation, &unit).await?;
-            let committed = generation
-                .apply(token, state.committed_snapshot(), &unit.batch)
-                .await?;
+            let committed =
+                reconciliation::apply(generation, token, state.committed_snapshot(), &unit.batch)
+                    .await?;
             // No mutable source state or graph escapes before the atomic generation
             // commit. Cancellation drops this unit and leaves the prior cache intact.
             progress.projected_cut = committed.snapshot.evidence_cut;
@@ -1037,12 +1047,14 @@ impl ProjectionWorker {
                 state
                     .source_owners
                     .insert((ownership.source, ownership.generation), ownership.owner);
-            } else if let Some(key) = key.strip_prefix("read_epoch:") {
+            } else if let Some(key) = key.strip_prefix("object_provenance:") {
                 let reference = AnyObjectRef::decode(key)
                     .map_err(|error| WorkerError::Task(error.to_string()))?;
-                state
-                    .object_epochs
-                    .insert(reference, serde_json::from_value(value)?);
+                if !value.is_null() {
+                    state
+                        .object_provenance
+                        .insert(reference, Arc::new(serde_json::from_value(value)?));
+                }
             } else if let Some(key) = key.strip_prefix("read_preview:") {
                 state.previews.insert(
                     PayloadRef::parse(key).map_err(|error| WorkerError::Task(error.to_string()))?,
@@ -1052,6 +1064,8 @@ impl ProjectionWorker {
         }
         let resolved = self.reduce(&mut state.reducer).await?;
         state.reduction = resolved.reduction;
+        self.restore_provenance_index(&mut state, snapshot.evidence_cut)
+            .await?;
         Ok((state, resolved.work))
     }
 
@@ -1223,18 +1237,6 @@ impl ProjectionWorker {
                 .map(|payload| (payload, epoch.clone())),
         );
         for claim in &output.claims {
-            for subject in match &claim.fact {
-                Fact::Declare { object } => vec![object.object_ref()],
-                _ => vec![],
-            } {
-                if !unit.next.object_epochs.contains_key(&subject) {
-                    unit.batch.mapper_states.insert(
-                        format!("read_epoch:{}", subject.encode()),
-                        serde_json::to_value(&epoch)?,
-                    );
-                    unit.next.object_epochs.insert(subject, epoch.clone());
-                }
-            }
             for evidence in &claim.evidence {
                 if !unit.next.available_evidence.contains(evidence) {
                     if self.evidence.receipt(evidence).await?.is_some_and(|receipt|matches!(receipt.disposition,ReceiptDisposition::Retained{admission_seq}if admission_seq<=unit.batch.through_cut)){unit.next.available_evidence.insert(evidence.clone());}
@@ -1579,9 +1581,10 @@ impl ProjectionWorker {
         before: &WorkerState,
         unit: &mut ProjectionUnit,
     ) -> Result<()> {
+        let changes = std::mem::take(&mut unit.reduction_changes);
+        self.refresh_provenance(unit, &changes).await?;
         let old = &before.reduction;
         let new = &unit.next.reduction;
-        let changes = std::mem::take(&mut unit.reduction_changes);
         // Redelivery and acquisition-only metadata do not change a reader. Keep
         // the exact committed materialization; payload availability and new epoch
         // bindings remain independent inputs even when semantic values agree.
@@ -1591,7 +1594,7 @@ impl ProjectionWorker {
                 .batch
                 .mapper_states
                 .keys()
-                .any(|key| key.starts_with("read_epoch:"))
+                .any(|key| key.starts_with("object_provenance:"))
             && unit.next.reading.is_some()
         {
             return Ok(());

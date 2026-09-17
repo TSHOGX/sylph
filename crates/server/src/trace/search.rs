@@ -7,15 +7,15 @@
 use super::generation::Snapshot;
 use serde::{Deserialize, Serialize};
 use sqlx::{
-    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous},
     Row, SqlitePool,
+    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous},
 };
 use std::{
     collections::BTreeSet,
     path::Path,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
 };
 use sylph_protocol::trace::*;
@@ -726,7 +726,17 @@ fn search_sql_error(error: sqlx::Error, budget_exhausted: bool, query: &str) -> 
                 || message.starts_with("unknown special query:")
                 || message
                     .strip_prefix("no such column: ")
-                    .is_some_and(|column| query.contains(&format!("{column}:"))))
+                    .is_some_and(|column| {
+                        // FTS5 also parses an unquoted hyphen as a column exclusion.
+                        // Its unknown-column diagnostic can precede a missing colon,
+                        // as in `release-notes`. Match query tokens so this remains a
+                        // client error without relabeling unrelated schema failures.
+                        query
+                            .split(|character: char| {
+                                !character.is_alphanumeric() && character != '_'
+                            })
+                            .any(|token| token == column)
+                    }))
         {
             return SearchError::InvalidQuery(message.into());
         }

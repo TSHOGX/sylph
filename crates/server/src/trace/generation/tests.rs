@@ -1,10 +1,9 @@
 use super::*;
 use sylph_protocol::{
-    trace::{
-        AgentThread, ClaimRef, EntryRef, Fact, HistoryEntry, Issuer,
-        ObservationRef, OwnerRef,
-    },
     SessionId,
+    trace::{
+        AgentThread, ClaimRef, EntryRef, Fact, HistoryEntry, Issuer, ObservationRef, OwnerRef,
+    },
 };
 
 struct Fixture {
@@ -16,7 +15,7 @@ struct Fixture {
 
 #[tokio::test]
 async fn projection_writer_discards_an_acknowledged_begin_without_a_transaction_guard() {
-    let fixture=Fixture::new().await;
+    let fixture = Fixture::new().await;
     crate::db::sqlite::assert_abandoned_begin_is_discarded(&fixture.store.writer).await;
 }
 
@@ -129,7 +128,8 @@ async fn late_order_and_body_changes_do_not_omit_or_duplicate_old_snapshot_membe
     );
     let mut changed_b = b.clone();
     if let TraceObject::HistoryEntry(entry) = &mut changed_b {
-        entry.predecessor = Some(EntryRef::native(fixture.agent.clone(), "entries", vec!["a".into()]).unwrap());
+        entry.predecessor =
+            Some(EntryRef::native(fixture.agent.clone(), "entries", vec!["a".into()]).unwrap());
     }
     let new = fixture
         .publish(ProjectionBatch {
@@ -390,6 +390,7 @@ async fn payload_authorization_requires_the_exact_anchor_revision_recipient_and_
         selection: Some(fixture.selection.clone()),
         payload_ref: PayloadRef::bytes("1".repeat(64)).unwrap(),
         body_revision: "R1".into(),
+        dependency_epochs: BTreeSet::new(),
         representation: Representation::Conversation,
         ranges: vec![PayloadRange {
             start: 4,
@@ -580,15 +581,17 @@ async fn a_failed_projection_unit_rolls_back_objects_claims_memberships_and_chec
         memberships: vec![fixture.member(&object, 1), fixture.member(&absent, 2)],
         ..Default::default()
     };
-    assert!(fixture
-        .store
-        .apply(
-            1,
-            &fixture.store.checkpoint().await.unwrap().snapshot,
-            &failed,
-        )
-        .await
-        .is_err());
+    assert!(
+        fixture
+            .store
+            .apply(
+                1,
+                &fixture.store.checkpoint().await.unwrap().snapshot,
+                &failed,
+            )
+            .await
+            .is_err()
+    );
     assert_eq!(
         fixture
             .store
@@ -755,16 +758,20 @@ async fn expired_revision_floor_is_explicit_and_cannot_regress_after_restart() {
             .preview,
         "current"
     );
-    assert!(fixture
-        .store
-        .advance_revision_floor(old.view_revision)
-        .await
-        .is_err());
-    assert!(fixture
-        .store
-        .advance_revision_floor(current.view_revision + 1)
-        .await
-        .is_err());
+    assert!(
+        fixture
+            .store
+            .advance_revision_floor(old.view_revision)
+            .await
+            .is_err()
+    );
+    assert!(
+        fixture
+            .store
+            .advance_revision_floor(current.view_revision + 1)
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -1179,7 +1186,9 @@ async fn foreground_work_stays_bounded_when_history_and_invalid_version_density_
         }
     }
     for (history, density, candidates, vm_steps) in &measurements {
-        eprintln!("history={history}, superseded-density={density}, candidates={candidates}, VM steps={vm_steps}");
+        eprintln!(
+            "history={history}, superseded-density={density}, candidates={candidates}, VM steps={vm_steps}"
+        );
     }
     for density in [1, 10, 100] {
         let small = measurements
@@ -1219,20 +1228,22 @@ async fn same_cut_interpretation_continuations_advance_view_without_claiming_new
         .snapshot;
     assert_eq!(snapshot.evidence_cut, 0);
     assert_eq!(snapshot.view_revision, 1);
-    assert!(fixture
-        .store
-        .apply(
-            prior.fence_token,
-            &snapshot,
-            &ProjectionBatch {
-                through_cut: 0,
-                continuation: true,
-                processed_occurrences: vec![1],
-                ..Default::default()
-            }
-        )
-        .await
-        .is_err());
+    assert!(
+        fixture
+            .store
+            .apply(
+                prior.fence_token,
+                &snapshot,
+                &ProjectionBatch {
+                    through_cut: 0,
+                    continuation: true,
+                    processed_occurrences: vec![1],
+                    ..Default::default()
+                }
+            )
+            .await
+            .is_err()
+    );
     let next = fixture
         .store
         .apply(
@@ -1393,12 +1404,14 @@ async fn assert_snapshot_mismatch_rejected(change: impl FnOnce(&mut Snapshot)) {
     assert!(matches!(fixture.store.mapper_states(&mismatch).await,
         Err(GenerationError::StaleSnapshot { expected, actual }) if expected == mismatch && actual == current.snapshot));
     assert_eq!(fixture.store.checkpoint().await.unwrap(), current);
-    assert!(fixture
-        .store
-        .mapper_states(&current.snapshot)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        fixture
+            .store
+            .mapper_states(&current.snapshot)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]

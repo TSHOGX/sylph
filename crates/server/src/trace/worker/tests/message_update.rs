@@ -185,8 +185,11 @@ impl Stream {
                 "an existing-message update must preserve unrelated history rows"
             );
         }
-        assert_eq!(actual, reader_projection(&self.fixture, &self.cold).await,
-            "current bodies, order, epoch metadata, memberships, parts and payload reachability must match full projection");
+        assert_eq!(
+            actual,
+            reader_projection(&self.fixture, &self.cold).await,
+            "current bodies, order, epoch metadata, memberships, parts and payload reachability must match full projection"
+        );
         assert_eq!(claims(&self.store).await, claims(&self.cold).await);
     }
 
@@ -281,6 +284,7 @@ fn anchor(access: &PayloadAccess) -> PayloadAnchor {
         body_revision: access.body_revision.clone(),
         representation: access.representation,
         ranges: vec![],
+        dependency_epochs: BTreeSet::new(),
     }
 }
 
@@ -355,8 +359,8 @@ async fn measured_sequence(records: usize) -> Vec<UpdateWork> {
 }
 
 #[tokio::test]
-async fn turn_bearing_message_updates_bound_work_independently_of_twenty_or_two_hundred_unrelated_messages(
-) {
+async fn turn_bearing_message_updates_bound_work_independently_of_twenty_or_two_hundred_unrelated_messages()
+ {
     assert_eq!(measured_sequence(20).await, measured_sequence(200).await);
 }
 
@@ -445,11 +449,13 @@ async fn failed_existing_message_update_preserves_old_parts_and_retries_without_
     .unwrap();
     sqlx::raw_sql("CREATE TRIGGER reject_message_update BEFORE INSERT ON read_rows BEGIN SELECT RAISE(ABORT,'message update rollback'); END")
         .execute(&mut connection).await.unwrap();
-    assert!(stream
-        .worker
-        .catch_up(&stream.store, 1, stream.sequence)
-        .await
-        .is_err());
+    assert!(
+        stream
+            .worker
+            .catch_up(&stream.store, 1, stream.sequence)
+            .await
+            .is_err()
+    );
     assert_eq!(stream.snapshot().await, old);
     assert_eq!(
         reader_projection(&stream.fixture, &stream.store).await,

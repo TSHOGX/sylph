@@ -8,22 +8,24 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
 };
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use sqlx::{
+    Row, Sqlite, SqliteConnection, SqlitePool,
     pool::PoolConnection,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
-    Row, Sqlite, SqliteConnection, SqlitePool,
 };
 use sylph_protocol::trace::{
-    AgentRef, AnyObjectRef, Claim, ClaimRef, OwnerRef, PayloadRange, PayloadRef, Recipient,
-    Representation, SelectionRef, TraceFactKind, TraceObject,
+    AgentRef, AnyObjectRef, Claim, ClaimRef, IngestionEpoch, OwnerRef, PayloadRange, PayloadRef,
+    Recipient, Representation, SelectionRef, TraceFactKind, TraceObject,
 };
+
+mod reconciliation;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -330,10 +332,11 @@ pub struct PayloadAnchor {
     pub body_revision: String,
     pub representation: Representation,
     pub ranges: Vec<PayloadRange>,
+    pub dependency_epochs: BTreeSet<IngestionEpoch>,
 }
 
 impl PayloadAnchor {
-    fn key(&self) -> Result<String> {
+    pub(crate) fn key(&self) -> Result<String> {
         // Range coverage is a temporal value. It is not part of the relation's
         // identity, allowing a corrected coverage claim to close its old version.
         Ok(blake3::hash(&serde_json::to_vec(&(
@@ -491,6 +494,8 @@ pub struct GenerationStore {
     writer: SqlitePool,
     readers: SqlitePool,
     limits: QueryLimits,
+    #[cfg(test)]
+    reconciliation_pause: Arc<std::sync::Mutex<Option<reconciliation::Pause>>>,
 }
 
 impl GenerationStore {
@@ -537,6 +542,8 @@ impl GenerationStore {
             writer,
             readers,
             limits,
+            #[cfg(test)]
+            reconciliation_pause: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
@@ -563,6 +570,8 @@ impl GenerationStore {
             writer,
             readers,
             limits,
+            #[cfg(test)]
+            reconciliation_pause: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
@@ -583,10 +592,14 @@ impl GenerationStore {
         decode_checkpoint(&self.manifest.generation, &row)
     }
 
-    pub async fn snapshot_at(&self,revision:u64)->Result<Snapshot> {
-        let row=sqlx::query("SELECT r.evidence_cut FROM projection_revisions r JOIN projection_state s ON s.singleton=1 WHERE r.view_revision=? AND r.view_revision>=s.revision_floor")
+    pub async fn snapshot_at(&self, revision: u64) -> Result<Snapshot> {
+        let row=sqlx::query("SELECT r.evidence_cut FROM projection_revisions r JOIN projection_state s ON s.singleton=1 WHERE r.view_revision=? AND r.view_revision>=s.revision_floor AND r.view_revision<=s.view_revision")
             .bind(signed(revision)?).fetch_optional(&self.readers).await?.ok_or(GenerationError::SnapshotExpired)?;
-        Ok(Snapshot {generation:self.manifest.generation.clone(),evidence_cut:unsigned(row.try_get("evidence_cut")?)?,view_revision:revision})
+        Ok(Snapshot {
+            generation: self.manifest.generation.clone(),
+            evidence_cut: unsigned(row.try_get("evidence_cut")?)?,
+            view_revision: revision,
+        })
     }
 
     /// Publication proofs survive reader-floor advancement and must still match
@@ -617,6 +630,8 @@ impl GenerationStore {
         batch: &ProjectionBatch,
     ) -> Result<Checkpoint> {
         self.validate_batch(batch)?;
+        let _writer = self.lock_complete_writer().await?;
+        self.resume_reconciliation_locked(expected_fence).await?;
         let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
         let row = sqlx::query("SELECT * FROM projection_state WHERE singleton = 1")
             .fetch_one(&mut *tx)
@@ -632,10 +647,13 @@ impl GenerationStore {
             });
         }
         let expected_cut = expected_snapshot.evidence_cut;
-        if batch.through_cut < expected_cut || (batch.through_cut == expected_cut &&
-            (!batch.continuation || !batch.processed_occurrences.is_empty())) {
+        if batch.through_cut < expected_cut
+            || (batch.through_cut == expected_cut
+                && (!batch.continuation || !batch.processed_occurrences.is_empty()))
+        {
             return Err(GenerationError::Invalid(
-                "a same-cut interpretation continuation cannot claim new admitted occurrences".into(),
+                "a same-cut interpretation continuation cannot claim new admitted occurrences"
+                    .into(),
             ));
         }
         let revision = prior
@@ -648,8 +666,33 @@ impl GenerationStore {
             .bind(signed(batch.through_cut)?)
             .execute(&mut *tx)
             .await?;
+        let changes = self.write_batch_rows(&mut tx, batch, revision).await?;
+        let json = serde_json::to_string(&changes)?;
+        self.publish_batch(
+            &mut tx,
+            &prior,
+            batch.through_cut,
+            revision,
+            &blake3::hash(&serde_json::to_vec(batch)?).to_hex(),
+            &json,
+            json.len(),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(Checkpoint {
+            snapshot: changes.snapshot,
+            ..prior
+        })
+    }
+
+    async fn write_batch_rows(
+        &self,
+        tx: &mut SqliteConnection,
+        batch: &ProjectionBatch,
+        revision: u64,
+    ) -> Result<ChangeBatch> {
         for claim in &batch.claims {
-            save_claim(&mut tx, claim, revision).await?;
+            save_claim(tx, claim, revision).await?;
         }
         let mut changed = BTreeSet::new();
         let mut removed = BTreeSet::new();
@@ -737,7 +780,7 @@ impl GenerationStore {
                 .ok_or_else(|| {
                     GenerationError::Invalid("membership count became negative".into())
                 })?;
-            sqlx::query("INSERT INTO scope_counts VALUES (?, ?, ?)")
+            sqlx::query("INSERT INTO scope_counts VALUES (?, ?, ?) ON CONFLICT(scope_key,valid_from) DO UPDATE SET member_count=excluded.member_count")
                 .bind(scope)
                 .bind(signed(revision)?)
                 .bind(count)
@@ -745,9 +788,9 @@ impl GenerationStore {
                 .await?;
         }
         for change in &batch.payload_anchors {
-            save_anchor(&mut tx, change, revision).await?;
+            save_anchor(tx, change, revision).await?;
         }
-        super::reading_store::apply_rows(&mut tx, &batch.read_rows, revision).await?;
+        super::reading_store::apply_rows(tx, &batch.read_rows, revision).await?;
         for derivation in &batch.payload_derivations {
             let json = serde_json::to_string(derivation)?;
             let key = blake3::hash(json.as_bytes()).to_hex().to_string();
@@ -759,48 +802,60 @@ impl GenerationStore {
                 .bind(signed(*occurrence)?).bind(signed(revision)?).execute(&mut *tx).await?;
         }
         for (mapper, value) in &batch.mapper_states {
-            sqlx::query("INSERT INTO mapper_states VALUES (?, ?, ?) ON CONFLICT(mapper_key) DO UPDATE SET state_json = excluded.state_json, at_revision = excluded.at_revision")
-                .bind(mapper).bind(serde_json::to_string(value)?).bind(signed(revision)?).execute(&mut *tx).await?;
+            sqlx::query("INSERT INTO mapper_states VALUES (?, ?, ?)")
+                .bind(mapper)
+                .bind(serde_json::to_string(value)?)
+                .bind(signed(revision)?)
+                .execute(&mut *tx)
+                .await?;
         }
         let snapshot = Snapshot {
             generation: self.manifest.generation.clone(),
             evidence_cut: batch.through_cut,
             view_revision: revision,
         };
-        let changes = ChangeBatch {
+        Ok(ChangeBatch {
             snapshot,
             changed: changed.into_iter().collect(),
             removed: removed.into_iter().collect(),
             moved: moved.into_iter().collect(),
-        };
-        let json = serde_json::to_string(&changes)?;
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn publish_batch(
+        &self,
+        tx: &mut SqliteConnection,
+        prior: &Checkpoint,
+        through_cut: u64,
+        revision: u64,
+        digest: &str,
+        json: &str,
+        change_bytes: usize,
+    ) -> Result<()> {
         sqlx::query("INSERT INTO change_batches VALUES (?, ?, ?, ?)")
             .bind(signed(revision)?)
-            .bind(signed(batch.through_cut)?)
-            .bind(&json)
-            .bind(json.len() as i64)
+            .bind(signed(through_cut)?)
+            .bind(json)
+            .bind(change_bytes as i64)
             .execute(&mut *tx)
             .await?;
         sqlx::query("INSERT INTO projection_commit_proofs VALUES(?,?,?,?,?)")
             .bind(signed(revision)?)
             .bind(signed(prior.snapshot.view_revision)?)
-            .bind(signed(expected_cut)?)
-            .bind(signed(batch.through_cut)?)
-            .bind(blake3::hash(&serde_json::to_vec(batch)?).to_hex().as_str())
+            .bind(signed(prior.snapshot.evidence_cut)?)
+            .bind(signed(through_cut)?)
+            .bind(digest)
             .execute(&mut *tx)
             .await?;
         sqlx::query(
             "UPDATE projection_state SET evidence_cut = ?, view_revision = ? WHERE singleton = 1",
         )
-        .bind(signed(batch.through_cut)?)
+        .bind(signed(through_cut)?)
         .bind(signed(revision)?)
         .execute(&mut *tx)
         .await?;
-        tx.commit().await?;
-        Ok(Checkpoint {
-            snapshot: changes.snapshot,
-            ..prior
-        })
+        Ok(())
     }
 
     /// BEGIN IMMEDIATE drains in-flight commits. Incrementing the persistent token
@@ -817,6 +872,8 @@ impl GenerationStore {
         if let Some(entered) = entered {
             entered.notify_one();
         }
+        let _writer = self.lock_complete_writer().await?;
+        self.resume_reconciliation_locked(expected_token).await?;
         let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
         let row = sqlx::query("SELECT * FROM projection_state WHERE singleton = 1")
             .fetch_one(&mut *tx)
@@ -1318,8 +1375,8 @@ impl GenerationStore {
         requested: &PayloadAnchor,
         start: u64,
         end_exclusive: u64,
-    ) -> Result<()> {
-        if start >= end_exclusive {
+    ) -> Result<BTreeSet<IngestionEpoch>> {
+        if start > end_exclusive {
             return Err(GenerationError::PayloadNotReachable);
         }
         let (mut conn, _) = self.read_connection(snapshot).await?;
@@ -1327,7 +1384,7 @@ impl GenerationStore {
         if via.withdrawn_reason.is_some() {
             return Err(GenerationError::PayloadNotReachable);
         }
-        let row = sqlx::query("SELECT valid_to, ranges_json FROM payload_anchor_versions WHERE anchor_key = ? AND valid_from <= ? ORDER BY valid_from DESC LIMIT 1")
+        let row = sqlx::query("SELECT valid_to, ranges_json, dependency_epochs_json FROM payload_anchor_versions WHERE anchor_key = ? AND valid_from <= ? ORDER BY valid_from DESC LIMIT 1")
             .bind(requested.key()?).bind(signed(snapshot.view_revision)?).fetch_optional(&mut *conn).await.map_err(map_query_error)?.ok_or(GenerationError::PayloadNotReachable)?;
         if row
             .try_get::<Option<i64>, _>("valid_to")?
@@ -1337,6 +1394,11 @@ impl GenerationStore {
         }
         let ranges: Vec<PayloadRange> =
             serde_json::from_str(&row.try_get::<String, _>("ranges_json")?)?;
+        let dependencies =
+            serde_json::from_str(&row.try_get::<String, _>("dependency_epochs_json")?)?;
+        if start == end_exclusive {
+            return Ok(dependencies);
+        }
         let mut cursor = start;
         for range in ranges {
             if range.end_exclusive <= cursor {
@@ -1347,7 +1409,7 @@ impl GenerationStore {
             }
             cursor = range.end_exclusive;
             if cursor >= end_exclusive {
-                return Ok(());
+                return Ok(dependencies);
             }
         }
         Err(GenerationError::PayloadNotReachable)
@@ -1365,8 +1427,8 @@ impl GenerationStore {
         expected_snapshot: &Snapshot,
         pause: Option<(&tokio::sync::Notify, &tokio::sync::Notify)>,
     ) -> Result<BTreeMap<String, serde_json::Value>> {
-        // Mapper rows retain only their current value. Pin the checkpoint and rows
-        // in one read transaction; filtering by at_revision would lose overwritten keys.
+        // The exact checkpoint and temporal values share one read transaction;
+        // private reconciliation rows cannot replace its committed mapper state.
         let mut tx = self.readers.begin().await?;
         let row = sqlx::query("SELECT * FROM projection_state WHERE singleton = 1")
             .fetch_one(&mut *tx)
@@ -1382,7 +1444,8 @@ impl GenerationStore {
             entered.notify_one();
             resume.notified().await;
         }
-        let rows = sqlx::query("SELECT mapper_key, state_json FROM mapper_states")
+        let rows = sqlx::query("SELECT mapper_key,state_json FROM mapper_states m WHERE at_revision=(SELECT MAX(at_revision) FROM mapper_states WHERE mapper_key=m.mapper_key AND at_revision<=?)")
+            .bind(signed(expected_snapshot.view_revision)?)
             .fetch_all(&mut *tx)
             .await?;
         tx.commit().await?;
@@ -1398,7 +1461,7 @@ impl GenerationStore {
 
     pub async fn has_processed_occurrence(&self, occurrence: u64) -> Result<bool> {
         Ok(sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM processed_occurrences WHERE occurrence_id = ?)",
+            "SELECT EXISTS(SELECT 1 FROM processed_occurrences WHERE occurrence_id = ? AND at_revision <= (SELECT view_revision FROM projection_state WHERE singleton=1))",
         )
         .bind(signed(occurrence)?)
         .fetch_one(&self.readers)
@@ -1414,6 +1477,7 @@ impl GenerationStore {
         if limit == 0 || limit > self.limits.max_items {
             return Err(GenerationError::Limit("payload derivations"));
         }
+        self.validate_published_snapshot(snapshot).await?;
         let rows:Vec<String>=sqlx::query_scalar("SELECT derivation_json FROM payload_derivations WHERE payload_ref=? AND first_revision<=? ORDER BY first_revision,derivation_key LIMIT ?")
             .bind(payload.as_str()).bind(signed(snapshot.view_revision)?).bind(limit as i64).fetch_all(&self.readers).await?;
         rows.into_iter()
@@ -1437,6 +1501,7 @@ impl GenerationStore {
         {
             return Err(GenerationError::Limit("retained claim page"));
         }
+        self.validate_published_snapshot(snapshot).await?;
         let cursor = after.map(ClaimRef::encode).unwrap_or_default();
         let rows=sqlx::query("SELECT claim_ref,claim_bytes FROM semantic_claims WHERE claim_ref > ? AND first_revision <= ? ORDER BY claim_ref LIMIT ?")
             .bind(cursor).bind(signed(snapshot.view_revision)?).bind((limit+1) as i64).fetch_all(&self.readers).await?;
@@ -1485,7 +1550,7 @@ impl GenerationStore {
         if limit == 0 || limit > self.limits.max_items {
             return Err(GenerationError::Limit("change batches"));
         }
-        let rows = sqlx::query("SELECT batch_bytes, view_revision FROM change_batches WHERE view_revision > ? ORDER BY view_revision LIMIT ?")
+        let rows = sqlx::query("SELECT batch_bytes, view_revision FROM change_batches WHERE view_revision > ? AND view_revision <= (SELECT view_revision FROM projection_state WHERE singleton=1) ORDER BY view_revision LIMIT ?")
             .bind(signed(revision)?).bind(limit as i64).fetch_all(&self.readers).await?;
         let mut bytes = 0usize;
         let mut result = Vec::new();
@@ -1519,10 +1584,13 @@ impl GenerationStore {
         conn.lock_handle()
             .await?
             .set_progress_handler(1, move || counter.fetch_add(1, Ordering::Relaxed) < budget);
-        let row = sqlx::query("SELECT s.revision_floor, r.evidence_cut FROM projection_state s LEFT JOIN projection_revisions r ON r.view_revision = ? WHERE s.singleton = 1")
+        let row = sqlx::query("SELECT s.revision_floor,s.view_revision,r.evidence_cut FROM projection_state s LEFT JOIN projection_revisions r ON r.view_revision = ? WHERE s.singleton = 1")
             .bind(signed(snapshot.view_revision)?).fetch_one(&mut *conn).await.map_err(map_query_error)?;
         if snapshot.view_revision < unsigned(row.try_get("revision_floor")?)? {
             return Err(GenerationError::SnapshotExpired);
+        }
+        if snapshot.view_revision > unsigned(row.try_get("view_revision")?)? {
+            return Err(GenerationError::InvalidSnapshot);
         }
         let cut = row
             .try_get::<Option<i64>, _>("evidence_cut")?
@@ -1549,14 +1617,39 @@ impl GenerationStore {
         if serde_json::to_vec(batch)?.len() > self.limits.max_batch_bytes {
             return Err(GenerationError::Limit("projection batch bytes"));
         }
+        self.validate_batch_contents(batch)
+    }
+
+    fn validate_batch_contents(&self, batch: &ProjectionBatch) -> Result<()> {
+        let mut rows = BTreeSet::new();
         for row in &batch.read_rows {
-            if row.scope.len()>self.limits.max_key_bytes||row.address.len()>self.limits.max_key_bytes||row.order_key.len()>self.limits.max_key_bytes {return Err(GenerationError::Limit("reading row key"));}
-            if row.body.as_ref().map(serde_json::to_vec).transpose()?.is_some_and(|body|body.len()>self.limits.max_summary_bytes) {return Err(GenerationError::Limit("individual reading row bytes"));}
+            if !rows.insert((&row.scope, &row.address)) {
+                return Err(GenerationError::Invalid(
+                    "one batch changes a reading row twice".into(),
+                ));
+            }
+            if row.scope.len() > self.limits.max_key_bytes
+                || row.address.len() > self.limits.max_key_bytes
+                || row.order_key.len() > self.limits.max_key_bytes
+            {
+                return Err(GenerationError::Limit("reading row key"));
+            }
+            if row
+                .body
+                .as_ref()
+                .map(serde_json::to_vec)
+                .transpose()?
+                .is_some_and(|body| body.len() > self.limits.max_summary_bytes)
+            {
+                return Err(GenerationError::Limit("individual reading row bytes"));
+            }
             if serde_json::to_vec(&row.required_environments)?.len()
                 + serde_json::to_vec(&row.dependency_epochs)?.len()
                 > self.limits.max_key_bytes
             {
-                return Err(GenerationError::Limit("reading authorization metadata bytes"));
+                return Err(GenerationError::Limit(
+                    "reading authorization metadata bytes",
+                ));
             }
             for environment in &row.required_environments {
                 sylph_protocol::EnvironmentId::parse(environment)
@@ -1594,7 +1687,7 @@ impl GenerationStore {
                 {
                     return Err(GenerationError::Invalid(
                         "withdrawal needs a bounded reason".into(),
-                    ))
+                    ));
                 }
                 _ => {}
             }
@@ -1662,7 +1755,9 @@ impl GenerationStore {
 async fn writer_pool(path: &Path) -> Result<SqlitePool> {
     Ok(SqlitePoolOptions::new()
         .max_connections(1)
-        .after_release(|connection,_|Box::pin(crate::db::sqlite::reusable_after_release(connection)))
+        .after_release(|connection, _| {
+            Box::pin(crate::db::sqlite::reusable_after_release(connection))
+        })
         .connect_with(
             SqliteConnectOptions::new()
                 .filename(path)
@@ -1775,8 +1870,8 @@ async fn save_anchor(
                 "payload anchor recipient differs from its containing object".into(),
             ));
         }
-        sqlx::query("INSERT INTO payload_anchor_versions (anchor_key, via_ref, containing_agent, selection_ref, payload_ref, body_revision, representation, valid_from, ranges_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
-            .bind(key).bind(object_key(&anchor.via_ref)?).bind(anchor.containing_agent.encode()).bind(anchor.selection.as_ref().map(SelectionRef::encode)).bind(anchor.payload_ref.as_str()).bind(&anchor.body_revision).bind(serde_json::to_string(&anchor.representation)?).bind(signed(revision)?).bind(serde_json::to_string(&anchor.ranges)?).execute(conn).await?;
+        sqlx::query("INSERT INTO payload_anchor_versions (anchor_key, via_ref, containing_agent, selection_ref, payload_ref, body_revision, representation, valid_from, ranges_json, dependency_epochs_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+            .bind(key).bind(object_key(&anchor.via_ref)?).bind(anchor.containing_agent.encode()).bind(anchor.selection.as_ref().map(SelectionRef::encode)).bind(anchor.payload_ref.as_str()).bind(&anchor.body_revision).bind(serde_json::to_string(&anchor.representation)?).bind(signed(revision)?).bind(serde_json::to_string(&anchor.ranges)?).bind(serde_json::to_string(&anchor.dependency_epochs)?).execute(conn).await?;
     }
     Ok(())
 }
@@ -1806,7 +1901,7 @@ fn decode_checkpoint(generation: &str, row: &sqlx::sqlite::SqliteRow) -> Result<
         _ => {
             return Err(GenerationError::Invalid(
                 "unknown durable writer mode".into(),
-            ))
+            ));
         }
     };
     Ok(Checkpoint {

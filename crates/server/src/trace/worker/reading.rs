@@ -1,7 +1,7 @@
 use super::*;
 use crate::trace::{
     generation::{PayloadAnchor, PayloadAnchorChange},
-    reading_store::{read_scope, ReadRowChange},
+    reading_store::{ReadRowChange, read_scope},
 };
 use sylph_trace::reading::{AppendIndex, AppendWork, PayloadPreview, ReadingProjection};
 
@@ -18,17 +18,20 @@ pub(super) struct MaterializedReading {
 impl MaterializedReading {
     fn from_projection(
         projection: &ReadingProjection,
-        epochs: &imbl::OrdMap<AnyObjectRef, IngestionEpoch>,
+        provenance: &ProvenanceMap,
         reduction: Arc<Reduction>,
         max_references: usize,
+        support_index: &provenance::SupportIndex,
         work: &mut AppendWork,
     ) -> Result<Self> {
         Ok(Self {
-            rows: rows(projection, epochs)?
+            rows: rows(projection, provenance, &reduction, support_index)?
                 .into_iter()
                 .map(|(key, row)| (key, Arc::new(row)))
                 .collect(),
-            anchors: anchors(projection)?.into_iter().collect(),
+            anchors: anchors(projection, provenance, &reduction)?
+                .into_iter()
+                .collect(),
             composed: projection.composed_payloads.clone().into_iter().collect(),
             append_index: AppendIndex::build(reduction, max_references, work),
             window_lengths: projection
@@ -79,9 +82,10 @@ impl ProjectionWorker {
             None => {
                 let previous = MaterializedReading::from_projection(
                     &sylph_trace::reading::project(old, &committed.previews, 32),
-                    &committed.object_epochs,
+                    &committed.object_provenance,
                     old.clone(),
                     self.limits.max_incremental_dependencies,
+                    &committed.provenance_index.clone().unwrap_or_default(),
                     &mut unit.reader_append_work,
                 )?;
                 unit.reader_rows_materialized += previous.rows.len();
@@ -212,13 +216,13 @@ impl ProjectionWorker {
             .batch
             .mapper_states
             .keys()
-            .filter_map(|key| key.strip_prefix("read_epoch:"))
+            .filter_map(|key| key.strip_prefix("object_provenance:"))
         {
             let reference = AnyObjectRef::decode(reference)
                 .map_err(|error| WorkerError::Task(error.to_string()))?;
             existing_epoch_changed |= old.object(&reference).is_some()
-                && committed.object_epochs.get(&reference)
-                    != unit.next.object_epochs.get(&reference);
+                && committed.object_provenance.get(&reference)
+                    != unit.next.object_provenance.get(&reference);
         }
         if allow_append && !existing_preview_changed && !existing_epoch_changed {
             let appended = before
@@ -250,7 +254,12 @@ impl ProjectionWorker {
                         )
                     })
                     .collect();
-                let additions = rows(&appended, &unit.next.object_epochs)?;
+                let additions = rows(
+                    &appended,
+                    &unit.next.object_provenance,
+                    &unit.next.reduction,
+                    &unit.next.provenance_index.clone().unwrap_or_default(),
+                )?;
                 unit.reader_rows_materialized += additions.len();
                 for (key, mut row) in additions {
                     if let Some(offset) = offsets.get(&row.scope) {
@@ -270,15 +279,19 @@ impl ProjectionWorker {
                             && prior.anchor == row.anchor
                             && prior.scope_epoch == row.scope_epoch
                             && prior.required_environments == row.required_environments
-                            && prior.target_epochs == row.target_epochs
+                            && prior.dependency_epochs == row.dependency_epochs
                     }) {
                         continue;
                     }
                     unit.batch.read_rows.push(row.clone());
                     next.rows.insert(key, Arc::new(row));
                 }
-                for (key, anchor) in anchors(&appended)? {
-                    if !next.anchors.contains_key(&key) {
+                for (key, anchor) in anchors(
+                    &appended,
+                    &unit.next.object_provenance,
+                    &unit.next.reduction,
+                )? {
+                    if next.anchors.get(&key) != Some(&anchor) {
                         unit.batch.payload_anchors.push(PayloadAnchorChange {
                             anchor: anchor.clone(),
                             present: true,
@@ -317,8 +330,18 @@ impl ProjectionWorker {
                     )
                 });
             if let Some(updated) = updated {
-                let previous = rows(&updated.before, &committed.object_epochs)?;
-                let mut replacements = rows(&updated.after, &unit.next.object_epochs)?;
+                let previous = rows(
+                    &updated.before,
+                    &committed.object_provenance,
+                    &committed.reduction,
+                    &committed.provenance_index.clone().unwrap_or_default(),
+                )?;
+                let mut replacements = rows(
+                    &updated.after,
+                    &unit.next.object_provenance,
+                    &unit.next.reduction,
+                    &unit.next.provenance_index.clone().unwrap_or_default(),
+                )?;
                 unit.reader_rows_materialized += previous.len() + replacements.len();
                 let history_scopes: BTreeSet<_> = updated
                     .before
@@ -335,7 +358,7 @@ impl ProjectionWorker {
                             && stored.anchor == row.anchor
                             && stored.scope_epoch == row.scope_epoch
                             && stored.required_environments == row.required_environments
-                            && stored.target_epochs == row.target_epochs
+                            && stored.dependency_epochs == row.dependency_epochs
                             && (history_scopes.contains(&row.scope)
                                 || stored.order_key == row.order_key)
                     });
@@ -349,8 +372,16 @@ impl ProjectionWorker {
                         }
                     }
                 }
-                let old_anchors = anchors(&updated.before)?;
-                let new_anchors = anchors(&updated.after)?;
+                let old_anchors = anchors(
+                    &updated.before,
+                    &committed.object_provenance,
+                    &committed.reduction,
+                )?;
+                let new_anchors = anchors(
+                    &updated.after,
+                    &unit.next.object_provenance,
+                    &unit.next.reduction,
+                )?;
                 matched &= old_anchors
                     .keys()
                     .all(|key| before.anchors.contains_key(key));
@@ -374,7 +405,7 @@ impl ProjectionWorker {
                                 || stored.anchor != row.anchor
                                 || stored.scope_epoch != row.scope_epoch
                                 || stored.required_environments != row.required_environments
-                                || stored.target_epochs != row.target_epochs
+                                || stored.dependency_epochs != row.dependency_epochs
                         }) {
                             unit.batch.read_rows.push(row.clone());
                             next.rows.insert(key, Arc::new(row));
@@ -390,7 +421,7 @@ impl ProjectionWorker {
                         }
                     }
                     for (key, anchor) in new_anchors {
-                        if !next.anchors.contains_key(&key) {
+                        if next.anchors.get(&key) != Some(&anchor) {
                             unit.batch.payload_anchors.push(PayloadAnchorChange {
                                 anchor: anchor.clone(),
                                 present: true,
@@ -414,9 +445,10 @@ impl ProjectionWorker {
         prepare_composed(&before, &after, unit)?;
         let after = MaterializedReading::from_projection(
             &after,
-            &unit.next.object_epochs,
+            &unit.next.object_provenance,
             unit.next.reduction.clone(),
             self.limits.max_incremental_dependencies,
+            &unit.next.provenance_index.clone().unwrap_or_default(),
             &mut unit.reader_append_work,
         )?;
         unit.reader_rows_materialized += after.rows.len();
@@ -426,7 +458,7 @@ impl ProjectionWorker {
                     || old.order_key != row.order_key
                     || old.scope_epoch != row.scope_epoch
                     || old.required_environments != row.required_environments
-                    || old.target_epochs != row.target_epochs
+                    || old.dependency_epochs != row.dependency_epochs
             }) {
                 unit.batch.read_rows.push(row.as_ref().clone());
             }
@@ -440,7 +472,7 @@ impl ProjectionWorker {
             }
         }
         for (key, anchor) in &after.anchors {
-            if !before.anchors.contains_key(key) {
+            if before.anchors.get(key) != Some(anchor) {
                 unit.batch.payload_anchors.push(PayloadAnchorChange {
                     anchor: anchor.clone(),
                     present: true,
@@ -474,19 +506,15 @@ fn prepare_composed(
         {
             continue;
         }
-        let epochs: BTreeSet<_> = composed
-            .revisions
-            .iter()
-            .map(|revision| {
-                unit.next
-                    .object_epochs
-                    .get(&AnyObjectRef::MessageRevision(revision.clone()))
-                    .cloned()
-                    .ok_or_else(|| {
-                        WorkerError::Task("composed content lacks its revision epoch".into())
-                    })
-            })
-            .collect::<Result<_>>()?;
+        let mut epochs = BTreeSet::new();
+        for revision in &composed.revisions {
+            let support = object_support(
+                &unit.next.reduction,
+                &unit.next.object_provenance,
+                &AnyObjectRef::MessageRevision(revision.clone()),
+            )?;
+            epochs.extend(support.dependency_epochs.iter().cloned());
+        }
         let claims: BTreeSet<_> = composed
             .revisions
             .iter()
@@ -527,7 +555,9 @@ fn prepare_composed(
 
 fn rows(
     projection: &ReadingProjection,
-    epochs: &imbl::OrdMap<AnyObjectRef, IngestionEpoch>,
+    provenance: &ProvenanceMap,
+    reduction: &Reduction,
+    support_index: &provenance::SupportIndex,
 ) -> Result<BTreeMap<(String, String), ReadRowChange>> {
     let mut rows = BTreeMap::new();
     let mut insert = |scope: String,
@@ -535,23 +565,42 @@ fn rows(
                       anchor: Option<TraceAddress>,
                       index: usize,
                       body: serde_json::Value,
-                      subject: &AnyObjectRef|
+                      subject: &AnyObjectRef,
+                      contributors: Vec<AnyObjectRef>,
+                      relation: bool|
      -> Result<()> {
-        let Some(epoch) = epochs
-            .get(subject)
-            .or_else(|| epochs.get(&AnyObjectRef::Agent(subject.scope().clone())))
-        else {
-            return Err(WorkerError::Task(
-                "reader projection lacks an evidence scope epoch".into(),
-            ));
-        };
+        let support = object_support(reduction, provenance, subject)?;
+        let mut dependency_epochs: BTreeSet<_> =
+            support.dependency_epochs.iter().cloned().collect();
+        if let Some(anchor) = &anchor {
+            if let Some(target) = declared_support(reduction, provenance, &anchor.object())? {
+                dependency_epochs.extend(target.dependency_epochs.iter().cloned());
+            }
+        }
+        for reference in contributors {
+            if let Some(target) = declared_support(reduction, provenance, &reference)? {
+                dependency_epochs.extend(target.dependency_epochs.iter().cloned());
+            }
+        }
+        if relation {
+            if let Some(anchor) = &anchor {
+                let source = reduction
+                    .object(subject)
+                    .map_or(subject, |object| &object.reference);
+                let target = anchor.object();
+                let target = reduction
+                    .object(&target)
+                    .map_or(&target, |object| &object.reference);
+                dependency_epochs.extend(support_index.relation_dependencies(source, target));
+            }
+        }
         let row = ReadRowChange {
             scope: scope.clone(),
             address: address.clone(),
             anchor: anchor.clone(),
             order_key: (index as u64 + 1).to_be_bytes().to_vec(),
             body: Some(body),
-            scope_epoch: epoch.clone(),
+            scope_epoch: support.primary_epoch.clone(),
             required_environments: std::iter::once(
                 subject.scope().environment().as_str().to_owned(),
             )
@@ -561,16 +610,7 @@ fn rows(
                     .map(|anchor| anchor.object().scope().environment().as_str().to_owned()),
             )
             .collect(),
-            target_epochs: anchor
-                .iter()
-                .filter_map(|anchor| {
-                    let object = anchor.object();
-                    epochs
-                        .get(&object)
-                        .or_else(|| epochs.get(&AnyObjectRef::Agent(object.scope().clone())))
-                        .cloned()
-                })
-                .collect(),
+            dependency_epochs,
         };
         rows.insert((scope, address), row);
         Ok(())
@@ -583,6 +623,21 @@ fn rows(
             0,
             serde_json::to_value(header)?,
             &AnyObjectRef::Agent(agent.clone()),
+            header
+                .own_execution
+                .reference
+                .iter()
+                .map(TraceAddress::object)
+                .chain(
+                    header
+                        .history
+                        .selection
+                        .iter()
+                        .cloned()
+                        .map(AnyObjectRef::HistorySelection),
+                )
+                .collect(),
+            false,
         )?;
     }
     for (scope, units) in &projection.windows {
@@ -594,6 +649,8 @@ fn rows(
                 index,
                 serde_json::to_value(unit)?,
                 &unit.anchor.object(),
+                reading_contributors(unit, projection),
+                false,
             )?;
         }
     }
@@ -608,6 +665,12 @@ fn rows(
                 index,
                 serde_json::to_value(row)?,
                 &AnyObjectRef::Agent(agent.clone()),
+                row.own_execution
+                    .reference
+                    .iter()
+                    .map(TraceAddress::object)
+                    .collect(),
+                true,
             )?;
         }
     }
@@ -623,6 +686,8 @@ fn rows(
                 index,
                 serde_json::to_value(row)?,
                 &reference.object(),
+                vec![],
+                false,
             )?;
         }
     }
@@ -637,6 +702,8 @@ fn rows(
                 index,
                 serde_json::to_value(row)?,
                 &AnyObjectRef::HistorySelection(row.selection.clone()),
+                vec![],
+                false,
             )?;
         }
     }
@@ -660,6 +727,13 @@ fn rows(
             0,
             serde_json::to_value(summary)?,
             reference,
+            detail
+                .execution
+                .iter()
+                .flat_map(|execution| execution.reference.iter())
+                .map(TraceAddress::object)
+                .collect(),
+            false,
         )?;
         match &detail.content {
             ReadObjectContent::Operation {
@@ -677,6 +751,8 @@ fn rows(
                         index,
                         serde_json::to_value(result)?,
                         reference,
+                        vec![],
+                        true,
                     )?;
                 }
                 for (index, resource) in resources.iter().enumerate() {
@@ -691,6 +767,8 @@ fn rows(
                         index,
                         serde_json::to_value(resource)?,
                         reference,
+                        vec![],
+                        true,
                     )?;
                 }
             }
@@ -707,6 +785,8 @@ fn rows(
                         index,
                         serde_json::to_value(member)?,
                         reference,
+                        vec![],
+                        true,
                     )?;
                 }
             }
@@ -726,6 +806,8 @@ fn rows(
                 index,
                 serde_json::to_value(relation)?,
                 reference,
+                vec![],
+                true,
             )?;
         }
     }
@@ -738,6 +820,13 @@ fn rows(
                 0,
                 serde_json::json!({}),
                 &AnyObjectRef::Agent(scope.agent.clone()),
+                scope
+                    .selection
+                    .iter()
+                    .cloned()
+                    .map(AnyObjectRef::HistorySelection)
+                    .collect(),
+                false,
             )?;
         }
     }
@@ -750,6 +839,8 @@ fn rows(
                 index,
                 serde_json::to_value(part)?,
                 &part.payload.via_ref.object(),
+                payload_contributors(&part.payload, projection),
+                false,
             )?;
         }
     }
@@ -780,9 +871,26 @@ fn rows(
     Ok(rows)
 }
 
-fn anchors(projection: &ReadingProjection) -> Result<BTreeMap<String, PayloadAnchor>> {
+fn anchors(
+    projection: &ReadingProjection,
+    provenance: &ProvenanceMap,
+    reduction: &Reduction,
+) -> Result<BTreeMap<String, PayloadAnchor>> {
     let mut anchors = BTreeMap::new();
     let mut add = |payload: &PayloadAccess| -> Result<()> {
+        // The object holding the bytes must be declared to expose them at all; a
+        // contributing revision may still be an unobserved reference at this view.
+        let mut dependency_epochs: BTreeSet<_> =
+            object_support(reduction, provenance, &payload.via_ref.object())?
+                .dependency_epochs
+                .iter()
+                .cloned()
+                .collect();
+        for reference in payload_contributors(payload, projection) {
+            if let Some(support) = declared_support(reduction, provenance, &reference)? {
+                dependency_epochs.extend(support.dependency_epochs.iter().cloned());
+            }
+        }
         let anchor = PayloadAnchor {
             via_ref: payload.via_ref.object(),
             containing_agent: payload.containing_agent.agent(),
@@ -791,8 +899,9 @@ fn anchors(projection: &ReadingProjection) -> Result<BTreeMap<String, PayloadAnc
             body_revision: payload.body_revision.clone(),
             representation: payload.representation,
             ranges: payload.available_ranges.clone(),
+            dependency_epochs,
         };
-        anchors.insert(serde_json::to_string(&anchor)?, anchor);
+        anchors.insert(anchor.key()?, anchor);
         Ok(())
     };
     for units in projection.windows.values() {
@@ -853,7 +962,7 @@ fn anchors(projection: &ReadingProjection) -> Result<BTreeMap<String, PayloadAnc
                 if anchor.containing_agent == scope.agent {
                     let mut anchor = anchor.clone();
                     anchor.selection = scope.selection.clone();
-                    anchors.insert(serde_json::to_string(&anchor)?, anchor);
+                    anchors.insert(anchor.key()?, anchor);
                 }
             }
         }
@@ -864,3 +973,126 @@ fn anchors(projection: &ReadingProjection) -> Result<BTreeMap<String, PayloadAnc
 #[cfg(test)]
 #[path = "reading/visibility_tests.rs"]
 mod visibility_tests;
+
+/// Support for a referenced endpoint, absent when nothing has declared it yet.
+///
+/// A relation names two endpoints, and only the containing row's subject is
+/// guaranteed to have declared itself: a child observed before its parent
+/// references an object this view has no declaration for. Storage redacts a
+/// missing target without withholding the containing row, so an undeclared
+/// endpoint contributes no dependency epoch instead of failing the projection —
+/// otherwise reader authorization would depend on source arrival order. A
+/// declared object whose provenance is missing stays fatal, because that is a
+/// broken support index rather than an unobserved endpoint.
+fn declared_support<'a>(
+    reduction: &Reduction,
+    provenance: &'a ProvenanceMap,
+    reference: &AnyObjectRef,
+) -> Result<Option<&'a ObjectProvenance>> {
+    if reduction.object(reference).is_none() {
+        return Ok(None);
+    }
+    object_support(reduction, provenance, reference).map(Some)
+}
+
+fn object_support<'a>(
+    reduction: &Reduction,
+    provenance: &'a ProvenanceMap,
+    reference: &AnyObjectRef,
+) -> Result<&'a ObjectProvenance> {
+    let object = reduction.object(reference).ok_or_else(|| {
+        WorkerError::Task(format!(
+            "reader projection lacks a declaration for {}",
+            reference.encode()
+        ))
+    })?;
+    provenance
+        .get(&object.reference)
+        .map(Arc::as_ref)
+        .ok_or_else(|| {
+            WorkerError::Task(format!(
+                "reader projection lacks evidence provenance for {}",
+                reference.encode()
+            ))
+        })
+}
+
+// Content dependencies name the revisions actually rendered. Authorship and
+// original-owner links are independently redacted and never own copied bytes.
+fn payload_contributors(
+    payload: &PayloadAccess,
+    projection: &ReadingProjection,
+) -> Vec<AnyObjectRef> {
+    let mut references: Vec<_> = projection
+        .composed_payloads
+        .get(&payload.payload_ref)
+        .into_iter()
+        .flat_map(|composed| composed.revisions.iter().cloned())
+        .map(AnyObjectRef::MessageRevision)
+        .collect();
+    if let Ok(revision) = MessageRevisionRef::decode(&payload.body_revision) {
+        references.push(AnyObjectRef::MessageRevision(revision));
+    } else if let Ok(result) = ResultRef::decode(&payload.body_revision) {
+        references.push(AnyObjectRef::Result(result));
+    }
+    references
+}
+
+fn reading_contributors(unit: &ReadingUnit, projection: &ReadingProjection) -> Vec<AnyObjectRef> {
+    let mut references: Vec<_> = unit
+        .activation
+        .iter()
+        .flat_map(|execution| execution.reference.iter())
+        .map(TraceAddress::object)
+        .collect();
+    match &unit.content {
+        ReadingContent::Message {
+            message_ref,
+            revision_ref,
+            delivery,
+            parts,
+            ..
+        } => {
+            references.extend([
+                AnyObjectRef::Message(message_ref.clone()),
+                AnyObjectRef::MessageRevision(revision_ref.clone()),
+            ]);
+            references.extend(delivery.iter().map(|delivery| delivery.reference.object()));
+            references.extend(
+                parts
+                    .iter()
+                    .flat_map(|part| payload_contributors(&part.payload, projection)),
+            );
+        }
+        ReadingContent::ActivationBoundary {
+            execution,
+            trigger_deliveries,
+            ..
+        } => {
+            references.extend(
+                execution
+                    .reference
+                    .iter()
+                    .chain(trigger_deliveries)
+                    .map(TraceAddress::object),
+            );
+        }
+        ReadingContent::ContextBoundary {
+            checkpoint,
+            summary,
+            ..
+        } => {
+            references.push(checkpoint.object());
+            references.extend(
+                summary
+                    .iter()
+                    .flat_map(|part| payload_contributors(&part.payload, projection)),
+            );
+        }
+        ReadingContent::HistoryBoundary { selection, .. } => {
+            references.push(AnyObjectRef::HistorySelection(selection.clone()))
+        }
+        _ => {}
+    }
+    references
+}

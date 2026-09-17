@@ -7,22 +7,28 @@ fn assert_shared_roots(before: &WorkerState, after: &WorkerState) {
     assert!(before.gaps.ptr_eq(&after.gaps));
     assert!(before.captured_payloads.ptr_eq(&after.captured_payloads));
     assert!(before.previews.ptr_eq(&after.previews));
-    assert!(before.object_epochs.ptr_eq(&after.object_epochs));
+    assert!(before.object_provenance.ptr_eq(&after.object_provenance));
     assert!(before.correlations.ptr_eq(&after.correlations));
-    assert!(before
-        .correlation_evidence
-        .ptr_eq(&after.correlation_evidence));
+    assert!(
+        before
+            .correlation_evidence
+            .ptr_eq(&after.correlation_evidence)
+    );
     assert!(before.available_evidence.ptr_eq(&after.available_evidence));
     assert!(before.source_owners.ptr_eq(&after.source_owners));
     assert!(before.source_definitions.ptr_eq(&after.source_definitions));
     assert!(before.history_records.ptr_eq(&after.history_records));
-    assert!(before
-        .observation_sources
-        .ptr_eq(&after.observation_sources));
-    assert!(before
-        .reducer
-        .claim_snapshot()
-        .ptr_eq(&after.reducer.claim_snapshot()));
+    assert!(
+        before
+            .observation_sources
+            .ptr_eq(&after.observation_sources)
+    );
+    assert!(
+        before
+            .reducer
+            .claim_snapshot()
+            .ptr_eq(&after.reducer.claim_snapshot())
+    );
     assert!(Arc::ptr_eq(&before.reduction, &after.reduction));
 }
 
@@ -41,13 +47,13 @@ fn retained_values(state: &WorkerState) -> serde_json::Value {
         "gaps": state.gaps.iter().collect::<Vec<_>>(),
         "payloads": state.captured_payloads.iter().collect::<Vec<_>>(),
         "previews": state.previews.iter().map(|(key, value)| (key, value.as_ref())).collect::<Vec<_>>(),
-        "epochs": state.object_epochs.iter().collect::<Vec<_>>(),
+        "epochs": state.object_provenance.iter().collect::<Vec<_>>(),
     })
 }
 
 #[tokio::test]
-async fn candidate_state_clones_share_nonempty_roots_and_isolate_large_values_at_twenty_and_two_hundred(
-) {
+async fn candidate_state_clones_share_nonempty_roots_and_isolate_large_values_at_twenty_and_two_hundred()
+ {
     let fixture = Fixture::new().await;
     let capture = fixture.native_fixture().await.remove(0);
     for count in [20usize, 200] {
@@ -117,9 +123,15 @@ async fn candidate_state_clones_share_nonempty_roots_and_isolate_large_values_at
                     ..Default::default()
                 }),
             );
-            committed
-                .object_epochs
-                .insert(AnyObjectRef::Message(message(&key)), fixture.epoch.clone());
+            committed.object_provenance.insert(
+                AnyObjectRef::Message(message(&key)),
+                Arc::new(ObjectProvenance {
+                    primary_claim: ClaimRef::native(agent(), "sharing", vec![key.clone()]).unwrap(),
+                    primary_observation: capture.observation_ref.clone(),
+                    primary_epoch: fixture.epoch.clone(),
+                    dependency_epochs: imbl::ordset![fixture.epoch.clone()],
+                }),
+            );
         }
         committed.semantic_work.full_rebuilds = 7;
         let before = retained_values(&committed);
@@ -164,10 +176,14 @@ async fn candidate_state_clones_share_nonempty_roots_and_isolate_large_values_at
         Arc::make_mut(candidate.next.previews.get_mut(&payload).unwrap())
             .preview
             .clear();
-        candidate.next.object_epochs.insert(
-            AnyObjectRef::Message(message("source-0")),
-            IngestionEpoch::new("candidate-epoch").unwrap(),
-        );
+        Arc::make_mut(
+            candidate
+                .next
+                .object_provenance
+                .get_mut(&AnyObjectRef::Message(message("source-0")))
+                .unwrap(),
+        )
+        .primary_epoch = IngestionEpoch::new("candidate-epoch").unwrap();
         let unchanged = PayloadRef::bytes(blake3::hash(b"source-1").to_hex()).unwrap();
         assert!(Arc::ptr_eq(
             &committed.source_states["source-1"],
@@ -239,14 +255,18 @@ async fn refresh_work(records: usize) -> semantic::SemanticWork {
     assert_eq!(archive.semantic.history_entries.len(), records + 1);
     assert_eq!(committed.reducer.claim_snapshot(), held.claims);
     assert!(archive.semantic.agents.ptr_eq(&held.semantic.agents));
-    assert!(archive
-        .semantic
-        .operations
-        .ptr_eq(&held.semantic.operations));
-    assert!(archive
-        .semantic
-        .result_operations
-        .ptr_eq(&held.semantic.result_operations));
+    assert!(
+        archive
+            .semantic
+            .operations
+            .ptr_eq(&held.semantic.operations)
+    );
+    assert!(
+        archive
+            .semantic
+            .result_operations
+            .ptr_eq(&held.semantic.result_operations)
+    );
     let (cold, _) = fixture.generation("semantic-cold-oracle").await;
     let mut cold_worker = fixture.worker();
     cold_worker.full_reader_rebuilds = true;
@@ -262,8 +282,8 @@ async fn refresh_work(records: usize) -> semantic::SemanticWork {
 }
 
 #[tokio::test]
-async fn a_semantic_tail_refresh_has_constant_work_at_twenty_and_two_hundred_and_matches_cold_projection(
-) {
+async fn a_semantic_tail_refresh_has_constant_work_at_twenty_and_two_hundred_and_matches_cold_projection()
+ {
     assert_eq!(refresh_work(20).await, refresh_work(200).await);
 }
 

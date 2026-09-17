@@ -1,23 +1,23 @@
 //! Outward envagent transport, current capability state and durable capture admission.
 use super::registry::{EnvironmentRegistry, EnvironmentSnapshot, PairingGrant, PairingOffer};
 use crate::{db::ControlStore, models::now_ms, trace::service::TraceService};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
     Arc,
+    atomic::{AtomicU64, Ordering},
 };
-use sylph_protocol::trace::{AgentRef, IngestionScope, InventoryRef};
 use sylph_protocol::CaptureAuthorization;
+use sylph_protocol::trace::{AgentRef, IngestionScope, InventoryRef};
 use sylph_protocol::{
-    negotiate, Command, CommandOutcome, DecodedMessage, EnvironmentId, IdempotencyPolicy,
-    WireMessage, ENV_PROTOCOL,
+    Command, CommandOutcome, DecodedMessage, ENV_PROTOCOL, EnvironmentId, IdempotencyPolicy,
+    WireMessage, negotiate,
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::{mpsc, Mutex, RwLock},
+    sync::{Mutex, RwLock, mpsc},
 };
 use tokio_rustls::TlsAcceptor;
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -163,6 +163,9 @@ impl EnvBridge {
     }
 
     async fn serve_connection(&self, stream: TcpStream) -> Result<()> {
+        // Capture RPCs exchange short receipts between length/body frame writes.
+        // Nagle and the peer's delayed ACK otherwise add a timer to each reply.
+        stream.set_nodelay(true)?;
         let (reader, writer) = stream.into_split();
         self.serve_io(reader, writer).await
     }
@@ -326,7 +329,7 @@ impl EnvBridge {
                         "unhandled current envagent notification"
                     ),
                     DecodedMessage::Unknown { kind, .. } => {
-                        return Err(anyhow!("unknown capture wire envelope {kind}"))
+                        return Err(anyhow!("unknown capture wire envelope {kind}"));
                     }
                 }
             }
@@ -644,6 +647,7 @@ impl EnvBridge {
     pub async fn serve_tls(&self, listener: TcpListener, acceptor: TlsAcceptor) -> Result<()> {
         loop {
             let (stream, _peer) = listener.accept().await?;
+            stream.set_nodelay(true)?;
             let bridge = self.clone();
             let acceptor = acceptor.clone();
             tokio::spawn(async move {
@@ -1065,12 +1069,12 @@ impl EnvBridge {
             CommandOutcome::Rejected { code, message } => {
                 return Err(anyhow::Error::new(RemoteCommandError::rejected(
                     code, message,
-                )))
+                )));
             }
             CommandOutcome::Unknown { message } => {
                 return Err(anyhow::Error::new(RemoteCommandError::Unknown {
                     message: message.unwrap_or_default(),
-                }))
+                }));
             }
         };
         let contained_workdir = result

@@ -1,12 +1,12 @@
 //! HTTP authorization over rows produced by the normalized reader projection.
 use super::*;
 use axum::{
-    body::Body,
-    http::{header, Request, StatusCode},
     Router,
+    body::Body,
+    http::{Request, StatusCode, header},
 };
 use base64::Engine;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sylph_protocol::{AgentName, EnvironmentId, NativeId, SessionId};
 use tower::ServiceExt;
 
@@ -19,6 +19,37 @@ struct Fixture {
     parent: AgentRef,
     visible: AgentRef,
     hidden: Vec<AgentRef>,
+}
+
+// These HTTP fixtures begin at normalized facts rather than vendor admission.
+// Every declaration is assigned an explicit fixture epoch before producing rows.
+fn normalized_provenance(
+    claims: &[Claim],
+    epochs: &imbl::OrdMap<AnyObjectRef, IngestionEpoch>,
+) -> ProvenanceMap {
+    claims
+        .iter()
+        .filter_map(|claim| {
+            let Fact::Declare { object } = &claim.fact else {
+                return None;
+            };
+            let reference = object.object_ref();
+            let epoch = epochs
+                .get(&reference)
+                .or_else(|| epochs.get(&AnyObjectRef::Agent(reference.scope().clone())))
+                .expect("each normalized fixture object has an assigned epoch")
+                .clone();
+            Some((
+                reference,
+                Arc::new(provenance::ObjectProvenance {
+                    primary_claim: claim.claim_ref.clone(),
+                    primary_observation: claim.evidence.iter().min().unwrap().clone(),
+                    primary_epoch: epoch.clone(),
+                    dependency_epochs: imbl::ordset![epoch],
+                }),
+            ))
+        })
+        .collect()
 }
 
 impl Fixture {
@@ -170,7 +201,12 @@ impl Fixture {
                 .agent(),
             visible
         );
-        let published_rows: Vec<_> = rows(&projection, &epochs).unwrap().into_values().collect();
+        let provenance = normalized_provenance(&claims, &epochs);
+        let published_rows: Vec<_> =
+            rows(&projection, &provenance, &reduction, &Default::default())
+                .unwrap()
+                .into_values()
+                .collect();
         // Publish bounded production row batches. No vendor mapper is being
         // certified here: the fixture starts at the normalized facts boundary.
         for chunk in published_rows.chunks(generation.limits().max_batch_changes) {
@@ -345,7 +381,8 @@ impl Fixture {
                 claims.len(),
             )
             .unwrap();
-        let projection = sylph_trace::reading::project(&reducer.resolve(), &previews, 32);
+        let reduction = reducer.resolve();
+        let projection = sylph_trace::reading::project(&reduction, &previews, 32);
         let epoch = self
             .state
             .trace
@@ -357,6 +394,7 @@ impl Fixture {
             .await
             .unwrap();
         let epochs = imbl::OrdMap::from(vec![(AnyObjectRef::Agent(self.parent.clone()), epoch)]);
+        let provenance = normalized_provenance(&claims, &epochs);
         let history = read_scope(&self.parent, None, "history");
         let parts = sylph_trace::reading::parts_key(
             &self.parent,
@@ -366,7 +404,7 @@ impl Fixture {
         );
         // Add these new history/parts collections to the existing graph fixture;
         // their rows and ordering still come from the production projection.
-        let rows = rows(&projection, &epochs)
+        let rows = rows(&projection, &provenance, &reduction, &Default::default())
             .unwrap()
             .into_values()
             .filter(|row| row.scope == history || row.scope == parts)
@@ -653,7 +691,9 @@ async fn bootstrap_parts_cursor_reads_the_remaining_part_only_with_its_original_
     let revision = message["revisionRef"].as_str().unwrap();
     let anchor = units[0]["anchor"].as_str().unwrap();
     let path = |view: &str, cursor: &str| {
-        format!("/api/v1/trace/objects/{revision}/parts?via_ref={anchor}&at_snapshot={view}&after={cursor}")
+        format!(
+            "/api/v1/trace/objects/{revision}/parts?via_ref={anchor}&at_snapshot={view}&after={cursor}"
+        )
     };
     let (status, remaining) = fixture.get(&path(view, cursor)).await;
     assert_eq!(status, StatusCode::OK, "{remaining}");

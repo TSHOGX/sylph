@@ -4,8 +4,8 @@ use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
 };
 use sylph_protocol::trace::*;
@@ -229,14 +229,15 @@ impl TraceService {
         }
         // Projection files are disposable and may have an older row/security
         // contract. Reject the manifest before opening those files for reads.
-        let contract_changed = service
-            .catalogue
-            .active_generation()
-            .await?
-            .is_some_and(|published| {
-                published.ready.manifest
-                    != Self::manifest(published.ready.manifest.generation.clone())
-            });
+        let contract_changed =
+            service
+                .catalogue
+                .active_generation()
+                .await?
+                .is_some_and(|published| {
+                    published.ready.manifest
+                        != Self::manifest(published.ready.manifest.generation.clone())
+                });
         let recovered = if contract_changed {
             Err(super::publication::PublicationError::Recovery(
                 "Published projection contract differs from this server".into(),
@@ -256,7 +257,7 @@ impl TraceService {
                 service.rebuild().await?;
             }
             Err(error @ super::publication::PublicationError::Catalogue(_)) => {
-                return Err(error.into())
+                return Err(error.into());
             }
             Err(error) => {
                 let message = format!("{error:#}");
@@ -485,7 +486,10 @@ impl TraceService {
         Ok(store)
     }
 
-    async fn require_generation_contract(&self, manifest: &GenerationManifest) -> anyhow::Result<()> {
+    async fn require_generation_contract(
+        &self,
+        manifest: &GenerationManifest,
+    ) -> anyhow::Result<()> {
         if manifest != &Self::manifest(manifest.generation.clone()) {
             // Retained views can outlive an active contract change. Reject them
             // before opening an older row layout, including already cached stores.
@@ -604,7 +608,7 @@ impl TraceService {
     fn manifest(generation: String) -> GenerationManifest {
         GenerationManifest {
             generation: generation.clone(),
-            semantic_schema: "trace-3".into(),
+            semantic_schema: "trace-4".into(),
             mapper_builds: [
                 ("server", mapping::server::ServerMapper.build()),
                 ("codex", mapping::codex::CodexMapper.build()),

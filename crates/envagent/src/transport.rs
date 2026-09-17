@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use std::pin::Pin;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -232,6 +232,9 @@ impl ConnectionSupervisor {
                     "envagent connection timed out",
                 ))
             })??;
+        // Length and body are separate writes. Capture upload/receipt RPCs wait for
+        // each other, so Nagle plus delayed ACK otherwise adds a timer per frame.
+        stream.set_nodelay(true)?;
         self.epoch = self.epoch.advance();
         let stream = if tls {
             let ca = std::env::var("SYLPH_ENV_CA_CERT").map_err(|_| {

@@ -228,7 +228,7 @@ pub(crate) async fn apply_rows(
             .checked_add(delta)
             .filter(|count| *count >= 0)
             .ok_or_else(|| GenerationError::Invalid("negative reading count".into()))?;
-        sqlx::query("INSERT INTO read_counts VALUES(?,?,?)")
+        sqlx::query("INSERT INTO read_counts VALUES(?,?,?) ON CONFLICT(scope_key,valid_from) DO UPDATE SET count=excluded.count")
             .bind(scope)
             .bind(revision as i64)
             .bind(count)
@@ -606,7 +606,9 @@ fn decode_candidate(row: &sqlx::sqlite::SqliteRow) -> Result<ReadCandidate, Gene
         required_environments: serde_json::from_str(
             &row.try_get::<String, _>("required_environments_json")?,
         )?,
-        dependency_epochs: serde_json::from_str(&row.try_get::<String, _>("dependency_epochs_json")?)?,
+        dependency_epochs: serde_json::from_str(
+            &row.try_get::<String, _>("dependency_epochs_json")?,
+        )?,
     })
 }
 

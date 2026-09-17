@@ -1,20 +1,20 @@
 //! Authenticated normalized trace reads. Every request rechecks grants and tombstones.
 
 use crate::{
+    AppState,
     middleware::auth::SubjectId,
     trace::{
         evidence::catalogue::ViewLease,
         generation::GenerationError,
-        reading_store::{read_scope, ReadCandidate, ReadFilter, ReadRow, ReadWindow},
+        reading_store::{ReadCandidate, ReadFilter, ReadRow, ReadWindow, read_scope},
     },
-    AppState,
 };
 use axum::{
+    Json, Router,
     extract::{Extension, Path, Query, State},
-    http::{header, StatusCode},
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
-    Json, Router,
 };
 use serde::{Deserialize, Serialize};
 use sylph_protocol::trace::*;
@@ -845,10 +845,24 @@ async fn check_row(
             return Err(storage(GenerationError::NotFound));
         }
     }
-    for epoch in std::iter::once(&row.epoch)
-        .chain(&row.dependency_epochs)
-        .collect::<std::collections::BTreeSet<_>>()
-    {
+    check_epochs(
+        state,
+        subject,
+        lease,
+        &std::iter::once(row.epoch.clone())
+            .chain(row.dependency_epochs.iter().cloned())
+            .collect(),
+    )
+    .await
+}
+
+async fn check_epochs(
+    state: &AppState,
+    subject: &str,
+    lease: &ViewLease,
+    epochs: &std::collections::BTreeSet<IngestionEpoch>,
+) -> Result<()> {
+    for epoch in epochs {
         let proof = state
             .trace
             .catalogue()
@@ -1102,6 +1116,46 @@ async fn authorized_value(
         }
     }
     redact(&mut value, &denied);
+    if let Ok(mut header) = serde_json::from_value::<AgentHeader>(value.clone()) {
+        let agent = header.agent.address.agent();
+        for (link, parent) in [(&mut header.parent, true), (&mut header.origin, false)] {
+            let Some(target) = link.as_ref().map(|link| link.address.agent()) else {
+                continue;
+            };
+            // Endpoint visibility cannot authorize the relationship itself. Read
+            // only its retained candidate metadata; binding this optional link to
+            // the lease would unnecessarily expire the child's own surviving view.
+            let (scope, anchor) = if parent {
+                (
+                    read_scope(&target, None, "relations"),
+                    AnyObjectRef::Agent(agent.clone()),
+                )
+            } else {
+                (
+                    read_scope(
+                        &agent,
+                        None,
+                        &format!("object-relations:{}", agent.encode()),
+                    ),
+                    AnyObjectRef::Agent(target),
+                )
+            };
+            let readable = match generation
+                .read_candidate(snapshot, &scope, &TraceAddress::of(&anchor))
+                .await
+            {
+                Ok(candidate) => candidate_is_readable(state, subject, candidate)
+                    .await
+                    .map_err(storage)?,
+                Err(GenerationError::NotFound) => false,
+                Err(error) => return Err(storage(error)),
+            };
+            if !readable {
+                *link = None;
+            }
+        }
+        value = serde_json::to_value(header).map_err(internal)?;
+    }
     Ok(value)
 }
 
@@ -1979,7 +2033,7 @@ async fn payload(
         _ => {
             return Err(invalid(
                 "Payload authorization needs an entry, delivery or operation",
-            ))
+            ));
         }
     };
     observe(&state, &subject.0, &owner).await?;
@@ -1991,9 +2045,13 @@ async fn payload(
         body_revision: query.revision,
         representation: query.representation,
         ranges: vec![],
+        dependency_epochs: Default::default(),
     };
+    // Separately retained bytes carry their own contributor epochs. A lease that
+    // never read the contributor still has to authorize them on its first request,
+    // or deleting that scope would leave the body reachable through a fresh view.
     let authorization_start = query.start.unwrap_or(0);
-    generation
+    let dependencies = generation
         .authorize_payload(
             &lease.snapshot,
             &requested,
@@ -2002,6 +2060,7 @@ async fn payload(
         )
         .await
         .map_err(storage)?;
+    check_epochs(&state, &subject.0, &lease, &dependencies).await?;
     let total = state
         .trace
         .evidence()

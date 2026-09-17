@@ -65,46 +65,35 @@ Intentional wrong-identity/branch/ordinal expectations and five storage faults w
 observed failing. These checks establish specific design claims, not a passing
 production reducer. [Conformance](unified-trace-conformance.md) names their limits.
 
-**Next implementation, in dependency order:**
+### Foundation delivery gates
 
-1. Stabilize the migrated architecture and primary stores. Prove
-   cold/incremental/reread/interleaved/rebuilt equivalence through production admission,
-   reduction and read projection, with independently authored expectations. Resolve
-   core representation defects exposed by that replay before widening behavior. Complete
-   the remaining required semantic mutations and mixed-source dependency schedules,
-   including reusable children, independent resources and distinct result representations.
-2. Extend query authorization acceptance under concurrent grant changes and deletion.
-   Candidate filtering before hydration, private continuation positions and bounded
-   authorized totals are implemented; preserve these contracts through incremental
-   projection and future full descendant indexing. Replace first-arriving declaration
-   epochs with deterministic retained-support provenance; the independently scoped
-   parent/child replay currently produces different header and target epoch metadata
-   under reversed source arrival. `crates/server/src/trace/worker/tests/epoch_order.rs` is an explicit ignored
-   known-failure gate, not passing acceptance. Its fix must cover supporting evidence,
-   contributor deletion, aliases, search and recipient-copy authorization together.
-3. Measure the connected production pipeline under large retained histories, high
-   version density, concurrent captures, reconnects and deletion. Replace full reduction
-   and whole-reader materialization on routine updates with bounded incremental work;
-   bound search indexing as well as returned pages. Extend fault coverage beyond job
-   lifecycle and publication cancellation to the production storage and delivery matrix.
-   Prove a valid correction larger than one projection batch completes through private
-   reconciliation, and exercise the connected spool/socket/ACK path under concurrent load.
-4. After these core gates stabilize, finish adapter evidence and mapping conformance:
-   remaining runtime/delegation/accounting cases, source certificates and workflow/schedule
-   coverage. Unavailable joins and selected-head evidence stay unknown.
-5. Refine reader surfaces last: complete descendant navigation, structured-value
-   exploration, observed-content transfer and separately budgeted export/playback, then
-   visual, accessibility and scale acceptance including manual VoiceOver. The user
-   excluded Safari testing. Synthetic layout fixtures do not establish vendor semantic
-   correctness or production delivery isolation.
+The following finite gates govern this delivery. Evidence is a named production test,
+retained-corpus replay, or measured connected workflow; source inspection establishes a
+gap, not acceptance. Stage 1 remains active. Downstream implementation begins only after
+its blockers close. Full reconciliation is allowed where the storage contract permits it;
+universal incrementality is not a separate requirement.
 
-Each stage includes correctness, architecture, performance and authorization review,
-followed by a bounded commit before another implementation stage expands the diff.
+| Gate | Classification | Exit evidence / dependency |
+| --- | --- | --- |
+| S1.1 Deterministic authorization provenance | Correctness/security blocker | Reverse independently scoped source arrival; prove identical rows and retained support after restart/rebuild, alias resolution, contributor deletion, current grant changes, search and recipient-owned copies. The ignored `crates/server/src/trace/worker/tests/epoch_order.rs` test records the existing failure. |
+| S1.2 Large valid correction | Correctness blocker | A valid single observation changing more than one writer batch completes in bounded private writes; old pages remain readable; cancellation/restart/fencing never publish a partial correction. Current worker overflow handling incorrectly records a source gap. |
+| S1.3 Connected delivery | Required acceptance gap | Actual spool/socket/upload/ACK path under simultaneous large import, small live session, file commands, reconnect/restart and deletion; exact retained bytes/order, no duplicate dispatch and eventual drained producer prefix. |
+| S1.4 Supported production workload | Required acceptance gap | Growing long histories, stream revision density, concurrent sources, fan-out and superseded versions; report CPU/SQL work, memory, queue delay, page bytes and evidence/projection/search cuts. Determine whether the cumulative reducer-claim limit blocks the required histories. A measured failure becomes a performance blocker. |
+| S1.5 Core failure and replay matrix | Required acceptance gap | Map every storage/failure row and shared-core semantic mutation in `docs/unified-trace-conformance.md` to a passing production experiment and observed negative control; cover delayed evidence and same-cut filesystem-free rebuild. |
+| S2.1 Vendor semantics and evidence | Required acceptance gap; depends on S1 | Audit each adapter spec clause; complete independently authored native/live expectations, remaining reusable-child/resource/result/accounting/workflow cases and source certificates. Unobserved joins and selected heads remain explicitly unknown. |
+| S2.2 Adapter conformance | Required acceptance gap; depends on S2.1 | All vendor replay schedules and applicable semantic mutations pass through production admission, mapping, reduction and reads; acquisition preserves exact external vendor records. |
+| S3.1 Reader functionality | Required acceptance gap; depends on S2 | Full descendant navigation, structured values, observed-content transfer and separately budgeted export/playback satisfy `docs/unified-trace-ui.md`; action targets remain exact. |
+| S3.2 User-facing acceptance | Required acceptance gap; depends on S3.1 | Complete specified desktop/mobile visual, keyboard, accessibility and resource matrix, actual VoiceOver pass, long reading/live/reconnect/search/rebuild workflows. Safari testing remains excluded by the user. |
 
-**Exit gate:** production cold/incremental/mixed-source conformance, demonstrated semantic
-mutations, storage failure/performance experiments, and complete affected runtime/frontend
-checks from [unified-trace-conformance.md](unified-trace-conformance.md). Existing synthetic
-UI trees and the reference SQLite exercise cannot substitute for that evidence.
+Every stage closes with the full affected Rust/frontend suites after the final edit,
+a requirement-by-requirement audit and a detailed English Conventional Commit. Coherent
+verified blocker fixes may be committed before the stage boundary. No stage closes solely
+on unit tests, synthetic browser trees or the reference SQLite exercise.
+
+**Deferred non-blocking improvements:** universal incremental graph maintenance, producer
+sharding, byte-weighted scheduling and independently compressed body ranges. Revisit only
+if a named primary-workflow measurement fails its required experience. These do not remove
+any normative acceptance requirement from this delivery.
 
 The milestones below remain the record of the current implementation and other product
 work. Their block-era mechanisms are not requirements for the replacement. No store is
