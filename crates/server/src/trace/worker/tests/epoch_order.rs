@@ -196,7 +196,6 @@ async fn replay(child_first: bool) -> (Vec<Claim>, Reduction, ReaderProjection) 
 }
 
 #[tokio::test]
-#[ignore = "known failing acceptance gate: merged declaration provenance uses first-arriving epoch"]
 async fn distinct_parent_and_child_capture_scopes_keep_reader_authorization_independent_of_source_order()
  {
     let parent_first = replay(false).await;
