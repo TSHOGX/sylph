@@ -387,6 +387,13 @@ compose their initial and final endpoints, cancelling net no-ops without compari
 entire archive again. The full reducer remains the independent oracle for replay and
 reconciliation. Resolution work reports claims processed, history entries updated, full
 resolutions and dependency indexing separately from materialized reader rows.
+The guarded tail resolver issues an opaque proof bound to the exact immutable reductions
+before and after the update. Only consecutive proofs can compose. Membership and reader
+projection consume that proof rather than rediscovering the unchanged archive prefix or
+rescanning old missing-reference dependencies. A restored, replaced or unrelated reduction
+cannot borrow the proof, even when its values compare equal. Full reconciliation issues no
+tail proof. Reader-only boundary dependencies remain indexed and separately bounded;
+payload availability and source/target epochs are still independent invalidations.
 
 Reader invalidation consumes typed changes in every resolved semantic family, including
 old and new endpoints and removed values. Object declarations alone cannot invalidate

@@ -26,6 +26,120 @@ pub struct Resolution {
     pub reduction: Arc<Reduction>,
     pub changes: ReductionChanges,
     pub work: ReductionWork,
+    pub append: Option<IndependentAppend>,
+}
+
+/// Reducer-issued evidence that only fresh independent history tails changed.
+/// Strong endpoint references keep the checked values immutable and prevent a
+/// reused allocation address from satisfying a later consumer's identity check.
+#[derive(Clone)]
+pub struct IndependentAppend {
+    before: Arc<Reduction>,
+    after: Arc<Reduction>,
+    witness: AppendWitness,
+}
+
+#[derive(Debug, Clone)]
+pub struct IndependentAppendAgent {
+    previous_archive_len: usize,
+    previous_head: EntryRef,
+    added_entries: Vec<EntryRef>,
+}
+
+impl IndependentAppendAgent {
+    pub fn previous_archive_len(&self) -> usize {
+        self.previous_archive_len
+    }
+
+    pub fn previous_head(&self) -> &EntryRef {
+        &self.previous_head
+    }
+
+    pub fn added_entries(&self) -> &[EntryRef] {
+        &self.added_entries
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct AppendWitness {
+    agents: BTreeMap<AgentRef, IndependentAppendAgent>,
+    objects: BTreeSet<AnyObjectRef>,
+    predecessor_relations: Vec<ResolvedRelation>,
+}
+
+impl std::fmt::Debug for IndependentAppend {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("IndependentAppend")
+            .field("witness", &self.witness)
+            .finish_non_exhaustive()
+    }
+}
+
+impl IndependentAppend {
+    pub fn before(&self) -> &Arc<Reduction> {
+        &self.before
+    }
+
+    pub fn after(&self) -> &Arc<Reduction> {
+        &self.after
+    }
+
+    pub fn agents(&self) -> &BTreeMap<AgentRef, IndependentAppendAgent> {
+        &self.witness.agents
+    }
+
+    pub fn objects(&self) -> &BTreeSet<AnyObjectRef> {
+        &self.witness.objects
+    }
+
+    pub fn predecessor_relations(&self) -> std::slice::Iter<'_, ResolvedRelation> {
+        self.witness.predecessor_relations.iter()
+    }
+
+    pub fn matches(&self, before: &Reduction, after: &Reduction) -> bool {
+        std::ptr::eq(self.before.as_ref(), before) && std::ptr::eq(self.after.as_ref(), after)
+    }
+
+    /// Compose only certificates sharing the exact immutable intermediate state.
+    /// Work is proportional to certified additions, never prior history length.
+    pub fn compose(mut self, later: Self) -> Option<Self> {
+        if !Arc::ptr_eq(&self.after, &later.before) {
+            return None;
+        }
+        for (agent, addition) in later.witness.agents {
+            if let Some(previous) = self.witness.agents.get_mut(&agent) {
+                if previous
+                    .previous_archive_len
+                    .checked_add(previous.added_entries.len())?
+                    != addition.previous_archive_len
+                    || previous.added_entries.last() != Some(&addition.previous_head)
+                {
+                    return None;
+                }
+                previous.added_entries.extend(addition.added_entries);
+            } else {
+                self.witness.agents.insert(agent, addition);
+            }
+        }
+        self.witness.objects.extend(later.witness.objects);
+        self.witness
+            .predecessor_relations
+            .extend(later.witness.predecessor_relations);
+        self.witness
+            .predecessor_relations
+            .sort_by(|left, right| left.claim.cmp(&right.claim));
+        self.after = later.after;
+        Some(self)
+    }
+
+    fn unchanged(reduction: Arc<Reduction>) -> Self {
+        Self {
+            before: reduction.clone(),
+            after: reduction,
+            witness: AppendWitness::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -107,6 +221,7 @@ impl Reducer {
         if self.incremental.pending.is_empty() && self.incremental.index_limit == max_dependencies {
             if let Some(reduction) = previous {
                 return Resolution {
+                    append: Some(IndependentAppend::unchanged(reduction.clone())),
                     reduction,
                     changes: ReductionChanges::default(),
                     work: ReductionWork {
@@ -128,10 +243,24 @@ impl Reducer {
             .zip(self.incremental.index.as_ref())
             .filter(|_| self.incremental.index_limit == max_dependencies)
             .and_then(|(before, index)| resolve_tail(before, index, &pending));
-        let (reduction, changes) = if let Some((reduction, changes, entries)) = incremental {
+        let (reduction, changes, append) = if let Some((reduction, changes, witness)) = incremental
+        {
             work.claims_resolved = pending.len();
-            work.history_entries_updated = entries;
-            (Arc::new(reduction), changes)
+            work.history_entries_updated = witness
+                .agents
+                .values()
+                .map(|agent| agent.added_entries.len())
+                .sum();
+            let reduction = Arc::new(reduction);
+            let append = IndependentAppend {
+                before: previous
+                    .as_ref()
+                    .expect("tail resolution has an initialized predecessor")
+                    .clone(),
+                after: reduction.clone(),
+                witness,
+            };
+            (reduction, changes, Some(append))
         } else {
             let reduction = Arc::new(self.resolve());
             work.claims_resolved = self.claims.len();
@@ -145,7 +274,7 @@ impl Reducer {
                 previous.as_deref().unwrap_or(&Reduction::default()),
                 &reduction,
             );
-            (reduction, changes)
+            (reduction, changes, None)
         };
         if previous.is_none() || self.incremental.index_limit != max_dependencies {
             let mut index = DependencyIndex::default();
@@ -165,6 +294,7 @@ impl Reducer {
             reduction,
             changes,
             work,
+            append,
         }
     }
 }
@@ -173,7 +303,7 @@ fn resolve_tail(
     before: &Reduction,
     index: &DependencyIndex,
     claims: &[&Claim],
-) -> Option<(Reduction, ReductionChanges, usize)> {
+) -> Option<(Reduction, ReductionChanges, AppendWitness)> {
     if claims.is_empty()
         || claims
             .iter()
@@ -341,6 +471,10 @@ fn resolve_tail(
     }
     let mut result = before.clone();
     let mut changes = ReductionChanges::default();
+    let mut witness = AppendWitness {
+        objects: declared,
+        ..AppendWitness::default()
+    };
     for (agent, mut successors) in by_agent {
         let old = before.histories.get(&agent)?;
         if old.candidate_heads.len() != 1
@@ -352,17 +486,28 @@ fn resolve_tail(
         }
         let mut history = old.clone();
         let mut tail = old.archive_order.back()?.clone();
+        let previous_head = tail.clone();
+        let mut added_entries = Vec::new();
         while let Some(next) = successors.remove(&tail) {
             history.archive_order.push_back(next.clone());
             history
                 .order_basis
                 .insert(next.clone(), ReadingOrderBasis::NativePredecessor);
+            added_entries.push(next.clone());
             tail = next;
         }
         if !successors.is_empty() {
             return None;
         }
         history.candidate_heads = std::iter::once(tail).collect();
+        witness.agents.insert(
+            agent.clone(),
+            IndependentAppendAgent {
+                previous_archive_len: old.archive_order.len(),
+                previous_head,
+                added_entries,
+            },
+        );
         result.histories.insert(agent.clone(), history.clone());
         changes.histories.changed.insert(
             agent,
@@ -415,6 +560,7 @@ fn resolve_tail(
         );
     }
     for relation in local.relations {
+        witness.predecessor_relations.push(relation.clone());
         let insertion = result
             .relations
             .binary_search_by(|old| old.claim.cmp(&relation.claim))
@@ -428,7 +574,7 @@ fn resolve_tail(
         );
         result.relations.insert(insertion, relation);
     }
-    Some((result, changes, entries.len()))
+    Some((result, changes, witness))
 }
 
 #[cfg(test)]

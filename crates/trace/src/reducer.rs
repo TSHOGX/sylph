@@ -1209,7 +1209,7 @@ mod history;
 use history::resolve_histories;
 
 mod incremental;
-pub use incremental::{ReductionWork, Resolution};
+pub use incremental::{IndependentAppend, IndependentAppendAgent, ReductionWork, Resolution};
 mod dependencies;
 
 mod changes;

@@ -3,7 +3,7 @@ use crate::trace::{
     generation::{PayloadAnchor, PayloadAnchorChange},
     reading_store::{read_scope, ReadRowChange},
 };
-use sylph_trace::reading::{PayloadPreview, ReadingProjection};
+use sylph_trace::reading::{AppendIndex, AppendWork, PayloadPreview, ReadingProjection};
 
 /// Immutable cache of exactly the previous committed reader rows. Cloning a
 /// candidate unit shares these bytes; failed or cancelled units cannot mutate it.
@@ -13,11 +13,15 @@ pub(super) struct MaterializedReading {
     anchors: imbl::OrdMap<String, PayloadAnchor>,
     composed: imbl::OrdMap<PayloadRef, sylph_trace::reading::ComposedPayload>,
     window_lengths: imbl::OrdMap<sylph_trace::reading::ReadingScope, usize>,
+    append_index: Option<AppendIndex>,
 }
 impl MaterializedReading {
     fn from_projection(
         projection: &ReadingProjection,
         epochs: &BTreeMap<AnyObjectRef, IngestionEpoch>,
+        reduction: Arc<Reduction>,
+        max_references: usize,
+        work: &mut AppendWork,
     ) -> Result<Self> {
         Ok(Self {
             rows: rows(projection, epochs)?
@@ -26,6 +30,7 @@ impl MaterializedReading {
                 .collect(),
             anchors: anchors(projection)?.into_iter().collect(),
             composed: projection.composed_payloads.clone().into_iter().collect(),
+            append_index: AppendIndex::build(reduction, max_references, work),
             window_lengths: projection
                 .windows
                 .iter()
@@ -62,18 +67,22 @@ impl ProjectionWorker {
     pub(super) async fn materialize_reading(
         &self,
         generation: &GenerationStore,
-        old: &Reduction,
+        committed: &WorkerState,
         changes: &ReductionChanges,
         unit: &mut ProjectionUnit,
     ) -> Result<()> {
-        // Reconstruct after restart before changing preview metadata. Recomputing
-        // "before" with new metadata masks a late payload correction as unchanged.
+        let old = &committed.reduction;
+        // Reconstruct from committed metadata. Newly assigned epochs and payload
+        // previews must not rewrite the baseline before comparison after restart.
         let before = match &unit.next.reading {
             Some(previous) => previous.clone(),
             None => {
                 let previous = MaterializedReading::from_projection(
-                    &sylph_trace::reading::project(old, &unit.next.previews, 32),
-                    &unit.next.object_epochs,
+                    &sylph_trace::reading::project(old, &committed.previews, 32),
+                    &committed.object_epochs,
+                    old.clone(),
+                    self.limits.max_incremental_dependencies,
+                    &mut unit.reader_append_work,
                 )?;
                 unit.reader_rows_materialized += previous.rows.len();
                 Arc::new(previous)
@@ -198,15 +207,39 @@ impl ProjectionWorker {
         let allow_append = !self.full_reader_rebuilds;
         #[cfg(not(test))]
         let allow_append = true;
-        if allow_append && !existing_preview_changed {
-            if let Some(appended) = sylph_trace::reading::project_independent_append(
-                old,
-                &unit.next.reduction,
-                changes,
-                &unit.next.previews,
-                32,
-            ) {
+        let mut existing_epoch_changed = false;
+        for reference in unit
+            .batch
+            .mapper_states
+            .keys()
+            .filter_map(|key| key.strip_prefix("read_epoch:"))
+        {
+            let reference = AnyObjectRef::decode(reference)
+                .map_err(|error| WorkerError::Task(error.to_string()))?;
+            existing_epoch_changed |= old.object(&reference).is_some()
+                && committed.object_epochs.get(&reference)
+                    != unit.next.object_epochs.get(&reference);
+        }
+        if allow_append && !existing_preview_changed && !existing_epoch_changed {
+            let appended = before
+                .append_index
+                .as_ref()
+                .zip(unit.append.as_ref())
+                .filter(|(_, proof)| proof.matches(old, &unit.next.reduction))
+                .and_then(|(index, proof)| {
+                    sylph_trace::reading::project_independent_append(
+                        index,
+                        proof,
+                        &unit.next.previews,
+                        32,
+                        generation.limits().max_candidates,
+                        &mut unit.reader_append_work,
+                    )
+                });
+            if let Some(appended) = appended {
                 let mut next = before.as_ref().clone();
+                next.append_index = Some(appended.index);
+                let appended = appended.projection;
                 let offsets: BTreeMap<_, _> = appended
                     .windows
                     .keys()
@@ -327,7 +360,13 @@ impl ProjectionWorker {
                     .push((epoch, reference.clone(), composed.manifest.clone()));
             }
         }
-        let after = MaterializedReading::from_projection(&after, &unit.next.object_epochs)?;
+        let after = MaterializedReading::from_projection(
+            &after,
+            &unit.next.object_epochs,
+            unit.next.reduction.clone(),
+            self.limits.max_incremental_dependencies,
+            &mut unit.reader_append_work,
+        )?;
         unit.reader_rows_materialized += after.rows.len();
         for (key, row) in &after.rows {
             if before.rows.get(key).is_none_or(|old| {

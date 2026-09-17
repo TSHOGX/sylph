@@ -19,7 +19,7 @@ use sylph_trace::{
         self, ArchiveContext, ArchiveRequest, DerivedPayload, MapInput, MapOutput, MapperState,
         MappingDiagnostic, SemanticMapper,
     },
-    reducer::{Reducer, Reduction, ReductionChanges, ReductionWork, Resolution},
+    reducer::{IndependentAppend, Reducer, Reduction, ReductionChanges, ReductionWork, Resolution},
 };
 use tokio::sync::{Mutex, Semaphore};
 
@@ -106,6 +106,25 @@ pub struct WorkerProgress {
     /// Rows constructed by reader materialization during this worker pass.
     pub reader_rows_materialized: usize,
     pub reduction: ReductionWork,
+    pub membership: MembershipWork,
+    pub reader_append: sylph_trace::reading::AppendWork,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MembershipWork {
+    pub entries_examined: usize,
+    pub objects_examined: usize,
+    pub changes_emitted: usize,
+    pub full_reconciliations: usize,
+}
+
+impl MembershipWork {
+    fn accumulate(&mut self, other: &Self) {
+        self.entries_examined += other.entries_examined;
+        self.objects_examined += other.objects_examined;
+        self.changes_emitted += other.changes_emitted;
+        self.full_reconciliations += other.full_reconciliations;
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -216,6 +235,10 @@ struct ProjectionUnit {
     reader_rows_materialized: usize,
     reduction_changes: ReductionChanges,
     reduction_work: ReductionWork,
+    membership_work: MembershipWork,
+    reader_append_work: sylph_trace::reading::AppendWork,
+    append: Option<IndependentAppend>,
+    append_eligible: bool,
 }
 
 impl ProjectionUnit {
@@ -236,6 +259,10 @@ impl ProjectionUnit {
             reader_rows_materialized: 0,
             reduction_changes: ReductionChanges::default(),
             reduction_work: ReductionWork::default(),
+            membership_work: MembershipWork::default(),
+            reader_append_work: sylph_trace::reading::AppendWork::default(),
+            append: None,
+            append_eligible: true,
         }
     }
     fn gap(
@@ -479,6 +506,10 @@ impl ProjectionWorker {
                 // Oversized candidates still spent this work before batch splitting.
                 progress.reader_rows_materialized += prepared.reader_rows_materialized;
                 progress.reduction.accumulate(&prepared.reduction_work);
+                progress.membership.accumulate(&prepared.membership_work);
+                progress
+                    .reader_append
+                    .accumulate(&prepared.reader_append_work);
                 match generation.validate_batch(&prepared.batch) {
                     Ok(()) => break prepared,
                     Err(GenerationError::Limit(_)) if captures.len() > 1 => {
@@ -760,7 +791,7 @@ impl ProjectionWorker {
         if unit.next.reducer.len() > self.limits.max_reducer_claims {
             return Err(WorkerError::Limit("retained reducer claims"));
         }
-        self.materialize(generation, &state.reduction, &mut unit)
+        self.materialize(generation, state, &mut unit)
             .await?;
         if serde_json::to_vec(&unit.batch.mapper_states)?.len() > self.limits.max_state_bytes {
             return Err(WorkerError::Limit("mapper checkpoint bytes"));
@@ -770,6 +801,17 @@ impl ProjectionWorker {
 
     async fn reduce_unit(&self, unit: &mut ProjectionUnit) -> Result<()> {
         let resolved = self.reduce(&mut unit.next.reducer).await?;
+        if unit.append_eligible {
+            unit.append = match (unit.append.take(), resolved.append) {
+                (Some(previous), Some(next)) => previous.compose(next),
+                (None, Some(next)) if next.matches(&unit.next.reduction, &resolved.reduction) => {
+                    Some(next)
+                }
+                _ => None,
+            };
+            // A later tail cannot erase an earlier unproved change in this unit.
+            unit.append_eligible = unit.append.is_some();
+        }
         unit.next.reduction = resolved.reduction;
         unit.reduction_changes.compose(resolved.changes);
         unit.reduction_work.accumulate(&resolved.work);
@@ -1475,9 +1517,10 @@ impl ProjectionWorker {
     async fn materialize(
         &self,
         generation: &GenerationStore,
-        old: &Reduction,
+        before: &WorkerState,
         unit: &mut ProjectionUnit,
     ) -> Result<()> {
+        let old = &before.reduction;
         let new = &unit.next.reduction;
         let changes = std::mem::take(&mut unit.reduction_changes);
         // Redelivery and acquisition-only metadata do not change a reader. Keep
@@ -1523,25 +1566,50 @@ impl ProjectionWorker {
                 reason: "Resolved to another issued reference".into(),
             });
         }
-        let old_members = memberships(old)?;
-        let new_members = memberships(new)?;
-        for (key, value) in &new_members {
-            if old_members
-                .get(key)
-                .is_none_or(|old| old.order_key != value.order_key)
-            {
-                batch.memberships.push(value.clone());
+        let previous_count = batch.memberships.len();
+        if let Some(proof) = unit
+            .append
+            .as_ref()
+            .filter(|proof| proof.matches(old, new))
+        {
+            for (agent, tail) in proof.agents() {
+                for (offset, entry) in tail.added_entries().iter().enumerate() {
+                    unit.membership_work.entries_examined += 1;
+                    let ordinal = tail
+                        .previous_archive_len()
+                        .checked_add(offset)
+                        .ok_or(WorkerError::Limit("archive membership ordinal"))?;
+                    batch.memberships.push(MembershipChange {
+                        scope: QueryScope::archive(agent.clone()),
+                        object_ref: AnyObjectRef::HistoryEntry(entry.clone()),
+                        order_key: (ordinal as u64).to_be_bytes().to_vec(),
+                        present: true,
+                    });
+                }
+            }
+        } else {
+            unit.membership_work.full_reconciliations += 1;
+            let old_members = memberships(old, &mut unit.membership_work)?;
+            let new_members = memberships(new, &mut unit.membership_work)?;
+            for (key, value) in &new_members {
+                if old_members
+                    .get(key)
+                    .is_none_or(|old| old.order_key != value.order_key)
+                {
+                    batch.memberships.push(value.clone());
+                }
+            }
+            for (key, value) in old_members {
+                if !new_members.contains_key(&key) {
+                    batch.memberships.push(MembershipChange {
+                        present: false,
+                        ..value
+                    });
+                }
             }
         }
-        for (key, value) in old_members {
-            if !new_members.contains_key(&key) {
-                batch.memberships.push(MembershipChange {
-                    present: false,
-                    ..value
-                });
-            }
-        }
-        self.materialize_reading(generation, old, &changes, unit)
+        unit.membership_work.changes_emitted += batch.memberships.len() - previous_count;
+        self.materialize_reading(generation, before, &changes, unit)
             .await?;
         Ok(())
     }
@@ -1748,6 +1816,7 @@ fn requests_may_resolve(requests: &[ArchiveRequest], state: &WorkerState) -> boo
 
 fn memberships(
     reduction: &Reduction,
+    work: &mut MembershipWork,
 ) -> Result<BTreeMap<(String, AnyObjectRef), MembershipChange>> {
     let mut result = BTreeMap::new();
     let mut add = |scope: QueryScope, reference: AnyObjectRef, index: usize| -> Result<()> {
@@ -1765,6 +1834,7 @@ fn memberships(
     };
     for (agent, history) in &reduction.histories {
         for (index, entry) in history.archive_order.iter().enumerate() {
+            work.entries_examined += 1;
             add(
                 QueryScope::archive(agent.clone()),
                 AnyObjectRef::HistoryEntry(entry.clone()),
@@ -1777,6 +1847,7 @@ fn memberships(
             .zip(history.selected_entries.as_ref())
         {
             for (index, entry) in entries.iter().enumerate() {
+                work.entries_examined += 1;
                 add(
                     QueryScope::history(agent.clone(), selection.clone()),
                     AnyObjectRef::HistoryEntry(entry.clone()),
@@ -1786,6 +1857,7 @@ fn memberships(
         }
     }
     let mut activation_counts = BTreeMap::<AgentRef, usize>::new();
+    work.objects_examined += reduction.objects.len();
     for object in reduction
         .objects
         .values()

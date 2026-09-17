@@ -300,8 +300,18 @@ the resolver emits a typed delta and work counters without running the full orac
 predecessors, deferred corrections/equivalences, selected-source completion, sibling/order
 changes and dependency-budget exhaustion fall back to the full deterministic reduction.
 The 20/200 tail oracle suite compares every reduction to the full resolver, including
-restart and redelivery; full 2000-record production scaling and direct delta scheduling
-remain open.
+restart and redelivery; the complete production scaling matrix and general incremental
+reconciliation remain open.
+
+Independent tails now carry reducer-issued proofs bound to their exact immutable before
+and after reductions. The worker emits only new archive memberships, and the reader uses
+persistent reverse indexes for boundary relations, selected entries, submitted deliveries
+and coverage instead of repeating full-history proofs. Index capacity and guard fanout are
+bounded separately, with explicit work counters and reconciliation on exhaustion. The
+20/200 production comparison includes membership and reader-proof work as well as complete
+persisted rows, payload anchors and authorization metadata. Restoring a missing reader cache
+uses committed previews and epochs, so a new binding for an old entry cannot mask the row
+update required at the next view revision.
 
 Search reconciliation now persists complete source fingerprints and reuses unchanged
 FTS text across process restarts. Bounded source writes and stale-source removal remain
@@ -319,8 +329,9 @@ negative controls also do not establish that every new dependency guard was muta
 
 Open implementation/acceptance work remains in the ordered list above. In particular,
 `crates/server/src/trace/worker/reading.rs` still materializes general reconciliation from
-the whole reduction. Tail proof evaluation also scans semantic metadata; constant row
-construction alone does not establish bounded total update work. Bounded HTTP
+the whole reduction. Candidate worker-state cloning and semantic mapper-context refresh
+still grow with retained metadata; bounded membership and reader-proof work alone does
+not establish bounded total update work. Bounded HTTP
 pages do not prove bounded incremental projection cost. The ignored
 `worker_projection_scaling_probe` measures this production path under
 `SYLPH_WORKER_BENCH_RECORDS`; cold replay and repeated live updates still need the full

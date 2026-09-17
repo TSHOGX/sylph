@@ -23,7 +23,9 @@ async fn append_message(
     offset + raw.len() as u64
 }
 
-async fn warm_append_after(records: usize) -> usize {
+async fn warm_append_after(
+    records: usize,
+) -> (usize, MembershipWork, sylph_trace::reading::AppendWork) {
     let fixture = Fixture::new().await;
     let header = CODEX_NATIVE
         .split_inclusive(|byte| *byte == b'\n')
@@ -77,6 +79,13 @@ async fn warm_append_after(records: usize) -> usize {
     );
     assert_eq!(appended.reduction.history_entries_updated, 1);
     assert!(appended.reduction.claims_resolved <= worker.limits.max_claims_per_observation);
+    assert_eq!(appended.membership.entries_examined, 1);
+    assert_eq!(appended.membership.objects_examined, 0);
+    assert_eq!(appended.membership.changes_emitted, 1);
+    assert_eq!(appended.membership.full_reconciliations, 0);
+    assert!(!appended.reader_append.index_unavailable);
+    assert!(!appended.reader_append.guard_budget_exhausted);
+    assert!(appended.reader_append.guard_references_examined <= warm.limits().max_candidates);
     let warm_projection = reader_projection(&fixture, &warm).await;
     assert_eq!(
         warm_projection
@@ -120,16 +129,20 @@ async fn warm_append_after(records: usize) -> usize {
     warm.close().await;
     fixture.evidence.close().await;
     assert!(appended.reduction.dependency_references_indexed > 0);
-    appended.reader_rows_materialized
+    (
+        appended.reader_rows_materialized,
+        appended.membership,
+        appended.reader_append,
+    )
 }
 
 #[tokio::test]
-async fn independent_tail_append_materializes_constant_rows_and_matches_cold_rebuild() {
+async fn independent_tail_append_bounds_membership_and_reader_proof_work_and_matches_cold_rebuild() {
     let short_history = warm_append_after(20).await;
     let long_history = warm_append_after(200).await;
     assert_eq!(
         short_history, long_history,
-        "Reader row work for one independent append must not grow with prior history"
+        "Membership, reader proof, and row work for one append must not grow with prior history"
     );
 }
 
@@ -171,6 +184,10 @@ async fn failed_incremental_append_preserves_committed_rows_and_retries_the_same
         .unwrap();
     let retry = worker.catch_up(&store, 1, 3).await.unwrap();
     assert!(retry.reader_rows_materialized <= 10);
+    assert_eq!(retry.membership.entries_examined, 1);
+    assert_eq!(retry.membership.objects_examined, 0);
+    assert_eq!(retry.membership.full_reconciliations, 0);
+    assert!(!retry.reader_append.index_unavailable);
     let (cold, _) = fixture.generation("append-rollback-reference").await;
     let mut reference_worker = fixture.worker();
     reference_worker.full_reader_rebuilds = true;

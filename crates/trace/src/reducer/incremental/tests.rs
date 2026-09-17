@@ -566,3 +566,159 @@ fn lowering_the_dependency_budget_without_new_claims_releases_the_old_index() {
     assert_eq!(resolved.work.full_resolutions, 1);
     assert_eq!(*resolved.reduction, reducer.resolve());
 }
+
+fn entry_ref(index: u64) -> EntryRef {
+    EntryRef::native(
+        agent("root"),
+        "incremental.entry",
+        vec![format!("entry-{index}")],
+    )
+    .unwrap()
+}
+
+fn append_resolution(reducer: &mut Reducer, batch: &[Claim]) -> Resolution {
+    reducer
+        .apply(batch, &available(batch), batch.len())
+        .unwrap();
+    reducer.resolve_incremental(100_000)
+}
+
+#[test]
+fn append_certificate_binds_exact_snapshots_and_names_the_ordered_tail() {
+    let mut reducer = Reducer::default();
+    let before = append_resolution(&mut reducer, &[tail(0), tail(1)].concat());
+    assert!(before.append.is_none());
+    let mut added = [tail(3), tail(2)].concat();
+    for index in [3, 2] {
+        added.push(claim(
+            1000 + index,
+            Fact::Relation {
+                relation: Relation::HistoryPredecessor {
+                    predecessor: entry_ref(index - 1),
+                    entry: entry_ref(index),
+                },
+            },
+        ));
+    }
+    let after = append_resolution(&mut reducer, &added);
+    let proof = after.append.as_ref().unwrap();
+    assert!(proof.matches(&before.reduction, &after.reduction));
+    assert!(std::sync::Arc::ptr_eq(proof.before(), &before.reduction));
+    assert!(std::sync::Arc::ptr_eq(proof.after(), &after.reduction));
+    assert!(!proof.matches(&before.reduction.as_ref().clone(), &after.reduction));
+    assert!(!proof.matches(&before.reduction, &after.reduction.as_ref().clone()));
+    assert!(!proof.matches(&after.reduction, &before.reduction));
+    assert_eq!(proof.agents().len(), 1);
+    let affected = &proof.agents()[&agent("root")];
+    assert_eq!(affected.previous_archive_len(), 2);
+    assert_eq!(affected.previous_head(), &entry_ref(1));
+    assert_eq!(affected.added_entries(), &[entry_ref(2), entry_ref(3)]);
+    let expected_objects = added
+        .iter()
+        .filter_map(|claim| match &claim.fact {
+            Fact::Declare { object } => Some(object.object_ref()),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(proof.objects(), &expected_objects);
+    assert_eq!(proof.objects().len(), 6);
+    assert_eq!(proof.predecessor_relations().count(), 2);
+    for index in [2, 3] {
+        assert!(proof.predecessor_relations().any(|relation| matches!(
+            &relation.relation, Relation::HistoryPredecessor { predecessor, entry }
+                if predecessor == &entry_ref(index - 1) && entry == &entry_ref(index)
+        )));
+    }
+    assert_eq!(after.reduction.as_ref(), &reducer.resolve());
+}
+
+#[test]
+fn retained_append_certificate_prevents_mutating_its_snapshot_in_place() {
+    let mut reducer = Reducer::default();
+    append_resolution(&mut reducer, &tail(0));
+    let resolved = append_resolution(&mut reducer, &tail(1));
+    let proof = resolved.append.unwrap();
+    let mut snapshot = resolved.reduction;
+    drop(reducer);
+    assert!(std::sync::Arc::get_mut(&mut snapshot).is_none());
+    let original = proof.after().clone();
+    std::sync::Arc::make_mut(&mut snapshot)
+        .diagnostics
+        .push_back(ReductionDiagnostic {
+            code: DiagnosticCode::CaptureGap,
+            claims: vec![],
+            message: "candidate mutation".into(),
+        });
+    assert!(!proof.matches(proof.before(), &snapshot));
+    assert!(proof.matches(proof.before(), &original));
+    assert!(original.diagnostics.is_empty());
+}
+
+#[test]
+fn consecutive_append_certificates_compose_through_exact_noop_snapshots() {
+    let mut reducer = Reducer::default();
+    let initial = append_resolution(&mut reducer, &tail(0));
+    let first = append_resolution(&mut reducer, &tail(1));
+    let unchanged = reducer.resolve_incremental(100_000);
+    let identity = unchanged.append.unwrap();
+    assert!(identity.agents().is_empty());
+    assert!(identity.objects().is_empty());
+    assert_eq!(identity.predecessor_relations().count(), 0);
+    assert!(identity.matches(&first.reduction, &first.reduction));
+    let last = append_resolution(&mut reducer, &tail(2));
+    let proof = first
+        .append
+        .unwrap()
+        .compose(identity)
+        .unwrap()
+        .compose(last.append.unwrap())
+        .unwrap();
+    assert!(proof.matches(&initial.reduction, &last.reduction));
+    let affected = &proof.agents()[&agent("root")];
+    assert_eq!(affected.previous_archive_len(), 1);
+    assert_eq!(affected.previous_head(), &entry_ref(0));
+    assert_eq!(affected.added_entries(), &[entry_ref(1), entry_ref(2)]);
+    assert_eq!(proof.objects().len(), 6);
+}
+
+#[test]
+fn equal_reductions_from_another_resolver_cannot_supply_a_composition_boundary() {
+    let mut first_reducer = Reducer::default();
+    append_resolution(&mut first_reducer, &tail(0));
+    let first = append_resolution(&mut first_reducer, &tail(1));
+    let mut other_reducer = Reducer::default();
+    let equal_middle = append_resolution(&mut other_reducer, &[tail(0), tail(1)].concat());
+    assert_eq!(first.reduction, equal_middle.reduction);
+    let other = append_resolution(&mut other_reducer, &tail(2));
+    assert!(first
+        .append
+        .unwrap()
+        .compose(other.append.unwrap())
+        .is_none());
+}
+
+#[test]
+fn full_reconciliation_breaks_the_certificate_chain_even_before_a_later_valid_append() {
+    let mut reducer = Reducer::default();
+    append_resolution(&mut reducer, &tail(0));
+    let first = append_resolution(&mut reducer, &tail(1));
+    let diagnostic = claim(
+        1000,
+        Fact::Diagnostic {
+            diagnostic: TraceDiagnostic {
+                subject: None,
+                code: DiagnosticCode::CaptureGap,
+                message: "unrelated retained evidence".into(),
+                related_claims: vec![],
+            },
+        },
+    );
+    let fallback = append_resolution(&mut reducer, &[diagnostic]);
+    assert_eq!(fallback.work.full_resolutions, 1);
+    assert!(fallback.append.is_none());
+    let last = append_resolution(&mut reducer, &tail(2));
+    assert_eq!(last.work.full_resolutions, 0);
+    let later = last.append.unwrap();
+    assert!(later.matches(&fallback.reduction, &last.reduction));
+    assert!(first.append.unwrap().compose(later).is_none());
+}
