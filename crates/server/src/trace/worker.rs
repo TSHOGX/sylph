@@ -990,16 +990,51 @@ impl ProjectionWorker {
             }
             after = page.next;
         }
-        // Claims are temporal, while mapper state is latest-only. The store
-        // checks this exact snapshot and reads the mapper rows in one transaction;
-        // a concurrent continuation rejects restoration instead of mixing revisions.
-        let values = generation.mapper_states(snapshot).await?;
-        if serde_json::to_vec(&values)?.len() > self.limits.max_state_bytes {
-            return Err(WorkerError::Limit("restored mapper checkpoint bytes"));
+        // Claims are temporal, while mapper state is latest-only. Each page checks
+        // this exact snapshot and reads its mapper rows in one transaction, so a
+        // concurrent continuation rejects restoration instead of mixing revisions.
+        //
+        // The checkpoint is read in bounded pages, like the claims above. Reading it
+        // whole and comparing it to `max_state_bytes` applied a per-batch transient
+        // limit to accumulated history, which made the limit a ceiling on how long a
+        // history could be before a restarted worker could no longer resume it at
+        // all — while the same worker held the whole reduction in memory under
+        // `max_reducer_claims`. The bound belongs on the page, which is the buffer
+        // that must not grow.
+        let mut cursor: Option<String> = None;
+        loop {
+            let page = generation
+                .mapper_state_page(snapshot, cursor.as_deref(), self.limits.max_state_bytes)
+                .await?;
+            let resume = page.next;
+            for (key, value) in page.states {
+                self.restore_state_entry(&mut state, key, value)?;
+            }
+            match resume {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
         }
-        for (key, value) in values {
+        let resolved = self.reduce(&mut state.reducer).await?;
+        state.reduction = resolved.reduction;
+        self.restore_provenance_index(&mut state, snapshot.evidence_cut)
+            .await?;
+        Ok((state, resolved.work))
+    }
+
+    /// Apply one restored mapper-checkpoint entry to the state being rebuilt.
+    ///
+    /// Split out of `load_state` so the paged read has one body per entry rather
+    /// than a loop whose shape depends on how the rows were batched.
+    fn restore_state_entry(
+        &self,
+        state: &mut WorkerState,
+        key: String,
+        value: serde_json::Value,
+    ) -> Result<()> {
+        {
             if value.is_null() {
-                continue;
+                return Ok(());
             }
             if let Some(key) = key.strip_prefix("source:") {
                 state
@@ -1062,11 +1097,7 @@ impl ProjectionWorker {
                 );
             }
         }
-        let resolved = self.reduce(&mut state.reducer).await?;
-        state.reduction = resolved.reduction;
-        self.restore_provenance_index(&mut state, snapshot.evidence_cut)
-            .await?;
-        Ok((state, resolved.work))
+        Ok(())
     }
 
     async fn map_record(

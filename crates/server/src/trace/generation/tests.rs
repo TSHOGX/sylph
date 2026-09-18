@@ -1486,8 +1486,9 @@ async fn mapper_restore_reads_the_checkpoint_and_values_from_one_transaction() {
         let resume = resume.clone();
         tokio::spawn(async move {
             store
-                .mapper_states_inner(&expected, Some((&entered, &resume)))
+                .mapper_states_inner(&expected, Some((&entered, &resume)), None, usize::MAX)
                 .await
+                .map(|page| page.states)
         })
     };
     let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {

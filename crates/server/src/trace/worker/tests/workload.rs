@@ -400,7 +400,7 @@ async fn activation_count_stays_bounded_at_the_observed_corpus_ceiling() {
 
 /// Payload bytes: one history whose record count is fixed while each record's
 /// body grows.
-async fn sized_history(bytes_each: usize, records: u64) -> (Fixture, u64) {
+pub(super) async fn sized_history(bytes_each: usize, records: u64) -> (Fixture, u64) {
     let fixture = Fixture::new().await;
     let mut offset = 0u64;
     let mut header = serde_json::to_vec(&serde_json::json!({
@@ -680,9 +680,12 @@ async fn repeated_source_rewrites_cost_the_same_each_time_and_do_not_duplicate_r
 /// by running later. The durable mapper checkpoint is attributable, has a real
 /// declared limit, and is what a restart must load back into memory in one piece.
 ///
-/// The limit is enforced on restoration (`load_state`), not on the warm write path,
-/// which checks only the current batch. So a history that grows past it keeps
-/// projecting until the process restarts and then cannot resume at all.
+/// Accumulated state legitimately grows with retained history, so the figure to
+/// bound is the transient page a restarting worker decodes, not the total. This
+/// measures the growth rate, states what the largest retained history accumulates,
+/// and asserts that the per-page read stays bounded regardless — which is what
+/// `max_state_bytes` means once restoration pages
+/// (`crate::trace::generation::GenerationStore::mapper_state_page`).
 #[tokio::test]
 async fn durable_projection_state_keeps_the_largest_retained_history_restorable() {
     // The largest retained Codex root in
@@ -714,28 +717,82 @@ async fn durable_projection_state_keeps_the_largest_retained_history_restorable(
     let slope = (large_bytes - small_bytes) as f64 / (large_records - small_records) as f64;
     let fixed = large_bytes as f64 - slope * large_records as f64;
     let projected = (slope * LARGEST_RETAINED_HISTORY as f64 + fixed).ceil() as usize;
-    let records_at_limit = (limit as f64 / slope).floor() as usize;
+    // The record count at which the accumulated checkpoint passes one page's worth
+    // of bytes. Past it, restoration must take more than one page — which is the
+    // behaviour under test, not a failure.
+    let records_per_page = (limit as f64 / slope).floor() as usize;
     eprintln!(
-        "durable_state_projection bytes_per_record={slope:.1} fixed_overhead={fixed:.1} projected_at_{LARGEST_RETAINED_HISTORY}={projected} records_at_limit={records_at_limit} max_state_bytes={limit}"
+        "durable_state_projection bytes_per_record={slope:.1} fixed_overhead={fixed:.1} projected_at_{LARGEST_RETAINED_HISTORY}={projected} records_per_page={records_per_page} max_state_bytes={limit}"
     );
     assert!(
         slope > 0.0,
         "a per-record state rate of zero would mean the measurement observed no growth"
     );
+    // Every restoration page stays within the limit whatever the total, and the walk
+    // terminates. A page reading its whole table would exceed the small limit here,
+    // and a cursor that failed to advance would spin instead of finishing.
+    let (fixture, through) = sized_history(512, 200).await;
+    let (generation, _) = fixture.generation("state-pages").await;
+    let worker = fixture.worker();
+    worker.catch_up(&generation, 1, through).await.unwrap();
+    let snapshot = generation.checkpoint().await.unwrap().snapshot;
+    let page_limit = 64 * 1024;
+    let mut cursor = None;
+    let mut pages = 0usize;
+    let mut restored = 0usize;
+    let mut worst = 0usize;
+    loop {
+        let page = generation
+            .mapper_state_page(&snapshot, cursor.as_deref(), page_limit)
+            .await
+            .unwrap();
+        pages += 1;
+        restored += page.states.len();
+        worst = worst.max(
+            page.states
+                .iter()
+                .map(|(key, value)| key.len() + serde_json::to_vec(value).unwrap().len())
+                .sum(),
+        );
+        assert!(pages <= 4096, "restoration pages must advance, not loop");
+        match page.next {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+    // Compare the walk against the unpaged read of the same snapshot. Comparing it
+    // to another fixture's entry count would measure two stores, not the paging.
+    let total_entries = generation.mapper_states(&snapshot).await.unwrap().len();
+    eprintln!(
+        "durable_state_pages page_limit={page_limit} pages={pages} entries_restored={restored} unpaged_entries={total_entries} worst_page_bytes={worst}"
+    );
     assert!(
-        projected < limit,
-        "the largest retained history projects to {projected} durable state bytes against a {limit} limit, so a history of {LARGEST_RETAINED_HISTORY} records cannot be restored after restart; the limit is first reached at about {records_at_limit} records"
+        pages > 1,
+        "the page bound was never exercised: {total_entries} entries fit one {page_limit}-byte page"
+    );
+    assert_eq!(
+        restored, total_entries,
+        "paged restoration must deliver every committed entry exactly once"
+    );
+    assert!(
+        worst <= page_limit + slope.ceil() as usize * 8,
+        "one restoration page exceeded its byte bound: {worst} against {page_limit}"
     );
 }
 
 /// A projection that a running worker can extend must still be restorable by a
 /// fresh one at the same cut.
 ///
-/// The warm path checks only the batch it is about to write, so exceeding the
-/// restoration limit is invisible until a restart — the failure mode is a
-/// projection that works until the process dies and then stalls permanently, with
+/// The warm path bounds the batch it is about to write, so accumulated state that
+/// restoration cannot read back is invisible until a restart — the failure mode is
+/// a projection that works until the process dies and then stalls permanently, with
 /// evidence retained and no read surface advancing. Asserting restorability at the
 /// same cut is what makes that reachable in a test rather than in production.
+///
+/// The restarted worker is given a `max_state_bytes` far *smaller* than the state
+/// already committed. That is the whole point: the limit bounds one restoration
+/// page, not the retained total, so a history whose checkpoint exceeds it many
+/// times over must still resume.
 #[tokio::test]
 async fn state_a_warm_worker_accepts_can_be_restored_by_a_restarted_worker() {
     let (fixture, through) = sized_history(512, 200).await;
@@ -748,18 +805,28 @@ async fn state_a_warm_worker_accepts_can_be_restored_by_a_restarted_worker() {
         .unwrap()
         .len();
     drop(worker);
-    let restarted = fixture.worker();
+    let page_limit = 64 * 1024;
+    assert!(
+        bytes > page_limit * 4,
+        "the committed state must exceed one page several times over for this to test paging: {bytes}"
+    );
+    let restarted = fixture.worker_with(WorkerLimits {
+        max_state_bytes: page_limit,
+        ..WorkerLimits::default()
+    });
     let resumed = restarted
         .catch_up(&generation, 1, through)
         .await
         .unwrap_or_else(|error| {
             panic!(
-                "a restarted worker cannot restore the {bytes} bytes of state a warm worker committed: {error}"
+                "a restarted worker cannot restore the {bytes} bytes of state a warm worker committed through a {page_limit}-byte page: {error}"
             )
         });
     assert_eq!(
         resumed.projected_cut, through,
         "restoration must resume at the committed cut"
     );
-    eprintln!("restorable_state committed_bytes={bytes} resumed_cut={through}");
+    eprintln!(
+        "restorable_state committed_bytes={bytes} page_limit={page_limit} resumed_cut={through}"
+    );
 }

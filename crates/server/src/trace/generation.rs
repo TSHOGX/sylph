@@ -477,6 +477,13 @@ pub struct RetainedClaimsPage {
     pub has_more: bool,
 }
 
+/// One bounded page of the committed mapper checkpoint. `next` is the first key
+/// this page stopped before, so restoration resumes from it exactly once.
+pub struct MapperStatePage {
+    pub states: BTreeMap<String, serde_json::Value>,
+    pub next: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ClaimCursor {
@@ -1419,14 +1426,35 @@ impl GenerationStore {
         &self,
         expected_snapshot: &Snapshot,
     ) -> Result<BTreeMap<String, serde_json::Value>> {
-        self.mapper_states_inner(expected_snapshot, None).await
+        self.mapper_states_inner(expected_snapshot, None, None, usize::MAX)
+            .await
+            .map(|page| page.states)
+    }
+
+    /// One bounded page of the committed mapper checkpoint, ordered by key.
+    ///
+    /// Restoration reads the checkpoint in pages for the same reason claim
+    /// restoration does: the accumulated checkpoint grows with retained history,
+    /// while a worker's transient decode buffer must not. Reading it whole made a
+    /// per-batch byte limit into a ceiling on history length
+    /// (`docs/unified-trace-storage.md` § Reduction and projection checkpoints).
+    pub async fn mapper_state_page(
+        &self,
+        expected_snapshot: &Snapshot,
+        after: Option<&str>,
+        max_bytes: usize,
+    ) -> Result<MapperStatePage> {
+        self.mapper_states_inner(expected_snapshot, None, after, max_bytes)
+            .await
     }
 
     async fn mapper_states_inner(
         &self,
         expected_snapshot: &Snapshot,
         pause: Option<(&tokio::sync::Notify, &tokio::sync::Notify)>,
-    ) -> Result<BTreeMap<String, serde_json::Value>> {
+        after: Option<&str>,
+        max_bytes: usize,
+    ) -> Result<MapperStatePage> {
         // The exact checkpoint and temporal values share one read transaction;
         // private reconciliation rows cannot replace its committed mapper state.
         let mut tx = self.readers.begin().await?;
@@ -1444,19 +1472,33 @@ impl GenerationStore {
             entered.notify_one();
             resume.notified().await;
         }
-        let rows = sqlx::query("SELECT mapper_key,state_json FROM mapper_states m WHERE at_revision=(SELECT MAX(at_revision) FROM mapper_states WHERE mapper_key=m.mapper_key AND at_revision<=?)")
+        // Key order is the page cursor. The latest-revision subquery is per key, so
+        // ordering by key keeps a resumed page from revisiting or skipping one.
+        let rows = sqlx::query("SELECT mapper_key,state_json FROM mapper_states m WHERE at_revision=(SELECT MAX(at_revision) FROM mapper_states WHERE mapper_key=m.mapper_key AND at_revision<=?) AND mapper_key>? ORDER BY mapper_key")
             .bind(signed(expected_snapshot.view_revision)?)
+            .bind(after.unwrap_or(""))
             .fetch_all(&mut *tx)
             .await?;
         tx.commit().await?;
-        rows.into_iter()
-            .map(|row| {
-                Ok((
-                    row.try_get("mapper_key")?,
-                    serde_json::from_str(&row.try_get::<String, _>("state_json")?)?,
-                ))
-            })
-            .collect()
+        let mut states = BTreeMap::new();
+        let mut bytes = 0usize;
+        let mut next = None;
+        for row in rows {
+            let key: String = row.try_get("mapper_key")?;
+            let json: String = row.try_get("state_json")?;
+            // At least one entry per page, so a single large value cannot stall
+            // restoration at a cursor no page can pass.
+            if !states.is_empty() && bytes + key.len() + json.len() > max_bytes {
+                // The cursor is the last key this page *delivered*, because the
+                // resumed query is exclusive (`mapper_key > ?`). Naming the first
+                // undelivered key here would skip exactly one entry per page.
+                next = states.keys().next_back().cloned();
+                break;
+            }
+            bytes += key.len() + json.len();
+            states.insert(key, serde_json::from_str(&json)?);
+        }
+        Ok(MapperStatePage { states, next })
     }
 
     pub async fn has_processed_occurrence(&self, occurrence: u64) -> Result<bool> {

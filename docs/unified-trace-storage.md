@@ -343,6 +343,15 @@ transaction. A stale restore fails instead of combining older claims with newer 
 state. The worker installs the checkpoint returned by a successful commit, never one
 predicted before the transaction.
 
+A committed mapper checkpoint grows with retained history, so restoration reads it in
+bounded pages, as claim restoration already does, and each page validates the same exact
+snapshot. The worker's byte limit bounds one page, never the retained total: a limit
+compared against the whole checkpoint is a ceiling on how long a history may become
+before a restarted worker can no longer resume it, which the retained-evidence contract
+does not permit. Every page delivers at least one entry, so no single large value stalls
+restoration, and the page cursor is the last key delivered rather than the first one
+skipped.
+
 Mapper input snapshots share immutable ordered claim, evidence, correlation and source
 indexes with the candidate worker state. Later captures cannot mutate a mapper's frozen
 input, and constructing an ordinary input does not scan the retained claims or rebuild
