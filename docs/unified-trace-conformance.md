@@ -273,6 +273,8 @@ holds that window open before completing the competing operation.
 | CAS collection | Shared payload across evidence, active/private/leased generations, search and export jobs survives until its last live root is released |
 | Resource pressure | Projection stall does not hold evidence/control writer; bounded queues report actual admission/capture limits and recover from durable checkpoints |
 
+### Performance fixtures
+
 Performance fixtures vary independent dimensions: history length, concurrent sources,
 child fan-out, activation count, payload bytes, source rewrite frequency, and the number
 of superseded versions of hot objects. A LIMIT on returned rows is not a scan bound.
