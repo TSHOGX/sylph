@@ -836,3 +836,89 @@ async fn bootstrap_cancellation_before_its_final_read_releases_the_unreturned_vi
         .await
         .unwrap();
 }
+
+/// A search index left behind by temporal GC refuses its query instead of
+/// answering with current text under stale membership.
+///
+/// `docs/unified-trace-conformance.md` § Storage, query, and failure acceptance
+/// requires the search row to pin a matching view and cut or invalidate explicitly,
+/// and never to serve current text with old membership. Retirement ordering is
+/// covered elsewhere; the clause this closes is what a *query* does once GC has
+/// moved past the cut its index was built at.
+///
+/// Answering such a query is the expensive failure: the caller receives plausible
+/// hits whose membership no longer exists, which reads as a result rather than as
+/// an error. Refusing is the only safe answer, because the index cannot know which
+/// of its rows survived.
+#[tokio::test]
+async fn a_search_index_left_behind_by_collection_refuses_instead_of_serving_stale_membership() {
+    use crate::trace::search::{SearchHistoryMode, SearchQueryContext, SearchScope};
+    let directory = tempfile::tempdir().unwrap();
+    let service = TraceService::open(directory.path()).await.unwrap();
+    admit_native(&service).await;
+    service.project_pending().await.unwrap();
+    service.index_pending().await.unwrap();
+    let lease = service.lease_guard("reader", None).await.unwrap();
+    let snapshot = lease.snapshot.clone();
+    let index = service.search_store(&snapshot.generation).await.unwrap();
+    assert_eq!(index.checkpoint().await.unwrap(), Some(snapshot.clone()));
+    let query = |snapshot: crate::trace::generation::Snapshot, token: String| {
+        let index = index.clone();
+        async move {
+            index
+                .start_query(
+                    SearchQueryContext {
+                        subject: "reader",
+                        query: "transcript",
+                        scope: &SearchScope {
+                            agent: None,
+                            selection: None,
+                            mode: SearchHistoryMode::Authored,
+                            representation: None,
+                        },
+                        allowed_environments: &["env7fk2".into()].into(),
+                    },
+                    &snapshot,
+                    &token,
+                    crate::models::now_ms(),
+                    8,
+                )
+                .await
+        }
+    };
+    // The index answers while its cut is current, so the refusal below is caused by
+    // collection rather than by a query that never worked.
+    assert!(
+        query(snapshot.clone(), lease.token.clone())
+            .await
+            .is_ok_and(|result| !result.hits.is_empty()),
+        "the index must answer at its own cut before collection retires it"
+    );
+    // Retire the index behind a rebuilt generation, then release the lease holding
+    // its revision. This is temporal GC moving past the cut the index was built at.
+    service.rebuild().await.unwrap();
+    let now = crate::models::now_ms();
+    service
+        .catalogue
+        .expire_lease("reader", &lease.token)
+        .await
+        .unwrap();
+    service.retire_searches(now).await.unwrap();
+    assert_eq!(
+        index.checkpoint().await.unwrap(),
+        None,
+        "collection must leave the retired index without a cut"
+    );
+    // The same query at the same snapshot must now refuse. Its documents may still
+    // be on disk, which is exactly why answering would be wrong.
+    //
+    // Two guards enforce this and either one alone keeps the test green: the
+    // checkpoint comparison in `start_query` and the `search_state` cut comparison
+    // inside the query transaction. Removing both together is what makes this index
+    // return two hits from retired membership, so both are load-bearing.
+    let stale = query(snapshot.clone(), lease.token.clone()).await;
+    assert!(
+        matches!(stale, Err(crate::trace::search::SearchError::Indexing)),
+        "a collected index answered a query at its old cut: {stale:?}"
+    );
+}
