@@ -670,3 +670,96 @@ async fn repeated_source_rewrites_cost_the_same_each_time_and_do_not_duplicate_r
         "reader materialization went quadratic in rewrites: {last} rows at {largest} incarnations"
     );
 }
+
+/// Durable projection state per retained record, and whether the largest retained
+/// history fits `WorkerLimits::max_state_bytes`.
+///
+/// This is the memory half of S1.4. Process RSS is not the figure to report: a
+/// shared test process attributes an allocator's warmup to whichever measurement
+/// ran first, which is how a 1101 kB/record "cost" turns into 21 kB/record purely
+/// by running later. The durable mapper checkpoint is attributable, has a real
+/// declared limit, and is what a restart must load back into memory in one piece.
+///
+/// The limit is enforced on restoration (`load_state`), not on the warm write path,
+/// which checks only the current batch. So a history that grows past it keeps
+/// projecting until the process restarts and then cannot resume at all.
+#[tokio::test]
+async fn durable_projection_state_keeps_the_largest_retained_history_restorable() {
+    // The largest retained Codex root in
+    // `docs/measurements/unified-trace/codex-structure.json`.
+    const LARGEST_RETAINED_HISTORY: usize = 13009;
+    let limit = WorkerLimits::default().max_state_bytes;
+    let mut samples = Vec::new();
+    for records in [200u64, 800] {
+        let (fixture, through) = sized_history(512, records).await;
+        let (generation, _) = fixture.generation("state-bytes").await;
+        let worker = fixture.worker();
+        worker.catch_up(&generation, 1, through).await.unwrap();
+        let snapshot = generation.checkpoint().await.unwrap().snapshot;
+        let states = generation.mapper_states(&snapshot).await.unwrap();
+        let bytes = serde_json::to_vec(&states).unwrap().len();
+        let tombstones = states.values().filter(|value| value.is_null()).count();
+        samples.push((records as usize, bytes, states.len(), tombstones));
+    }
+    for (records, bytes, entries, tombstones) in &samples {
+        eprintln!(
+            "durable_state_workload records={records} state_bytes={bytes} entries={entries} tombstones={tombstones} bytes_per_record={:.1} max_state_bytes={limit}",
+            *bytes as f64 / *records as f64,
+        );
+    }
+    // Separate the per-record slope from fixed overhead, so the projection does not
+    // inherit a constant as though it scaled.
+    let (small_records, small_bytes, ..) = samples[0];
+    let (large_records, large_bytes, ..) = samples[1];
+    let slope = (large_bytes - small_bytes) as f64 / (large_records - small_records) as f64;
+    let fixed = large_bytes as f64 - slope * large_records as f64;
+    let projected = (slope * LARGEST_RETAINED_HISTORY as f64 + fixed).ceil() as usize;
+    let records_at_limit = (limit as f64 / slope).floor() as usize;
+    eprintln!(
+        "durable_state_projection bytes_per_record={slope:.1} fixed_overhead={fixed:.1} projected_at_{LARGEST_RETAINED_HISTORY}={projected} records_at_limit={records_at_limit} max_state_bytes={limit}"
+    );
+    assert!(
+        slope > 0.0,
+        "a per-record state rate of zero would mean the measurement observed no growth"
+    );
+    assert!(
+        projected < limit,
+        "the largest retained history projects to {projected} durable state bytes against a {limit} limit, so a history of {LARGEST_RETAINED_HISTORY} records cannot be restored after restart; the limit is first reached at about {records_at_limit} records"
+    );
+}
+
+/// A projection that a running worker can extend must still be restorable by a
+/// fresh one at the same cut.
+///
+/// The warm path checks only the batch it is about to write, so exceeding the
+/// restoration limit is invisible until a restart — the failure mode is a
+/// projection that works until the process dies and then stalls permanently, with
+/// evidence retained and no read surface advancing. Asserting restorability at the
+/// same cut is what makes that reachable in a test rather than in production.
+#[tokio::test]
+async fn state_a_warm_worker_accepts_can_be_restored_by_a_restarted_worker() {
+    let (fixture, through) = sized_history(512, 200).await;
+    let (generation, _) = fixture.generation("restorable-state").await;
+    let worker = fixture.worker();
+    let warm = worker.catch_up(&generation, 1, through).await.unwrap();
+    assert_eq!(warm.projected_cut, through);
+    let snapshot = generation.checkpoint().await.unwrap().snapshot;
+    let bytes = serde_json::to_vec(&generation.mapper_states(&snapshot).await.unwrap())
+        .unwrap()
+        .len();
+    drop(worker);
+    let restarted = fixture.worker();
+    let resumed = restarted
+        .catch_up(&generation, 1, through)
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "a restarted worker cannot restore the {bytes} bytes of state a warm worker committed: {error}"
+            )
+        });
+    assert_eq!(
+        resumed.projected_cut, through,
+        "restoration must resume at the committed cut"
+    );
+    eprintln!("restorable_state committed_bytes={bytes} resumed_cut={through}");
+}
