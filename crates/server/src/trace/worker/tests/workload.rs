@@ -4,14 +4,15 @@
 //! independent dimensions. History length and superseded versions of hot objects
 //! are bounded on the read side in `crate::trace::reading_store`, and the
 //! cumulative reducer-claim ceiling is answered in `super::reconciliation`. This
-//! module measures the three ingestion dimensions that had no measurement at all:
-//! concurrent sources, child fan-out and activation count.
+//! module measures the remaining five ingestion dimensions: concurrent sources,
+//! child fan-out, activation count, payload bytes and source rewrite frequency.
 //!
 //! These are workload measurements, not correctness replays. Source order
 //! correctness lives in `super::corpus` and delegation semantics in
 //! `super::delegation`; neither varies its dimension to observe cost.
 
 use super::*;
+use crate::trace::reading_store::read_scope;
 
 /// Independent sessions on independent sources, admitted interleaved.
 struct ConcurrentSources {
@@ -394,5 +395,278 @@ async fn activation_count_stays_bounded_at_the_observed_corpus_ceiling() {
     assert!(
         largest_rows < largest_count * largest_count,
         "reader materialization went quadratic in activations: {largest_rows} rows for {largest_count} activations"
+    );
+}
+
+/// Payload bytes: one history whose record count is fixed while each record's
+/// body grows.
+async fn sized_history(bytes_each: usize, records: u64) -> (Fixture, u64) {
+    let fixture = Fixture::new().await;
+    let mut offset = 0u64;
+    let mut header = serde_json::to_vec(&serde_json::json!({
+        "type":"session_meta","ordinal":0,"payload":{"id":"sized-owner"}
+    }))
+    .unwrap();
+    header.push(b'\n');
+    fixture.native_on("sized-source", 1, offset, &header).await;
+    offset += header.len() as u64;
+    for sequence in 2..=records + 1 {
+        let mut raw = serde_json::to_vec(&serde_json::json!({
+            "type":"response_item","ordinal":sequence,
+            "payload":{"type":"message","id":format!("sized-{sequence}"),
+                "role":"assistant",
+                "content":[{"type":"output_text","text":"x".repeat(bytes_each)}]}
+        }))
+        .unwrap();
+        raw.push(b'\n');
+        fixture
+            .native_on("sized-source", sequence, offset, &raw)
+            .await;
+        offset += raw.len() as u64;
+    }
+    let through = fixture.evidence.evidence_cut().await.unwrap();
+    (fixture, through)
+}
+
+/// Payload size must not enter projection work or the first page's byte budget.
+///
+/// A reader row carries a bounded preview, not the body: `QueryLimits`
+/// `max_preview_bytes` is what a page pays per row, and the body itself is a
+/// separate explicit read. That is the contract this measures — a thousandfold
+/// body growth may move page bytes by the preview limit per visible row and
+/// nothing more, and must not move row or VM-step counts at all.
+///
+/// Without this, a vendor writing large tool output would grow the foreground
+/// page in proportion to bytes nobody asked to read, which
+/// `docs/unified-trace-conformance.md` § Performance fixtures forbids.
+#[tokio::test]
+async fn payload_bytes_do_not_enter_projection_work_or_the_first_page_budget() {
+    const RECORDS: u64 = 8;
+    let mut samples = Vec::new();
+    for bytes_each in [64usize, 640, 6400, 64_000] {
+        let (fixture, through) = sized_history(bytes_each, RECORDS).await;
+        let (generation, _) = fixture.generation("payload-bytes").await;
+        let worker = fixture.worker();
+        let progress = worker.catch_up(&generation, 1, through).await.unwrap();
+        assert_eq!(progress.suspended_sources, 0);
+        assert_eq!(progress.unmapped_observations, 0);
+        assert_eq!(progress.projected_cut, through);
+        let snapshot = generation.checkpoint().await.unwrap().snapshot;
+        let agent = AgentRef::Session(SessionId::decode("env7fk2:codex:sized-owner").unwrap());
+        let page = generation
+            .read_page(
+                &snapshot,
+                &read_scope(&agent, None, "history"),
+                None,
+                None,
+                None,
+                RECORDS as usize,
+                false,
+            )
+            .await
+            .unwrap();
+        assert!(
+            !page.rows.is_empty(),
+            "the measurement must read the rows it claims to bound"
+        );
+        let page_bytes: usize = page
+            .rows
+            .iter()
+            .map(|row| serde_json::to_vec(&row.body).unwrap().len())
+            .sum();
+        samples.push((
+            bytes_each,
+            progress.reader_rows_materialized,
+            page.vm_steps,
+            page_bytes,
+            page.rows.len(),
+        ));
+    }
+    for (bytes_each, rows, steps, page_bytes, visible) in &samples {
+        eprintln!(
+            "payload_bytes_workload bytes_each={bytes_each} total_payload={} reader_rows={rows} page_vm_steps={steps} first_page_bytes={page_bytes} visible_rows={visible}",
+            *bytes_each as u64 * RECORDS,
+        );
+    }
+    let baseline = samples[0];
+    let preview_limit = QueryLimits::default().max_preview_bytes;
+    for sample in &samples[1..] {
+        assert_eq!(
+            sample.1, baseline.1,
+            "payload size changed reader materialization work: {baseline:?} to {sample:?}"
+        );
+        assert_eq!(
+            sample.2, baseline.2,
+            "payload size changed the page's own scan: {baseline:?} to {sample:?}"
+        );
+        // Each visible row may carry at most one preview's worth more than the
+        // smallest body, which is the bounded quantity; the body is a separate read.
+        assert!(
+            sample.3 <= baseline.3 + sample.4 * preview_limit,
+            "first-page bytes grew past one preview per visible row: {baseline:?} to {sample:?}"
+        );
+    }
+}
+
+/// Source rewrite frequency: the same records re-presented under a new physical
+/// source generation, as a truncate-rewriting vendor produces.
+async fn rewritten_source(rewrites: u64, records: u64) -> (Fixture, GenerationStore, Vec<usize>) {
+    let fixture = Fixture::new().await;
+    let (generation, _) = fixture.generation("rewrite-frequency").await;
+    let worker = fixture.worker();
+    let issuer = Issuer::Environment(EnvironmentId::parse("env7fk2").unwrap());
+    let mut sequence = 0u64;
+    let mut rows = Vec::new();
+    for incarnation in 0..rewrites {
+        let mut offset = 0u64;
+        // A rewrite re-presents the same logical records at the same positions
+        // under a new generation. Fresh ids would measure history growth instead.
+        for ordinal in 0..=records {
+            let mut raw = if ordinal == 0 {
+                serde_json::to_vec(&serde_json::json!({
+                    "type":"session_meta","ordinal":0,"payload":{"id":"rewrite-owner"}
+                }))
+                .unwrap()
+            } else {
+                serde_json::to_vec(&serde_json::json!({
+                    "type":"response_item","ordinal":ordinal,
+                    "payload":{"type":"message","id":format!("rewrite-record-{ordinal}"),
+                        "role":"assistant",
+                        "content":[{"type":"output_text","text":format!("record {ordinal}")}]}
+                }))
+                .unwrap()
+            };
+            raw.push(b'\n');
+            sequence += 1;
+            fixture
+                .admit(
+                    ObservationRef {
+                        issuer: issuer.clone(),
+                        producer_id: "native".into(),
+                        producer_epoch: "one".into(),
+                        producer_seq: sequence,
+                    },
+                    SourcePosition {
+                        source: SourceRef {
+                            issuer: issuer.clone(),
+                            instance: "rewrite-source".into(),
+                        },
+                        generation: incarnation,
+                        locator: SourceLocator::Jsonl {
+                            byte_start: offset,
+                            byte_end: offset + raw.len() as u64,
+                            record_ordinal: ordinal,
+                        },
+                    },
+                    &raw,
+                    TransportKind::NativeJsonl,
+                )
+                .await;
+            offset += raw.len() as u64;
+        }
+        let through = fixture.evidence.evidence_cut().await.unwrap();
+        let progress = worker.catch_up(&generation, 1, through).await.unwrap();
+        assert_eq!(progress.suspended_sources, 0);
+        assert_eq!(progress.projected_cut, through);
+        rows.push(progress.reader_rows_materialized);
+    }
+    (fixture, generation, rows)
+}
+
+/// A rewrite's per-incarnation cost must stay flat, and the reader must keep
+/// exactly one row per logical record however many times the source was rewritten.
+///
+/// `docs/unified-trace-conformance.md` § Storage, query, and failure acceptance
+/// requires truncate/rewrite to be an acquisition case; the cost question is
+/// separate and belongs here. The risk is that generation N is reconciled against
+/// all of 0..N, which would make a vendor that rewrites on every turn quadratic in
+/// its own history.
+///
+/// Rows per incarnation are asserted flat rather than merely subquadratic, because
+/// re-presenting known records resolves the same objects to the same values: the
+/// only new work is the current incarnation's own extent.
+#[tokio::test]
+async fn repeated_source_rewrites_cost_the_same_each_time_and_do_not_duplicate_rows() {
+    const RECORDS: u64 = 4;
+    let mut samples = Vec::new();
+    for rewrites in [1u64, 4, 16] {
+        let (fixture, generation, rows) = rewritten_source(rewrites, RECORDS).await;
+        let total: usize = rows.iter().sum();
+        // However many incarnations were admitted, the reader shows one row per
+        // logical record: a rewrite is a new view of the same history, not more of it.
+        let snapshot = generation.checkpoint().await.unwrap().snapshot;
+        let agent = AgentRef::Session(SessionId::decode("env7fk2:codex:rewrite-owner").unwrap());
+        let page = generation
+            .read_page(
+                &snapshot,
+                &read_scope(&agent, None, "history"),
+                None,
+                None,
+                None,
+                (RECORDS * 4) as usize,
+                false,
+            )
+            .await
+            .unwrap();
+        let mut addresses: Vec<_> = page.rows.iter().map(|row| row.address.clone()).collect();
+        addresses.sort();
+        addresses.dedup();
+        assert_eq!(
+            addresses.len(),
+            page.rows.len(),
+            "a rewrite duplicated reader rows at {rewrites} incarnations"
+        );
+        let visible = page.rows.len();
+        drop(fixture);
+        samples.push((rewrites, rows, total, visible));
+    }
+    for (rewrites, rows, total, visible) in &samples {
+        eprintln!(
+            "rewrite_frequency_workload rewrites={rewrites} rows_each={rows:?} total_rows={total} visible_rows={visible} rows_per_rewrite={:.1}",
+            *total as f64 / *rewrites as f64,
+        );
+    }
+    let visible = samples[0].3;
+    assert!(visible > 0, "the rewrite measurement read no rows");
+    // Row identity is the correctness half and holds at every frequency measured:
+    // an Nth incarnation of the same records is a new view of one history, so the
+    // reader shows the same rows it showed at one incarnation.
+    for (rewrites, _, _, later_visible) in &samples {
+        assert_eq!(
+            *later_visible, visible,
+            "rewrite count changed how many rows the reader shows: {rewrites} incarnations"
+        );
+    }
+    // The cost half is a real growth term: each incarnation re-materializes the
+    // owner's history rows, so the per-pass cost rises by a fixed step per prior
+    // incarnation rather than staying flat. Bound the observed frequency and report
+    // the step, the same shape as child fan-out and activation count above.
+    //
+    // Pi is the vendor that truncate-rewrites, and its ordinary appends do not take
+    // that path: `_persist` uses `appendFileSync` once flushed, and `_rewriteFile`
+    // runs on empty-file initialization, version migration and fork, read from the
+    // unbundled install `docs/agents.md` § `pi` names. A handful of incarnations per
+    // source is therefore the supported workload, and 16 is deliberately past it.
+    const OBSERVED_FREQUENCY: u64 = 4;
+    let (frequency, rows, _, _) = &samples[1];
+    assert_eq!(*frequency, OBSERVED_FREQUENCY);
+    let steps: Vec<usize> = rows.windows(2).map(|pair| pair[1] - pair[0]).collect();
+    eprintln!("rewrite_frequency_step rewrites={frequency} row_steps={steps:?}");
+    assert!(
+        steps.windows(2).all(|pair| pair[0] == pair[1]),
+        "the per-incarnation row step is not constant, so rewrite cost is worse than linear: {steps:?}"
+    );
+    let ceiling = rows.last().unwrap();
+    assert!(
+        *ceiling <= visible * OBSERVED_FREQUENCY as usize * 8,
+        "reader materialization at the observed rewrite frequency exceeds its bound: {ceiling} rows"
+    );
+    // Past the observed frequency the accumulated term must still not go quadratic
+    // in the reader rows one incarnation carries.
+    let (largest, largest_rows, _, _) = &samples[2];
+    let last = *largest_rows.last().unwrap();
+    assert!(
+        last < (visible * *largest as usize).pow(2),
+        "reader materialization went quadratic in rewrites: {last} rows at {largest} incarnations"
     );
 }
