@@ -191,7 +191,12 @@ async fn connected_history_replay_preserves_bytes_and_unblocks_live_reads_after_
     .expect("Files must stay responsive during blocked reconnect replay");
     assert_eq!(status, 200, "{file}");
     assert_eq!(file["content"], "small file stays available\n");
-    assert!(backend.spool_count().await > 0);
+    // Queue delay is a property of the backlog this test built, so it is read here,
+    // while the held ACK still holds one, rather than after `drained()` returns and
+    // reports zero.
+    let queue_peak = backend.spool_count().await;
+    assert!(queue_peak > 0);
+    let queue_started = Instant::now();
     let epoch = backend.epoch().await;
     backend.wire.disconnect();
     backend.wait_connected_after(epoch).await;
@@ -207,6 +212,7 @@ async fn connected_history_replay_preserves_bytes_and_unblocks_live_reads_after_
         "a rendered submitted input alone does not prove the vendor answer was delivered"
     );
     backend.drained().await;
+    let queue_drain_ms = queue_started.elapsed().as_millis();
     let replay_ms = replay_started.elapsed().as_millis();
     let evidence = backend.state.trace.evidence();
     let mut previous = 0;
@@ -268,6 +274,38 @@ async fn connected_history_replay_preserves_bytes_and_unblocks_live_reads_after_
     );
     backend.state.trace.project_pending().await.unwrap();
     backend.state.trace.index_pending().await.unwrap();
+    // S1.4 requires the three cuts alongside the latency figures above, and this is
+    // the one run whose backlog, reconnect and deletion all actually happened, so it
+    // reports them rather than a separate fixture measuring a quiet system.
+    let evidence_cut = backend.state.trace.evidence().evidence_cut().await.unwrap();
+    let active = backend.state.trace.active().await.unwrap();
+    let projection_cut = active.checkpoint().await.unwrap().snapshot.evidence_cut;
+    let search_cut = backend
+        .state
+        .trace
+        .search_store(&active.manifest().generation)
+        .await
+        .unwrap()
+        .checkpoint()
+        .await
+        .unwrap()
+        .map(|snapshot| snapshot.evidence_cut);
+    // Neither derived cut may lead the evidence it was built from: that would be a
+    // read surface answering from a position its evidence does not support. The
+    // search cut is `None` only before its first index publishes, and this test has
+    // just searched the end of retained history, so it must be present.
+    assert!(
+        projection_cut <= evidence_cut,
+        "the projection cut {projection_cut} leads the evidence cut {evidence_cut}"
+    );
+    let search_cut = search_cut.expect("a published search index must report its cut");
+    assert!(
+        search_cut <= evidence_cut,
+        "the search cut {search_cut} leads the evidence cut {evidence_cut}"
+    );
+    eprintln!(
+        "connected_delivery_cuts evidence_cut={evidence_cut} projection_cut={projection_cut} search_cut={search_cut} queue_peak={queue_peak} queue_drain_ms={queue_drain_ms}"
+    );
     let (status, hits) = backend
         .request(
             "GET",
