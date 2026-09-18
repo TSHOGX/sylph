@@ -448,3 +448,77 @@ async fn an_open_change_stream_stops_when_its_retained_scope_is_deleted() {
     let event = next_change(response).await;
     assert_eq!(event["kind"], "access_changed");
 }
+
+/// One base view token serves the header, history, activation and object-detail
+/// reads, each at the same cut and revision with its own cursor scope.
+///
+/// `docs/unified-trace-conformance.md` § Storage, query, and failure acceptance
+/// requires this of the reusable lease: a reader opening a conversation and then
+/// expanding details must not acquire a lease per surface, and every surface must
+/// answer from the same snapshot. Store-level tests cover scope variants of one
+/// snapshot; this drives the four HTTP surfaces a reader actually opens, through
+/// one token, and checks both halves — one lease, and one snapshot.
+#[tokio::test]
+async fn one_base_view_token_serves_header_history_activation_and_object_details() {
+    let backend = TestBackend::start().await;
+    let id = backend.create_session("codex").await;
+    let bootstrap = boot(&backend, &id).await;
+    let agent = bootstrap["header"]["agent"]["address"].as_str().unwrap();
+    let token = bootstrap["view"]["token"].as_str().unwrap();
+    let view = bootstrap["view"].clone();
+    let leases_before = backend.active_leases().await;
+    // Four surfaces, four independent cursor scopes, one token. The object detail
+    // is a history entry from the window, and the activation detail is the agent's
+    // own execution reference — both taken from the bootstrap rather than invented.
+    // `address` carries a row suffix for reader paging; `anchor` is the object
+    // reference the detail route accepts.
+    let entry = bootstrap["window"]["items"][0]["anchor"].as_str().unwrap();
+    let activation = bootstrap["header"]["ownExecution"]["reference"]
+        .as_str()
+        .unwrap();
+    let surfaces = [
+        format!("/api/v1/trace/agents/{agent}?at_snapshot={token}"),
+        format!("/api/v1/trace/agents/{agent}/history?at_snapshot={token}&limit=1"),
+        format!("/api/v1/trace/agents/{agent}/activations?at_snapshot={token}&limit=1"),
+        format!("/api/v1/trace/objects/{entry}?at_snapshot={token}"),
+        format!("/api/v1/trace/objects/{activation}?at_snapshot={token}"),
+    ];
+    for surface in &surfaces {
+        let response = backend.get_authed(surface).await;
+        assert_eq!(
+            response.status(),
+            200,
+            "{surface}: {}",
+            body_string(response).await
+        );
+        let body = json_body(backend.get_authed(surface).await).await;
+        assert_eq!(
+            body["view"], view,
+            "{surface} answered from a different snapshot than the base view token"
+        );
+    }
+    // The whole point of a reusable lease: five reads across four surfaces acquire
+    // no additional lease. A per-surface lease would be invisible in the bodies
+    // above and is exactly what this clause forbids.
+    assert_eq!(
+        backend.active_leases().await,
+        leases_before,
+        "reads through one base view token acquired additional leases"
+    );
+    // Releasing the one token invalidates every surface, which proves they shared
+    // it rather than each holding an independent view that happened to agree.
+    assert_eq!(
+        backend
+            .delete_authed(&format!("/api/v1/trace/views/{token}"))
+            .await
+            .status(),
+        204
+    );
+    for surface in &surfaces {
+        let status = backend.get_authed(surface).await.status();
+        assert!(
+            status.is_client_error(),
+            "{surface} still answered after its base view token was released: {status}"
+        );
+    }
+}

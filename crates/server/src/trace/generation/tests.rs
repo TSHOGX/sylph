@@ -186,6 +186,147 @@ async fn late_order_and_body_changes_do_not_omit_or_duplicate_old_snapshot_membe
     assert_eq!(current.total_count, 3);
 }
 
+/// Merging and deleting a member between page one and page two must not omit or
+/// duplicate a row on the snapshot already being read.
+///
+/// `docs/unified-trace-conformance.md` § Storage, query, and failure acceptance
+/// names move, merge and delete as three separate mutations for this row. The
+/// sibling test above covers move and body correction; merge and delete are the
+/// two that can change how many rows exist rather than only where one sits, so
+/// they are the ones that can drop or repeat a row across a page boundary.
+///
+/// Both mutations are applied while page one is already read, and page two is then
+/// requested at the old snapshot. The old snapshot must still yield the members it
+/// had, and the current snapshot must reflect the mutation — otherwise the test
+/// would pass equally if the mutation had silently not been applied.
+#[tokio::test]
+async fn merging_and_deleting_members_do_not_omit_or_duplicate_old_snapshot_pages() {
+    let fixture = Fixture::new().await;
+    let a = fixture.entry("a");
+    let b = fixture.entry("b");
+    let c = fixture.entry("c");
+    let d = fixture.entry("d");
+    let old = fixture
+        .publish(ProjectionBatch {
+            through_cut: 1,
+            objects: vec![
+                ObjectUpdate::put(a.clone(), "A original"),
+                ObjectUpdate::put(b.clone(), "B original"),
+                ObjectUpdate::put(c.clone(), "C original"),
+                ObjectUpdate::put(d.clone(), "D original"),
+            ],
+            memberships: vec![
+                fixture.member(&a, 10),
+                fixture.member(&b, 20),
+                fixture.member(&c, 30),
+                fixture.member(&d, 40),
+            ],
+            ..Default::default()
+        })
+        .await;
+    let first = fixture
+        .store
+        .page(&old, &fixture.scope(), None, 2)
+        .await
+        .unwrap();
+    assert_eq!(
+        first
+            .objects
+            .iter()
+            .map(|item| item.preview.as_str())
+            .collect::<Vec<_>>(),
+        ["A original", "B original"]
+    );
+    // Merge `c` into `a`: the equivalence withdraws the merged-away member and
+    // leaves one representative. Delete `d` outright by removing its membership.
+    // Both land entirely inside the unread tail of the page-one cursor.
+    let new = fixture
+        .publish(ProjectionBatch {
+            through_cut: 2,
+            objects: vec![ObjectUpdate::Withdraw {
+                object_ref: c.object_ref(),
+                reason: "merged into a".into(),
+            }],
+            memberships: vec![
+                MembershipChange {
+                    scope: fixture.scope(),
+                    object_ref: c.object_ref(),
+                    order_key: 30u64.to_be_bytes().to_vec(),
+                    present: false,
+                },
+                MembershipChange {
+                    scope: fixture.scope(),
+                    object_ref: d.object_ref(),
+                    order_key: 40u64.to_be_bytes().to_vec(),
+                    present: false,
+                },
+            ],
+            ..Default::default()
+        })
+        .await;
+    // The reader holding the old snapshot still sees the tail it was promised.
+    let second = fixture
+        .store
+        .page(&old, &fixture.scope(), first.next_cursor.as_deref(), 2)
+        .await
+        .unwrap();
+    assert_eq!(
+        second
+            .objects
+            .iter()
+            .map(|item| item.preview.as_str())
+            .collect::<Vec<_>>(),
+        ["C original", "D original"],
+        "a merge and a delete after page one changed the old snapshot's page two"
+    );
+    let mut walked: Vec<_> = first
+        .objects
+        .iter()
+        .chain(second.objects.iter())
+        .map(|item| item.preview.clone())
+        .collect();
+    let seen = walked.len();
+    walked.sort();
+    walked.dedup();
+    assert_eq!(seen, walked.len(), "paging repeated a member: {walked:?}");
+    assert_eq!(seen, 4, "paging omitted a member: {walked:?}");
+    // The mutation must actually have landed, or every assertion above holds
+    // vacuously against a snapshot nothing changed.
+    let current = fixture
+        .store
+        .page(&new, &fixture.scope(), None, 4)
+        .await
+        .unwrap();
+    assert_eq!(
+        current
+            .objects
+            .iter()
+            .map(|item| item.preview.as_str())
+            .collect::<Vec<_>>(),
+        ["A original", "B original"],
+        "the merged and deleted members must be gone from the current snapshot"
+    );
+    assert_eq!(current.total_count, 2);
+    // A withdrawn object keeps its old readable value at the old snapshot and
+    // reports the withdrawal at the new one.
+    assert_eq!(
+        fixture
+            .store
+            .object(&old, &c.object_ref())
+            .await
+            .unwrap()
+            .object,
+        c
+    );
+    assert!(
+        matches!(
+            fixture.store.object(&new, &c.object_ref()).await,
+            Err(GenerationError::InterpretationWithdrawn(_))
+        ),
+        "a merged-away member must report its withdrawal at the snapshot that merged it"
+    );
+}
+
 #[tokio::test]
 async fn summary_revisions_do_not_multiply_history_membership_rows() {
     let fixture = Fixture::new().await;
