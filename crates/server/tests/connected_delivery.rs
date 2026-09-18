@@ -303,8 +303,16 @@ async fn connected_history_replay_preserves_bytes_and_unblocks_live_reads_after_
         search_cut <= evidence_cut,
         "the search cut {search_cut} leads the evidence cut {evidence_cut}"
     );
+    // Active leases are the other required workload report. `history_markers` walked
+    // every page of a 161-record history, so the count must reflect only the views
+    // this test still holds and must not scale with the pages walked.
+    let leases = backend.active_leases().await;
     eprintln!(
-        "connected_delivery_cuts evidence_cut={evidence_cut} projection_cut={projection_cut} search_cut={search_cut} queue_peak={queue_peak} queue_drain_ms={queue_drain_ms}"
+        "connected_delivery_cuts evidence_cut={evidence_cut} projection_cut={projection_cut} search_cut={search_cut} queue_peak={queue_peak} queue_drain_ms={queue_drain_ms} active_leases={leases}"
+    );
+    assert!(
+        leases <= 8,
+        "paged reads over {records} records left {leases} view leases active, which scales with pages rather than with held views"
     );
     let (status, hits) = backend
         .request(

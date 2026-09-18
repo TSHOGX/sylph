@@ -437,6 +437,24 @@ impl ConnectedBackend {
         assert_eq!(status, 202, "{result}");
         result
     }
+    /// Active and pending view leases across every subject.
+    ///
+    /// Read from the durable evidence store rather than a service accessor, so a
+    /// lease the server believes it released but never deleted still counts.
+    pub async fn active_leases(&self) -> i64 {
+        use sqlx::Connection;
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(self.state.config.data_dir.join("evidence.db"))
+            .read_only(true);
+        let mut connection = sqlx::SqliteConnection::connect_with(&options)
+            .await
+            .unwrap();
+        sqlx::query_scalar("SELECT COUNT(*) FROM trace_view_leases WHERE state IN ('pending','active') AND expires_at_ms>?")
+            .bind(sylph_server::models::now_ms())
+            .fetch_one(&mut connection)
+            .await
+            .unwrap()
+    }
     pub async fn spool_count(&self) -> i64 {
         let options = sqlx::sqlite::SqliteConnectOptions::new()
             .filename(&self.config.spool.path)

@@ -847,3 +847,67 @@ async fn state_a_warm_worker_accepts_can_be_restored_by_a_restarted_worker() {
         "restorable_state committed_bytes={bytes} page_limit={page_limit} resumed_cut={through}"
     );
 }
+
+/// Writer-lock occupancy per projection pass must not grow with retained history.
+///
+/// The last required S1.4 report. A LIMIT on rows is not a scan bound, and neither
+/// is a fast pass: what a concurrent writer actually waits on is how long the
+/// generation's write transaction is held. If that grew with history, a long-lived
+/// agent would progressively starve search indexing and reconciliation even though
+/// every individual page stayed bounded.
+///
+/// Occupancy is measured by contending for it: a competing `BEGIN IMMEDIATE` is
+/// timed against the same generation while a pass commits, which is the wait a real
+/// second writer experiences. Wall-clock timing alone would measure the whole pass,
+/// most of which is mapping and reduction on CPU workers holding no lock at all.
+#[tokio::test]
+async fn writer_lock_occupancy_per_pass_does_not_grow_with_retained_history() {
+    let mut samples = Vec::new();
+    for records in [100u64, 400] {
+        let (fixture, through) = sized_history(512, records).await;
+        let (generation, _) = fixture.generation("lock-occupancy").await;
+        let worker = fixture.worker();
+        // Project everything but the final record, so the timed pass is one warm
+        // append against an already-large history rather than a cold rebuild.
+        let warm = worker.catch_up(&generation, 1, through - 1).await.unwrap();
+        assert_eq!(warm.projected_cut, through - 1);
+        let contended = {
+            let path = generation.path().to_path_buf();
+            tokio::spawn(async move {
+                let mut connection = sqlx::SqliteConnection::connect_with(
+                    &sqlx::sqlite::SqliteConnectOptions::new().filename(path),
+                )
+                .await
+                .unwrap();
+                let started = std::time::Instant::now();
+                let transaction = connection.begin_with("BEGIN IMMEDIATE").await.unwrap();
+                let waited = started.elapsed();
+                transaction.rollback().await.unwrap();
+                waited
+            })
+        };
+        let progress = worker.catch_up(&generation, 1, through).await.unwrap();
+        assert_eq!(progress.projected_cut, through);
+        let waited = contended.await.unwrap().as_micros();
+        samples.push((records as usize, waited, progress.reader_rows_materialized));
+    }
+    for (records, waited, rows) in &samples {
+        eprintln!(
+            "lock_occupancy_workload records={records} contended_wait_us={waited} pass_reader_rows={rows}"
+        );
+    }
+    // Four times the history may not multiply what a competing writer waits for.
+    // The allowance is generous because a single sample on a shared machine is
+    // noisy; what it rejects is occupancy proportional to history.
+    let (small_records, small_wait, _) = samples[0];
+    let (large_records, large_wait, _) = samples[1];
+    let history_factor = large_records as f64 / small_records as f64;
+    eprintln!(
+        "lock_occupancy_growth history_factor={history_factor:.1} wait_factor={:.2}",
+        large_wait as f64 / small_wait.max(1) as f64
+    );
+    assert!(
+        large_wait <= small_wait.max(1_000) * history_factor as u128,
+        "writer-lock occupancy grew with retained history: {small_wait}us at {small_records} records, {large_wait}us at {large_records}"
+    );
+}
