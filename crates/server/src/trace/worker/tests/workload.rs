@@ -93,6 +93,13 @@ async fn concurrent_source_count_does_not_change_per_record_projection_work() {
             .unwrap()
             .clone();
         let claims = held.lock().await.reducer.len();
+        // Durable checkpoint bytes are the attributable memory figure: `source_states`
+        // is keyed per physical source, so concurrent import is the arrangement that
+        // could multiply retained state for the same admitted records.
+        let committed = generation.checkpoint().await.unwrap().snapshot;
+        let state_bytes = serde_json::to_vec(&generation.mapper_states(&committed).await.unwrap())
+            .unwrap()
+            .len();
         samples.push((
             sources,
             records_each,
@@ -100,11 +107,13 @@ async fn concurrent_source_count_does_not_change_per_record_projection_work() {
             claims,
             progress.reduction.claims_resolved,
             progress.reader_rows_materialized,
+            state_bytes,
         ));
     }
-    for (sources, each, total, claims, resolved, rows) in &samples {
+    for (sources, each, total, claims, resolved, rows, state_bytes) in &samples {
         eprintln!(
-            "concurrent_source_workload sources={sources} records_each={each} total_records={total} retained_claims={claims} claims_resolved={resolved} reader_rows={rows}"
+            "concurrent_source_workload sources={sources} records_each={each} total_records={total} retained_claims={claims} claims_resolved={resolved} reader_rows={rows} state_bytes={state_bytes} state_bytes_per_record={:.1}",
+            *state_bytes as f64 / *total as f64,
         );
     }
     // Every arrangement admitted the same number of content records, so retained
@@ -120,6 +129,14 @@ async fn concurrent_source_count_does_not_change_per_record_projection_work() {
         assert!(
             sample.5 <= baseline.5 + sample.0 * 8,
             "reader rows grew with concurrent source count beyond per-source rows: {baseline:?} to {sample:?}"
+        );
+        // Retained state may carry a per-source term — each live source keeps its own
+        // mapper state and header — but concurrent import must not multiply the state
+        // held for the same admitted records. Twelve sources sharing 24 records may
+        // cost a per-source constant, not twelve times the single-source figure.
+        assert!(
+            sample.6 <= baseline.6 * 2 + sample.0 * 4096,
+            "retained state grew with concurrent source count beyond a per-source term: {baseline:?} to {sample:?}"
         );
     }
 }
