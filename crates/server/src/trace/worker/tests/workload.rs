@@ -911,3 +911,85 @@ async fn writer_lock_occupancy_per_pass_does_not_grow_with_retained_history() {
         "writer-lock occupancy grew with retained history: {small_wait}us at {small_records} records, {large_wait}us at {large_records}"
     );
 }
+
+/// A stalled projection must not hold the evidence writer.
+///
+/// `docs/unified-trace-conformance.md` § Storage, query, and failure acceptance
+/// requires this of the resource-pressure row, and it is an architectural claim
+/// rather than a latency one: evidence admission and projection are separate
+/// databases with separate writer pools, so a projection that cannot commit must
+/// leave capture admission fully available. If it did not, a single stuck
+/// projection would stop the server retaining bytes at all — the one thing that
+/// cannot be recovered later.
+///
+/// The stall is created by holding the generation's own writer in a competing
+/// `BEGIN IMMEDIATE`, which is the real contention rather than a sleep: the worker
+/// genuinely cannot commit while it is held. Admission is then required to succeed
+/// and to advance the evidence cut while the projection is still blocked.
+#[tokio::test]
+async fn a_stalled_projection_does_not_hold_the_evidence_writer() {
+    let (fixture, through) = sized_history(512, 8).await;
+    let (generation, _) = fixture.generation("stalled-projection").await;
+    let worker = fixture.worker();
+    // Block the generation writer before the worker tries to publish.
+    let mut blocking = sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new().filename(generation.path()),
+    )
+    .await
+    .unwrap();
+    let held = blocking.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    let projecting = {
+        let worker = worker.clone();
+        let generation = generation.clone();
+        tokio::spawn(async move { worker.catch_up(&generation, 1, through).await })
+    };
+    // While projection cannot commit, admission must still commit and advance the
+    // cut. A timeout here is the failure this test exists to catch: it would mean
+    // the stalled projection is holding a writer admission needs.
+    let before = fixture.evidence.evidence_cut().await.unwrap();
+    let mut raw = serde_json::to_vec(&serde_json::json!({
+        "type":"response_item","ordinal":99,
+        "payload":{"type":"message","id":"admitted-during-stall","role":"assistant",
+            "content":[{"type":"output_text","text":"admitted while projection is stalled"}]}
+    }))
+    .unwrap();
+    raw.push(b'\n');
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        // Admission requires a contiguous producer sequence, so this follows the
+        // fixture's last record rather than jumping ahead.
+        fixture
+            .native_on("sized-source", through + 1, 1_000_000, &raw)
+            .await
+    })
+    .await
+    .expect("evidence admission blocked behind a stalled projection");
+    let during = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        fixture.evidence.evidence_cut(),
+    )
+    .await
+    .expect("reading the evidence cut blocked behind a stalled projection")
+    .unwrap();
+    assert!(
+        during > before,
+        "admission during a stalled projection did not advance the evidence cut: {before} then {during}"
+    );
+    // The stall has to still be in force at the moment admission succeeded, or this
+    // test would pass against a projection that had simply already committed.
+    assert!(
+        !projecting.is_finished(),
+        "the projection committed before the block was released, so no stall was measured"
+    );
+    // Releasing the block lets the same projection finish, which proves the stall
+    // was real contention and not a projection that had already committed.
+    held.rollback().await.unwrap();
+    let progress = projecting.await.unwrap().unwrap();
+    assert_eq!(
+        progress.projected_cut, through,
+        "the unblocked projection must commit the cut it was asked for"
+    );
+    eprintln!(
+        "stalled_projection evidence_cut_before={before} during_stall={during} projected_cut={}",
+        progress.projected_cut
+    );
+}
