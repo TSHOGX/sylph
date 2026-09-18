@@ -18,6 +18,9 @@ pub struct FixtureAgents {
     pub emit_request: bool,
     pub resolutions: Arc<AtomicU64>,
     pub unknown_resolution: bool,
+    /// Vendor interrupts actually delivered. Counted so a test can prove a refused
+    /// control reached no vendor process, which a status code alone does not show.
+    pub interrupts: Arc<AtomicU64>,
 }
 impl sylph_envagent::adapters::AdapterSource for FixtureAgents {
     fn for_agent(&self, name: &str) -> Option<Box<dyn Adapter>> {
@@ -164,6 +167,7 @@ impl Session for FixtureSession {
         self.last.lock().unwrap().clone()
     }
     async fn interrupt(&self) -> Result<()> {
+        self.source.interrupts.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
     async fn steer(&self, _: &str, _: Option<&str>) -> Result<()> {

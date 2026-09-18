@@ -115,6 +115,62 @@ async fn an_embedded_read_target_cannot_dispatch_to_its_anchor_session() {
     assert_eq!(backend.source.sends.load(Ordering::SeqCst), 1);
 }
 
+/// Stop at an embedded target must reach no vendor process at all.
+///
+/// `docs/unified-trace-conformance.md` § Storage, query, and failure acceptance
+/// names Stop and input separately for this row, and they fail differently: input
+/// misrouted to the anchor writes a turn, while Stop misrouted to the anchor kills
+/// a session the caller never addressed — a destructive action on an unrelated
+/// agent. The sibling test above covers input; this covers Stop and Interrupt.
+///
+/// A 409 alone would not prove it: the refusal has to happen before dispatch, so
+/// the assertion is on the vendor interrupt counter, not only the status.
+///
+/// The anchor is given a live execution lease and the request carries it. Without
+/// that, Stop is refused by the lease check before target resolution is reached,
+/// and the test passes whether the embedded guard exists or not — a check that
+/// cannot fail. With the lease held and matching, the embedded guard is the only
+/// thing left that can refuse.
+#[tokio::test]
+async fn an_embedded_read_target_cannot_stop_or_interrupt_its_anchor_session() {
+    let backend = TestBackend::start().await;
+    let id = backend.create_session("codex").await;
+    let session = TestBackend::session_id(&id);
+    backend
+        .state
+        .store
+        .set_control_state(&session, Some("live-lease"), Some("native-live"), true, 1)
+        .await
+        .unwrap();
+    let child = sylph_protocol::trace::AgentRef::Embedded {
+        anchor_session: session,
+        namespace: "child".into(),
+        native_child_id: "native-child".into(),
+    };
+    for action in ["stop", "interrupt"] {
+        let response = backend
+            .post_authed(
+                "/api/v1/trace/commands",
+                json!({"target":{"kind":"embedded","agent":child.encode(),"hostSessionId":id,
+                    "namespace":"child","nativeChildId":"native-child","route":"unproven"},
+                    "action":action,"lease":"live-lease","affectedExecution":null,
+                    "idempotencyKey":format!("{action}-child"),"text":null,"attachments":[],
+                    "config":null,"answer":null}),
+            )
+            .await;
+        assert_eq!(
+            response.status(),
+            409,
+            "{action} at an embedded target must be refused"
+        );
+        assert_eq!(
+            backend.source.interrupts.load(Ordering::SeqCst),
+            0,
+            "{action} at an embedded target reached the anchor session's vendor process"
+        );
+    }
+}
+
 #[tokio::test]
 async fn deleting_a_session_blocks_retained_input_and_old_trace_views() {
     let backend = TestBackend::start().await;
