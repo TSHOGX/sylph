@@ -559,3 +559,4 @@ mod claude_workflow;
 mod pi_maintenance;
 mod codex_goal;
 mod claude_tools;
+mod pi_tools;

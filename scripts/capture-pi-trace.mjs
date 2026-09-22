@@ -10,8 +10,8 @@ import { createHash } from "node:crypto";
 import { createInterface } from "node:readline";
 
 const scenario = process.argv[2] ?? "success";
-if (!["success", "retry", "compaction"].includes(scenario))
-  throw new Error("Expected success, retry, or compaction capture scenario");
+if (!["success", "retry", "compaction", "sidecar"].includes(scenario))
+  throw new Error("Expected success, retry, compaction, or sidecar capture scenario");
 
 const root = await mkdtemp(join(tmpdir(), "sylph-pi-loopback-"));
 const config = join(root, "config");
@@ -58,10 +58,15 @@ const server = createServer(async (request, response) => {
       response.write(frame);
     };
     emit({ role: "assistant", content: "" });
-    const content = scenario === "compaction" && requests.length > 1
-      ? ["SYLPH_PI_COMPACTION_SUMMARY"] : ["SYLPH_PI_", "A", "A", "_OK"];
-    for (const text of content) emit({ content: text });
-    emit({}, "stop");
+    if (scenario === "sidecar" && requests.length <= 2) {
+      emit({ tool_calls: [{ index: 0, id: "call_controlled_bash", type: "function", function: { name: "bash", arguments: JSON.stringify({command: "python3 -c 'import sys; sys.stdout.write(\"SYLPH_PI_SIDECAR\\n\" * 8192)'"}) } }] });
+      emit({}, "tool_calls");
+    } else {
+      const content = scenario === "compaction" && requests.length > 1
+        ? ["SYLPH_PI_COMPACTION_SUMMARY"] : ["SYLPH_PI_", "A", "A", "_OK"];
+      for (const text of content) emit({ content: text });
+      emit({}, "stop");
+    }
     providerFrames.push("data: [DONE]\n\n");
     response.end("data: [DONE]\n\n");
   } catch (error) {
@@ -74,12 +79,12 @@ await once(server, "listening");
 const baseUrl = `http://127.0.0.1:${server.address().port}/v1`;
 await writeFile(join(config, "models.json"), JSON.stringify({
   providers: { "sylph-capture": { baseUrl, api: "openai-completions", apiKey: "local-fixture",
-    models: [{ id: "trace-marker", reasoning: false, input: ["text"], contextWindow: 8192, maxTokens: 512 }],
+    models: [{ id: "trace-marker", reasoning: false, input: ["text"], contextWindow: scenario === "sidecar" ? 65536 : 8192, maxTokens: 512 }],
   } },
 }));
 await writeFile(join(config, "settings.json"), JSON.stringify({
   retry: { enabled: true, maxRetries: 2, baseDelayMs: 10, provider: { maxRetries: 0 } },
-  compaction: { enabled: true, reserveTokens: 512, keepRecentTokens: 1 },
+  compaction: { enabled: scenario !== "sidecar", reserveTokens: 512, keepRecentTokens: 1 },
 }));
 const pending = new Map();
 let settle;
@@ -93,7 +98,7 @@ try {
     "--mode", "rpc", "--provider", "sylph-capture", "--model", "trace-marker",
     "--thinking", "off", "--session-dir", sessions,
     "--system-prompt", "Return the controlled marker supplied by the local provider.",
-    "--no-tools", "--no-extensions", "--no-skills", "--no-prompt-templates",
+    ...(scenario === "sidecar" ? ["--tools", "bash"] : ["--no-tools"]), "--no-extensions", "--no-skills", "--no-prompt-templates",
     "--no-themes", "--no-context-files", "--no-approve", "--offline",
   ], { cwd: root, env: {
     PATH: process.env.PATH,
@@ -145,7 +150,7 @@ try {
   await send("state-after", "get_state");
   await send("entries-after", "get_entries");
   if (streamError) throw streamError;
-  const expectedRequests = scenario === "retry" ? 3 : scenario === "compaction" ? 2 : 1;
+  const expectedRequests = ["retry", "sidecar"].includes(scenario) ? 3 : scenario === "compaction" ? 2 : 1;
   if (requests.length !== expectedRequests) throw new Error(`Expected ${expectedRequests} provider requests, received ${requests.length}`);
   const events = rpc.filter((row) => row.direction === "in").map((row) => row.frame);
   if (scenario === "retry" && (events.filter((event) => event.type === "auto_retry_start").length !== 2
@@ -169,10 +174,30 @@ try {
   await writeFile(join(root, "provider-request.json"), JSON.stringify(requests, null, 2) + "\n");
   await writeFile(join(root, "provider-response.sse"), providerFrames.join(""));
   const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
-  const prefixes = [await realpath(root), root].sort((a, b) => b.length - a.length);
+  const substitutions = [[await realpath(root), "/workspace/pi-capture"], [root, "/workspace/pi-capture"]];
+  let sidecar;
+  const sidecarLocations = [];
+  if (scenario === "sidecar") {
+    const finishes = events.filter((event) => event.type === "tool_execution_end");
+    if (finishes.length !== 2 || finishes.some((event) => event.isError || event.toolCallId !== "call_controlled_bash"))
+      throw new Error("Expected two successful tool invocations with the deliberately repeated call ID");
+    const paths = finishes.map((event) => event.result?.details?.fullOutputPath);
+    if (paths.some((path) => typeof path !== "string") || new Set(paths).size !== 2)
+      throw new Error("Expected two independently produced full-output files");
+    for (const [index, path] of paths.entries()) {
+      const bytes = await readFile(path);
+      if (!bytes.equals(Buffer.from("SYLPH_PI_SIDECAR\n".repeat(8192)))) throw new Error("Unexpected complete Bash output");
+      sidecar = bytes;
+      const locator = `/workspace/pi-capture/sidecar-${index + 1}.txt`;
+      sidecarLocations.push(locator);
+      substitutions.push([path, locator]);
+    }
+    await writeFile(join(root, "sidecar.txt"), sidecar);
+  }
+  substitutions.sort((a, b) => b[0].length - a[0].length);
   const sanitize = (value) => {
     if (typeof value === "string")
-      return prefixes.reduce((text, prefix) => text.replaceAll(prefix, "/workspace/pi-capture"), value);
+      return substitutions.reduce((text, [from, to]) => text.replaceAll(from, to), value);
     if (Array.isArray(value)) return value.map(sanitize);
     if (value && typeof value === "object")
       return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, sanitize(item)]));
@@ -188,10 +213,11 @@ try {
   await writeFile(join(root, `stdout-${scenario}.jsonl`), retainedStdout);
   await writeFile(join(root, "capture.json"), JSON.stringify({
     vendor: "pi", version, scenario, provider: "deterministic loopback OpenAI-compatible SSE fixture",
-    expected_text: "SYLPH_PI_AA_OK", remote_model: false, tools_enabled: false,
+    expected_text: "SYLPH_PI_AA_OK", remote_model: false, tools_enabled: scenario === "sidecar",
+    ...(sidecar ? { sidecar_sha256: digest(sidecar), sidecar_byte_length: sidecar.length, sidecar_locations: sidecarLocations } : {}),
     source_sha256: { rpc: digest(encodedRpc), stdout: digest(rawStdout), native: digest(native) },
     retained_sha256: { rpc: digest(retainedRpc), stdout: digest(retainedStdout), native: digest(retainedNative) },
-    sanitization: "Parse JSON records, replace only temporary capture path prefixes, serialize compact JSONL. Preserve IDs, values, event order and duplicate delta occurrences. RPC direction wrappers are recorder metadata; stdout is captured independently as exact source bytes before sanitization.",
+    sanitization: "Parse JSON records, replace temporary capture roots and exact produced sidecar paths, serialize compact JSONL. Preserve IDs, values, event order and duplicate delta occurrences. RPC direction wrappers are recorder metadata; stdout is captured independently as exact source bytes before sanitization.",
   }, null, 2) + "\n");
   console.log(root);
 } finally {

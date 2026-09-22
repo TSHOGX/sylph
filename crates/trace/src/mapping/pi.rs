@@ -15,6 +15,7 @@ use super::{
 pub struct PiMapper;
 
 mod maintenance;
+mod runtime;
 use maintenance::ObservedWork;
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -24,10 +25,30 @@ struct PiState {
     outer: Option<OuterRun>,
     message: Option<LiveMessage>,
     last_native_entry: Option<EntryRef>,
-    current_pending: BTreeMap<String, OperationRef>,
+    current_pending: BTreeMap<String, TrackedTool>,
+    runtime_tools: BTreeMap<String, TrackedTool>,
+    inner: Option<InnerMessages>,
+    last_frame: Option<u64>,
     current_parent: Option<String>,
     retry: Option<ObservedWork>,
     compaction: Option<ObservedWork>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct TrackedTool {
+    operation: OperationRef,
+    evidence: Vec<ObservationRef>,
+    activation: Option<ActivationRef>,
+    awaiting_execution: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct InnerMessages {
+    start: SourcePosition,
+    evidence: ObservationRef,
+    count: u64,
+    assistant: Option<u64>,
+    coherent: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -55,7 +76,7 @@ struct LiveMessage {
 
 impl SemanticMapper for PiMapper {
     fn build(&self) -> &'static str {
-        "pi-4"
+        "pi-5"
     }
 
     fn map(&self, input: MapInput<'_>) -> MapOutput {
@@ -63,6 +84,9 @@ impl SemanticMapper for PiMapper {
             state: input.state.clone(),
             ..MapOutput::default()
         };
+        if input.capture.transport_kind == TransportKind::LiveStdin {
+            return output;
+        }
         let value = match serde_json::from_slice::<Value>(input.raw) {
             Ok(value) => value,
             Err(error) => {
@@ -294,7 +318,7 @@ impl Context<'_, '_> {
             );
             return;
         };
-        self.entry(&owner, value, "native");
+        self.entry(&owner, value, "native", "");
     }
 
     fn original_owner(&mut self, containing: &AgentRef, id: &str) -> Option<OwnerRef> {
@@ -324,7 +348,7 @@ impl Context<'_, '_> {
         }
     }
 
-    fn entry(&mut self, owner: &AgentRef, value: &Value, selector: &str) {
+    fn entry(&mut self, owner: &AgentRef, value: &Value, selector: &str, source_path: &str) {
         let Some(id) = text(value, "id") else {
             self.issue(
                 Some(owner),
@@ -369,6 +393,7 @@ impl Context<'_, '_> {
                     &production,
                     message,
                     &format!("{selector}/{id}/message"),
+                    Some(&format!("{source_path}/message")),
                     Some(id),
                     RevisionForm::Complete,
                     None,
@@ -385,6 +410,7 @@ impl Context<'_, '_> {
                     &production,
                     &message,
                     &format!("{selector}/{id}"),
+                    None,
                     Some(id),
                     RevisionForm::Complete,
                     None,
@@ -447,7 +473,8 @@ impl Context<'_, '_> {
                 )]
             }
         };
-        for operation in self.state.current_pending.values() {
+        for pending in self.state.current_pending.values() {
+            let operation = &pending.operation;
             if matches!(operation.address(),ObjectAddress::Native{namespace,key,..} if namespace=="pi.tool-call"&&key.first().is_some_and(|entry|entry==id))
             {
                 content.push(HistoryContent::Operation(operation.clone()));
@@ -495,11 +522,17 @@ impl Context<'_, '_> {
             );
         }
         self.state.last_native_entry = Some(entry.clone());
-        for (call, operation) in &self.state.current_pending {
+        for (call, pending) in &self.state.current_pending {
+            let key = correlation_key(owner, "pi.tool-at-entry", &[id.into(), call.clone()]);
             self.output.correlations.insert(
-                correlation_key(owner, "pi.tool-at-entry", &[id.into(), call.clone()]),
-                AnyObjectRef::Operation(operation.clone()),
+                key.clone(),
+                AnyObjectRef::Operation(pending.operation.clone()),
             );
+            let mut evidence = pending.evidence.clone();
+            evidence.push(self.input.canonical_observation.clone());
+            evidence.sort();
+            evidence.dedup();
+            self.output.correlation_evidence.insert(key, evidence);
         }
         self.output.correlations.insert(
             correlation_key(owner, "pi.entry", &[id.into()]),
@@ -531,6 +564,7 @@ impl Context<'_, '_> {
         production: &OwnerRef,
         value: &Value,
         selector: &str,
+        source_slot: Option<&str>,
         native_entry: Option<&str>,
         form: RevisionForm,
         activation: Option<ActivationRef>,
@@ -705,7 +739,15 @@ impl Context<'_, '_> {
                                     argument_state: ArgumentState::Sealed,
                                 }),
                             );
-                            self.state.current_pending.insert(id.into(), operation);
+                            self.state.current_pending.insert(
+                                id.into(),
+                                TrackedTool {
+                                    operation,
+                                    evidence: self.output.claims.last().unwrap().evidence.clone(),
+                                    activation: activation.clone(),
+                                    awaiting_execution: true,
+                                },
+                            );
                         }
                     } else {
                         self.issue(
@@ -791,17 +833,8 @@ impl Context<'_, '_> {
         }
         if role == "toolResult" {
             if let Some(operation) = operation {
-                for field in ["persistedOutputPath", "outputFile"] {
-                    if let Some(path) = text(&value["details"], field) {
-                        let key =
-                            super::attachment_key(self.input.canonical_observation, selector, path);
-                        self.output
-                            .correlations
-                            .insert(key.clone(), AnyObjectRef::Operation(operation.clone()));
-                        self.output
-                            .correlation_evidence
-                            .insert(key, vec![self.input.canonical_observation.clone()]);
-                    }
+                if let Some(source_slot) = source_slot {
+                    self.bind_tool_sidecars(&operation, &value["details"], source_slot, &[]);
                 }
                 let payload = self.json(&value["content"], &format!("{selector}/content"));
                 self.result(
@@ -894,7 +927,7 @@ impl Context<'_, '_> {
 
     fn tool(&mut self, owner: &AgentRef, id: &str) -> Option<OperationRef> {
         if let Some(operation) = self.state.current_pending.get(id) {
-            return Some(operation.clone());
+            return Some(operation.operation.clone());
         }
         let mut next = self
             .state
@@ -1477,6 +1510,7 @@ impl Context<'_, '_> {
                 &current.value,
                 "live/message",
                 None,
+                None,
                 RevisionForm::Replacement {
                     covers: Some(SourcePrefix {
                         through: self.input.capture.source_position.clone(),
@@ -1490,6 +1524,18 @@ impl Context<'_, '_> {
     }
 
     fn live(&mut self, value: &Value) {
+        let frame = match self.input.capture.source_position.locator {
+            SourceLocator::Frame { ordinal } => Some(ordinal),
+            _ => None,
+        };
+        if self.state.inner.as_ref().is_some_and(|_| {
+            frame.is_none() || self.state.last_frame.and_then(|last| last.checked_add(1)) != frame
+        }) {
+            if let Some(inner) = &mut self.state.inner {
+                inner.coherent = false;
+            }
+        }
+        self.state.last_frame = frame;
         let kind = text(value, "type").unwrap_or("");
         if kind == "response"
             && text(value, "command") == Some("get_state")
@@ -1525,7 +1571,15 @@ impl Context<'_, '_> {
         match kind {
             "response" => self.response(&owner, value),
             "agent_start" => {
+                self.state.inner = Some(InnerMessages {
+                    start: self.input.capture.source_position.clone(),
+                    evidence: self.input.canonical_observation.clone(),
+                    count: 0,
+                    assistant: None,
+                    coherent: frame.is_some(),
+                });
                 if self.state.outer.is_none() {
+                    self.release_runtime_tools(&owner, None);
                     let reference = ActivationRef::occurrence(
                         owner.clone(),
                         self.input.capture.source_position.clone(),
@@ -1570,6 +1624,7 @@ impl Context<'_, '_> {
                     return;
                 };
                 self.release_unfinished_maintenance(&owner, &run.activation);
+                self.release_runtime_tools(&owner, Some(&run.activation));
                 let (outcome, reason, evidence) =
                     run.terminal
                         .unwrap_or((TerminalOutcome::Unknown, None, run.start.clone()));
@@ -1605,11 +1660,27 @@ impl Context<'_, '_> {
                 self.output.state.current_activation = None;
                 self.state.current_pending.clear();
             }
-            "agent_end" | "turn_start" | "turn_end" => {}
+            "turn_start" => {}
+            "turn_end" | "agent_end" => self.echo_tool_sidecars(&owner, value, kind),
             "auto_retry_start" | "auto_retry_end" | "compaction_start" | "compaction_end" => {
                 self.maintenance(&owner, value, kind)
             }
             "message_start" => {
+                let overlaps = self.state.message.is_some();
+                let inner_index = self.state.inner.as_mut().map(|inner| {
+                    if overlaps {
+                        inner.coherent = false;
+                    }
+                    let index = inner.count;
+                    if text(&value["message"], "role") == Some("assistant") {
+                        inner.assistant = Some(index);
+                    }
+                    match inner.count.checked_add(1) {
+                        Some(count) => inner.count = count,
+                        None => inner.coherent = false,
+                    }
+                    index
+                });
                 let reference = MessageRef::occurrence(
                     owner.clone(),
                     self.input.capture.source_position.clone(),
@@ -1617,6 +1688,7 @@ impl Context<'_, '_> {
                 )
                 .unwrap();
                 let inference = if text(&value["message"], "role") == Some("assistant") {
+                    self.state.current_pending.clear();
                     Some(self.begin_work(
                         &owner,
                         "inference",
@@ -1628,6 +1700,21 @@ impl Context<'_, '_> {
                 } else {
                     None
                 };
+                if text(&value["message"], "role") == Some("toolResult") {
+                    if let Some(id) = text(&value["message"], "toolCallId") {
+                        if let Some(pending) = self.state.current_pending.get(id).cloned() {
+                            self.bind_tool_sidecars(
+                                &pending.operation,
+                                &value["message"]["details"],
+                                "/message",
+                                &pending.evidence,
+                            );
+                            if let Some(index) = inner_index {
+                                self.record_inner_result(&owner, id, index, &pending);
+                            }
+                        }
+                    }
+                }
                 self.state.message = Some(LiveMessage {
                     reference,
                     start: self.input.capture.source_position.clone(),
@@ -1682,6 +1769,7 @@ impl Context<'_, '_> {
                     },
                     message,
                     "live/message",
+                    Some("/message"),
                     None,
                     form,
                     self.state.outer.as_ref().map(|run| run.activation.clone()),
@@ -1778,181 +1866,101 @@ impl Context<'_, '_> {
             return;
         }
         if matches!(command, "get_entries" | "get_tree") {
-            let first_claim = self.output.claims.len();
-            if let Some(entries) = value["data"]["entries"].as_array() {
-                for entry in entries {
-                    self.entry(owner, entry, "snapshot");
-                }
-            }
-            if let Some(tree) = value["data"]["tree"].as_array() {
-                let mut pending: Vec<_> = tree.iter().rev().collect();
-                while let Some(node) = pending.pop() {
-                    if let Some(entry) = node.get("entry") {
-                        self.entry(owner, entry, "snapshot");
-                    }
-                    if let Some(children) = node["children"].as_array() {
-                        pending.extend(children.iter().rev());
-                    }
-                }
-            }
-            // An append window can name a head whose ancestors were omitted. Keep
-            // their topology, without claiming this response observed their content.
-            let observations = self.output.claims[first_claim..]
-                .iter()
-                .filter(|claim| matches!(claim.fact, Fact::HistoryContentObserved { .. }))
-                .map(|claim| claim.claim_ref.clone())
-                .collect();
-            if let Some(leaf) = value["data"].get("leafId") {
-                let membership = if let Some(id) = leaf.as_str() {
-                    SelectionMembership::EntryPath {
-                        head: EntryRef::native(owner.clone(), "pi.entry", vec![id.into()]).unwrap(),
-                    }
-                } else if leaf.is_null() {
-                    SelectionMembership::EntrySet { entries: vec![] }
-                } else {
-                    self.issue(
-                        Some(owner),
-                        "pi/leaf-shape",
-                        DiagnosticCode::DecodeFailure,
-                        "Selected leaf ID is neither a native ID nor null",
-                    );
-                    return;
-                };
-                let selection = SelectionRef::occurrence(
-                    owner.clone(),
-                    self.input.capture.source_position.clone(),
-                    vec!["selected-leaf".into()],
-                )
-                .unwrap();
-                self.object(
-                    owner,
-                    "pi/history-selection",
-                    TraceObject::HistorySelection(HistorySelection {
-                        selection_ref: selection.clone(),
-                        agent: owner.clone(),
-                        membership,
-                        content_scope: HistoryContentScope::ObservationSet { observations },
-                        excluded_heads: vec![],
-                    }),
-                );
-                self.add(
-                    owner,
-                    "pi/select-history",
-                    Fact::SelectHistory {
-                        agent: owner.clone(),
-                        selection,
-                        selected_at: self.input.capture.source_position.clone(),
-                    },
-                );
-            } else {
-                self.issue(
-                    Some(owner),
-                    "pi/leaf-missing",
-                    DiagnosticCode::UnknownSelection,
-                    "Entry snapshot does not report its selected leaf",
-                );
-            }
+            let pending = std::mem::take(&mut self.state.current_pending);
+            let parent = self.state.current_parent.take();
+            self.history_response(owner, value);
+            self.state.current_pending = pending;
+            self.state.current_parent = parent;
         } else if matches!(command, "prompt" | "steer" | "follow_up") {
             self.issue(Some(owner),"pi/queue-not-consumption",DiagnosticCode::CaptureGap,"RPC acceptance does not establish which immutable input revision a later native message consumed");
         }
     }
 
-    fn runtime_tool(&mut self, owner: &AgentRef, value: &Value, kind: &str) {
-        let Some(id) = text(value, "toolCallId") else {
-            self.issue(
-                Some(owner),
-                "pi/tool-id",
-                DiagnosticCode::MissingOwner,
-                "Runtime tool event lacks its toolCallId",
-            );
-            return;
-        };
-        let reference = OperationRef::native(
-            owner.clone(),
-            "pi.runtime-tool",
-            vec![
-                self.input.capture.observation_ref.producer_epoch.clone(),
-                id.into(),
-            ],
-        )
-        .unwrap();
-        if kind == "tool_execution_start" {
-            let Some(name) = text(value, "toolName") else {
+    fn history_response(&mut self, owner: &AgentRef, value: &Value) {
+        let first_claim = self.output.claims.len();
+        if let Some(entries) = value["data"]["entries"].as_array() {
+            for (index, entry) in entries.iter().enumerate() {
+                self.entry(owner, entry, "snapshot", &format!("/data/entries/{index}"));
+            }
+        }
+        if let Some(tree) = value["data"]["tree"].as_array() {
+            let mut pending: Vec<_> = tree
+                .iter()
+                .enumerate()
+                .rev()
+                .map(|(index, node)| (node, format!("/data/tree/{index}")))
+                .collect();
+            while let Some((node, path)) = pending.pop() {
+                if let Some(entry) = node.get("entry") {
+                    self.entry(owner, entry, "snapshot", &format!("{path}/entry"));
+                }
+                if let Some(children) = node["children"].as_array() {
+                    pending.extend(
+                        children
+                            .iter()
+                            .enumerate()
+                            .rev()
+                            .map(|(index, node)| (node, format!("{path}/children/{index}"))),
+                    );
+                }
+            }
+        }
+        // An append window can name a head whose ancestors were omitted. Keep
+        // their topology, without claiming this response observed their content.
+        let observations = self.output.claims[first_claim..]
+            .iter()
+            .filter(|claim| matches!(claim.fact, Fact::HistoryContentObserved { .. }))
+            .map(|claim| claim.claim_ref.clone())
+            .collect();
+        if let Some(leaf) = value["data"].get("leafId") {
+            let membership = if let Some(id) = leaf.as_str() {
+                SelectionMembership::EntryPath {
+                    head: EntryRef::native(owner.clone(), "pi.entry", vec![id.into()]).unwrap(),
+                }
+            } else if leaf.is_null() {
+                SelectionMembership::EntrySet { entries: vec![] }
+            } else {
                 self.issue(
                     Some(owner),
-                    "pi/tool-name",
+                    "pi/leaf-shape",
                     DiagnosticCode::DecodeFailure,
-                    "Runtime tool start lacks its toolName",
+                    "Selected leaf ID is neither a native ID nor null",
                 );
                 return;
             };
-            let payload = self.json(&value["args"], "/args");
+            let selection = SelectionRef::occurrence(
+                owner.clone(),
+                self.input.capture.source_position.clone(),
+                vec!["selected-leaf".into()],
+            )
+            .unwrap();
             self.object(
                 owner,
-                "pi/runtime-tool",
-                TraceObject::Operation(Operation {
-                    operation_ref: reference.clone(),
-                    owner: OwnerRef::Agent {
-                        agent: owner.clone(),
-                    },
-                    activation: self.state.outer.as_ref().map(|run| run.activation.clone()),
-                    requester: Some(RequesterRef::Agent(owner.clone())),
-                    category: OperationCategory::Tool {
-                        namespace: Some("pi".into()),
-                        name: name.into(),
-                    },
-                    input_revision: Some(payload),
-                    argument_state: ArgumentState::Sealed,
+                "pi/history-selection",
+                TraceObject::HistorySelection(HistorySelection {
+                    selection_ref: selection.clone(),
+                    agent: owner.clone(),
+                    membership,
+                    content_scope: HistoryContentScope::ObservationSet { observations },
+                    excluded_heads: vec![],
                 }),
             );
             self.add(
                 owner,
-                "pi/runtime-start",
-                Fact::Execution {
-                    execution: ExecutionRef::Operation(reference),
-                    boundary: ExecutionBoundary::Started { time: None },
+                "pi/select-history",
+                Fact::SelectHistory {
+                    agent: owner.clone(),
+                    selection,
+                    selected_at: self.input.capture.source_position.clone(),
                 },
             );
         } else {
-            let payload = self.json(
-                &value[if kind == "tool_execution_update" {
-                    "partialResult"
-                } else {
-                    "result"
-                }],
-                "/result",
+            self.issue(
+                Some(owner),
+                "pi/leaf-missing",
+                DiagnosticCode::UnknownSelection,
+                "Entry snapshot does not report its selected leaf",
             );
-            self.result(
-                owner,
-                reference.clone(),
-                payload,
-                Representation::Runtime,
-                if kind == "tool_execution_update" {
-                    ResultDisposition::Progress
-                } else {
-                    ResultDisposition::FinalReturn
-                },
-                "pi/runtime",
-            );
-            if kind == "tool_execution_end" {
-                let outcome = match value.get("isError").and_then(Value::as_bool) {
-                    Some(true) => TerminalOutcome::Failed,
-                    Some(false) => TerminalOutcome::Succeeded,
-                    None => TerminalOutcome::Unknown,
-                };
-                self.add(
-                    owner,
-                    "pi/runtime-outcome",
-                    Fact::Execution {
-                        execution: ExecutionRef::Operation(reference),
-                        boundary: ExecutionBoundary::Outcome {
-                            outcome,
-                            reason: None,
-                            detail: None,
-                        },
-                    },
-                );
-            }
         }
     }
 

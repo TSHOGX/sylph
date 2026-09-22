@@ -1,0 +1,26 @@
+{
+  "vendor": "pi",
+  "version": "0.85.1",
+  "scenario": "sidecar",
+  "provider": "deterministic loopback OpenAI-compatible SSE fixture",
+  "expected_text": "SYLPH_PI_AA_OK",
+  "remote_model": false,
+  "tools_enabled": true,
+  "sidecar_sha256": "390829a80790cf03b6fc082ee651d43d17bdb707646f7e3cb2a340e235f29924",
+  "sidecar_byte_length": 139264,
+  "sidecar_locations": [
+    "/workspace/pi-capture/sidecar-1.txt",
+    "/workspace/pi-capture/sidecar-2.txt"
+  ],
+  "source_sha256": {
+    "rpc": "0182c7620e21ee3d9d6fe128da08e7bbfb6513af4a021e738edadff6236cb55e",
+    "stdout": "05d4a7e09fb07e102d2659ec3f3984ffac7ea4a889ad7ba430ab786625cde79d",
+    "native": "ad4d4b060b705d7fc34cc8de3ee6f3b3f9f8641ac7426ac1b10bbf7c1debccb7"
+  },
+  "retained_sha256": {
+    "rpc": "28e9bcfd700d9b29e03dafd895c8e41de00bca7113d0e9fbe2f88be4b7a314d5",
+    "stdout": "05a02a75564343b94509e119c78daccc23cfbe7af324174539e47a1b619ba17b",
+    "native": "e3001f8daca440bd5792ac45a3f94e7dafc35f6f99a7f95424cb5cc874e9591e"
+  },
+  "sanitization": "Parse JSON records, replace temporary capture roots and exact produced sidecar paths, serialize compact JSONL. Preserve IDs, values, event order and duplicate delta occurrences. RPC direction wrappers are recorder metadata; stdout is captured independently as exact source bytes before sanitization."
+}

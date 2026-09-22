@@ -675,9 +675,13 @@ pub fn sidecar_references(raw: &[u8], transport: sylph_protocol::trace::Transpor
                     paths(details, slot, found);
                 }
             }
-            if value.get("type").and_then(Value::as_str) == Some("tool_execution_end") {
-                if let Some(result) = value.pointer("/result/details") {
-                    paths(result, &join(slot, "result"), found);
+            if let Some(field) = match value.get("type").and_then(Value::as_str) {
+                Some("tool_execution_update") => Some("partialResult"),
+                Some("tool_execution_end") => Some("result"),
+                _ => None,
+            } {
+                if let Some(result) = value.get(field).and_then(|value| value.get("details")) {
+                    paths(result, &join(slot, field), found);
                 }
             }
             for (key, child) in object {
@@ -735,5 +739,29 @@ mod sidecar_tests {
             value.as_object_mut().unwrap().remove(field);
             assert!(sidecar_references(&serde_json::to_vec(&value).unwrap(), transport).is_empty());
         }
+    }
+}
+
+#[cfg(test)]
+mod pi_sidecar_tests {
+    use super::*;
+    use sylph_protocol::trace::TransportKind;
+
+    #[test]
+    fn recorded_pi_progress_results_echoes_and_entry_windows_keep_their_actual_source_slots() {
+        let rows:Vec<Value>=include_str!("../../../../fixtures/unified-trace/pi/tool-sidecar/stdout.jsonl").lines().map(|line|serde_json::from_str(line).unwrap()).collect();
+        for (kind,slot) in [("tool_execution_update","/partialResult"),("tool_execution_end","/result"),("message_start","/message"),("message_end","/message"),("turn_end","/toolResults/0")] {
+            let found=rows.iter().filter(|row|row["type"]==kind).map(|row|sidecar_references(&serde_json::to_vec(row).unwrap(),TransportKind::LiveStdout)).find(|found|!found.is_empty()).unwrap();
+            assert_eq!(found.len(),1);assert_eq!(found[0].parent_slot,slot);assert_eq!(found[0].locator,"/workspace/pi-capture/sidecar-1.txt");
+        }
+        let end=rows.iter().find(|row|row["type"]=="agent_end").unwrap();
+        let found=sidecar_references(&serde_json::to_vec(end).unwrap(),TransportKind::LiveStdout);
+        assert_eq!(found.iter().map(|reference|reference.parent_slot.as_str()).collect::<Vec<_>>(),["/messages/2","/messages/4"]);
+        let entries=rows.iter().rfind(|row|row["command"]=="get_entries").unwrap();
+        let found=sidecar_references(&serde_json::to_vec(entries).unwrap(),TransportKind::LiveStdout);
+        assert_eq!(found.iter().map(|reference|reference.parent_slot.as_str()).collect::<Vec<_>>(),["/data/entries/4/message","/data/entries/6/message"]);
+        let native:Vec<Value>=include_str!("../../../../fixtures/unified-trace/pi/tool-sidecar/native.jsonl").lines().map(|line|serde_json::from_str(line).unwrap()).collect();
+        let found:Vec<_>=native.iter().flat_map(|row|sidecar_references(&serde_json::to_vec(row).unwrap(),TransportKind::NativeJsonl)).collect();
+        assert_eq!(found.len(),2);assert!(found.iter().all(|reference|reference.parent_slot=="/message"));
     }
 }

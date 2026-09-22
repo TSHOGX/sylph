@@ -796,3 +796,4 @@ fn intrinsic_source_owner_requires_native_header_and_keeps_its_generation() {
 }
 
 mod maintenance;
+mod runtime_tools;

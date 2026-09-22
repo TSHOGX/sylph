@@ -52,6 +52,14 @@ HTTP 503 failures before a successful response; the real CLI schedules both retr
 persists both failed attempts. The `compaction` scenario completes the marker response
 before requesting manual compaction, retaining both the live result and native checkpoint.
 
+The [controlled Bash corpus](../fixtures/unified-trace/pi/tool-sidecar/capture.json) uses
+`scripts/capture-pi-trace.mjs sidecar`. Its loopback provider requests two real Bash
+invocations with an intentionally repeated call ID, then returns the marker. Each
+invocation creates its own output file; equal complete bytes share one retained
+artifact. Only Bash is enabled, with extensions and personal context disabled. These
+captures establish Pi's emitted runtime, native and sidecar shapes, not remote-model
+behavior or an unobserved native/live identity join.
+
 ## Acquisition and source generations
 
 Managed live execution captures raw stdout frames, exact RPC writes and responses,
@@ -227,6 +235,21 @@ boundaries, `stopReason: stop`, file EOF, and wall-clock gaps do not prove a set
 outer interval. Native import keeps unknown Activation association where evidence is
 missing rather than synthesizing a turn for each user-role record.
 
+Runtime tool IDs are scoped to the observed invocation, not the capture producer epoch.
+The controlled Bash corpus reuses one `toolCallId` in two successive model responses;
+Pi executes both and produces independent output files. A coherent live model-call
+declaration supplies the operation reference for its matching runtime start. Without
+that declaration, the first observed runtime boundary supplies a provisional occurrence.
+Updates and completion follow that in-flight association until its end; a repeated start
+or outer settlement cannot invent an outcome for an unfinished earlier invocation.
+Native entry snapshots do not overwrite these live associations, and native call IDs
+remain scoped to their actual entry/part until a separate certificate proves a join.
+
+`tool_execution_start` is an invocation boundary, not proof that a shell command or edit
+ran: the pinned loop emits it even when rejecting truncated arguments before execution.
+Its arguments remain reported input. Outbound RPC writes provide no vendor lifecycle or
+admission evidence.
+
 ### Compact RPC content
 
 The pinned [`toJsonEvent` serializer](https://github.com/earendil-works/pi/blob/bbb61e34aaf231639fdaaad1adbd757947034eac/packages/coding-agent/src/modes/json-event.ts)
@@ -311,6 +334,20 @@ Tool `content` and `details` are distinct payloads. Binary/image content keeps m
 type and encoded bytes. Bash full-output sidecar paths are captured under environment
 containment; missing sidecar bytes remain unavailable. Exact provider requests,
 uncaptured stderr, and hidden reasoning are not reconstructed from summaries.
+
+The pinned Bash tool reports `details.fullOutputPath` when truncating output. Runtime
+`partialResult` / `result`, tool-result message snapshots, native entries and RPC entry
+windows each keep the actual source pointer for that reference. Sidecar discovery and
+the mapper use that same pointer; a semantic selector such as an entry ID is not a JSON
+location. Equal file bytes can be shared while their invocation results and live/native
+references remain independently evidenced.
+
+`turn_end.toolResults` and `agent_end.messages` echo the pinned loop's emitted messages.
+A contiguous observed frame prefix, matching message count and scoped result ID can
+certify an echo's association with an earlier result. The mapper stores the ordinal
+bindings in the semantic archive and keeps only counters in its checkpoint. A missing
+prefix or inconsistent echo remains unresolved; neither matching output text nor the
+latest occurrence of a reused call ID supplies that certificate.
 
 Native `message.timestamp` is milliseconds; outer entry timestamps retain their own
 reported clock interpretation. An offsetless historical wall-clock timestamp does not

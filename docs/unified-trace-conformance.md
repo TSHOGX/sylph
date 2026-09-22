@@ -59,6 +59,16 @@ The retained material is:
   live-first, alternating, duplicate-delivery and restarted schedules. Synthetic
   malformed-result and missing-end cases separately test conservative outcomes and
   episode isolation; they are not vendor captures.
+- The [Pi Bash sidecar corpus](../fixtures/unified-trace/pi/tool-sidecar/capture.json)
+  uses the same loopback recorder with one enabled tool. Two deliberately repeated
+  model tool-call IDs produce separate observed invocations and output files. The
+  complete 139,264-byte file contents are equal and share one retained body artifact;
+  the two file locators, native entry IDs and source observations remain distinct.
+  `crates/server/src/trace/worker/tests/corpus/pi_tools.rs` feeds acquisition's actual
+  path selectors through production admission and normalization, including progress,
+  message, echo and entry-window references, early attachments, restart and rebuild.
+  Separate synthetic tests reject incomplete echo certificates and preserve bounded
+  runtime checkpoints. No native/live message equivalence is inferred from equal bytes.
 - The [Claude workflow bundles](../fixtures/unified-trace/claude/workflow/capture.json)
   retain a 2.1.238 successful two-child demo and a 2.1.245 failed host with two journal
   starts and no returns. Each bundle keeps launch records, manifest and journal with
