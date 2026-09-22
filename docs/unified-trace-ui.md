@@ -311,6 +311,21 @@ not make the resource completed. A goal continuation labels the triggering input
 sleep call appears as waiting work. A schedule registration and its observed firings are
 separate rows; a future time or a sleep does not become a recurring-schedule widget.
 
+Resource details expose a bounded page of retained state observations, with a continuation
+at the same view. Registration, firing, cancellation, goal updates, yield and close keep
+separate rows and supporting claim/source references. Comparable source coordinates establish source order; opaque snapshot identities and
+source-less claims keep explicitly labeled presentation order. Grouping independent sources does not establish a shared timeline or
+one current state. An absent state is unknown, not `Available` or `Running`. State detail
+payloads load only on explicit expansion. Creator/using operations and their known
+activations remain linked independently of resource state.
+
+A message revision opens its own immutable representation and a bounded page of payload
+parts. The submitted revision and recorded wrapper can both be inspected through their
+representation links. A revision detail never silently substitutes the selected message's
+newest body, and pagination does not download bodies before expansion. An append record
+exposes its exact segment with an explicit predecessor link and segment label; it does
+not present the delta as a complete historical message or eagerly compose every prefix.
+
 ## Operation and payload inspection
 
 An operation header shows its supplied semantic kind, owner agent, activation when
@@ -464,7 +479,7 @@ a history cursor is not reused as a relations cursor. Header, history, and inspe
 details can therefore share one cut without requiring one unbounded bootstrap response.
 
 A body request pins the immutable revision reachable through its readable `via_ref`
-HistoryEntry/Delivery/Operation anchor and selected history. This authorization anchor
+HistoryEntry/Delivery/Operation/Resource/MessageRevision anchor and selected history. This authorization anchor
 is separate from original authorship: retained copied context can be read through its
 authorized recipient without granting access to the origin environment. A valid anchor
 cannot authorize its newer body under an old snapshot. A newer counter cannot invalidate a multi-megabyte body. Two windows using

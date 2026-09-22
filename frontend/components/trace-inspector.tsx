@@ -2,7 +2,12 @@
 import { useT } from "@/lib/i18n";
 import dynamic from "next/dynamic";
 import Link from "next/link";
-import { ChevronLeftIcon, ChevronRightIcon, EyeIcon, RefreshIcon } from "./icons";
+import {
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  EyeIcon,
+  RefreshIcon,
+} from "./icons";
 import {
   useEffect,
   useEffectEvent,
@@ -30,6 +35,7 @@ import {
   type TraceView,
 } from "@/lib/trace-types";
 import { describeCount } from "@/lib/trace-window";
+import { ResourceHistory, RevisionPayloads } from "./trace-resource-history";
 import { TracePayload } from "./trace-payload";
 import { ArtifactsPane } from "./artifacts-pane";
 const Companion = dynamic(() =>
@@ -164,7 +170,7 @@ export function TraceInspector({
     if (ui.isMobile) ui.closeDrawer();
     else ui.setRightOpen(false);
   };
-  const { ref, onKeyDown } = useDialog<HTMLElement>({
+  const { ref, onKeyDown } = useDialog<HTMLDivElement>({
     enabled: visible && full && !ui.artifactFullscreen,
     onClose: close,
   });
@@ -226,10 +232,10 @@ export function TraceInspector({
     ? undefined
     : { width: Math.max(420, Math.min(width, available - 520)) };
   return (
-    <aside
+    <div
       ref={ref}
       aria-label={t("trace.inspectorLabel")}
-      role={full && !ui.artifactFullscreen ? "dialog" : undefined}
+      role={full && !ui.artifactFullscreen ? "dialog" : "complementary"}
       aria-modal={(full && !ui.artifactFullscreen) || undefined}
       onKeyDown={onKeyDown}
       style={style}
@@ -483,7 +489,7 @@ export function TraceInspector({
           </div>
         )}
       </div>
-    </aside>
+    </div>
   );
 }
 
@@ -1183,6 +1189,28 @@ function ObjectContent({
             />
           )}
         </>
+      ) : content.kind === "resource" ? (
+        <ResourceHistory
+          reference={detail.reference}
+          history={history}
+          view={detail.view}
+          observations={content.observations}
+          cursor={content.observationsCursor}
+          maximum={maximum}
+          onInspect={(reference) => onInspect({ kind: "object", reference })}
+        />
+      ) : content.kind === "revision" ? (
+        <RevisionPayloads
+          reference={detail.reference}
+          history={history}
+          view={detail.view}
+          representation={content.representation}
+          form={content.form}
+          onInspect={(reference) => onInspect({ kind: "object", reference })}
+          payloads={content.payloads}
+          cursor={content.payloadsCursor}
+          maximum={maximum}
+        />
       ) : content.kind === "measurement" ? (
         <dl className="space-y-2 text-sm">
           <dt>{t("trace.metric")}</dt>
@@ -1255,26 +1283,6 @@ function ObjectContent({
                   cursor={content.membershipsCursor}
                   view={detail.view}
                   kind="memberships"
-                  onInspect={onInspect}
-                />
-              )}
-            </>
-          )}
-          {content.kind === "resource" && (
-            <>
-              <p className="text-sm">
-                {content.resourceKind.kind} ·{" "}
-                {content.state.kind === "available"
-                  ? t("trace.available")
-                  : content.state.reason}
-              </p>
-              {content.operationsCursor && (
-                <RelationPages
-                  reference={detail.reference}
-                  history={history}
-                  cursor={content.operationsCursor}
-                  view={detail.view}
-                  kind="relations"
                   onInspect={onInspect}
                 />
               )}

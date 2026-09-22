@@ -145,6 +145,15 @@ impl ProjectionWorker {
             .values()
             .filter_map(|change| change.after.declaration.known())
             .flat_map(TraceObject::payload_refs)
+            // State/terminal detail payloads can be referenced by facts without
+            // changing an object declaration. Their metadata follows the same
+            // retained reference list used for payload roots, never guessed size.
+            .chain(
+                unit.batch
+                    .claims
+                    .iter()
+                    .flat_map(|claim| claim.fact.payload_refs()),
+            )
             .cloned()
             .collect();
         for payload in refs {
@@ -717,6 +726,8 @@ fn rows(
                 results.clear();
                 resources.clear();
             }
+            ReadObjectContent::Resource { observations, .. } => observations.clear(),
+            ReadObjectContent::Revision { payloads, .. } => payloads.clear(),
             ReadObjectContent::Context { memberships, .. } => memberships.clear(),
             _ => {}
         }
@@ -769,6 +780,42 @@ fn rows(
                         reference,
                         vec![],
                         true,
+                    )?;
+                }
+            }
+            ReadObjectContent::Resource { observations, .. } => {
+                for (index, observation) in observations.iter().enumerate() {
+                    insert(
+                        read_scope(
+                            reference.scope(),
+                            None,
+                            &format!("object-observations:{}", reference.encode()),
+                        ),
+                        observation.claim_ref.encode(),
+                        Some(TraceAddress::of(reference)),
+                        index,
+                        serde_json::to_value(observation)?,
+                        reference,
+                        vec![],
+                        false,
+                    )?;
+                }
+            }
+            ReadObjectContent::Revision { payloads, .. } => {
+                for (index, payload) in payloads.iter().enumerate() {
+                    insert(
+                        read_scope(
+                            reference.scope(),
+                            None,
+                            &format!("object-payloads:{}", reference.encode()),
+                        ),
+                        index.to_string(),
+                        Some(TraceAddress::of(reference)),
+                        index,
+                        serde_json::to_value(payload)?,
+                        reference,
+                        payload_contributors(payload, projection),
+                        false,
                     )?;
                 }
             }
@@ -849,7 +896,14 @@ fn rows(
     let mut selected_rows = Vec::new();
     for (scope, references) in &projection.selected_objects {
         for reference in references {
-            for kind in ["relations", "results", "resources", "memberships"] {
+            for kind in [
+                "relations",
+                "results",
+                "resources",
+                "memberships",
+                "observations",
+                "payloads",
+            ] {
                 let collection = format!("object-{kind}:{}", reference.encode());
                 let archive_scope = read_scope(reference.scope(), None, &collection);
                 for ((key, _), row) in rows
@@ -934,7 +988,14 @@ fn anchors(
                     }
                 }
             }
-            ReadObjectContent::Resource { payloads, .. }
+            ReadObjectContent::Resource { observations, .. } => {
+                for observation in observations {
+                    for payload in &observation.payloads {
+                        add(payload)?;
+                    }
+                }
+            }
+            ReadObjectContent::Revision { payloads, .. }
             | ReadObjectContent::Context { payloads, .. }
             | ReadObjectContent::Generic { payloads, .. } => {
                 for payload in payloads {

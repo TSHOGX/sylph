@@ -725,7 +725,7 @@ impl GenerationStore {
                     changed.insert(reference.clone());
                     (
                         Some(serde_json::to_string(object)?),
-                        anchor_owner(object).map(AgentRef::encode),
+                        payload_anchor_owner(object).map(AgentRef::encode),
                         preview.as_str(),
                         *preview_truncated,
                         None,
@@ -1755,9 +1755,11 @@ impl GenerationStore {
                 AnyObjectRef::HistoryEntry(_)
                     | AnyObjectRef::Delivery(_)
                     | AnyObjectRef::Operation(_)
+                    | AnyObjectRef::Resource(_)
+                    | AnyObjectRef::MessageRevision(_)
             ) {
                 return Err(GenerationError::Invalid(
-                    "payload anchor must be a containing entry, delivery or operation".into(),
+                    "payload anchor must be a containing entry, delivery, operation, resource or revision".into(),
                 ));
             }
             if anchor.body_revision.is_empty()
@@ -1979,9 +1981,11 @@ fn object_kind(reference: &AnyObjectRef) -> &'static str {
     }
 }
 
-fn anchor_owner(object: &TraceObject) -> Option<&AgentRef> {
+pub(crate) fn payload_anchor_owner(object: &TraceObject) -> Option<&AgentRef> {
     match object {
         TraceObject::HistoryEntry(entry) => Some(&entry.containing_agent),
+        TraceObject::Resource(resource) => Some(resource.resource_ref.scope()),
+        TraceObject::MessageRevision(revision) => Some(revision.revision_ref.scope()),
         TraceObject::Operation(operation) => match &operation.owner {
             OwnerRef::Agent { agent } => Some(agent),
             OwnerRef::Unresolved { .. } => None,

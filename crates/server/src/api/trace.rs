@@ -1904,6 +1904,44 @@ async fn object(
             *resources = page.items;
             *resources_cursor = page.after_cursor;
         }
+        ReadObjectContent::Resource {
+            observations,
+            observations_cursor,
+            ..
+        } => {
+            let page: ReadPage<ReadResourceObservation> = page(
+                &state,
+                &subject.0,
+                &lease,
+                reference.scope(),
+                selected.as_ref(),
+                &format!("object-observations:{}", reference.encode()),
+                &window,
+                false,
+            )
+            .await?;
+            *observations = page.items;
+            *observations_cursor = page.after_cursor;
+        }
+        ReadObjectContent::Revision {
+            payloads,
+            payloads_cursor,
+            ..
+        } => {
+            let page: ReadPage<PayloadAccess> = page(
+                &state,
+                &subject.0,
+                &lease,
+                reference.scope(),
+                selected.as_ref(),
+                &format!("object-payloads:{}", reference.encode()),
+                &window,
+                false,
+            )
+            .await?;
+            *payloads = page.items;
+            *payloads_cursor = page.after_cursor;
+        }
         ReadObjectContent::Context {
             memberships,
             memberships_cursor,
@@ -1940,12 +1978,15 @@ async fn object_relations(
     let selected = selection(&query)?;
     check_selected_object(&state, &subject.0, &lease, selected.as_ref(), &reference).await?;
     let kind = query.kind.as_deref().unwrap_or("relations");
-    if !matches!(kind, "relations" | "results" | "resources" | "memberships") {
+    if !matches!(
+        kind,
+        "relations" | "results" | "resources" | "memberships" | "observations" | "payloads"
+    ) {
         return Err(invalid("Unknown relation collection"));
     }
     let scope = format!("object-{kind}:{}", reference.encode());
-    let response: Result<Response> = if kind == "results" {
-        Ok(Json(
+    let response: Result<Response> = match kind {
+        "results" => Ok(Json(
             page::<ReadResultOccurrence>(
                 &state,
                 &subject.0,
@@ -1958,9 +1999,36 @@ async fn object_relations(
             )
             .await?,
         )
-        .into_response())
-    } else {
-        Ok(Json(
+        .into_response()),
+        "observations" => Ok(Json(
+            page::<ReadResourceObservation>(
+                &state,
+                &subject.0,
+                &lease,
+                reference.scope(),
+                selected.as_ref(),
+                &scope,
+                &query,
+                false,
+            )
+            .await?,
+        )
+        .into_response()),
+        "payloads" => Ok(Json(
+            page::<PayloadAccess>(
+                &state,
+                &subject.0,
+                &lease,
+                reference.scope(),
+                selected.as_ref(),
+                &scope,
+                &query,
+                false,
+            )
+            .await?,
+        )
+        .into_response()),
+        _ => Ok(Json(
             page::<ReadRelation>(
                 &state,
                 &subject.0,
@@ -1973,7 +2041,7 @@ async fn object_relations(
             )
             .await?,
         )
-        .into_response())
+        .into_response()),
     };
     let response = response?;
     lease.retain();
@@ -2018,24 +2086,9 @@ async fn payload(
         .object(&lease.snapshot, &anchor)
         .await
         .map_err(storage)?;
-    let owner = match detail.object {
-        TraceObject::HistoryEntry(entry) => entry.containing_agent,
-        TraceObject::Delivery(delivery) => match delivery.recipient {
-            Recipient::Agent {
-                agent: OwnerRef::Agent { agent },
-            } => agent,
-            _ => return Err(invalid("Delivery has no agent recipient")),
-        },
-        TraceObject::Operation(operation) => match operation.owner {
-            OwnerRef::Agent { agent } => agent,
-            _ => return Err(invalid("Operation owner unresolved")),
-        },
-        _ => {
-            return Err(invalid(
-                "Payload authorization needs an entry, delivery or operation",
-            ));
-        }
-    };
+    let owner = crate::trace::generation::payload_anchor_owner(&detail.object)
+        .cloned()
+        .ok_or_else(|| invalid("Payload authorization needs a readable containing object"))?;
     observe(&state, &subject.0, &owner).await?;
     let requested = crate::trace::generation::PayloadAnchor {
         via_ref: anchor,

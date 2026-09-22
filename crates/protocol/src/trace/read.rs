@@ -539,6 +539,55 @@ pub struct ReadRelation {
     rename_all_fields = "camelCase",
     deny_unknown_fields
 )]
+pub enum ReadResourceState {
+    Created,
+    Running,
+    Yielded,
+    Closed {
+        outcome: TerminalOutcome,
+        reason: Option<String>,
+    },
+    GoalUpdated {
+        status: String,
+    },
+    ScheduleRegistered,
+    ScheduleCancelled,
+    ScheduleFired {
+        firing_key: Vec<String>,
+        delivery: Option<TraceAddress>,
+    },
+    Unknown {
+        reason: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReadResourceObservation {
+    pub claim_ref: ClaimRef,
+    pub source: Option<SourcePosition>,
+    pub order_basis: ReadOrderBasis,
+    pub state: ReadResourceState,
+    pub payloads: Vec<PayloadAccess>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ReadRevisionForm {
+    Complete,
+    Append { predecessor: Option<TraceAddress> },
+    Correction { replaces: TraceAddress },
+    Replacement,
+    Final,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
 pub enum ReadObjectContent {
     Operation {
         category: OperationCategory,
@@ -550,9 +599,14 @@ pub enum ReadObjectContent {
     },
     Resource {
         resource_kind: ResourceKind,
-        state: ReadAvailability,
+        observations: Vec<ReadResourceObservation>,
+        observations_cursor: Option<String>,
+    },
+    Revision {
+        representation: Representation,
+        form: ReadRevisionForm,
         payloads: Vec<PayloadAccess>,
-        operations_cursor: Option<String>,
+        payloads_cursor: Option<String>,
     },
     Context {
         basis: ContextBasis,

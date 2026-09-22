@@ -1121,3 +1121,150 @@ fn a_selected_admitted_representation_exposes_the_related_submission_without_sel
             .contains(&AnyObjectRef::MessageRevision(revisions[1].clone()))
     );
 }
+#[test]
+fn resource_observations_keep_all_independent_states_without_creating_execution() {
+    let resource = ResourceRef::native(agent(), "schedule", vec!["one".into()]).unwrap();
+    let registration = PayloadRef::bytes("a".repeat(64)).unwrap();
+    let delivery = DeliveryRef::native(agent(), "delivery", vec!["firing".into()]).unwrap();
+    let states = vec![
+        ResourceState::Created,
+        ResourceState::Running,
+        ResourceState::Yielded,
+        ResourceState::Closed {
+            outcome: TerminalOutcome::Failed,
+            reason: Some(ExecutionCloseReason::ObservationLoss),
+        },
+        ResourceState::GoalUpdated {
+            status: "paused".into(),
+            detail: Some(registration.clone()),
+        },
+        ResourceState::ScheduleRegistered {
+            registration: registration.clone(),
+        },
+        ResourceState::ScheduleCancelled,
+        ResourceState::ScheduleFired {
+            firing_key: vec!["first".into()],
+            delivery: Some(delivery.clone()),
+        },
+        ResourceState::Unknown {
+            reason: "Source did not report the outcome".into(),
+        },
+    ];
+    let mut facts = vec![
+        Fact::Declare {
+            object: declared_agent(agent()),
+        },
+        Fact::Declare {
+            object: TraceObject::Resource(Resource {
+                resource_ref: resource.clone(),
+                creator: None,
+                host: None,
+                kind: ResourceKind::Schedule,
+            }),
+        },
+    ];
+    facts.extend(states.into_iter().map(|state| Fact::ResourceState {
+        resource: resource.clone(),
+        state,
+    }));
+    let projection = facts_projection(
+        facts,
+        &PayloadPreviews::from_iter([(registration, text_preview("retained registration"))]),
+    );
+    let detail = &projection.objects[&AnyObjectRef::Resource(resource)];
+    assert!(matches!(
+        detail.execution.as_ref().unwrap().state,
+        ReadExecutionState::Unavailable
+    ));
+    let ReadObjectContent::Resource { observations, .. } = &detail.content else {
+        panic!("state history missing")
+    };
+    assert_eq!(observations.len(), 9);
+    assert!(observations.iter().any(|row| matches!(
+        &row.state,
+        ReadResourceState::Closed {
+            outcome: TerminalOutcome::Failed,
+            ..
+        }
+    )));
+    assert!(
+        observations.iter().any(
+            |row| matches!(&row.state,ReadResourceState::GoalUpdated{status}if status=="paused")
+        )
+    );
+    assert!(observations.iter().any(|row|matches!(&row.state,ReadResourceState::ScheduleFired{firing_key,delivery:Some(target)}if firing_key==&["first"]&&target.object()==AnyObjectRef::Delivery(delivery.clone()))));
+    assert_eq!(observations.iter().flat_map(|row| &row.payloads).count(), 2);
+    assert!(
+        observations.iter().all(|row| row.source.is_none()),
+        "native fact keys cannot invent a physical source position"
+    );
+}
+#[test]
+fn append_revision_detail_keeps_its_exact_segment_and_explicit_predecessor() {
+    let first = PayloadRef::bytes("a".repeat(64)).unwrap();
+    let second = PayloadRef::bytes("b".repeat(64)).unwrap();
+    let (mut facts, entry, revisions) = observed_content_fixture([&first, &second]);
+    for fact in &mut facts {
+        if let Fact::Declare {
+            object: TraceObject::MessageRevision(revision),
+        } = fact
+        {
+            revision.parts[0].part_ref =
+                MessagePartRef::native(agent(), "part", vec!["shared-stream".into()]).unwrap();
+            if revision.revision_ref == revisions[1] {
+                revision.form = RevisionForm::Append {
+                    predecessor: Some(revisions[0].clone()),
+                };
+            }
+        }
+    }
+    let selection = SelectionRef::native(agent(), "selected-stream", vec!["tail".into()]).unwrap();
+    facts.push(Fact::Declare {
+        object: TraceObject::HistorySelection(HistorySelection {
+            selection_ref: selection.clone(),
+            agent: agent(),
+            membership: SelectionMembership::EntrySet {
+                entries: vec![entry],
+            },
+            content_scope: HistoryContentScope::ObservationSet {
+                observations: vec![reader_claim_ref(6)],
+            },
+            excluded_heads: vec![],
+        }),
+    });
+    let projection = facts_projection(
+        facts,
+        &PayloadPreviews::from_iter([
+            (first, text_preview("initial")),
+            (second.clone(), text_preview(" segment")),
+        ]),
+    );
+    assert!(
+        projection.selected_objects[&ReadingScope {
+            agent: agent(),
+            selection: Some(selection)
+        }]
+            .contains(&AnyObjectRef::MessageRevision(revisions[0].clone())),
+        "the selected append must expose its actual retained predecessor"
+    );
+    let detail = &projection.objects[&AnyObjectRef::MessageRevision(revisions[1].clone())];
+    let ReadObjectContent::Revision {
+        form: ReadRevisionForm::Append {
+            predecessor: Some(predecessor),
+        },
+        payloads,
+        ..
+    } = &detail.content
+    else {
+        panic!("append detail must name its predecessor")
+    };
+    assert_eq!(
+        predecessor.object(),
+        AnyObjectRef::MessageRevision(revisions[0].clone())
+    );
+    assert_eq!(payloads.len(), 1);
+    assert_eq!(
+        payloads[0].payload_ref, second,
+        "a revision inspector shows the retained segment, not a composed/latest body"
+    );
+}

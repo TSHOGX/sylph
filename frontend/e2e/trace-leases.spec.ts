@@ -2,6 +2,24 @@ import { expect, finishDocument, test, type Page } from "./fixtures/test";
 import { createSession } from "./fixtures/session";
 import type { ReaderBootstrap } from "../lib/trace-types";
 
+async function settledReader(page: Page) {
+  // Creation races the fixture's final projection. Measuring that first lease
+  // can observe normal live-view replacement before document departure. Let the
+  // real reader observe settlement, leave setup, then measure a fresh document.
+  // Do not intercept requests here: interception can abort keepalive DELETEs
+  // during document teardown, which is the very mechanism this file measures.
+  const settled = page.waitForResponse(async (response) =>
+    /^\/api\/v1\/trace\/agents\/[^/]+$/.test(new URL(response.url()).pathname) &&
+    response.status() === 200 &&
+    (await response.json() as ReaderBootstrap).header.ownExecution.state.kind === "terminated",
+  );
+  await createSession(page);
+  await settled;
+  const url = page.url();
+  await finishDocument(page);
+  return url;
+}
+
 function nextBootstrap(page: Page) {
   return page.waitForResponse((response) =>
     /^\/api\/v1\/trace\/agents\/[^/]+$/.test(new URL(response.url()).pathname) &&
@@ -21,8 +39,10 @@ async function expectReleased(page: Page, url: string, view: ReaderBootstrap["vi
 }
 
 test("document navigation releases its actual server view", async ({ page }) => {
+  const readerUrl = await settledReader(page);
   const bootstrap = nextBootstrap(page);
-  await createSession(page);
+  await page.goto(readerUrl);
+  await expect(page.getByLabel("Message", { exact: true })).toBeVisible();
   const response = await bootstrap;
   const { view } = await response.json() as ReaderBootstrap;
   const retained = new URL(response.url());
@@ -41,9 +61,9 @@ test("document navigation releases its actual server view", async ({ page }) => 
 
 test("repeated graceful document lifetimes keep server views available", async ({ page }) => {
   test.setTimeout(120_000);
+  const readerUrl = await settledReader(page);
   const first = nextBootstrap(page);
-  await createSession(page);
-  const readerUrl = page.url();
+  await page.goto(readerUrl);
   let response = await first;
   const seen = new Set<string>();
 

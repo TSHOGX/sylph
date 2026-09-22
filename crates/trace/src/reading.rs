@@ -11,6 +11,7 @@ use sylph_protocol::trace::*;
 mod append;
 mod content;
 mod inputs;
+mod resources;
 mod message_update;
 mod window;
 pub use append::{project_independent_append, AppendIndex, AppendProjection, AppendWork};
@@ -540,7 +541,15 @@ impl Index<'_> {
                     }
                 }
                 Some(TraceObject::MessageRevision(revision)) => {
-                    pending.push(AnyObjectRef::Message(revision.message.clone()))
+                    pending.push(AnyObjectRef::Message(revision.message.clone()));
+                    // An append's exact body already depends on this predecessor.
+                    // Reachability does not extend to unrelated alternative revisions.
+                    if let RevisionForm::Append {
+                        predecessor: Some(predecessor),
+                    } = &revision.form
+                    {
+                        pending.push(AnyObjectRef::MessageRevision(predecessor.clone()));
+                    }
                 }
                 Some(TraceObject::Message(message)) => {
                     if let Some(production) = &message.production {
@@ -698,9 +707,45 @@ impl Index<'_> {
             }
             TraceObject::Resource(resource) => ReadObjectContent::Resource {
                 resource_kind: resource.kind.clone(),
-                state: ReadAvailability::Available,
-                payloads: vec![],
-                operations_cursor: None,
+                observations: self.resource_observations(resource),
+                observations_cursor: None,
+            },
+            TraceObject::MessageRevision(revision) => ReadObjectContent::Revision {
+                representation: revision.representation,
+                form: match &revision.form {
+                    RevisionForm::Complete => ReadRevisionForm::Complete,
+                    RevisionForm::Append { predecessor } => ReadRevisionForm::Append {
+                        predecessor: predecessor.as_ref().map(|reference| {
+                            TraceAddress::of(&AnyObjectRef::MessageRevision(reference.clone()))
+                        }),
+                    },
+                    RevisionForm::Replacement { .. } => ReadRevisionForm::Replacement,
+                    RevisionForm::Final { .. } => ReadRevisionForm::Final,
+                    RevisionForm::Correction { replaces } => ReadRevisionForm::Correction {
+                        replaces: TraceAddress::of(&AnyObjectRef::MessageRevision(
+                            replaces.clone(),
+                        )),
+                    },
+                },
+                // Detail shows exactly this immutable record. Composing every
+                // historical prefix would duplicate stream bodies quadratically;
+                // append records expose their segment and predecessor explicitly.
+                payloads: revision
+                    .parts
+                    .iter()
+                    .map(|part| {
+                        self.access(
+                            &scope,
+                            &reference,
+                            &revision.revision_ref.encode(),
+                            &part.payload,
+                            revision.representation,
+                            part.media_type.clone(),
+                            part.encoding,
+                        )
+                    })
+                    .collect(),
+                payloads_cursor: None,
             },
             TraceObject::ContextCheckpoint(checkpoint) => ReadObjectContent::Context {
                 basis: checkpoint.basis,
@@ -744,6 +789,9 @@ impl Index<'_> {
                 payloads: vec![],
             },
         };
+        if let TraceObject::Resource(resource) = object {
+            self.resource_links(resource, &mut relations);
+        }
         ReadObjectDetail {
             view: ReadView {
                 token: String::new(),
@@ -1283,7 +1331,14 @@ fn object_label(object: &TraceObject) -> &'static str {
         TraceObject::Delivery(_) => "Delivery",
         TraceObject::Operation(_) => "Operation",
         TraceObject::Result(_) => "Result occurrence",
-        TraceObject::Resource(_) => "Resource",
+        TraceObject::Resource(resource) => match resource.kind {
+            ResourceKind::Terminal { .. } => "Terminal",
+            ResourceKind::CodeCell { .. } => "Code cell",
+            ResourceKind::Goal => "Goal",
+            ResourceKind::Schedule => "Schedule",
+            ResourceKind::Artifact { .. } => "Artifact",
+            ResourceKind::Extension { .. } => "Resource",
+        },
         TraceObject::HistoryEntry(_) => "History entry",
         TraceObject::HistorySelection(_) => "History selection",
         TraceObject::ContextCheckpoint(_) => "Context checkpoint",

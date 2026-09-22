@@ -121,10 +121,7 @@ export type Author =
   | { kind: "tool"; operation: TraceAddress | null; label: string }
   | { kind: "unknown" };
 export type Representation =
-  | "runtime"
-  | "caller_result"
-  | "conversation"
-  | "submitted";
+  "runtime" | "caller_result" | "conversation" | "submitted";
 export interface PayloadAccess {
   payloadRef: string;
   bodyRevision: string;
@@ -217,7 +214,15 @@ export type Metric =
   | { kind: "cost"; pricingBasis: string }
   | { kind: "extension"; namespace: string; name: string };
 export type MeasurementUnit =
-  | { kind: "tokens" | "seconds" | "milliseconds" | "nanoseconds" | "bytes" | "count" }
+  | {
+      kind:
+        | "tokens"
+        | "seconds"
+        | "milliseconds"
+        | "nanoseconds"
+        | "bytes"
+        | "count";
+    }
   | { kind: "currency"; code: string }
   | { kind: "extension"; namespace: string; name: string };
 export interface NativeSessionIdentity {
@@ -412,6 +417,34 @@ export interface TraceRelation {
   label: string;
   agent: AgentLink | null;
 }
+export type ResourceState =
+  | {
+      kind:
+        | "created"
+        | "running"
+        | "yielded"
+        | "schedule_registered"
+        | "schedule_cancelled";
+    }
+  | {
+      kind: "closed";
+      outcome: "succeeded" | "failed" | "cancelled" | "interrupted" | "unknown";
+      reason: string | null;
+    }
+  | { kind: "goal_updated"; status: string }
+  | {
+      kind: "schedule_fired";
+      firingKey: string[];
+      delivery: TraceAddress | null;
+    }
+  | { kind: "unknown"; reason: string };
+export interface ResourceObservation {
+  claimRef: string;
+  orderBasis: "native_predecessor" | "explicit_order" | "presentation_tiebreak";
+  source: SourcePosition | null;
+  state: ResourceState;
+  payloads: PayloadAccess[];
+}
 export type ObjectContent =
   | {
       kind: "operation";
@@ -425,9 +458,18 @@ export type ObjectContent =
   | {
       kind: "resource";
       resourceKind: ResourceKind;
-      state: Availability;
+      observations: ResourceObservation[];
+      observationsCursor: string | null;
+    }
+  | {
+      kind: "revision";
+      representation: Representation;
+      form:
+        | { kind: "complete" | "replacement" | "final" }
+        | { kind: "append"; predecessor: TraceAddress | null }
+        | { kind: "correction"; replaces: TraceAddress };
       payloads: PayloadAccess[];
-      operationsCursor: string | null;
+      payloadsCursor: string | null;
     }
   | {
       kind: "context";

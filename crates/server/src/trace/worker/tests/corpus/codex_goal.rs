@@ -265,6 +265,48 @@ async fn expected(fixture: &Fixture, store: &GenerationStore) {
             .count(),
         2
     );
+    let resource = AnyObjectRef::Resource(goal(GOAL));
+    let states = store
+        .read_page(
+            &snapshot,
+            &read_scope(
+                &owner(),
+                None,
+                &format!("object-observations:{}", resource.encode()),
+            ),
+            None,
+            None,
+            None,
+            8,
+            false,
+        )
+        .await
+        .unwrap();
+    let observations: Vec<ReadResourceObservation> = states
+        .rows
+        .into_iter()
+        .map(|row| serde_json::from_value(row.body).unwrap())
+        .collect();
+    assert_eq!(observations.len(), 2);
+    assert_eq!(
+        observations
+            .iter()
+            .map(|row| match &row.state {
+                ReadResourceState::GoalUpdated { status } => status.as_str(),
+                _ => panic!("goal state kind"),
+            })
+            .collect::<Vec<_>>(),
+        ["active", "paused"]
+    );
+    for observation in &observations {
+        assert_eq!(observation.payloads.len(), 1);
+        assert_eq!(observation.payloads[0].via_ref.object(), resource);
+        assert_eq!(
+            observation.payloads[0].body_revision,
+            observation.claim_ref.encode()
+        );
+        assert!(observation.payloads[0].total_bytes.unwrap() > 0);
+    }
     let mut reader_seconds: Vec<_> = details
         .iter()
         .filter_map(|detail| match &detail.content {

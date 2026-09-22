@@ -709,11 +709,16 @@ do not override these hard limits.
 An individual summary is bounded independently, with truncated-preview metadata and
 lazy detail references. A huge native record therefore cannot force an oversized page.
 Payload endpoints require a `via_ref` authorization anchor and snapshot;
-possession of a global CAS hash is not authorization. The anchor is a readable containing HistoryEntry, Delivery or Operation,
-separate from original authorship. The requested payload, revision and representation
+possession of a global CAS hash is not authorization. The anchor is a readable containing
+HistoryEntry, Delivery, Operation, Resource or immutable MessageRevision, separate from
+original authorship. The requested payload, revision and representation
 must be reachable through that anchor at the snapshot revision and selected history.
-An R1 anchor cannot authorize its newer R2 payload. Retained inherited/copied bytes can
-be read through their authorized recipient entry without access to the origin
+A Resource anchor pins the particular state claim and its detail body; a MessageRevision
+anchor pins that immutable representation's parts, independently of whichever revision
+is currently selected for the message. Both retain their actual containing agent,
+selected-history reachability and every payload dependency epoch. Neither permits a
+raw CAS read by hash. An R1 anchor cannot authorize its newer R2 payload. Retained
+inherited/copied bytes can be read through their authorized recipient entry without access to the origin
 environment. This grants neither origin-object metadata nor unobserved origin ranges.
 Shared bytes do not expose another environment's existence or provenance. Range reads
 report range, total length when known, encoding and
