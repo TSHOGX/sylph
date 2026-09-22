@@ -217,7 +217,7 @@ export type Metric =
   | { kind: "cost"; pricingBasis: string }
   | { kind: "extension"; namespace: string; name: string };
 export type MeasurementUnit =
-  | { kind: "tokens" | "milliseconds" | "nanoseconds" | "bytes" | "count" }
+  | { kind: "tokens" | "seconds" | "milliseconds" | "nanoseconds" | "bytes" | "count" }
   | { kind: "currency"; code: string }
   | { kind: "extension"; namespace: string; name: string };
 export interface NativeSessionIdentity {

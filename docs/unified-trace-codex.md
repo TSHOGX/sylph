@@ -297,6 +297,30 @@ submits ordinary input with `turn_trigger: "goal"` when idle. That trigger is me
 when captured; an ordinary history lacking it does not gain inferred goal provenance
 because the preceding turn completed or because a text prefix looks familiar.
 
+The native `thread_goals` row supplies `thread_id` and `goal_id`. These identify a
+Goal resource independently of objective text, active status or observation order.
+Replacing a goal with the same objective but another `goal_id` creates another resource.
+The consistent database capture retains every column and SQLite storage class, including
+unrecognized fields. A missing row or unreadable database cannot complete a previously
+observed goal.
+The [retained goal capture](../fixtures/unified-trace/codex/goal/capture.json) records an
+actual row and schema using `scripts/capture-codex-goal.py`; only the database locator is
+substituted. The producing binary version is not inferred from another installed CLI.
+
+An explicit status is a `GoalUpdated` state; a missing or malformed status is unknown
+state with a decode diagnostic, never a fabricated status string. Goal state is not an
+Activation or execution boundary. Its detail preserves the complete acquired row.
+`tokens_used` and `time_used_seconds` are cumulative reported counters scoped to the
+native goal instance, with tokens and seconds kept distinct. The instance supplies a
+counter/reset domain, not an observed zero baseline. `token_budget`, when present, is
+a separate gauge; null does not mean zero. Goal totals are not added to thread,
+response or child totals without evidence that their scopes are disjoint.
+
+The public `ThreadGoal` shape at the pinned source revision omits `goal_id`. Both its
+outer `threadId` and the nested goal's `threadId`, when present, must agree with the
+containing native thread. Even an agreeing state observation remains unjoined to a
+database goal unless a retained identity certificate supplies that association.
+
 ## History and model context
 
 The header's `subagent_history_start_ordinal` marks the first child-owned native

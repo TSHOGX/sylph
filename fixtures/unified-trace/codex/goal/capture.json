@@ -1,0 +1,8 @@
+{
+  "method": "scripts/capture-codex-goal.py: one read-only transaction reads the actual thread_goals schema, every selected column and every SQLite storage class, including committed WAL data. No model or goal mutation is requested.",
+  "limits": "This is a logical database-row snapshot, not a copy or hash of SQLite file pages. The producing binary version is not exposed by this row and is not inferred from another installed CLI. Only databaseLocator is substituted; all row values and identities are retained.",
+  "source_snapshot_sha256": "599b4aeee8b83ee27e1e97e24b4dbe7bd884ac6ad59c0478dba6df909f2aa8ee",
+  "retained_sha256": "db8d4346e45813685a1909484a36874e3fb3a360f53807986a5e9250d5500879",
+  "schema_sha256": "b3aac485fec27eaefbdd3e68651bdf6d640908fb10226f3562cc5ffe92ca3d1f",
+  "thread_id": "01a0c6ff-3eff-7972-aefa-f4ad63d06308"
+}

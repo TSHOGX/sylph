@@ -56,7 +56,7 @@ async fn read_table(path:&Path,table:&str,key:&str,native_id:&str)->Result<(Nati
         .await?;
     anyhow::ensure!(
         !schema.is_empty() && schema.len() <= MAX_COLUMNS,
-        "vendor threads schema is absent or exceeds the column bound"
+        "vendor {table} schema is absent or exceeds the column bound"
     );
     for column in schema {
         snapshot.columns.push(NativeDatabaseColumn {
@@ -64,13 +64,14 @@ async fn read_table(path:&Path,table:&str,key:&str,native_id:&str)->Result<(Nati
             declared_type: column.try_get("type")?,
         });
     }
+    let identity_column = if table == "threads" { "rollout_path" } else { "goal_id" };
     anyhow::ensure!(
         snapshot.columns.iter().any(|column| column.name == key)
             && snapshot
                 .columns
                 .iter()
-                .any(|column| column.name == if table=="threads" {"rollout_path"} else {"goal_id"}),
-        "vendor threads schema lacks id or rollout_path"
+                .any(|column| column.name == identity_column),
+        "vendor {table} schema lacks {key} or {identity_column}"
     );
     let quoted: Vec<_> = snapshot
         .columns
@@ -96,7 +97,7 @@ async fn read_table(path:&Path,table:&str,key:&str,native_id:&str)->Result<(Nati
     };
     anyhow::ensure!(
         size >= 0 && size as u64 <= MAX_ROW_BYTES,
-        "vendor thread row exceeds the {MAX_ROW_BYTES}-byte capture bound"
+        "vendor {table} row exceeds the {MAX_ROW_BYTES}-byte capture bound"
     );
     let query = format!(
         "SELECT {} FROM {table} WHERE {key}=? LIMIT 1",
@@ -143,6 +144,53 @@ async fn read_table(path:&Path,table:&str,key:&str,native_id:&str)->Result<(Nati
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn goal_capture_reads_the_recorded_schema_from_wal_and_keeps_unknown_columns() {
+        let recorded: NativeDatabaseSnapshot = serde_json::from_str(include_str!(
+            "../../../../fixtures/unified-trace/codex/goal/goal.json"
+        )).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("goals_1.sqlite");
+        let mut writer = sqlx::SqliteConnection::connect_with(
+            &sqlx::sqlite::SqliteConnectOptions::new().filename(&path).create_if_missing(true)
+                .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal),
+        ).await.unwrap();
+        sqlx::query(include_str!("../../../../fixtures/unified-trace/codex/goal/schema.sql"))
+            .execute(&mut writer).await.unwrap();
+        sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)").execute(&mut writer).await.unwrap();
+        let names = recorded.columns.iter().map(|column| format!("\"{}\"", column.name.replace('"', "\"\""))).collect::<Vec<_>>();
+        let sql = format!("INSERT INTO thread_goals ({}) VALUES ({})", names.join(","), vec!["?"; names.len()].join(","));
+        let mut insert = sqlx::query(&sql);
+        for column in &recorded.columns {
+            insert = match &recorded.row[&column.name] {
+                NativeDatabaseValue::Text(value) => insert.bind(value),
+                NativeDatabaseValue::Integer(value) => insert.bind(value),
+                NativeDatabaseValue::Null => insert.bind(Option::<String>::None),
+                _ => panic!("the recorded goal schema has text, integer and null cells"),
+            };
+        }
+        insert.execute(&mut writer).await.unwrap();
+        assert!(std::fs::metadata(path.with_extension("sqlite-wal")).unwrap().len() > 0);
+        let NativeDatabaseValue::Text(thread) = &recorded.row["thread_id"] else { panic!("recorded native thread identity"); };
+        let (captured, _) = read_goal(&path, thread).await.unwrap();
+        assert_eq!(captured.status, NativeDatabaseStatus::Available);
+        assert_eq!(captured.columns, recorded.columns);
+        assert_eq!(captured.row, recorded.row);
+        sqlx::query("ALTER TABLE thread_goals ADD COLUMN vendor_extension BLOB").execute(&mut writer).await.unwrap();
+        sqlx::query("UPDATE thread_goals SET vendor_extension=X'00FF05',goal_id='replacement-goal',tokens_used=5 WHERE thread_id=?")
+            .bind(thread).execute(&mut writer).await.unwrap();
+        let (replacement, _) = read_goal(&path, thread).await.unwrap();
+        assert_eq!(replacement.row["goal_id"], NativeDatabaseValue::Text("replacement-goal".into()));
+        assert_eq!(replacement.row["objective"], recorded.row["objective"]);
+        assert_eq!(replacement.row["tokens_used"], NativeDatabaseValue::Integer(5));
+        assert_eq!(replacement.row["vendor_extension"], NativeDatabaseValue::Blob(vec![0,255,5]));
+        assert_eq!(replacement.row.len(), recorded.row.len() + 1);
+        sqlx::query("DELETE FROM thread_goals WHERE thread_id=?").bind(thread).execute(&mut writer).await.unwrap();
+        let (missing, _) = read_goal(&path, thread).await.unwrap();
+        assert_eq!(missing.status, NativeDatabaseStatus::MissingRow);
+        assert!(missing.row.is_empty());
+    }
     #[tokio::test]
     async fn database_capture_reads_committed_wal_and_preserves_every_column_storage_class() {
         let dir = tempfile::tempdir().unwrap();

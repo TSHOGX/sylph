@@ -14,7 +14,11 @@ use super::{
 pub mod history;
 
 pub struct CodexMapper;
+impl CodexMapper {
+    const BUILD: &'static str = "codex-3";
+}
 mod collaboration;
+mod goal;
 mod runtime;
 
 /// Checkpointed source knowledge. A copied parent header cannot replace the first
@@ -38,7 +42,7 @@ struct CodexState {
 
 impl SemanticMapper for CodexMapper {
     fn build(&self) -> &'static str {
-        "codex-2"
+        Self::BUILD
     }
 
     fn map(&self, input: MapInput<'_>) -> MapOutput {
@@ -157,7 +161,7 @@ fn map_database(input: MapInput<'_>) -> MapOutput {
         })
     };
     if snapshot.table == "thread_goals" {
-        return runtime::map_goal_database(input, snapshot);
+        return goal::map_database(input, snapshot);
     }
     if snapshot.status != NativeDatabaseStatus::Available {
         issue(

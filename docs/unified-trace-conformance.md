@@ -69,6 +69,15 @@ The retained material is:
   and scoped usage, late source/launch joins, restart, duplicate delivery and same-cut
   rebuilding. These historical artifacts do not establish absent child Activation
   boundaries or equality between progress indices and journal keys.
+- The [Codex goal snapshot](../fixtures/unified-trace/codex/goal/capture.json) retains one
+  actual `thread_goals` row and its schema from a read-only SQLite transaction. It is a
+  logical row capture, not a database-page copy; its producing binary version is unknown.
+  `crates/envagent/src/runtime/database.rs` verifies goal acquisition against that schema
+  with committed WAL data and an added opaque column. Production replay in
+  `crates/server/src/trace/worker/tests/corpus/codex_goal.rs` keeps exact captured detail,
+  resource identity and reader-visible counter units through reread, interleaving,
+  restart and rebuild. Replacement, missing-row and idless public-event scenarios are
+  explicitly synthetic variations, not additional vendor recordings.
 - The retained Codex 0.150.1 [delegation capture](measurements/codex/captures/s10_delegation_fork.jsonl)
   supplies all inbound app-server frames to the production replay in
   `crates/server/src/trace/worker/tests/delegation.rs`. A pinned digest guards the complete

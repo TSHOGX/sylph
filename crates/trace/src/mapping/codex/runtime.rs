@@ -1160,19 +1160,7 @@ impl Context<'_, '_> {
         }
     }
 
-    pub(super) fn goal_update(&mut self, owner: &AgentRef, value: &Value) {
-        let goal = &value["goal"];
-        if string(goal, "threadId").is_some_and(|id| self.agent(id).as_ref() != Some(owner)) {
-            self.issue(
-                owner,
-                "codex/goal-owner",
-                DiagnosticCode::ConflictingOwner,
-                "Goal snapshot belongs to another native thread",
-            );
-            return;
-        }
-        self.issue(owner,"codex/goal-instance-unresolved",DiagnosticCode::MissingSource,"Goal state is retained, but ThreadGoal has no instance id; a proved creation operation is required before assigning a Goal resource");
-    }
+
 }
 fn runtime_outcome(status: Option<&str>) -> TerminalOutcome {
     match status {
@@ -1182,78 +1170,6 @@ fn runtime_outcome(status: Option<&str>) -> TerminalOutcome {
         Some("interrupted" | "terminated") => TerminalOutcome::Interrupted,
         _ => TerminalOutcome::Unknown,
     }
-}
-
-pub(super) fn map_goal_database(
-    input: MapInput<'_>,
-    snapshot: sylph_protocol::NativeDatabaseSnapshot,
-) -> MapOutput {
-    use sylph_protocol::{NativeDatabaseStatus, NativeDatabaseValue};
-    let mut output = MapOutput {
-        state: input.state.clone(),
-        ..Default::default()
-    };
-    if snapshot.status != NativeDatabaseStatus::Available {
-        return output;
-    }
-    let (Some(NativeDatabaseValue::Text(thread)), Some(NativeDatabaseValue::Text(id))) =
-        (snapshot.row.get("thread_id"), snapshot.row.get("goal_id"))
-    else {
-        output.diagnostics.push(MappingDiagnostic {
-            evidence: vec![input.canonical_observation.clone()],
-            code: DiagnosticCode::MissingOwner,
-            message: "Goal metadata lacks its actual thread and goal identity".into(),
-        });
-        return output;
-    };
-    let Issuer::Environment(environment) = &input.capture.observation_ref.issuer else {
-        return output;
-    };
-    let owner = AgentRef::Session(SessionId::new(
-        environment.clone(),
-        AgentName::parse("codex").unwrap(),
-        NativeId::new(thread),
-    ));
-    let resource = ResourceRef::native(owner.clone(), "codex.goal", vec![id.clone()]).unwrap();
-    output.claims.push(claim(
-        &input,
-        &owner,
-        "codex/goal-resource",
-        "codex-2",
-        Fact::Declare {
-            object: TraceObject::Resource(Resource {
-                resource_ref: resource.clone(),
-                creator: None,
-                host: Some(OwnerRef::Agent {
-                    agent: owner.clone(),
-                }),
-                kind: ResourceKind::Goal,
-            }),
-        },
-    ));
-    let status = match snapshot.row.get("status") {
-        Some(NativeDatabaseValue::Text(status)) => status.clone(),
-        _ => "unknown".into(),
-    };
-    output.claims.push(claim(
-        &input,
-        &owner,
-        "codex/goal-state",
-        "codex-2",
-        Fact::ResourceState {
-            resource: resource.clone(),
-            state: ResourceState::GoalUpdated {
-                status,
-                detail: Some(input.capture.payload_ref.clone()),
-            },
-        },
-    ));
-    // The correlation records an observed native identifier, not objective equality.
-    output.correlations.insert(
-        correlation_key(&owner, "codex.goal-id", std::slice::from_ref(id)),
-        AnyObjectRef::Resource(resource),
-    );
-    output
 }
 
 #[cfg(test)]

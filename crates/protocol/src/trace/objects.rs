@@ -767,6 +767,7 @@ pub enum Metric {
 )]
 pub enum MeasurementUnit {
     Tokens,
+    Seconds,
     Milliseconds,
     Nanoseconds,
     Bytes,

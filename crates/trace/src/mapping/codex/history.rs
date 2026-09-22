@@ -661,7 +661,7 @@ pub(super) fn map_selection(input: MapInput<'_>, snapshot: NativeDatabaseSnapsho
                     "codex/history-alias/{}",
                     blake3::hash(entry.entry_ref.encode().as_bytes()).to_hex()
                 ),
-                "codex-2",
+                super::CodexMapper::BUILD,
                 Fact::Declare {
                     object: TraceObject::HistoryEntry(HistoryEntry {
                         entry_ref: alias.clone(),
@@ -708,7 +708,7 @@ pub(super) fn map_selection(input: MapInput<'_>, snapshot: NativeDatabaseSnapsho
                         blake3::hash(entry.entry_ref.encode().as_bytes()).to_hex(),
                         blake3::hash(content.claim_ref.encode().as_bytes()).to_hex()
                     ),
-                    "codex-2",
+                    super::CodexMapper::BUILD,
                     Fact::HistoryContentObserved {
                         observation: HistoryContentObservation {
                             entry: alias.clone(),
@@ -732,7 +732,7 @@ pub(super) fn map_selection(input: MapInput<'_>, snapshot: NativeDatabaseSnapsho
                     "codex/history-alias-position/{}",
                     blake3::hash(entry.entry_ref.encode().as_bytes()).to_hex()
                 ),
-                "codex-2",
+                super::CodexMapper::BUILD,
                 Fact::HistoryPosition {
                     entry: alias.clone(),
                     position: position.clone(),
@@ -792,7 +792,7 @@ pub(super) fn map_selection(input: MapInput<'_>, snapshot: NativeDatabaseSnapsho
                     &input,
                     &agent,
                     &format!("codex/history-alias-complete/{index}"),
-                    "codex-2",
+                    super::CodexMapper::BUILD,
                     Fact::HistoryMappingComplete {
                         extent: extent.clone(),
                     },
@@ -806,7 +806,7 @@ pub(super) fn map_selection(input: MapInput<'_>, snapshot: NativeDatabaseSnapsho
             &input,
             &agent,
             "codex/database-selection",
-            "codex-2",
+            super::CodexMapper::BUILD,
             Fact::Declare {
                 object: TraceObject::HistorySelection(HistorySelection {
                     selection_ref: selected.clone(),
@@ -826,7 +826,7 @@ pub(super) fn map_selection(input: MapInput<'_>, snapshot: NativeDatabaseSnapsho
             &input,
             &agent,
             "codex/database-selected",
-            "codex-2",
+            super::CodexMapper::BUILD,
             Fact::SelectHistory {
                 agent: agent.clone(),
                 selection: selected,
