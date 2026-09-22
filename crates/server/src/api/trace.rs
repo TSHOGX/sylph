@@ -40,6 +40,7 @@ impl IntoResponse for TraceError {
 }
 type Result<T> = std::result::Result<T, TraceError>;
 
+mod transfer;
 #[cfg(test)]
 mod visibility_tests;
 fn invalid(message: impl Into<String>) -> TraceError {
@@ -122,6 +123,10 @@ pub fn router() -> Router<AppState> {
         )
         .route("/api/v1/trace/objects/{object}/parts", get(parts))
         .route("/api/v1/trace/payloads/{payload}", get(payload))
+        .route(
+            "/api/v1/trace/payloads/{payload}/transfer",
+            get(transfer::payload_transfer),
+        )
         .route("/api/v1/trace/commands", post(command))
         .route(
             "/api/v1/trace/commands/{id}",

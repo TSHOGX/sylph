@@ -3221,6 +3221,138 @@
         }
       }
     },
+    "/api/v1/trace/payloads/{payload}/transfer": {
+      "get": {
+        "summary": "Transfer observed content with independent byte, work and cancellation budgets",
+        "parameters": [
+          {
+            "name": "payload",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "via_ref",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          },
+          {
+            "name": "at_snapshot",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          },
+          {
+            "name": "revision",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          },
+          {
+            "name": "representation",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          },
+          {
+            "name": "selection",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "copy",
+                "download"
+              ]
+            }
+          },
+          {
+            "name": "buffered",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          {
+            "name": "duration_ms",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "description": "Optional shorter transfer deadline; cannot exceed the advertised server limit."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Exact contiguous observed bytes for copy, or a ZIP with the retained intervals and coverage manifest for download. Stream errors abort incomplete transfers.",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "application/zip": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            },
+            "headers": {
+              "x-sylph-transfer-limit": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Maximum response bytes allowed for this explicit transfer"
+              },
+              "x-sylph-observed-bytes": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Total authorized observed payload bytes"
+              },
+              "x-sylph-transfer-duration-ms": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Resolved transfer deadline budget in milliseconds"
+              }
+            }
+          },
+          "default": {
+            "description": "Request, authorization, state or storage error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/trace/reprojection": {
       "get": {"summary":"Read bounded recent reprojection jobs","responses":{"200":{"description":"Active generation and at most 32 recent jobs","content":{"application/json":{"schema":{"type":"object","properties":{"activeGeneration":{"type":["string","null"]},"pointerSerial":{"type":"integer"},"jobs":{"type":"array","items":{"$ref":"#/components/schemas/ReprojectionJob"}},"recovering":{"type":["string","null"]}},"required":["activeGeneration","pointerSerial","jobs","recovering"]}}}},"403":{"description":"Administrator required"}}},
       "post": {"summary":"Admit or coalesce a durable reprojection job","responses":{"202":{"description":"Job admitted before replay completes","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ReprojectionReceipt"}}}},"403":{"description":"Administrator required"}}}
@@ -4158,7 +4290,13 @@
                   "snapshot_expired",
                   "trace_object_not_found",
                   "trace_unavailable",
-                  "trace_work_budget"
+                  "trace_work_budget",
+                  "read_capacity",
+                  "transfer_capacity",
+                  "transfer_gap",
+                  "transfer_limit",
+                  "transfer_timeout",
+                  "transfer_unavailable"
                 ]
               },
               "message": {

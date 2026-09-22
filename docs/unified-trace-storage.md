@@ -638,6 +638,31 @@ work and cancellation budgets; they are not hidden implementation paths for an o
 history page. Playback follows captured admission/source timing and states any pacing
 clamp. It is not reconstructed by reading only current object values.
 
+### Explicit payload transfer
+
+`GET /api/v1/trace/payloads/{payload_ref}/transfer` starts an explicit, cancellable
+transfer of one immutable representation. It requires the same `via_ref`, body revision,
+selected history and subject-bound view as a range read. The transfer owns a separately
+bounded lease at that exact snapshot, including a retained older generation, so closing
+the reader does not release bytes while an explicit transfer is active. Grant revocation,
+deletion, deadline, disconnect and successful completion end its authority or lifetime;
+a process crash leaves only a bounded expiring lease, never a permanent orphan root.
+
+The server's transfer limits bound concurrent jobs, retained bytes, buffered output,
+chunk work and duration separately from interactive pages and range reads. Each emitted
+chunk rechecks authorization and retention. Backpressure holds only a bounded chunk queue;
+a stalled receiver cannot reserve worker capacity past the transfer deadline. A failed
+stream ends as an error, never a successful shortened body.
+
+Copy transfers return exact bytes from one contiguous observed interval, with a declared
+length and budget. They refuse gaps rather than joining unrelated ranges. Downloads are
+streamed ZIP archives containing a manifest and one byte file per retained interval. The
+manifest names the immutable representation, representation length when known, retained ranges
+and coverage; missing bytes are never filled or concatenated. Archive entry names derive
+only from numeric offsets, not vendor paths. The ZIP writer uses stored entries, bounding
+CPU work independently of compression ratio. These single-payload transfers do not
+substitute for full evidence export or paced playback.
+
 ### Snapshot pages and live changes
 
 An initial reader request obtains a bounded reusable ViewLease. Related header, history,

@@ -52,6 +52,12 @@ pub struct TraceService {
     search_gate: Arc<Mutex<()>>,
     search_limits: SearchLimits,
     search_queries: Arc<Semaphore>,
+    transfers: Arc<Semaphore>,
+    transfer_limits: super::transfer::TransferLimits,
+    #[cfg(test)]
+    pub(crate) transfer_pause: ReprojectionPause,
+    #[cfg(test)]
+    pub(crate) transfer_backpressure: Arc<Notify>,
     recovery: Arc<RwLock<Option<String>>>,
     gc: TraceGarbageCollector,
     reprojection_wake: Arc<Notify>,
@@ -183,6 +189,7 @@ impl TraceService {
         let (changes, _) = tokio::sync::watch::channel(0);
         let search_limits = SearchLimits::default();
         let gc = TraceGarbageCollector::new(catalogue.clone(), GcLimits::default())?;
+        let transfer_limits = super::transfer::TransferLimits::default();
         let service = Self {
             root: root.into(),
             _archive_lock: Arc::new(archive_lock),
@@ -202,6 +209,12 @@ impl TraceService {
             searches: Arc::new(RwLock::new(BTreeMap::new())),
             search_wake: Arc::new(Notify::new()),
             search_gate: Arc::new(Mutex::new(())),
+            transfers: Arc::new(Semaphore::new(transfer_limits.max_jobs)),
+            transfer_limits,
+            #[cfg(test)]
+            transfer_pause: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            transfer_backpressure: Arc::new(Notify::new()),
             search_queries: Arc::new(Semaphore::new(search_limits.max_concurrent_queries)),
             search_limits,
             recovery: Arc::new(RwLock::new(None)),
@@ -541,6 +554,31 @@ impl TraceService {
         let pending = self.catalogue.begin_lease(subject, now, 120_000).await?;
         let release = self.pending_release(subject, &pending.lease_id);
         let view = self.catalogue.finish_lease(&pending, snapshot, now).await?;
+        Ok(LeaseGuard {
+            view,
+            release: Some(release),
+        })
+    }
+
+    pub fn transfer_limits(&self) -> &super::transfer::TransferLimits {
+        &self.transfer_limits
+    }
+    pub fn transfer_permit(&self) -> Option<OwnedSemaphorePermit> {
+        self.transfers.clone().try_acquire_owned().ok()
+    }
+    pub async fn transfer_lease(
+        &self,
+        subject: &str,
+        token: &str,
+        lifetime_ms: i64,
+    ) -> anyhow::Result<LeaseGuard> {
+        self.require_available().await?;
+        let view = self
+            .catalogue
+            .fork_lease(subject, token, crate::models::now_ms(), lifetime_ms)
+            .await?;
+        let release = self.pending_release(subject, &view.token);
+        self.generation(&view.snapshot.generation).await?;
         Ok(LeaseGuard {
             view,
             release: Some(release),

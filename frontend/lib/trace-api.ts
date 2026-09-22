@@ -198,6 +198,29 @@ export const traceAPI = {
       `${base}/agents/${segment(agent)}/commands`,
       { signal },
     ),
+  async transfer(
+    access: PayloadAccess,
+    view: TraceView,
+    kind: "copy" | "download",
+    buffered: boolean,
+    signal: AbortSignal,
+  ): Promise<Response> {
+    const url = `/api/v1${base}/payloads/${segment(access.payloadRef)}/transfer${query({ at_snapshot: view.token, via_ref: access.viaRef, selection: access.selection, revision: access.bodyRevision, representation: access.representation, kind, buffered: String(buffered) })}`;
+    const response = await fetch(url, {
+      signal,
+      credentials: "include",
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      const body = await response.json();
+      throw new ApiError(
+        response.status,
+        body.error?.code ?? "transfer_failed",
+        body.error?.message ?? "Observed-content transfer failed",
+      );
+    }
+    return response;
+  },
   async payload(
     access: PayloadAccess,
     view: TraceView,

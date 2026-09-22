@@ -672,11 +672,7 @@ impl EvidenceCatalogue {
             .checked_add(lifetime_ms)
             .ok_or_else(|| CatalogueError::Invalid("lease time overflow".into()))?;
         let mut tx = self.evidence.writer.begin_with("BEGIN IMMEDIATE").await?;
-        let total:i64=sqlx::query_scalar("SELECT COUNT(*) FROM trace_view_leases WHERE state IN ('pending','active') AND expires_at_ms>?").bind(now_ms).fetch_one(&mut *tx).await?;
-        let own:i64=sqlx::query_scalar("SELECT COUNT(*) FROM trace_view_leases WHERE subject=? AND state IN ('pending','active') AND expires_at_ms>?").bind(subject).bind(now_ms).fetch_one(&mut *tx).await?;
-        if total >= self.limits.max_leases as i64 || own >= self.limits.max_subject_leases as i64 {
-            return Err(CatalogueError::Limit("active view leases"));
-        }
+        check_lease_capacity(&mut tx, &self.limits, subject, now_ms).await?;
         let generation: Option<String> =
             sqlx::query_scalar("SELECT generation FROM trace_active WHERE singleton=1")
                 .fetch_one(&mut *tx)
@@ -746,6 +742,37 @@ impl EvidenceCatalogue {
             token: pending.lease_id.clone(),
             snapshot: snapshot.clone(),
             expires_at_ms: pending.expires_at_ms,
+        })
+    }
+
+    /// A transfer retains the existing cut, not whichever generation is active now.
+    pub async fn fork_lease(
+        &self,
+        subject: &str,
+        token: &str,
+        now_ms: i64,
+        lifetime_ms: i64,
+    ) -> Result<ViewLease> {
+        if lifetime_ms <= 0 || lifetime_ms > self.limits.max_lease_lifetime_ms {
+            return Err(CatalogueError::Invalid(
+                "transfer lease lifetime is invalid".into(),
+            ));
+        }
+        let expires = now_ms
+            .checked_add(lifetime_ms)
+            .ok_or_else(|| CatalogueError::Invalid("lease time overflow".into()))?;
+        let mut tx = self.evidence.writer.begin_with("BEGIN IMMEDIATE").await?;
+        let original = resolve_lease(&mut tx, subject, token, now_ms).await?;
+        check_lease_capacity(&mut tx, &self.limits, subject, now_ms).await?;
+        let fresh = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO trace_view_leases(lease_id,subject,generation,pending_nonce,state,visibility_revision,created_at_ms,expires_at_ms,evidence_cut,view_revision) SELECT ?,subject,generation,?,'active',visibility_revision,?,?,evidence_cut,view_revision FROM trace_view_leases WHERE lease_id=?")
+            .bind(&fresh).bind(uuid::Uuid::new_v4().to_string()).bind(now_ms).bind(expires).bind(token).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO trace_lease_scopes SELECT ?,scope_ref,ingestion_epoch FROM trace_lease_scopes WHERE lease_id=?").bind(&fresh).bind(token).execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(ViewLease {
+            token: fresh,
+            snapshot: original.snapshot,
+            expires_at_ms: expires,
         })
     }
 
@@ -1186,6 +1213,20 @@ async fn check_ticket(conn: &mut SqliteConnection, ticket: &BuildTicket) -> Resu
         return Err(CatalogueError::Invalid(
             "build ticket differs from its durable record".into(),
         ));
+    }
+    Ok(())
+}
+
+async fn check_lease_capacity(
+    conn: &mut SqliteConnection,
+    limits: &CatalogueLimits,
+    subject: &str,
+    now_ms: i64,
+) -> Result<()> {
+    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM trace_view_leases WHERE state IN ('pending','active') AND expires_at_ms>?").bind(now_ms).fetch_one(&mut *conn).await?;
+    let own: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM trace_view_leases WHERE subject=? AND state IN ('pending','active') AND expires_at_ms>?").bind(subject).bind(now_ms).fetch_one(conn).await?;
+    if total >= limits.max_leases as i64 || own >= limits.max_subject_leases as i64 {
+        return Err(CatalogueError::Limit("active view leases"));
     }
     Ok(())
 }

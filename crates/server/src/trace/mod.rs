@@ -15,3 +15,5 @@ pub mod search;
 pub mod service;
 pub mod upload;
 pub mod worker;
+
+pub mod transfer;

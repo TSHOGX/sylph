@@ -811,3 +811,69 @@ async fn readonly_scope_validation_rejects_deletion_and_a_mismatched_scope() {
         .await
         .unwrap());
 }
+
+#[tokio::test]
+async fn a_transfer_forks_the_exact_retained_view_without_borrowing_its_release_or_identity() {
+    let fixture = Fixture::new().await;
+    let old = fixture.publish("old-transfer-view").await;
+    let pending = fixture
+        .catalogue
+        .begin_lease("alice", 100, 1000)
+        .await
+        .unwrap();
+    let original = fixture
+        .catalogue
+        .finish_lease(&pending, &old.ready.snapshot, 101)
+        .await
+        .unwrap();
+    fixture
+        .catalogue
+        .bind_lease_scope("alice", &original.token, &fixture.proof(), 102)
+        .await
+        .unwrap();
+    fixture.publish("new-transfer-view").await;
+    let lifetime = fixture.catalogue.limits.max_lease_lifetime_ms / 2;
+    let transfer = fixture
+        .catalogue
+        .fork_lease("alice", &original.token, 103, lifetime)
+        .await
+        .unwrap();
+    assert_eq!(transfer.snapshot, original.snapshot);
+    assert_ne!(transfer.token, original.token);
+    assert_eq!(transfer.expires_at_ms, 103 + lifetime);
+    assert!(matches!(
+        fixture
+            .catalogue
+            .fork_lease("bob", &original.token, 104, lifetime)
+            .await,
+        Err(CatalogueError::SubjectMismatch)
+    ));
+    fixture
+        .catalogue
+        .expire_lease("alice", &original.token)
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture
+            .catalogue
+            .resolve_lease("alice", &transfer.token, 105)
+            .await
+            .unwrap(),
+        transfer
+    );
+    assert!(
+        fixture
+            .catalogue
+            .generation_is_pinned("old-transfer-view", 105)
+            .await
+            .unwrap()
+    );
+    fixture.evidence.delete_scope(&fixture.scope).await.unwrap();
+    assert!(matches!(
+        fixture
+            .catalogue
+            .resolve_lease("alice", &transfer.token, 106)
+            .await,
+        Err(CatalogueError::DeletedScope)
+    ));
+}

@@ -18,6 +18,7 @@ import {
   type PayloadAccess,
   type TraceView,
 } from "@/lib/trace-types";
+import { TraceTransfer } from "./trace-transfer";
 import { Markdown } from "./markdown";
 
 const button =
@@ -188,8 +189,10 @@ export function TracePayload({
   ]);
   const availability = availabilityLabel(access.availability);
   const readableRange =
-    hasRange && (availabilityKind === "available" || availabilityKind === "partial");
-  const next = current && range ? nextBodyStart(range, current.next, current.total) : null;
+    hasRange &&
+    (availabilityKind === "available" || availabilityKind === "partial");
+  const next =
+    current && range ? nextBodyStart(range, current.next, current.total) : null;
   return (
     <div className="min-w-0 space-y-2">
       {preview && !open && <Markdown text={preview} />}
@@ -198,7 +201,15 @@ export function TracePayload({
           {access.availability.kind}: {availability}
         </p>
       )}
-      {(truncated || !preview) && (
+      {availabilityKind === "opaque" && hasRange && (
+        <TraceTransfer
+          access={access}
+          view={view}
+          text={null}
+          readable={false}
+        />
+      )}
+      {availabilityKind !== "opaque" && (
         <button
           className={button}
           disabled={!readableRange}
@@ -210,12 +221,14 @@ export function TracePayload({
         >
           {open
             ? t("trace.closeContent")
-            : t("trace.readRepresentation", {
-                representation: representationLabel(
-                  access.representation,
-                  t,
-                ).toLowerCase(),
-              })}
+            : !truncated && preview
+              ? t("trace.contentActions")
+              : t("trace.readRepresentation", {
+                  representation: representationLabel(
+                    access.representation,
+                    t,
+                  ).toLowerCase(),
+                })}
         </button>
       )}
       {open && readableRange && (
@@ -223,7 +236,10 @@ export function TracePayload({
           <p className="mb-2 text-xs text-ink-muted">
             {representationLabel(access.representation, t)} ·{" "}
             {access.mediaType ?? "Media type unknown"} ·{" "}
-            {t("trace.bytes", { start: current?.displayStart ?? start, end: current?.next ?? end })}
+            {t("trace.bytes", {
+              start: current?.displayStart ?? start,
+              end: current?.next ?? end,
+            })}
             {access.totalBytes == null
               ? t("trace.totalUnknown")
               : t("trace.bytesTotal", { total: access.totalBytes })}
@@ -239,11 +255,19 @@ export function TracePayload({
           ) : (
             <p>{t("trace.binaryRange", { bytes: current.bytes.byteLength })}</p>
           )}
+          <TraceTransfer
+            access={access}
+            view={view}
+            text={current?.text ?? null}
+            readable={Boolean(readable)}
+          />
           <div className="flex flex-wrap gap-2">
             <button
               className={button}
               disabled={range?.previous == null}
-              onClick={() => range?.previous != null && setStart(range.previous)}
+              onClick={() =>
+                range?.previous != null && setStart(range.previous)
+              }
             >
               {t("trace.previousRange")}
             </button>

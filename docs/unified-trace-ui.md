@@ -368,6 +368,16 @@ are explicit bounded/streamed jobs; they do not first load an entire session int
 An absent length says unknown. No button promises a complete original for a truncated
 observation.
 
+`Copy visible text` copies the currently displayed decoded source range without interface
+labels. `Copy complete observed content` is an explicit text transfer with progress and
+cancellation; it preserves UTF-8 across chunks and changes the clipboard only after a
+complete successful transfer. A gap, invalid text, revoked access or exceeded budget
+leaves the clipboard unchanged. Download preserves each observed interval and its coverage
+in a ZIP manifest. Where the browser offers a streaming file writer, bytes go directly to
+that transactional writer; otherwise a separately bounded download buffer is used. Neither
+path grows the reader's payload cache or stores the complete body in React state. Only one
+copy/download job per browser workspace runs at a time; ordinary reading remains usable.
+
 Text ranges preserve UTF-8 boundaries and document the returned range when adjusted.
 Structured values use paged object/array exploration. Binary content retains its media
 type, dimensions/duration when known, and safe preview/download behavior. Filesystem

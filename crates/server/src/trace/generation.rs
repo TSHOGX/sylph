@@ -1386,23 +1386,7 @@ impl GenerationStore {
         if start > end_exclusive {
             return Err(GenerationError::PayloadNotReachable);
         }
-        let (mut conn, _) = self.read_connection(snapshot).await?;
-        let via = load_summary(&mut conn, &requested.via_ref, snapshot.view_revision).await?;
-        if via.withdrawn_reason.is_some() {
-            return Err(GenerationError::PayloadNotReachable);
-        }
-        let row = sqlx::query("SELECT valid_to, ranges_json, dependency_epochs_json FROM payload_anchor_versions WHERE anchor_key = ? AND valid_from <= ? ORDER BY valid_from DESC LIMIT 1")
-            .bind(requested.key()?).bind(signed(snapshot.view_revision)?).fetch_optional(&mut *conn).await.map_err(map_query_error)?.ok_or(GenerationError::PayloadNotReachable)?;
-        if row
-            .try_get::<Option<i64>, _>("valid_to")?
-            .is_some_and(|until| until <= snapshot.view_revision as i64)
-        {
-            return Err(GenerationError::PayloadNotReachable);
-        }
-        let ranges: Vec<PayloadRange> =
-            serde_json::from_str(&row.try_get::<String, _>("ranges_json")?)?;
-        let dependencies =
-            serde_json::from_str(&row.try_get::<String, _>("dependency_epochs_json")?)?;
+        let (ranges, dependencies) = self.payload_ranges(snapshot, requested).await?;
         if start == end_exclusive {
             return Ok(dependencies);
         }
@@ -1420,6 +1404,31 @@ impl GenerationStore {
             }
         }
         Err(GenerationError::PayloadNotReachable)
+    }
+
+    pub async fn payload_ranges(
+        &self,
+        snapshot: &Snapshot,
+        requested: &PayloadAnchor,
+    ) -> Result<(Vec<PayloadRange>, BTreeSet<IngestionEpoch>)> {
+        let (mut conn, _) = self.read_connection(snapshot).await?;
+        let via = load_summary(&mut conn, &requested.via_ref, snapshot.view_revision).await?;
+        if via.withdrawn_reason.is_some() {
+            return Err(GenerationError::PayloadNotReachable);
+        }
+        let row = sqlx::query("SELECT valid_to, ranges_json, dependency_epochs_json FROM payload_anchor_versions WHERE anchor_key = ? AND valid_from <= ? ORDER BY valid_from DESC LIMIT 1")
+            .bind(requested.key()?).bind(signed(snapshot.view_revision)?).fetch_optional(&mut *conn).await.map_err(map_query_error)?.ok_or(GenerationError::PayloadNotReachable)?;
+        if row
+            .try_get::<Option<i64>, _>("valid_to")?
+            .is_some_and(|until| until <= snapshot.view_revision as i64)
+        {
+            return Err(GenerationError::PayloadNotReachable);
+        }
+        let ranges: Vec<PayloadRange> =
+            serde_json::from_str(&row.try_get::<String, _>("ranges_json")?)?;
+        let dependencies: BTreeSet<IngestionEpoch> =
+            serde_json::from_str(&row.try_get::<String, _>("dependency_epochs_json")?)?;
+        Ok((ranges, dependencies))
     }
 
     pub async fn mapper_states(
