@@ -302,6 +302,26 @@ authorship preserved. A missing cutoff is recorded as missing.
 Operation results retain the native tool-result block, structured `toolUseResult`,
 persisted sidecar body, and forwarded live representation independently. A sidecar may
 contain more output than the formatted tool result; neither overwrites the other.
+The SDK's `SDKUserMessage` and `SDKUserMessageReplay` carry structured data in
+`tool_use_result`; native envelopes use `toolUseResult`. Mapping and sidecar discovery
+select the field for the actual transport. A missing field is not an explicit null
+result, and the other transport's spelling is not a fallback. Structured envelope
+metadata binds to a tool result only when the content array supplies exactly one
+tool-result pairing. Ambiguous metadata remains retained with a diagnostic instead of
+being copied onto every operation in that envelope.
+Outbound SDK frames remain exact write evidence. Their UUIDs, content and optional tool
+metadata do not establish vendor admission, a returned result or an independently
+observed child; server control facts own the known dispatch stages.
+
+The controlled Claude 2.1.278 [read capture](../fixtures/unified-trace/claude/tool-read/capture.json)
+and [sidecar capture](../fixtures/unified-trace/claude/tool-sidecar/capture.json) use the real
+CLI with a deterministic loopback provider, isolated configuration and one enabled tool.
+They retain both transport spellings with matching record UUIDs. The read's caller
+representation has line numbers while its structured data preserves the plain file
+bytes. The Bash capture retains a bounded caller preview and the complete produced
+sidecar as separate representations. Provider requests, response text and usage are
+controlled fixtures; these captures do not claim remote-model behavior.
+
 Images, documents, thinking signatures, unknown block types, truncated output markers,
 and vendor fields remain intact in retained evidence. Unknown content is available as
 an opaque payload part, not a successful empty string.

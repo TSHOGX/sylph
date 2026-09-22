@@ -641,18 +641,18 @@ pub struct SidecarReference {
 
 /// Routing metadata is extracted only after lexical retention. File contents are never
 /// executed, and an output path cannot supply agent or operation identity.
-pub fn sidecar_references(raw: &[u8]) -> Vec<SidecarReference> {
+pub fn sidecar_references(raw: &[u8], transport: sylph_protocol::trace::TransportKind) -> Vec<SidecarReference> {
     fn join(base: &str, key: &str) -> String {
         format!("{base}/{}", key.replace('~', "~0").replace('/', "~1"))
     }
-    fn visit(value: &Value, slot: &str, found: &mut BTreeSet<(String, String, String)>) {
+    fn visit(value: &Value, slot: &str, claude_result_field: &str, found: &mut BTreeSet<(String, String, String)>) {
         if let Some(object) = value.as_object() {
             if value.get("raw_payload_id").and_then(Value::as_str).is_some() {
                 if let (Some(path),Some(kind))=(value.get("path").and_then(Value::as_str),value.pointer("/kind/type").and_then(Value::as_str)) {
                     found.insert((path.into(),slot.into(),format!("codex.raw.{kind}")));
                 }
             }
-            if let Some(result) = object.get("toolUseResult") {
+            if let Some(result) = object.get(claude_result_field) {
                 let candidates: Vec<_> = value
                     .pointer("/message/content")
                     .and_then(Value::as_array)
@@ -666,7 +666,7 @@ pub fn sidecar_references(raw: &[u8]) -> Vec<SidecarReference> {
                 let parent = if let [(index, _)] = candidates.as_slice() {
                     format!("{slot}/message/content/{index}")
                 } else {
-                    join(slot, "toolUseResult")
+                    join(slot, claude_result_field)
                 };
                 paths(result, &parent, found);
             }
@@ -681,11 +681,11 @@ pub fn sidecar_references(raw: &[u8]) -> Vec<SidecarReference> {
                 }
             }
             for (key, child) in object {
-                visit(child, &join(slot, key), found);
+                visit(child, &join(slot, key), claude_result_field, found);
             }
         } else if let Some(items) = value.as_array() {
             for (index, child) in items.iter().enumerate() {
-                visit(child, &join(slot, &index.to_string()), found);
+                visit(child, &join(slot, &index.to_string()), claude_result_field, found);
             }
         }
     }
@@ -702,10 +702,38 @@ pub fn sidecar_references(raw: &[u8]) -> Vec<SidecarReference> {
     }
     let mut found = BTreeSet::new();
     if let Ok(value) = serde_json::from_slice::<Value>(raw) {
-        visit(&value, "", &mut found);
+        let claude_result_field = if matches!(transport, sylph_protocol::trace::TransportKind::LiveStdout | sylph_protocol::trace::TransportKind::LiveStdin) {
+            "tool_use_result"
+        } else { "toolUseResult" };
+        visit(&value, "", claude_result_field, &mut found);
     }
     found
         .into_iter()
         .map(|(locator, parent_slot,relation)| SidecarReference {locator,parent_slot,relation})
         .collect()
+}
+
+#[cfg(test)]
+mod sidecar_tests {
+    use super::*;
+    use sylph_protocol::trace::TransportKind;
+
+    #[test]
+    fn recorded_claude_sidecars_use_the_transport_field_and_unique_content_slot() {
+        for (raw, transport, field, other) in [
+            (include_str!("../../../../fixtures/unified-trace/claude/tool-sidecar/stdout.jsonl"), TransportKind::LiveStdout, "tool_use_result", "toolUseResult"),
+            (include_str!("../../../../fixtures/unified-trace/claude/tool-sidecar/native.jsonl"), TransportKind::NativeJsonl, "toolUseResult", "tool_use_result"),
+        ] {
+            let mut value: Value = raw.lines().map(|line| serde_json::from_str::<Value>(line).unwrap()).find(|row| row.get(field).is_some()).unwrap();
+            value[other] = serde_json::json!({"persistedOutputPath":"/wrong/transport"});
+            let found = sidecar_references(&serde_json::to_vec(&value).unwrap(), transport);
+            assert_eq!(found, vec![SidecarReference { locator: "/workspace/claude-capture/sidecar.txt".into(), parent_slot: "/message/content/0".into(), relation: "tool_output".into() }]);
+            value["message"]["content"].as_array_mut().unwrap().push(serde_json::json!({"type":"tool_result","tool_use_id":"second-call","content":"second"}));
+            let ambiguous = sidecar_references(&serde_json::to_vec(&value).unwrap(), transport);
+            assert_eq!(ambiguous.len(), 1);
+            assert_eq!(ambiguous[0].parent_slot, format!("/{field}"));
+            value.as_object_mut().unwrap().remove(field);
+            assert!(sidecar_references(&serde_json::to_vec(&value).unwrap(), transport).is_empty());
+        }
+    }
 }

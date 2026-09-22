@@ -36,13 +36,18 @@ struct LiveStream {
 
 impl SemanticMapper for ClaudeMapper {
     fn build(&self) -> &'static str {
-        "claude-3"
+        "claude-4"
     }
     fn map(&self, input: MapInput<'_>) -> MapOutput {
         let mut output = MapOutput {
             state: input.state.clone(),
             ..MapOutput::default()
         };
+        // Outbound SDK frames are retained writes. Even a caller-supplied UUID
+        // or tool metadata cannot certify vendor admission or a returned result.
+        if input.capture.transport_kind == TransportKind::LiveStdin {
+            return output;
+        }
         let value = match serde_json::from_slice::<Value>(input.raw) {
             Ok(value) => value,
             Err(error) => {
@@ -377,6 +382,16 @@ impl Context<'_, '_> {
                 },
             }),
         );
+        let result_field = if live { "tool_use_result" } else { "toolUseResult" };
+        let structured = value.get(result_field);
+        let pairings = values.iter().filter(|part| text(part, "type") == Some("tool_result")).count();
+        // Envelope metadata has no general per-block join key. Sharing it across
+        // several results would assign the same runtime bytes/child to each call.
+        let structured = if structured.is_some() && pairings != 1 {
+            self.issue(Some(&owner), "claude/structured-result-pairing", DiagnosticCode::MissingOwner,
+                "Structured tool metadata has no unique content-block pairing; the full envelope remains retained");
+            None
+        } else { structured };
         let mut content = vec![];
         for (index, part) in values.iter().enumerate() {
             content.push(self.part(
@@ -395,14 +410,14 @@ impl Context<'_, '_> {
                 );
             }
             if text(part, "type") == Some("tool_result") {
-                for field in ["persistedOutputPath","outputFile"] {if let Some(path)=text(&value["toolUseResult"],field) {
-                    if let Some(id)=text(part,"tool_use_id") {let key=super::attachment_key(self.input.canonical_observation,&format!("/message/content/{index}"),path);self.output.correlations.insert(key.clone(),AnyObjectRef::Operation(operation(&owner,id)));self.output.correlation_evidence.insert(key,vec![self.input.canonical_observation.clone()]);}
+                for field in ["persistedOutputPath","outputFile"] {if let Some(path)=structured.and_then(|value| text(value,field)) {
+                    if let Some(id)=text(part,"tool_use_id").filter(|id| !id.is_empty()) {let key=super::attachment_key(self.input.canonical_observation,&format!("/message/content/{index}"),path);self.output.correlations.insert(key.clone(),AnyObjectRef::Operation(operation(&owner,id)));self.output.correlation_evidence.insert(key,vec![self.input.canonical_observation.clone()]);}
                 }}
                 self.tool_result(
                     &owner,
                     &root_of(containing),
                     part,
-                    &value["toolUseResult"],
+                    structured,
                     &format!("claude/record/{uuid}/{index}"),
                 );
             }
@@ -900,10 +915,10 @@ impl Context<'_, '_> {
         owner: &AgentRef,
         root: &AgentRef,
         part: &Value,
-        structured: &Value,
+        structured: Option<&Value>,
         slot: &str,
     ) {
-        let Some(id) = text(part, "tool_use_id") else {
+        let Some(id) = text(part, "tool_use_id").filter(|id| !id.is_empty()) else {
             self.issue(
                 Some(owner),
                 &format!("{slot}/pairing"),
@@ -921,7 +936,7 @@ impl Context<'_, '_> {
             Representation::CallerResult,
             slot,
         );
-        if !structured.is_null() {
+        if let Some(structured) = structured {
             let payload = self.json(structured, &format!("{slot}/structured"));
             self.result(
                 owner,
@@ -931,6 +946,8 @@ impl Context<'_, '_> {
                 &format!("{slot}/structured"),
             );
         }
+        let absent = Value::Null;
+        let structured = structured.unwrap_or(&absent);
         if text(structured, "taskType") == Some("local_workflow") {
             self.workflow_launch(owner, root, &operation, structured, slot);
         }

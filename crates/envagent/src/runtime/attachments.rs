@@ -29,7 +29,7 @@ impl EnvAgent {
             raw.extend_from_slice(&bytes);
         }
         let parent_path=self.registry.source_locator(&capture.source_position.source).await?;
-        let watches: Vec<_> = sylph_adapters::native::inventory::sidecar_references(&raw)
+        let watches: Vec<_> = sylph_adapters::native::inventory::sidecar_references(&raw, capture.transport_kind)
             .into_iter()
             .map(|sidecar| AttachmentWatch {
                 parent: capture.observation_ref.clone(),

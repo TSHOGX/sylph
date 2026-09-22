@@ -284,6 +284,11 @@ ran or completed. Disposition distinguishes progress, yield, final return, and r
 where evidence supplies that meaning. An orphan result preserves its call reference
 and evidence; it does not need invented invocation arguments.
 
+A sidecar snapshot identifies bytes, not every invocation that refers to those bytes.
+When two operations expose the same snapshot, their result identities remain distinct.
+Repeated observations of that snapshot for the same identified operation can support
+one result, with every observation's provenance retained.
+
 Categories provide typed fields for tool, inference, delegation, communication, wait,
 terminal I/O, code cell, edit, and extension operations. They are semantic contracts,
 not a global list of names that promotes any tool called `Agent` into a child. The

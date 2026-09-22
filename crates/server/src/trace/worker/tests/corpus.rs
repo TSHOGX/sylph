@@ -558,3 +558,4 @@ fn assert_projection(actual: &Projection, expected: &Projection) {
 mod claude_workflow;
 mod pi_maintenance;
 mod codex_goal;
+mod claude_tools;

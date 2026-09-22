@@ -321,11 +321,11 @@ async fn sidecar_follow_keeps_parent_capture_immutable_and_retains_later_file_re
     let transport = Arc::new(MemoryTransport::default());
     let runtime = runtime(dir.path(), transport.clone()).await;
     let sidecar = dir.path().join("tool-output.txt");
-    let raw=serde_json::to_vec(&serde_json::json!({"type":"user","toolUseResult":{"persistedOutputPath":sidecar},"message":{"content":[{"type":"tool_result","tool_use_id":"call-1","content":"formatted result"}]}})).unwrap();
+    let raw=serde_json::to_vec(&serde_json::json!({"type":"user","tool_use_result":{"persistedOutputPath":sidecar},"message":{"content":[{"type":"tool_result","tool_use_id":"call-1","content":"formatted result"}]}})).unwrap();
     let parent = runtime
         .registry
         .capture_frame(
-            "native-parent",
+            "live-parent",
             trace::TransportKind::LiveStdout,
             raw.clone(),
             local_authorization(&auth(), 123),
@@ -358,6 +358,8 @@ async fn sidecar_follow_keeps_parent_capture_immutable_and_retains_later_file_re
     runtime.flush_snapshot().await.unwrap();
     std::fs::write(&sidecar, b"later output\n").unwrap();
     runtime.flush_snapshot().await.unwrap();
+    std::fs::remove_file(&sidecar).unwrap();
+    runtime.flush_snapshot().await.unwrap();
     let captures = transport.retained.lock().await;
     let chunks = transport.chunks.lock().await;
     assert!(captures[&parent].attachments.is_empty());
@@ -372,7 +374,9 @@ async fn sidecar_follow_keeps_parent_capture_immutable_and_retains_later_file_re
             event
         })
         .collect();
-    assert_eq!(events.len(), 3);
+    assert_eq!(events.len(), 4);
+    assert_eq!(events[3].attachment.availability, trace::AttachmentAvailability::Missing);
+    assert!(events[3].attachment.payload_ref.is_none());
     let retained: Vec<_> = events
         .iter()
         .filter_map(|event| {

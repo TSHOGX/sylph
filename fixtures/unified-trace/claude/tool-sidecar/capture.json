@@ -1,0 +1,24 @@
+{
+  "vendor": "claude",
+  "version": "2.1.278 (Claude Code)",
+  "scenario": "sidecar",
+  "session_id": "b824c239-d1a4-461f-b1ca-1f609355b400",
+  "result_uuid": "ff9e752f-dcb8-402b-8955-7b3b518cbad0",
+  "method": "scripts/capture-claude-trace.mjs sidecar; real CLI with a deterministic loopback provider and only Bash enabled. Bare/safe modes and disabled skills isolate personal customization and authentication. No remote model or external messages.",
+  "limits": "Provider tool calls, response text and usage are synthetic; CLI frames, native records, tool execution and sidecar bytes are observed. This capture proves those emitted shapes, not remote-model behavior.",
+  "sanitization": "Replace only temporary capture roots and the exact produced sidecar path, then compact JSON reserialization. All keys, IDs, values and event order remain. Sidecar bytes are unchanged.",
+  "source_sha256": {
+    "stdout": "e9027808a1e894258e97d722b00ffb9095fbe756b8eeaaf012b815426e4776af",
+    "native": "ee7a57795a25f7f17f166422bcb9058d53f5e47508cda9c314dd469faf837fee",
+    "sidecar": "b2d52d59a5b7cfe2a256ae39e5407f2b83ab142ed4815d4a1e529018e4360257"
+  },
+  "retained_sha256": {
+    "stdout": "2479c2b74c6c0a1b30e7d6997d66f505f38987d3208cf7ddceec361475071021",
+    "native": "c24e26e8183f07453b7fd3801ff67248ca1ea30fc7d34b00845b9bdb39091309",
+    "sidecar": "b2d52d59a5b7cfe2a256ae39e5407f2b83ab142ed4815d4a1e529018e4360257"
+  },
+  "records": {
+    "stdout": 19,
+    "native": 15
+  }
+}

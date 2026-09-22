@@ -69,6 +69,17 @@ The retained material is:
   and scoped usage, late source/launch joins, restart, duplicate delivery and same-cut
   rebuilding. These historical artifacts do not establish absent child Activation
   boundaries or equality between progress indices and journal keys.
+- Controlled Claude 2.1.278 [read](../fixtures/unified-trace/claude/tool-read/capture.json)
+  and [Bash sidecar](../fixtures/unified-trace/claude/tool-sidecar/capture.json) bundles
+  retain real SDK/native frames and tool-produced bytes from a loopback provider.
+  The provider's tool calls, final marker and usage are synthetic; the CLI supplies
+  record identities, field spellings, caller formatting and sidecar persistence.
+  `crates/server/src/trace/worker/tests/corpus/claude_tools.rs` verifies live runtime
+  metadata before native arrival, separate caller/runtime bytes, early sidecars,
+  source interleaving, restart and rebuild. An explicitly synthetic second call
+  referencing the same physical snapshot proves result identity remains qualified
+  by its invocation. Acquisition tests separately verify transport-specific selectors,
+  immutable parent bytes and retained file revisions after removal.
 - The [Codex goal snapshot](../fixtures/unified-trace/codex/goal/capture.json) retains one
   actual `thread_goals` row and its schema from a read-only SQLite transaction. It is a
   logical row capture, not a database-page copy; its producing binary version is unknown.
