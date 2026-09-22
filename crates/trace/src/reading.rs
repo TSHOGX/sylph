@@ -10,6 +10,7 @@ use std::sync::Arc;
 use sylph_protocol::trace::*;
 mod append;
 mod content;
+mod inputs;
 mod message_update;
 mod window;
 pub use append::{project_independent_append, AppendIndex, AppendProjection, AppendWork};
@@ -70,6 +71,8 @@ struct Index<'a> {
     coverage_by_agent: BTreeMap<AgentRef, Vec<&'a Coverage>>,
     coverage_by_subject: BTreeMap<AnyObjectRef, Vec<&'a Coverage>>,
     submitted: BTreeMap<AgentRef, Vec<&'a Delivery>>,
+    input_presentations: BTreeMap<MessageRevisionRef, BTreeSet<DeliveryRef>>,
+    input_messages: BTreeMap<MessageRef, BTreeSet<DeliveryRef>>,
     parents: BTreeMap<AgentRef, AgentRef>,
 }
 
@@ -99,6 +102,8 @@ pub fn project(
         coverage_by_agent: BTreeMap::new(),
         coverage_by_subject: BTreeMap::new(),
         submitted: BTreeMap::new(),
+        input_presentations: BTreeMap::new(),
+        input_messages: BTreeMap::new(),
         parents: BTreeMap::new(),
     };
     for object in reduction
@@ -248,6 +253,7 @@ pub fn project(
                 .collect(),
         );
     }
+    index.index_submitted_presentations();
     let mut result = ReadingProjection {
         composed_payloads,
         ..ReadingProjection::default()
@@ -526,13 +532,10 @@ impl Index<'_> {
                             HistoryContent::Opaque(_) => {}
                         }
                     }
-                    for delivery in self.deliveries.get(&entry.entry_ref).into_iter().flatten() {
-                        if !matches!(
-                            self.reduction
-                                .select_delivery_revision(delivery, Some(&revisions)),
-                            Resolved::Unknown
-                        ) {
-                            pending.push(AnyObjectRef::Delivery(delivery.clone()));
+                    for (delivery, _, revision) in self.associated_deliveries(entry, &revisions) {
+                        pending.push(AnyObjectRef::Delivery(delivery));
+                        if let Some(revision) = revision.known() {
+                            pending.push(AnyObjectRef::MessageRevision(revision.clone()));
                         }
                     }
                 }

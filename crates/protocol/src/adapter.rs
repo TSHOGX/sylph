@@ -328,12 +328,14 @@ pub trait Session: Send + Sync {
     /// session can be steered by the agent's own TUI besides.
     async fn capabilities(&self) -> Result<SessionCapabilities>;
 
-    /// Start a turn.
+    /// Start a turn using the durable command identity for vendor correlation.
+    /// Adapters echo that identity where the vendor supports it; it never grants
+    /// permission to retry an at-most-once command.
     ///
     /// Returns when the agent has **accepted** it, not when it has finished: a turn
     /// outlives the call that started it, which is the same reason `POST /turns` answers
     /// `202`. Completion arrives on [`Self::messages`].
-    async fn send(&self, turn: TurnInput) -> Result<()>;
+    async fn send(&self, command_id: &crate::CommandRequestId, turn: TurnInput) -> Result<()>;
 
     /// Vendor identity from the last successful send receipt, not a live-state query.
     /// The envagent binds it to its non-reusable turn generation for guarded controls.
@@ -349,7 +351,11 @@ pub trait Session: Send + Sync {
     /// server cannot require [`Self::native_id`] before sending that message.  The adapter
     /// owns the wait for its id and buffers any events emitted while the server promotes the
     /// link; the ordinary [`Self::messages`] stream remains lossless for the caller.
-    async fn send_initial(&self, turn: TurnInput) -> Result<NativeId>;
+    async fn send_initial(
+        &self,
+        command_id: &crate::CommandRequestId,
+        turn: TurnInput,
+    ) -> Result<NativeId>;
 
     /// End the current turn, keep the session.
     ///
@@ -366,10 +372,19 @@ pub trait Session: Send + Sync {
     /// and it would land in the wrong conversation. `codex` requires the same
     /// precondition. `None` means "whatever is running", which is a coherent ask from a
     /// client with no turn in view.
-    async fn steer(&self, text: &str, expected_turn_id: Option<&str>) -> Result<()>;
+    async fn steer(
+        &self,
+        command_id: &crate::CommandRequestId,
+        text: &str,
+        expected_turn_id: Option<&str>,
+    ) -> Result<()>;
 
     /// Insert into a native priority queue, without promising a target turn.
-    async fn queue_steering(&self, _text: &str) -> Result<()> {
+    async fn queue_steering(
+        &self,
+        _command_id: &crate::CommandRequestId,
+        _text: &str,
+    ) -> Result<()> {
         Err(crate::AdapterError::unsupported_field("Native steering queue is unavailable").into())
     }
 
@@ -388,7 +403,7 @@ pub trait Session: Send + Sync {
     /// `pi` emits `queue_update` carrying `steering` and `followUp`, so a client can show
     /// what is waiting; the other two do not, and there a queued message is only observable
     /// when it runs.
-    async fn queue(&self, text: &str) -> Result<()>;
+    async fn queue(&self, command_id: &crate::CommandRequestId, text: &str) -> Result<()>;
 
     /// Set one config option, and answer with the **refreshed array**.
     ///

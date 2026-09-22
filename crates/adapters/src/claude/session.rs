@@ -822,7 +822,11 @@ impl Session for ClaudeSession {
     /// cover: it is *this side* closing stdin, which for a Sylph session happens only at
     /// [`Session::close`]. So it explains a silence the adapter itself would have caused, not
     /// one it can observe in a CLI that wedged on its own. Useful, and less than it sounds.
-    async fn send(&self, turn: TurnInput) -> Result<()> {
+    async fn send(
+        &self,
+        _command_id: &sylph_protocol::CommandRequestId,
+        turn: TurnInput,
+    ) -> Result<()> {
         // Config first, so the turn runs under the settings it was sent with. Applied here
         // rather than as preceding calls from the server: one message means there is no
         // window in which a turn could begin under a mix of old and new values.
@@ -867,8 +871,12 @@ impl Session for ClaudeSession {
     /// waiting here keeps that vendor timing inside the adapter rather than making the server
     /// guess or require a fabricated id.  The event pump continues to run while we wait, so
     /// callers must buffer the stream until promotion has created the durable row.
-    async fn send_initial(&self, turn: TurnInput) -> Result<NativeId> {
-        self.send(turn).await?;
+    async fn send_initial(
+        &self,
+        command_id: &sylph_protocol::CommandRequestId,
+        turn: TurnInput,
+    ) -> Result<NativeId> {
+        self.send(command_id, turn).await?;
         let deadline = tokio::time::Instant::now() + crate::process::REPLY_TIMEOUT;
         loop {
             if !self.shared.identity_evidence.read().unwrap().is_empty() {
@@ -909,7 +917,12 @@ impl Session for ClaudeSession {
     /// capability, so a user's correction arrived *after* the thing it was meant to prevent,
     /// with every layer reporting success. Refusing is what makes the composer fall back to
     /// the behaviour the vendor can actually deliver.
-    async fn steer(&self, _text: &str, _expected_turn_id: Option<&str>) -> Result<()> {
+    async fn steer(
+        &self,
+        _command_id: &sylph_protocol::CommandRequestId,
+        _text: &str,
+        _expected_turn_id: Option<&str>,
+    ) -> Result<()> {
         Err(anyhow::Error::new(AdapterError::unsupported_field(
             "claude has no steer: text sent mid-turn is not read until the turn ends, so it \
              queues rather than corrects. Send it as a queued follow-up instead."
@@ -927,7 +940,11 @@ impl Session for ClaudeSession {
     /// waiting on this agent the way `pi`'s `queue_update` allows. That is a real difference
     /// between two agents offering the same capability, and it belongs at the code rather
     /// than in a client's assumption.
-    async fn queue(&self, text: &str) -> Result<()> {
+    async fn queue(
+        &self,
+        _command_id: &sylph_protocol::CommandRequestId,
+        text: &str,
+    ) -> Result<()> {
         self.control
             .child
             .send(json!({"type": "user", "message": {"role": "user", "content": text}}))
@@ -1856,10 +1873,13 @@ done
         );
 
         peer.session
-            .send(TurnInput {
-                text: "first turn".into(),
-                ..Default::default()
-            })
+            .send(
+                &sylph_protocol::CommandRequestId::parse("test-input-1").unwrap(),
+                TurnInput {
+                    text: "first turn".into(),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
         let _ = peer.user_message().await;
@@ -1934,11 +1954,14 @@ done
         let mut args = BTreeMap::new();
         args.insert("target".to_string(), "backend".to_string());
         peer.session
-            .send(TurnInput {
-                command: Some("verify".into()),
-                args,
-                ..Default::default()
-            })
+            .send(
+                &sylph_protocol::CommandRequestId::parse("test-input-2").unwrap(),
+                TurnInput {
+                    command: Some("verify".into()),
+                    args,
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
         let user = peer.user_message().await;
@@ -1961,10 +1984,13 @@ done
         let mut peer = peer("approve").await;
         let stream = peer.session.messages().unwrap();
         peer.session
-            .send(TurnInput {
-                text: "ASKME".into(),
-                ..Default::default()
-            })
+            .send(
+                &sylph_protocol::CommandRequestId::parse("test-input-3").unwrap(),
+                TurnInput {
+                    text: "ASKME".into(),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
 
@@ -2009,10 +2035,13 @@ done
         let mut peer = peer("no-toolname").await;
         let stream = peer.session.messages().unwrap();
         peer.session
-            .send(TurnInput {
-                text: "ASKME".into(),
-                ..Default::default()
-            })
+            .send(
+                &sylph_protocol::CommandRequestId::parse("test-input-4").unwrap(),
+                TurnInput {
+                    text: "ASKME".into(),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
         let request = first_request(stream).await.unwrap();
@@ -2064,10 +2093,13 @@ done
             .unwrap();
         let stream = peer.session.messages().unwrap();
         peer.session
-            .send(TurnInput {
-                text: "go".into(),
-                ..Default::default()
-            })
+            .send(
+                &sylph_protocol::CommandRequestId::parse("test-input-5").unwrap(),
+                TurnInput {
+                    text: "go".into(),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
 
@@ -2099,10 +2131,13 @@ done
         let mut peer = peer("question").await;
         let stream = peer.session.messages().unwrap();
         peer.session
-            .send(TurnInput {
-                text: "QUESTION".into(),
-                ..Default::default()
-            })
+            .send(
+                &sylph_protocol::CommandRequestId::parse("test-input-6").unwrap(),
+                TurnInput {
+                    text: "QUESTION".into(),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
 
@@ -2131,10 +2166,13 @@ done
         let mut peer = peer("twice").await;
         let stream = peer.session.messages().unwrap();
         peer.session
-            .send(TurnInput {
-                text: "ASKME".into(),
-                ..Default::default()
-            })
+            .send(
+                &sylph_protocol::CommandRequestId::parse("test-input-7").unwrap(),
+                TurnInput {
+                    text: "ASKME".into(),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
         let request = first_request(stream).await.unwrap();
@@ -2193,10 +2231,13 @@ done
         let mut peer = peer("future").await;
         let _stream = peer.session.messages().unwrap();
         peer.session
-            .send(TurnInput {
-                text: "FUTURE".into(),
-                ..Default::default()
-            })
+            .send(
+                &sylph_protocol::CommandRequestId::parse("test-input-8").unwrap(),
+                TurnInput {
+                    text: "FUTURE".into(),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
 
@@ -2216,10 +2257,13 @@ done
         let mut peer = peer("changed").await;
         let stream = peer.session.messages().unwrap();
         peer.session
-            .send(TurnInput {
-                text: "CHANGED".into(),
-                ..Default::default()
-            })
+            .send(
+                &sylph_protocol::CommandRequestId::parse("test-input-9").unwrap(),
+                TurnInput {
+                    text: "CHANGED".into(),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
 
@@ -2263,7 +2307,15 @@ done
     #[tokio::test]
     async fn steering_is_refused_because_this_vendor_has_no_steer() {
         let peer = peer("steer").await;
-        let error = match peer.session.steer("stop doing that", None).await {
+        let error = match peer
+            .session
+            .steer(
+                &sylph_protocol::CommandRequestId::parse("test-input-11").unwrap(),
+                "stop doing that",
+                None,
+            )
+            .await
+        {
             Ok(()) => panic!("a vendor with no steer must not accept one"),
             Err(error) => error,
         };
@@ -2284,7 +2336,13 @@ done
     #[tokio::test]
     async fn queueing_writes_another_user_message() {
         let peer = peer("queue").await;
-        peer.session.queue("also check the tests").await.unwrap();
+        peer.session
+            .queue(
+                &sylph_protocol::CommandRequestId::parse("test-input-12").unwrap(),
+                "also check the tests",
+            )
+            .await
+            .unwrap();
         let user = peer.user_message().await;
         assert_eq!(user["message"]["content"], json!("also check the tests"));
     }
@@ -2370,10 +2428,13 @@ done
             .unwrap();
         let mut stream = peer.session.messages().unwrap();
         peer.session
-            .send(TurnInput {
-                text: "hi".into(),
-                ..Default::default()
-            })
+            .send(
+                &sylph_protocol::CommandRequestId::parse("test-input-10").unwrap(),
+                TurnInput {
+                    text: "hi".into(),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
 

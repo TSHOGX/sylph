@@ -127,13 +127,21 @@ impl Session for JournaledSession {
     async fn capabilities(&self) -> Result<SessionCapabilities> {
         self.session.capabilities().await
     }
-    async fn send(&self, input: TurnInput) -> Result<()> {
+    async fn send(
+        &self,
+        command_id: &sylph_protocol::CommandRequestId,
+        input: TurnInput,
+    ) -> Result<()> {
         self.record(&input);
-        self.session.send(input).await
+        self.session.send(command_id, input).await
     }
-    async fn send_initial(&self, input: TurnInput) -> Result<NativeId> {
+    async fn send_initial(
+        &self,
+        command_id: &sylph_protocol::CommandRequestId,
+        input: TurnInput,
+    ) -> Result<NativeId> {
         self.record(&input);
-        self.session.send_initial(input).await
+        self.session.send_initial(command_id, input).await
     }
     async fn last_sent_turn_id(&self) -> Option<String> {
         self.session.last_sent_turn_id().await
@@ -141,11 +149,16 @@ impl Session for JournaledSession {
     async fn interrupt(&self) -> Result<()> {
         self.session.interrupt().await
     }
-    async fn steer(&self, text: &str, expected: Option<&str>) -> Result<()> {
-        self.session.steer(text, expected).await
+    async fn steer(
+        &self,
+        command_id: &sylph_protocol::CommandRequestId,
+        text: &str,
+        expected: Option<&str>,
+    ) -> Result<()> {
+        self.session.steer(command_id, text, expected).await
     }
-    async fn queue(&self, text: &str) -> Result<()> {
-        self.session.queue(text).await
+    async fn queue(&self, command_id: &sylph_protocol::CommandRequestId, text: &str) -> Result<()> {
+        self.session.queue(command_id, text).await
     }
     async fn set_config(&self, id: &str, value: Value) -> Result<Vec<ConfigOption>> {
         self.session.set_config(id, value).await

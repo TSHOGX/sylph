@@ -412,3 +412,90 @@ fn submitted_multipart_input_preserves_text_and_decoded_attachment_bytes() {
     let output=run(&fact,&capture(1),&ArchiveContext::default());let revision=output.claims.iter().find_map(|claim|match &claim.fact {Fact::Declare {object:TraceObject::MessageRevision(value)}=>Some(value),_=>None}).unwrap();assert_eq!(revision.parts.len(),2);assert_eq!(revision.parts[0].kind,ContentKind::Text);assert_eq!(revision.parts[1].kind,ContentKind::Image);assert_eq!(revision.parts[1].media_type.as_deref(),Some("image/png"));
     assert_eq!(output.payloads.iter().find(|payload|payload.reference==revision.parts[0].payload).unwrap().bytes,"keep\r\n你好".as_bytes());assert_eq!(output.payloads.iter().find(|payload|payload.reference==revision.parts[1].payload).unwrap().bytes,[0,1,2,255]);
 }
+
+#[test]
+fn vendor_correlation_names_the_dispatched_revision_and_never_claims_admission() {
+    let accepted = run(
+        &accepted(CommandKind::Queue),
+        &capture(1),
+        &ArchiveContext::default(),
+    );
+    let authorization = AuthorizationReceipt {
+        subject: "human-a".into(),
+        decision_ref: "grant".into(),
+        lease_ref: None,
+        evaluated_at_ms: 3,
+    };
+    let revised = run(
+        &OperationalFact::Revised {
+            command_id: "command-a".into(),
+            previous_revision: "original-v1".into(),
+            input: SubmittedRevision {
+                revision: "edited-v2".into(),
+                media_type: "text/plain".into(),
+                bytes: b"edited bytes".to_vec(),
+            },
+            authorization: authorization.clone(),
+        },
+        &capture(2),
+        &ArchiveContext::default(),
+    );
+    let mut archive = ArchiveContext::default();
+    for output in [&accepted, &revised] {
+        archive.correlations.extend(output.correlations.clone());
+        archive
+            .correlation_evidence
+            .extend(output.correlation_evidence.clone());
+    }
+    let fact = OperationalFact::Dispatched {
+        command_id: "command-a".into(),
+        input_revision: "edited-v2".into(),
+        attempt: 1,
+        authorization,
+    };
+    let missing = run(&fact, &capture(3), &ArchiveContext::default());
+    assert!(missing.correlations.is_empty());
+    assert_eq!(missing.requests.len(), 1);
+    let result = run(&fact, &capture(3), &archive);
+    let token = "sylph:input:command-a".to_owned();
+    let delivery = correlation_key(
+        &agent(),
+        "sylph.dispatched-input.delivery",
+        std::slice::from_ref(&token),
+    );
+    let revision = correlation_key(
+        &agent(),
+        "sylph.dispatched-input.revision",
+        std::slice::from_ref(&token),
+    );
+    assert_eq!(
+        result.correlations[&delivery],
+        AnyObjectRef::Delivery(
+            DeliveryRef::native(
+                agent(),
+                "sylph.command.delivery",
+                vec!["command-a".into(), "edited-v2".into()]
+            )
+            .unwrap()
+        )
+    );
+    assert_eq!(
+        result.correlations[&revision],
+        AnyObjectRef::MessageRevision(
+            MessageRevisionRef::native(
+                agent(),
+                "sylph.command.revision",
+                vec!["command-a".into(), "edited-v2".into()]
+            )
+            .unwrap()
+        )
+    );
+    assert_eq!(
+        result.correlation_evidence[&delivery],
+        [capture(2).observation_ref, capture(3).observation_ref]
+    );
+    assert!(!result.claims.iter().any(|claim| matches!(
+        claim.fact,
+        Fact::DeliveryStage { .. } | Fact::Execution { .. }
+    )));
+}

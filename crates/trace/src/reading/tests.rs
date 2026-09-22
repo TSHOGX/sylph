@@ -1000,3 +1000,124 @@ fn a_selected_stream_prefix_assembles_its_latest_included_revision_after_a_later
         .composed_payloads
         .contains_key(&parts[0].payload.payload_ref));
 }
+
+#[test]
+fn a_selected_admitted_representation_exposes_the_related_submission_without_selecting_other_source_bytes()
+ {
+    let recorded = PayloadRef::bytes("a".repeat(64)).unwrap();
+    let excluded = PayloadRef::bytes("b".repeat(64)).unwrap();
+    let submitted_payload = PayloadRef::bytes("c".repeat(64)).unwrap();
+    let (mut facts, entry, revisions) = observed_content_fixture([&recorded, &excluded]);
+    let submitted_message =
+        MessageRef::native(agent(), "submitted", vec!["message".into()]).unwrap();
+    let submitted =
+        MessageRevisionRef::native(agent(), "submitted", vec!["revision".into()]).unwrap();
+    let delivery = DeliveryRef::native(agent(), "submitted", vec!["delivery".into()]).unwrap();
+    let selection = SelectionRef::native(agent(), "selection", vec!["recorded".into()]).unwrap();
+    facts.extend([
+        Fact::Declare {
+            object: TraceObject::Message(Message {
+                message_ref: submitted_message.clone(),
+                author: Author::Human {
+                    subject: Some("person".into()),
+                },
+                protocol_role: None,
+                purpose: MessagePurpose::TaskInput,
+                production: None,
+            }),
+        },
+        Fact::Declare {
+            object: TraceObject::MessageRevision(MessageRevision {
+                revision_ref: submitted.clone(),
+                message: submitted_message.clone(),
+                representation: Representation::Submitted,
+                form: RevisionForm::Complete,
+                parts: vec![ContentPart {
+                    part_ref: MessagePartRef::native(agent(), "submitted", vec!["part".into()])
+                        .unwrap(),
+                    kind: ContentKind::Text,
+                    payload: submitted_payload.clone(),
+                    media_type: Some("text/plain".into()),
+                    encoding: PayloadEncoding::Utf8,
+                }],
+            }),
+        },
+        Fact::Declare {
+            object: TraceObject::Delivery(Delivery {
+                delivery_ref: delivery.clone(),
+                sender: Author::Human {
+                    subject: Some("person".into()),
+                },
+                recipient: Recipient::Agent {
+                    agent: OwnerRef::Agent { agent: agent() },
+                },
+                route: DeliveryRoute::ServerCommand {
+                    command_id: "command".into(),
+                },
+            }),
+        },
+        Fact::DeliveryRevisionObserved {
+            delivery: delivery.clone(),
+            revision: submitted.clone(),
+        },
+        Fact::DeliveryStage {
+            delivery,
+            stage: DeliveryStage::Admitted {
+                entry: Some(entry.clone()),
+            },
+        },
+        Fact::Relation {
+            relation: Relation::Representation {
+                original: submitted.clone(),
+                transformed: revisions[0].clone(),
+                rule: "explicit-input-correlation".into(),
+            },
+        },
+        Fact::Declare {
+            object: TraceObject::HistorySelection(HistorySelection {
+                selection_ref: selection.clone(),
+                agent: agent(),
+                membership: SelectionMembership::EntrySet {
+                    entries: vec![entry],
+                },
+                content_scope: HistoryContentScope::ObservationSet {
+                    observations: vec![reader_claim_ref(4)],
+                },
+                excluded_heads: vec![],
+            }),
+        },
+    ]);
+    let projection = facts_projection(
+        facts,
+        &PayloadPreviews::from_iter([
+            (recorded, text_preview("recorded wrapper")),
+            (excluded, text_preview("unselected body")),
+            (submitted_payload, text_preview("original request")),
+        ]),
+    );
+    let scope = ReadingScope {
+        agent: agent(),
+        selection: Some(selection),
+    };
+    let rows = &projection.windows[&scope];
+    assert_eq!(rows.len(), 1);
+    let ReadingContent::Message {
+        revision_ref,
+        message_ref,
+        parts,
+        ..
+    } = &rows[0].content
+    else {
+        panic!("submitted presentation missing")
+    };
+    assert_eq!(revision_ref, &submitted);
+    assert_eq!(message_ref, &submitted_message);
+    assert_eq!(parts[0].preview, "original request");
+    assert!(
+        projection.selected_objects[&scope].contains(&AnyObjectRef::MessageRevision(submitted))
+    );
+    assert!(
+        !projection.selected_objects[&scope]
+            .contains(&AnyObjectRef::MessageRevision(revisions[1].clone()))
+    );
+}

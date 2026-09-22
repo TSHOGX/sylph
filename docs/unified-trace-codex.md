@@ -153,6 +153,43 @@ refer to the same delivery and an observed vendor representation. Human authorsh
 comes from accepted control provenance or explicit vendor input semantics; a
 `user`-role context block remains context when that is what the source establishes.
 
+### Submitted input correlation
+
+The controlled [input capture](../fixtures/unified-trace/codex/input/capture.json)
+uses Codex 0.155.1 with a loopback Responses provider. Two identical inputs with
+independent `clientUserMessageId` values produce different vendor UserMessage IDs.
+The client value survives as live `clientId` and native `client_id`. The vendor ID
+and client correlation remain separate namespaces.
+
+Sylph supplies a correlation derived from the durable command request identity on
+turn start, steering and native queue input. A transport request counter is not this
+identity: reopening the transport can reuse it while native queued work still exists.
+The dispatched operational fact binds that command to its exact immutable input revision;
+queue edits before dispatch do not change the identity of an already dispatched revision.
+No client correlation authorizes an at-most-once retry.
+
+A retained UserMessage can establish admission of that dispatched input only when its
+owning agent and client correlation agree with the retained operational evidence. A
+queued acceptance alone cannot. The submitted revision remains the delivery's binding,
+and a representation relation names the separately retained vendor revision. Native
+wrapping never rewrites submitted bytes or proves exact inference inclusion. An unknown
+or unmatched client reference keeps its recorded content without inventing a human
+submission, and matching text cannot supply the missing certificate.
+
+The pinned [user-input producer](https://github.com/openai/codex/blob/968835997714baaff199cfed5f89a2c65d8ca77d/codex-rs/core/src/session/mod.rs)
+records model-history input before emitting its UserMessage display item in the serialized
+[input loop](https://github.com/openai/codex/blob/968835997714baaff199cfed5f89a2c65d8ca77d/codex-rs/core/src/session/turn.rs).
+For text input, the mapper can certify the two presentations only across consecutive
+physical records in one source generation, with matching owner and reported turn and a
+complete `user.text` content-kind mapping. An intervening record, gap, unknown kind or
+mismatched owner/turn leaves them unjoined. This adds representation evidence; neither
+native message ID is erased or replaced by the client ID.
+
+The reader presents the immutable submitted content once at its proved history admission,
+with the vendor representation independently inspectable. Selecting that history path
+can expose the related submission for reading without claiming those original bytes were
+the vendor's model context. Arrival order cannot change either revision or their identities.
+
 ## Activations and lifecycle
 
 Native `task_started.turn_id` and live `turn/started` open an Activation. Native

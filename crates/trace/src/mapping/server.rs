@@ -24,7 +24,7 @@ fn source_issue(input: &MapInput<'_>, output: &mut MapOutput, code: DiagnosticCo
             input,
             scope,
             "server/source-diagnostic",
-            "sylph-control-2",
+            "sylph-control-3",
             diagnostic(scope, code, message),
         ));
     } else {
@@ -105,7 +105,7 @@ fn control_scope(
 
 impl SemanticMapper for ServerMapper {
     fn build(&self) -> &'static str {
-        "sylph-control-2"
+        "sylph-control-3"
     }
 
     fn map(&self, input: MapInput<'_>) -> MapOutput {
@@ -407,18 +407,70 @@ impl SemanticMapper for ServerMapper {
                 let key=correlation_key(scope,"sylph.command.revision",&[command_id,revision.revision]);
                 output.correlations.insert(key.clone(),AnyObjectRef::Delivery(delivery));output.correlation_evidence.insert(key,vec![input.canonical_observation.clone()]);
             }
-            OperationalFact::Dispatched { command_id, .. } => {
-                // A transport attempt establishes neither receiver acceptance nor
-                // execution. Its exact operational fact remains retained evidence.
-                if command_id.is_empty() {
+            OperationalFact::Dispatched {
+                command_id,
+                input_revision,
+                ..
+            } => {
+                if command_id.is_empty() || input_revision.is_empty() {
                     add(
                         "server/invalid-dispatch",
                         diagnostic(
                             scope,
                             DiagnosticCode::DecodeFailure,
-                            "Dispatch is missing its command identity",
+                            "Dispatch is missing its command or immutable revision identity",
                         ),
                     );
+                    return output;
+                }
+                let key = correlation_key(
+                    scope,
+                    "sylph.command.revision",
+                    &[command_id.clone(), input_revision.clone()],
+                );
+                let Some(target) = input.archive.correlations.get(&key) else {
+                    output.requests.push(ArchiveRequest::Correlation {
+                        agent: scope.clone(),
+                        namespace: "sylph.command.revision".into(),
+                        key: vec![command_id, input_revision],
+                    });
+                    return output;
+                };
+                if let AnyObjectRef::Delivery(delivery) = target {
+                    // Dispatch only authorizes correlation. Vendor evidence must
+                    // independently establish acceptance or history admission.
+                    let token = sylph_protocol::trace::input_client_id(&command_id);
+                    let revision = MessageRevisionRef::native(
+                        scope.clone(),
+                        "sylph.command.revision",
+                        vec![command_id, input_revision],
+                    )
+                    .unwrap();
+                    let mut proof = input
+                        .archive
+                        .correlation_evidence
+                        .get(&key)
+                        .cloned()
+                        .unwrap_or_default();
+                    proof.push(input.canonical_observation.clone());
+                    proof.extend(scope_evidence.iter().cloned());
+                    proof.sort();
+                    proof.dedup();
+                    for (namespace, reference) in [
+                        (
+                            "sylph.dispatched-input.delivery",
+                            AnyObjectRef::Delivery(delivery.clone()),
+                        ),
+                        (
+                            "sylph.dispatched-input.revision",
+                            AnyObjectRef::MessageRevision(revision),
+                        ),
+                    ] {
+                        let binding =
+                            correlation_key(scope, namespace, std::slice::from_ref(&token));
+                        output.correlations.insert(binding.clone(), reference);
+                        output.correlation_evidence.insert(binding, proof.clone());
+                    }
                 }
             }
             OperationalFact::Delivery { command_id, input_revision, fact } => {

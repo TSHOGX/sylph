@@ -163,11 +163,11 @@ impl HostedSession {
         self.closed.store(true, Ordering::Release);
         self.session.lock().await.close().await
     }
-    pub async fn send(&self, input: TurnInput) -> Result<()> {
+    pub async fn send(&self, command_id: &CommandRequestId, input: TurnInput) -> Result<()> {
         self.session
             .lock()
             .await
-            .send(input)
+            .send(command_id, input)
             .await
             .map_err(vendor_error)
     }
@@ -568,7 +568,7 @@ impl EnvAgent {
         // Read commands have fresh request ids and no durable effects. Their response
         // bodies must not accumulate in the operational deduplication ledger.
         if policy == IdempotencyPolicy::Replayable {
-            return self.handle_command(command).await;
+            return self.handle_command(&request_id, command).await;
         }
         let gate = {
             let mut gates = self.command_gates.lock().await;
@@ -599,7 +599,7 @@ impl EnvAgent {
                 }
             }
         }
-        let outcome = self.handle_command(command).await;
+        let outcome = self.handle_command(&request_id, command).await;
         if let Err(error) = self.spool.finish_command(&request_id, &outcome).await {
             return CommandOutcome::Unknown {
                 message: Some(format!(
@@ -610,8 +610,12 @@ impl EnvAgent {
         outcome
     }
 
-    pub async fn handle_command(&self, command: EnvironmentCommand) -> CommandOutcome {
-        match self.command(command).await {
+    async fn handle_command(
+        &self,
+        request_id: &CommandRequestId,
+        command: EnvironmentCommand,
+    ) -> CommandOutcome {
+        match self.command(request_id, command).await {
             Ok(value) => CommandOutcome::accepted_with_result(value),
             Err(error) => {
                 if let Some(adapter) = error.downcast_ref::<AdapterError>() {
@@ -642,7 +646,11 @@ impl EnvAgent {
             }
         }
     }
-    async fn command(&self, command: EnvironmentCommand) -> Result<serde_json::Value> {
+    async fn command(
+        &self,
+        request_id: &CommandRequestId,
+        command: EnvironmentCommand,
+    ) -> Result<serde_json::Value> {
         let follow_native = matches!(&command, EnvironmentCommand::Watch { .. });
         match command {
             EnvironmentCommand::Prepare {
@@ -738,7 +746,7 @@ impl EnvAgent {
                         .session
                         .lock()
                         .await
-                        .send_initial(input)
+                        .send_initial(request_id, input)
                         .await
                         .map_err(vendor_error)?;
                     *session.native.write().await = Some(SessionId::new(
@@ -793,7 +801,7 @@ impl EnvAgent {
                     .local_input(input, &session_id.encode(), &turn_id)
                     .await?;
                 *session.lease.write().await = Some(turn_id.clone());
-                if let Err(error) = session.send(input).await {
+                if let Err(error) = session.send(request_id, input).await {
                     if error.downcast_ref::<UnconfirmedVendorOperation>().is_none() {
                         *session.lease.write().await = None;
                     }
@@ -835,7 +843,7 @@ impl EnvAgent {
                     .session
                     .lock()
                     .await
-                    .steer(&text, turn.as_deref())
+                    .steer(request_id, &text, turn.as_deref())
                     .await
                     .map_err(vendor_error)?;
                 Ok(serde_json::json!({}))
@@ -846,7 +854,7 @@ impl EnvAgent {
                     .session
                     .lock()
                     .await
-                    .queue_steering(&text)
+                    .queue_steering(request_id, &text)
                     .await
                     .map_err(vendor_error)?;
                 Ok(serde_json::json!({}))
@@ -857,7 +865,7 @@ impl EnvAgent {
                     .session
                     .lock()
                     .await
-                    .queue(&text)
+                    .queue(request_id, &text)
                     .await
                     .map_err(vendor_error)?;
                 Ok(serde_json::json!({}))

@@ -673,7 +673,11 @@ impl Session for CodexSession {
     }
 
     /// Start a turn. Returns once codex has **accepted** it.
-    async fn send(&self, turn: TurnInput) -> Result<()> {
+    async fn send(
+        &self,
+        command_id: &sylph_protocol::CommandRequestId,
+        turn: TurnInput,
+    ) -> Result<()> {
         let mut input: Vec<Value> = Vec::new();
         // A `Prompt` command becomes prompt text, because codex has no command concept to
         // route it to. Dropping it would silently lose what the user typed.
@@ -702,7 +706,7 @@ impl Session for CodexSession {
             return Err(anyhow!("a codex turn needs text or an attachment"));
         }
 
-        let mut params = json!({"threadId": self.thread.as_str(), "input": input});
+        let mut params = json!({"threadId": self.thread.as_str(), "clientUserMessageId": sylph_protocol::trace::input_client_id(command_id.as_str()), "input": input});
         let object = params.as_object_mut().expect("built as an object");
         // Per-turn overrides travel **with** the turn, which is why `turn/start` takes them:
         // sending them as preceding calls leaves a window where a turn runs under a mix of
@@ -753,8 +757,12 @@ impl Session for CodexSession {
     /// Start a prepared link's first turn.  Codex assigns a thread id in
     /// `thread/start`, before any turn exists, so sending the prompt does not need
     /// an additional identity wait here.
-    async fn send_initial(&self, turn: TurnInput) -> Result<NativeId> {
-        self.send(turn).await?;
+    async fn send_initial(
+        &self,
+        command_id: &sylph_protocol::CommandRequestId,
+        turn: TurnInput,
+    ) -> Result<NativeId> {
+        self.send(command_id, turn).await?;
         Ok(self.thread.clone())
     }
 
@@ -789,7 +797,12 @@ impl Session for CodexSession {
     /// id X but found Y`. That is the mid-turn precondition `docs/session-protocol.md`
     /// asks for, implemented by the vendor rather than simulated here, so a steer racing a
     /// turn boundary is refused instead of landing in the next conversation.
-    async fn steer(&self, text: &str, expected_turn_id: Option<&str>) -> Result<()> {
+    async fn steer(
+        &self,
+        command_id: &sylph_protocol::CommandRequestId,
+        text: &str,
+        expected_turn_id: Option<&str>,
+    ) -> Result<()> {
         let turn =
             match expected_turn_id {
                 Some(id) => id.to_string(),
@@ -806,6 +819,7 @@ impl Session for CodexSession {
             json!({
                 "threadId": self.thread.as_str(),
                 "expectedTurnId": turn,
+                "clientUserMessageId": sylph_protocol::trace::input_client_id(command_id.as_str()),
                 "input": [{"type": "text", "text": text}],
             }),
         )
@@ -822,22 +836,21 @@ impl Session for CodexSession {
     /// enum-shaped refusals rather than one of the silent accepts — but the field appears in
     /// no documentation, so the value is ours to choose.
     ///
-    /// A fresh id per call, from the transport's own counter, rather than a hash of the text:
-    /// queueing the same sentence twice is a real thing to want, and an id derived from
-    /// content would make the second one look like a duplicate of the first to a vendor that
-    /// dedupes on it. `thread/queue/list` keys on this id, so it is also what a future
-    /// "unqueue that" would name.
+    /// The durable command identity supplies the client ID. A process-local
+    /// transport counter can restart while the vendor still retains queued work.
+    /// The same token also correlates native admission without claiming that
+    /// enqueueing caused execution or that the next inference consumed the text.
     ///
     /// No turn-open precondition, unlike [`Self::steer`]: the queue is a property of the
     /// thread rather than of a turn, and adding to it with nothing running is what makes the
     /// next turn's opening text.
-    async fn queue(&self, text: &str) -> Result<()> {
+    async fn queue(&self, command_id: &sylph_protocol::CommandRequestId, text: &str) -> Result<()> {
         request(
             &self.child,
             method::THREAD_QUEUE_ADD,
             json!({
                 "threadId": self.thread.as_str(),
-                "clientUserMessageId": format!("sylph-{}", self.child.next_request_id()),
+                "clientUserMessageId": sylph_protocol::trace::input_client_id(command_id.as_str()),
                 "input": [{"type": "text", "text": text}],
             }),
         )
@@ -1337,3 +1350,6 @@ cat >/dev/null
         assert!(state.lock().await.pending.is_empty());
     }
 }
+
+#[cfg(test)]
+mod input_tests;

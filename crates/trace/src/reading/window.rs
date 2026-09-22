@@ -144,24 +144,7 @@ impl super::Index<'_> {
                             _ => None,
                         })
                         .collect();
-                    let associated = self
-                        .deliveries
-                        .get(entry_ref)
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|delivery| {
-                            match self.object(&AnyObjectRef::Delivery(delivery.clone())) {
-                                Some(TraceObject::Delivery(value)) => {
-                                    let revision = self
-                                        .reduction
-                                        .select_delivery_revision(delivery, Some(&eligible));
-                                    (!matches!(revision, Resolved::Unknown))
-                                        .then_some((delivery, value, revision))
-                                }
-                                _ => None,
-                            }
-                        })
-                        .collect::<Vec<_>>();
+                    let associated = self.associated_deliveries(entry, &eligible);
                     let revision = if associated.is_empty() {
                         if !state.represented_messages.insert(revision.message.clone()) {
                             continue;
@@ -205,7 +188,9 @@ impl super::Index<'_> {
                         ));
                     } else {
                         for (delivery, value, selected) in associated {
-                            state.seen_deliveries.insert(delivery.clone());
+                            if !state.seen_deliveries.insert(delivery.clone()) {
+                                continue;
+                            }
                             let address = format!("{address}:{}", delivery.encode());
                             let Some(TraceObject::MessageRevision(delivered)) =
                                 selected.known().and_then(|revision| {
@@ -220,12 +205,17 @@ impl super::Index<'_> {
                                 ));
                                 continue;
                             };
+                            let Some(TraceObject::Message(delivered_message)) =
+                                self.object(&AnyObjectRef::Message(delivered.message.clone()))
+                            else {
+                                continue;
+                            };
                             units.push(self.message_unit(
                                 scope,
                                 address,
                                 anchor.clone(),
                                 order_basis,
-                                message,
+                                delivered_message,
                                 delivered,
                                 Some(value),
                                 Some(entry),

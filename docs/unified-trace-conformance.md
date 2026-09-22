@@ -129,6 +129,19 @@ The retained material is:
   resource identity and reader-visible counter units through reread, interleaving,
   restart and rebuild. Replacement, missing-row and idless public-event scenarios are
   explicitly synthetic variations, not additional vendor recordings.
+- The [Codex input bundle](../fixtures/unified-trace/codex/input/capture.json) retains
+  Codex 0.155.1 native records and both directions of a real app-server stream, with
+  their observed interleaving. `scripts/capture-codex-input.py` uses an isolated loopback
+  Responses provider. Identical submitted text has distinct client and vendor message
+  IDs. Production replay in `crates/server/src/trace/worker/tests/corpus/codex_input.rs`
+  combines these bytes with explicitly synthetic control acceptance/dispatch facts to
+  check native-only, live-only and mixed sources, late control evidence, duplicate
+  receipts, rereads, restart and rebuilding. Synthetic transformations preserve the
+  submitted revision while retaining the vendor wrapper; an omitted dispatch cannot
+  establish admission. Separate tests require both source epochs for previews and retain
+  selected-path restrictions when exposing related submitted content. Adapter tests
+  reopen the same scripted transport to prove send, steer and queue IDs survive actual
+  request-counter reuse. No acceptance or model inclusion is inferred from dispatch.
 - The [Codex reusable-child excerpt](../fixtures/unified-trace/codex/reuse/capture.json)
   retains a root and one child from the native structural inventory, using
   `scripts/capture-codex-reuse.py`. Two child activations, equal-text task deliveries,

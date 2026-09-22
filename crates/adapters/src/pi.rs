@@ -1560,7 +1560,11 @@ pub mod session {
         /// rather than as a second response for the same id. That is exactly the contract —
         /// a turn outlives the call that started it — so the reply is awaited and nothing
         /// waits for the turn.
-        async fn send(&self, turn: TurnInput) -> Result<()> {
+        async fn send(
+            &self,
+            _command_id: &sylph_protocol::CommandRequestId,
+            turn: TurnInput,
+        ) -> Result<()> {
             // Applied before the prompt, which is why they travel *with* the turn: separate
             // preceding calls left a window where a turn could run under a mix of old and
             // new settings.
@@ -1610,8 +1614,12 @@ pub mod session {
         /// Start a prepared link's first turn.  pi exposes its session id during the
         /// handshake, so the adapter can answer immediately while the native store remains
         /// empty until the prompt actually writes a message.
-        async fn send_initial(&self, turn: TurnInput) -> Result<NativeId> {
-            self.send(turn).await?;
+        async fn send_initial(
+            &self,
+            command_id: &sylph_protocol::CommandRequestId,
+            turn: TurnInput,
+        ) -> Result<NativeId> {
+            self.send(command_id, turn).await?;
             Ok(self.native_id.clone())
         }
 
@@ -1638,14 +1646,23 @@ pub mod session {
         // The RPC queue insertion is unconditional (`AgentSession._queueSteer`). A
         // local turn-open read races vendor settlement, even while holding our mutex.
         // Preserve the native primitive under its own delivery semantics.
-        async fn steer(&self, _text: &str, _expected_turn_id: Option<&str>) -> Result<()> {
+        async fn steer(
+            &self,
+            _command_id: &sylph_protocol::CommandRequestId,
+            _text: &str,
+            _expected_turn_id: Option<&str>,
+        ) -> Result<()> {
             Err(sylph_protocol::AdapterError::unsupported_field(
                 "Pi offers a native steering queue, not turn-scoped steering",
             )
             .into())
         }
 
-        async fn queue_steering(&self, text: &str) -> Result<()> {
+        async fn queue_steering(
+            &self,
+            _command_id: &sylph_protocol::CommandRequestId,
+            text: &str,
+        ) -> Result<()> {
             self.call("steer", json!({"message": text})).await?;
             Ok(())
         }
@@ -1661,7 +1678,11 @@ pub mod session {
         /// reads it: pi delivers a follow-up once no tool calls and no steering messages
         /// remain. No turn-open precondition, because queueing with nothing running is a
         /// coherent ask — it is the next turn's opening text.
-        async fn queue(&self, text: &str) -> Result<()> {
+        async fn queue(
+            &self,
+            _command_id: &sylph_protocol::CommandRequestId,
+            text: &str,
+        ) -> Result<()> {
             self.call("follow_up", json!({"message": text})).await?;
             Ok(())
         }
@@ -2999,10 +3020,13 @@ done
             let (session, log) = scripted("send-accept", &[]).await;
             tokio::time::timeout(
                 Duration::from_secs(2),
-                session.send(TurnInput {
-                    text: "hello".to_string(),
-                    ..Default::default()
-                }),
+                session.send(
+                    &sylph_protocol::CommandRequestId::parse("test-input-1").unwrap(),
+                    TurnInput {
+                        text: "hello".to_string(),
+                        ..Default::default()
+                    },
+                ),
             )
             .await
             .expect("send must not await the turn")
@@ -3020,14 +3044,28 @@ done
         async fn native_queue_priority_is_available_without_a_turn_scoped_promise() {
             let (session, log) = scripted("steer-queue", &[]).await;
             session
-                .steer("guarded", Some("turn-7"))
+                .steer(
+                    &sylph_protocol::CommandRequestId::parse("test-input-4").unwrap(),
+                    "guarded",
+                    Some("turn-7"),
+                )
                 .await
                 .expect_err("Pi cannot bind a steer to a turn");
             session
-                .steer("unguarded", None)
+                .steer(
+                    &sylph_protocol::CommandRequestId::parse("test-input-5").unwrap(),
+                    "unguarded",
+                    None,
+                )
                 .await
                 .expect_err("absence of a lease cannot change delivery semantics");
-            session.queue_steering("priority").await.unwrap();
+            session
+                .queue_steering(
+                    &sylph_protocol::CommandRequestId::parse("test-input-6").unwrap(),
+                    "priority",
+                )
+                .await
+                .unwrap();
             let lines = sent(&log, 1).await;
             assert_eq!(lines[0]["type"], "steer");
             assert_eq!(lines[0]["message"], "priority");

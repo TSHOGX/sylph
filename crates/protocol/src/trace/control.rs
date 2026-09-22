@@ -8,6 +8,19 @@ use serde::{Deserialize, Serialize};
 
 use super::{AgentRef, CommandTarget, IngestionEpoch, ObservationRef};
 
+/// Opaque vendor input correlation for one durable, at-most-once command.
+/// The dispatched fact, rather than this token, names its immutable input revision.
+pub fn input_client_id(command_id: &str) -> String {
+    format!("sylph:input:{command_id}")
+}
+
+/// Other clients' opaque vendor IDs are not Sylph control references.
+pub fn is_input_client_id(value: &str) -> bool {
+    value
+        .strip_prefix("sylph:input:")
+        .is_some_and(|id| !id.is_empty())
+}
+
 /// A retry is permitted only where the adapter established native idempotency.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]

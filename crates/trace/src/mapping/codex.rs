@@ -15,13 +15,14 @@ pub mod history;
 
 pub struct CodexMapper;
 impl CodexMapper {
-    const BUILD: &'static str = "codex-5";
+    const BUILD: &'static str = "codex-6";
 }
 mod accounting;
 mod collaboration;
 mod goal;
-mod runtime;
+mod input;
 mod routing;
+mod runtime;
 
 /// Checkpointed source knowledge. A copied parent header cannot replace the first
 /// governing header, and a parent connection does not own forwarded child frames.
@@ -34,6 +35,7 @@ struct CodexState {
     accounting_root: Option<AgentRef>,
     agent_path: Option<String>,
     communication_metadata: Option<(bool, ObservationRef)>,
+    native_input: Option<input::NativeInput>,
     last_vendor_ordinal: Option<u64>,
     active_by_agent: BTreeMap<String, ActivationRef>,
     revision_by_message: BTreeMap<String, MessageRevisionRef>,
@@ -116,12 +118,14 @@ impl SemanticMapper for CodexMapper {
             input.capture.transport_kind,
             TransportKind::LiveStdout | TransportKind::LiveStdin
         );
+        let preceding_input = state.native_input.take();
         let mut context = Context {
             input: &input,
             output: &mut output,
             state: &mut state,
             build: self.build(),
             vendor_ordinal: value.get("ordinal").and_then(Value::as_u64),
+            preceding_input,
         };
         if value.get("schema_version").is_some() && value.get("rollout_id").is_some() {
             context.raw_trace(&value);
@@ -190,6 +194,7 @@ struct Context<'a, 'b> {
     state: &'a mut CodexState,
     build: &'static str,
     vendor_ordinal: Option<u64>,
+    preceding_input: Option<input::NativeInput>,
 }
 
 impl Context<'_, '_> {
@@ -870,7 +875,10 @@ impl Context<'_, '_> {
                     activation,
                     form,
                 ) {
-                    self.history(owner, vec![HistoryContent::Message(revision)], None);
+                    self.history(owner, vec![HistoryContent::Message(revision.clone())], None);
+                    if matches!(kind, "userMessage" | "UserMessage") {
+                        self.input_admission(owner, item, live, envelope, &revision);
+                    }
                 }
             }
             "collabAgentToolCall" | "CollabAgentToolCall" => {
@@ -1123,6 +1131,7 @@ impl Context<'_, '_> {
                     .insert(message.encode(), revision.clone());
             }
         }
+        self.remember_native_input(owner, value, &revision);
         Some(revision)
     }
 

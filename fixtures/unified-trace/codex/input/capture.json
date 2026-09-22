@@ -1,0 +1,26 @@
+{
+  "vendor": "codex",
+  "version": "codex-cli 0.155.1",
+  "session_id": "01a0caaa-6425-7ea1-8100-a92dcc6a2869",
+  "method": "scripts/capture-codex-input.py; real app-server with isolated configuration and a loopback Responses provider. Only a checked local fixture API key is supplied. Two identical human-shaped input values have independent client correlation IDs. No remote model or requested tool execution.",
+  "limits": "Provider response text and usage are synthetic; all app-server frames, vendor identifiers, counters and native persistence are observed. Client correlation does not establish inference inclusion or authorize dispatch retries.",
+  "sanitization": "Substitute only the temporary root path and compactly reserialize complete JSON frames and native records. No fields or records are removed.",
+  "source_sha256": {
+    "stdin": "ead73cf3c67cbc69fc90cf92bad77db1b5740711c235703118117d481a2da0f4",
+    "stdout": "ff42063946c68bdf22072358b729ab98239bf734ca22a5c94573610ef879d33b",
+    "wire": "aad07923a5bb2eb70f53328a03a85f443b452d3827e6192d92176a1c6df225cc",
+    "native": "d9eda6fb0539c169c325a820bc8f5853ba07f8767f8a518ea3938ab0593f1417"
+  },
+  "retained_sha256": {
+    "stdin": "cb53b32e93102171d3be75fbf55eb96f2aeef5502424d4a3623eef21a87da5e6",
+    "stdout": "a48e58ecfa487755b8fe0a20cf86ad714ecfb989ba11ddbe41284cf377741901",
+    "wire": "02e5154ba7680d3e0f2e5da96c3ef98e678e7c0dd563a0d676a961132cc7efa1",
+    "native": "cabea8aeea0150bc86c16d68f6a42eae52d6141362e90d67ce32149638bb37f2"
+  },
+  "records": {
+    "stdin": 5,
+    "stdout": 26,
+    "wire": 31,
+    "native": 22
+  }
+}

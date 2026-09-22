@@ -571,3 +571,5 @@ mod accounting;
 mod codex_reuse;
 
 mod claude_delegation;
+
+mod codex_input;

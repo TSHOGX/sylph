@@ -262,7 +262,7 @@ struct FixtureSession {
     active: Arc<Mutex<Option<String>>>,
     surface: Mutex<SessionCapabilities>,
     worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
-    queued: Arc<Mutex<std::collections::VecDeque<String>>>,
+    queued: Arc<Mutex<std::collections::VecDeque<(sylph_protocol::CommandRequestId, String)>>>,
 }
 #[async_trait]
 impl Session for FixtureSession {
@@ -275,7 +275,11 @@ impl Session for FixtureSession {
     async fn capabilities(&self) -> Result<SessionCapabilities> {
         Ok(self.surface.lock().await.clone())
     }
-    async fn send(&self, input: TurnInput) -> Result<()> {
+    async fn send(
+        &self,
+        command_id: &sylph_protocol::CommandRequestId,
+        input: TurnInput,
+    ) -> Result<()> {
         if self.active.lock().await.is_some() {
             return Err(anyhow!("fixture already has an active turn"));
         }
@@ -290,7 +294,7 @@ impl Session for FixtureSession {
                 native_turn_id: Some(turn.clone()),
             })))
             .await;
-        record(&self.capture,&self.stream,json!({"method":"item/completed","params":{"threadId":self.id.as_str(),"turnId":turn,"item":{"type":"userMessage","id":format!("user-{ordinal}"),"content":[{"type":"input_text","text":input.text}]}}})).await?;
+        record(&self.capture,&self.stream,json!({"method":"item/completed","params":{"threadId":self.id.as_str(),"turnId":turn,"item":{"type":"userMessage","id":format!("user-{ordinal}"),"clientId":sylph_protocol::trace::input_client_id(command_id.as_str()),"content":[{"type":"text","text":input.text,"text_elements":[]}]}}})).await?;
         let capture = self.capture.clone();
         let stream = self.stream.clone();
         let id = self.id.clone();
@@ -327,7 +331,7 @@ impl Session for FixtureSession {
                         native_turn_id: Some(turn),
                     })))
                     .await;
-                let Some(next) = queued.lock().await.pop_front() else {
+                let Some((next_command, next)) = queued.lock().await.pop_front() else {
                     *held = None;
                     return;
                 };
@@ -342,14 +346,18 @@ impl Session for FixtureSession {
                         native_turn_id: Some(turn.clone()),
                     })))
                     .await;
-                if record(&capture,&stream,json!({"method":"item/completed","params":{"threadId":id.as_str(),"turnId":turn,"item":{"type":"userMessage","id":format!("user-{ordinal}"),"content":[{"type":"input_text","text":prompt}]}}})).await.is_err(){return;}
+                if record(&capture,&stream,json!({"method":"item/completed","params":{"threadId":id.as_str(),"turnId":turn,"item":{"type":"userMessage","id":format!("user-{ordinal}"),"clientId":sylph_protocol::trace::input_client_id(next_command.as_str()),"content":[{"type":"text","text":prompt,"text_elements":[]}]}}})).await.is_err(){return;}
             }
         });
         *self.worker.lock().await = Some(worker);
         Ok(())
     }
-    async fn send_initial(&self, input: TurnInput) -> Result<NativeId> {
-        self.send(input).await?;
+    async fn send_initial(
+        &self,
+        command_id: &sylph_protocol::CommandRequestId,
+        input: TurnInput,
+    ) -> Result<NativeId> {
+        self.send(command_id, input).await?;
         Ok(self.id.clone())
     }
     async fn last_sent_turn_id(&self) -> Option<String> {
@@ -372,20 +380,31 @@ impl Session for FixtureSession {
         }
         Ok(())
     }
-    async fn steer(&self, _: &str, _: Option<&str>) -> Result<()> {
+    async fn steer(
+        &self,
+        _: &sylph_protocol::CommandRequestId,
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<()> {
         Err(anyhow!("fixture has no steer"))
     }
-    async fn queue(&self, text: &str) -> Result<()> {
+    async fn queue(&self, command_id: &sylph_protocol::CommandRequestId, text: &str) -> Result<()> {
         let active = self.active.lock().await;
         if active.is_some() {
-            self.queued.lock().await.push_back(text.into());
+            self.queued
+                .lock()
+                .await
+                .push_back((command_id.clone(), text.into()));
             return Ok(());
         }
         drop(active);
-        self.send(TurnInput {
-            text: text.into(),
-            ..Default::default()
-        })
+        self.send(
+            command_id,
+            TurnInput {
+                text: text.into(),
+                ..Default::default()
+            },
+        )
         .await
     }
     async fn set_config(&self, id: &str, value: serde_json::Value) -> Result<Vec<ConfigOption>> {

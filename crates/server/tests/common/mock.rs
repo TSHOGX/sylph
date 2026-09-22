@@ -116,7 +116,11 @@ impl Session for FixtureSession {
     async fn capabilities(&self) -> Result<SessionCapabilities> {
         Ok(SessionCapabilities::default())
     }
-    async fn send(&self, input: TurnInput) -> Result<()> {
+    async fn send(
+        &self,
+        _command_id: &sylph_protocol::CommandRequestId,
+        input: TurnInput,
+    ) -> Result<()> {
         self.source.sends.fetch_add(1, Ordering::SeqCst);
         self.source.inputs.lock().unwrap().push(input.clone());
         if self.source.refuse_send {
@@ -159,8 +163,12 @@ impl Session for FixtureSession {
         }
         Ok(())
     }
-    async fn send_initial(&self, input: TurnInput) -> Result<NativeId> {
-        self.send(input).await?;
+    async fn send_initial(
+        &self,
+        command_id: &sylph_protocol::CommandRequestId,
+        input: TurnInput,
+    ) -> Result<NativeId> {
+        self.send(command_id, input).await?;
         Ok(self.native.clone())
     }
     async fn last_sent_turn_id(&self) -> Option<String> {
@@ -170,10 +178,15 @@ impl Session for FixtureSession {
         self.source.interrupts.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
-    async fn steer(&self, _: &str, _: Option<&str>) -> Result<()> {
+    async fn steer(
+        &self,
+        _: &sylph_protocol::CommandRequestId,
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<()> {
         Ok(())
     }
-    async fn queue(&self, _: &str) -> Result<()> {
+    async fn queue(&self, _: &sylph_protocol::CommandRequestId, _: &str) -> Result<()> {
         Ok(())
     }
     async fn set_config(&self, _: &str, _: serde_json::Value) -> Result<Vec<ConfigOption>> {

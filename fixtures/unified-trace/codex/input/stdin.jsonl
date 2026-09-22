@@ -1,0 +1,5 @@
+{"jsonrpc":"2.0","method":"initialize","params":{"clientInfo":{"name":"sylph-client-probe","title":"Sylph client probe","version":"1"},"capabilities":{"experimentalApi":true}},"id":1}
+{"jsonrpc":"2.0","method":"initialized","params":{}}
+{"jsonrpc":"2.0","method":"thread/start","params":{"cwd":"/workspace/codex-capture/work","model":"gpt-5.5","modelProvider":"fixture","approvalPolicy":"never","sandbox":"read-only"},"id":2}
+{"jsonrpc":"2.0","method":"turn/start","params":{"threadId":"01a0caaa-6425-7ea1-8100-a92dcc6a2869","clientUserMessageId":"sylph:input:fixture-command-1","input":[{"type":"text","text":"SYLPH_IDENTICAL_SUBMITTED_INPUT"}]},"id":3}
+{"jsonrpc":"2.0","method":"turn/start","params":{"threadId":"01a0caaa-6425-7ea1-8100-a92dcc6a2869","clientUserMessageId":"sylph:input:fixture-command-2","input":[{"type":"text","text":"SYLPH_IDENTICAL_SUBMITTED_INPUT"}]},"id":4}
