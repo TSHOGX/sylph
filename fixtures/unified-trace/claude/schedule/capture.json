@@ -1,0 +1,22 @@
+{
+  "vendor": "claude",
+  "version": "2.1.278 (Claude Code)",
+  "scenario": "schedule",
+  "session_id": "87a03655-be7b-432b-bca4-5cba20392b03",
+  "result_uuid": "352f3f79-879b-481d-9dc7-a059d6f62785",
+  "method": "scripts/capture-claude-trace.mjs schedule; real CLI with a deterministic loopback provider and only CronCreate,CronDelete,CronList enabled. Isolated configuration, safe mode, disabled skills and an explicitly checked local API key isolate the capture. Bare mode is also used except for schedules, which it disables. No remote model or external messages.",
+  "limits": "Provider tool calls, response text and usage are synthetic; CLI frames, native records, tool execution and sidecar bytes are observed. This capture proves those emitted shapes, not remote-model behavior.",
+  "sanitization": "Replace only temporary capture roots and the exact produced sidecar path, then compact JSON reserialization. All keys, IDs, values and event order remain. Sidecar bytes are unchanged.",
+  "source_sha256": {
+    "stdout": "495d5ea8637a33179be51cffa823ea17db1c83b04dc6cfa952beacc9c223dd25",
+    "native": "54fd58bc8bd3599c2ee8e21f542a9f7d5f7209e8844989c99034568433ce1815"
+  },
+  "retained_sha256": {
+    "stdout": "62d3fb9f968b9f3d0740de61514381552a1f01b833d0c536279f69f7092d0638",
+    "native": "d88d5b71e73c0dcb81bebf73a5eead6fd9769bcf248c587056cc505e30898a7b"
+  },
+  "records": {
+    "stdout": 55,
+    "native": 29
+  }
+}

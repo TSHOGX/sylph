@@ -218,6 +218,15 @@ replay drives acquisition's selectors through early sidecars, native/live interl
 restart and rebuild while preserving unjoined native/live calls and shared physical
 bytes. Targeted mutations fail the new regressions. The broader S2 and S3 gates remain.
 
+Claude schedule results now resolve through their retained built-in invocation rather
+than generic result field names. The controlled create/list/delete cycle proves
+registration, cancellation and failed deletion independently; empty lists and ID-less
+firing notices do not invent state transitions or delivery. Late invocation evidence
+resolves a pending schedule result across restart, and production replay preserves the
+same resources and facts across source ordering and rebuild. Unrelated durable listings
+retain unknown identity scope until a creator/project certificate is available. These
+cases extend vendor conformance; the clause-level S2 audit and reader gates remain open.
+
 ### Runtime and reader cutover checkpoint
 
 The product path is now acquisition → durable capture/upload → evidence → pure mapping

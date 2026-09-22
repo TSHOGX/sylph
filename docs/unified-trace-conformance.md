@@ -90,6 +90,15 @@ The retained material is:
   referencing the same physical snapshot proves result identity remains qualified
   by its invocation. Acquisition tests separately verify transport-specific selectors,
   immutable parent bytes and retained file revisions after removal.
+- The controlled [Claude schedule cycle](../fixtures/unified-trace/claude/schedule/capture.json)
+  retains creation, nonempty listing, deletion, empty listing and missing-ID deletion
+  failure from one real CLI process. The local provider supplies the tool requests;
+  the CLI supplies IDs, storage results and error flags. The fixture is non-durable,
+  scheduled far in the future and removed during capture. Production replay in
+  `crates/server/src/trace/worker/tests/corpus/claude_schedule.rs` verifies independent
+  registration/cancellation facts, exact requested cron/prompt, failed-call outcome,
+  delayed invocation classification, source ordering, restart and rebuild. It does not
+  claim a firing or a cross-session identity certificate for project-wide schedules.
 - The [Codex goal snapshot](../fixtures/unified-trace/codex/goal/capture.json) retains one
   actual `thread_goals` row and its schema from a read-only SQLite transaction. It is a
   logical row capture, not a database-page copy; its producing binary version is unknown.

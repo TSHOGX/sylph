@@ -242,6 +242,33 @@ finishes that invocation. It does not manufacture a child Activation boundary or
 delivery of the parent's summary. Missing journals and unmatched locators remain gaps,
 and a failed workflow cannot finish an invocation whose result was not observed.
 
+### Schedules
+
+The controlled [schedule capture](../fixtures/unified-trace/claude/schedule/capture.json)
+records `CronCreate`, `CronList` and `CronDelete` against the real CLI using a loopback
+provider. Creation returns `id`, `humanSchedule`, `recurring` and `durable`; a following
+list contains the job. Successful deletion returns that ID, the next list is empty,
+and deleting an absent ID returns an error. The fixture job is non-durable and is
+deleted during capture; no firing is requested or inferred.
+
+These result shapes gain schedule meaning only through their retained built-in
+invocation. A successful create declares a Schedule resource and registration state;
+its creating operation retains the exact requested cron and prompt. A failed tool
+result never registers or cancels a resource. Deletion must agree with the requested
+ID and a known schedule reference. A list observes registration, not a new creation
+operation; an empty list does not prove cancellation, firing or expiration.
+
+Native IDs are resolved within their evidenced context. A durable registration can
+be anchored by its creator, but an unrelated project-wide listing does not identify
+that creator or establish a cross-session resource join. Such listings remain retained
+with unresolved scope until a certificate supplies it. Resource host is absent when
+the record does not establish who runs the scheduler.
+
+The recorded `scheduled_task_fire` native notices have no schedule ID. Their content
+remains a system notice with an explicit association gap. Prompt text, `/loop` wording,
+recency and a preceding registration cannot identify which resource fired, establish
+its delivery or start an Activation.
+
 ## Lifecycle and result authority
 
 | Observation | State transition |

@@ -15,6 +15,7 @@ use super::{
 pub struct ClaudeMapper;
 
 mod workflow;
+mod schedule;
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct ClaudeState {
@@ -36,7 +37,7 @@ struct LiveStream {
 
 impl SemanticMapper for ClaudeMapper {
     fn build(&self) -> &'static str {
-        "claude-4"
+        "claude-5"
     }
     fn map(&self, input: MapInput<'_>) -> MapOutput {
         let mut output = MapOutput {
@@ -249,7 +250,13 @@ impl Context<'_, '_> {
             "system" if text(value, "subtype") == Some("compact_boundary") => {
                 self.compaction(&owner, value)
             }
-            "system" => self.context_record(&owner, value, "system"),
+            "system" => {
+                self.context_record(&owner, value, "system");
+                if text(value, "subtype") == Some("scheduled_task_fire") {
+                    self.issue(Some(&owner), "claude/schedule-fire-identity", DiagnosticCode::MissingSource,
+                        "Scheduled firing notice has no evidenced schedule identity; prose and recency cannot establish a resource or delivery");
+                }
+            }
             "queue-operation"
             | "file-history-snapshot"
             | "mode"
@@ -904,6 +911,7 @@ impl Context<'_, '_> {
                 .delegation_starts
                 .insert(operation.encode(), value["input"].get("resume").is_none());
         }
+        self.schedule_call(owner, &operation, name, &value["input"]);
         self.output.correlations.insert(
             correlation_key(owner, "claude.tool-owner", &[owner.encode(), id.into()]),
             AnyObjectRef::Operation(operation),
@@ -948,6 +956,7 @@ impl Context<'_, '_> {
         }
         let absent = Value::Null;
         let structured = structured.unwrap_or(&absent);
+        self.schedule_result(owner, &operation, part, structured);
         if text(structured, "taskType") == Some("local_workflow") {
             self.workflow_launch(owner, root, &operation, structured, slot);
         }

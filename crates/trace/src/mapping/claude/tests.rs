@@ -64,6 +64,11 @@ fn run(values: &[Value], live: bool) -> Vec<MapOutput> {
             archive: &archive,
         });
         state = serde_json::from_slice(&serde_json::to_vec(&output.state).unwrap()).unwrap();
+        for claim in &output.claims {
+            if let Fact::Declare { object: TraceObject::Operation(operation) } = &claim.fact {
+                archive.semantic_mut().operations.insert(operation.operation_ref.clone(), operation.clone());
+            }
+        }
         archive.correlations.extend(output.correlations.clone());
         archive
             .correlation_evidence
@@ -965,3 +970,5 @@ fn interleaved_live_messages_keep_their_owners_and_same_index_parts_distinct() {
 
 mod workflow;
 mod tool_results;
+
+mod schedule;
