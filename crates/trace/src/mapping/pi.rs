@@ -14,6 +14,9 @@ use super::{
 
 pub struct PiMapper;
 
+mod maintenance;
+use maintenance::ObservedWork;
+
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct PiState {
     header_evidence: Option<ObservationRef>,
@@ -23,6 +26,8 @@ struct PiState {
     last_native_entry: Option<EntryRef>,
     current_pending: BTreeMap<String, OperationRef>,
     current_parent: Option<String>,
+    retry: Option<ObservedWork>,
+    compaction: Option<ObservedWork>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -45,11 +50,12 @@ struct LiveMessage {
     value: Value,
     closed_parts: BTreeSet<usize>,
     evidence: Vec<ObservationRef>,
+    inference: Option<ObservedWork>,
 }
 
 impl SemanticMapper for PiMapper {
     fn build(&self) -> &'static str {
-        "pi-3"
+        "pi-4"
     }
 
     fn map(&self, input: MapInput<'_>) -> MapOutput {
@@ -764,6 +770,25 @@ impl Context<'_, '_> {
                 parts,
             }),
         );
+        if role == "assistant"
+            && vendor_field(value, "stopReason", "stop_reason").and_then(Value::as_str)
+                == Some("error")
+        {
+            if let Some(message) = text(value, "errorMessage") {
+                self.add(
+                    owner,
+                    &format!("{selector}/reported-failure"),
+                    Fact::Diagnostic {
+                        diagnostic: TraceDiagnostic {
+                            subject: Some(AnyObjectRef::MessageRevision(revision.clone())),
+                            code: DiagnosticCode::ReportedFailure,
+                            message: message.into(),
+                            related_claims: vec![],
+                        },
+                    },
+                );
+            }
+        }
         if role == "toolResult" {
             if let Some(operation) = operation {
                 for field in ["persistedOutputPath", "outputFile"] {
@@ -969,7 +994,10 @@ impl Context<'_, '_> {
             }
             let object = AnyObjectRef::HistoryEntry(reference.clone());
             let (entry, evidence) = if let Some(entry) = self.local_history.get(&reference) {
-                (entry, imbl::vector![self.input.canonical_observation.clone()])
+                (
+                    entry,
+                    imbl::vector![self.input.canonical_observation.clone()],
+                )
             } else {
                 let Some(entry) = self.input.archive.semantic.history_entries.get(&reference)
                 else {
@@ -978,12 +1006,31 @@ impl Context<'_, '_> {
                         .push(ArchiveRequest::Object { object_ref: object });
                     return;
                 };
+                // Membership belongs to this coherent source view. Unioning all
+                // declarations of the same native entry lets a later RPC snapshot
+                // change an earlier compaction's proof when replay batches differ.
+                // A rewritten generation must supply its own predecessor records;
+                // absent records remain unresolved, not borrowed from another view.
                 let Some(evidence) = self
                     .input
                     .archive
                     .semantic
-                    .object_evidence
-                    .get(&object)
+                    .history_entry_proofs
+                    .get(&reference)
+                    .and_then(|proofs| {
+                        proofs.values().find(|proof| {
+                            proof.position.source == self.input.capture.source_position.source
+                                && proof.position.generation
+                                    == self.input.capture.source_position.generation
+                                && proof.position <= self.input.capture.source_position
+                                && self
+                                    .state
+                                    .header_evidence
+                                    .as_ref()
+                                    .is_none_or(|header| proof.evidence.contains(header))
+                        })
+                    })
+                    .map(|proof| &proof.evidence)
                     .filter(|evidence| {
                         !evidence.is_empty()
                             && evidence.iter().all(|reference| {
@@ -996,7 +1043,7 @@ impl Context<'_, '_> {
                         .push(ArchiveRequest::Object { object_ref: object });
                     return;
                 };
-                (entry, evidence.clone())
+                (entry, evidence.iter().cloned().collect())
             };
             proof.extend(evidence);
             entries.push(reference.clone());
@@ -1522,6 +1569,7 @@ impl Context<'_, '_> {
                     );
                     return;
                 };
+                self.release_unfinished_maintenance(&owner, &run.activation);
                 let (outcome, reason, evidence) =
                     run.terminal
                         .unwrap_or((TerminalOutcome::Unknown, None, run.start.clone()));
@@ -1557,13 +1605,10 @@ impl Context<'_, '_> {
                 self.output.state.current_activation = None;
                 self.state.current_pending.clear();
             }
-            "agent_end"
-            | "turn_start"
-            | "turn_end"
-            | "auto_retry_start"
-            | "auto_retry_end"
-            | "auto_compaction_start"
-            | "auto_compaction_end" => {}
+            "agent_end" | "turn_start" | "turn_end" => {}
+            "auto_retry_start" | "auto_retry_end" | "compaction_start" | "compaction_end" => {
+                self.maintenance(&owner, value, kind)
+            }
             "message_start" => {
                 let reference = MessageRef::occurrence(
                     owner.clone(),
@@ -1571,6 +1616,18 @@ impl Context<'_, '_> {
                     vec!["live-message".into()],
                 )
                 .unwrap();
+                let inference = if text(&value["message"], "role") == Some("assistant") {
+                    Some(self.begin_work(
+                        &owner,
+                        "inference",
+                        OperationCategory::Inference {
+                            model: text(&value["message"], "model").map(str::to_owned),
+                        },
+                        None,
+                    ))
+                } else {
+                    None
+                };
                 self.state.message = Some(LiveMessage {
                     reference,
                     start: self.input.capture.source_position.clone(),
@@ -1579,6 +1636,7 @@ impl Context<'_, '_> {
                     value: value["message"].clone(),
                     closed_parts: BTreeSet::new(),
                     evidence: vec![self.input.canonical_observation.clone()],
+                    inference,
                 });
                 if text(&value["message"], "role") == Some("assistant") {
                     if let Some(run) = &mut self.state.outer {
@@ -1630,6 +1688,27 @@ impl Context<'_, '_> {
                 );
                 self.live_history(&owner, &mut current, revision, false);
                 if kind == "message_end" {
+                    if let Some(inference) = &current.inference {
+                        let payload = self.json(message, "/message");
+                        let (outcome, reason) = terminal(message).unwrap_or_else(|| {
+                            if text(message, "stopReason") == Some("toolUse") {
+                                (
+                                    TerminalOutcome::Succeeded,
+                                    Some(ExecutionCloseReason::VendorStop),
+                                )
+                            } else {
+                                (TerminalOutcome::Unknown, None)
+                            }
+                        });
+                        self.finish_work(
+                            &owner,
+                            inference,
+                            payload,
+                            outcome,
+                            reason,
+                            "pi/inference",
+                        );
+                    }
                     if text(message, "role") == Some("assistant") {
                         if let Some(run) = &mut self.state.outer {
                             run.terminal = terminal(message).map(|(outcome, reason)| {

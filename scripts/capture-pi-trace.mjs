@@ -9,6 +9,10 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { createInterface } from "node:readline";
 
+const scenario = process.argv[2] ?? "success";
+if (!["success", "retry", "compaction"].includes(scenario))
+  throw new Error("Expected success, retry, or compaction capture scenario");
+
 const root = await mkdtemp(join(tmpdir(), "sylph-pi-loopback-"));
 const config = join(root, "config");
 const sessions = join(root, "sessions");
@@ -37,6 +41,12 @@ const server = createServer(async (request, response) => {
       chunks.push(chunk);
     }
     requests.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+    if (scenario === "retry" && requests.length <= 2) {
+      const body = JSON.stringify({ error: { message: "Controlled overloaded provider attempt", type: "server_error", code: "overloaded" } });
+      providerFrames.push(`HTTP 503 ${body}\n`);
+      response.writeHead(503, { "content-type": "application/json" }).end(body);
+      return;
+    }
     response.writeHead(200, { "content-type": "text/event-stream" });
     const emit = (delta, finish = null) => {
       const event = {
@@ -48,7 +58,9 @@ const server = createServer(async (request, response) => {
       response.write(frame);
     };
     emit({ role: "assistant", content: "" });
-    for (const content of ["SYLPH_PI_", "A", "A", "_OK"]) emit({ content });
+    const content = scenario === "compaction" && requests.length > 1
+      ? ["SYLPH_PI_COMPACTION_SUMMARY"] : ["SYLPH_PI_", "A", "A", "_OK"];
+    for (const text of content) emit({ content: text });
     emit({}, "stop");
     providerFrames.push("data: [DONE]\n\n");
     response.end("data: [DONE]\n\n");
@@ -64,6 +76,10 @@ await writeFile(join(config, "models.json"), JSON.stringify({
   providers: { "sylph-capture": { baseUrl, api: "openai-completions", apiKey: "local-fixture",
     models: [{ id: "trace-marker", reasoning: false, input: ["text"], contextWindow: 8192, maxTokens: 512 }],
   } },
+}));
+await writeFile(join(config, "settings.json"), JSON.stringify({
+  retry: { enabled: true, maxRetries: 2, baseDelayMs: 10, provider: { maxRetries: 0 } },
+  compaction: { enabled: true, reserveTokens: 512, keepRecentTokens: 1 },
 }));
 const pending = new Map();
 let settle;
@@ -122,15 +138,26 @@ try {
   const admitted = await send("prompt-marker", "prompt", { message: "Reply with exactly SYLPH_PI_AA_OK." });
   if (!admitted.success) throw new Error(`Pi refused capture prompt: ${JSON.stringify(admitted)}`);
   await Promise.race([settled, failed]);
+  if (scenario === "compaction") {
+    const compacted = await send("compact-marker", "compact", { customInstructions: "Keep the controlled marker." });
+    if (!compacted.success) throw new Error(`Pi refused compaction: ${JSON.stringify(compacted)}`);
+  }
   await send("state-after", "get_state");
   await send("entries-after", "get_entries");
   if (streamError) throw streamError;
-  if (requests.length !== 1) throw new Error(`Expected one provider request, received ${requests.length}`);
+  const expectedRequests = scenario === "retry" ? 3 : scenario === "compaction" ? 2 : 1;
+  if (requests.length !== expectedRequests) throw new Error(`Expected ${expectedRequests} provider requests, received ${requests.length}`);
+  const events = rpc.filter((row) => row.direction === "in").map((row) => row.frame);
+  if (scenario === "retry" && (events.filter((event) => event.type === "auto_retry_start").length !== 2
+      || !events.some((event) => event.type === "auto_retry_end" && event.success && event.attempt === 2)))
+    throw new Error("The capture did not observe Pi's actual outer retry cycle");
+  if (scenario === "compaction" && !events.some((event) => event.type === "compaction_end" && event.result && !event.aborted))
+    throw new Error("The capture did not observe a successful compaction");
   const files = (await readdir(sessions)).filter((file) => file.endsWith(".jsonl"));
   if (files.length !== 1) throw new Error("Expected one retained Pi session");
   const native = await readFile(join(sessions, files[0]));
   const entries = native.toString("utf8").trimEnd().split("\n").map((line) => JSON.parse(line));
-  const assistant = entries.find((entry) => entry.message?.role === "assistant")?.message;
+  const assistant = entries.findLast((entry) => entry.message?.role === "assistant")?.message;
   if (assistant?.stopReason !== "stop" || assistant.content[0]?.text !== "SYLPH_PI_AA_OK")
     throw new Error("Pi did not persist the controlled successful response");
   const rawStdout = Buffer.concat(stdout);
@@ -139,7 +166,7 @@ try {
   await writeFile(join(root, "stdout.jsonl"), rawStdout);
   await writeFile(join(root, "stderr.txt"), Buffer.concat(stderr));
   await writeFile(join(root, "native.jsonl"), native);
-  await writeFile(join(root, "provider-request.json"), JSON.stringify(requests[0], null, 2) + "\n");
+  await writeFile(join(root, "provider-request.json"), JSON.stringify(requests, null, 2) + "\n");
   await writeFile(join(root, "provider-response.sse"), providerFrames.join(""));
   const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
   const prefixes = [await realpath(root), root].sort((a, b) => b.length - a.length);
@@ -156,11 +183,11 @@ try {
   const retainedRpc = jsonl(encodedRpc);
   const retainedNative = jsonl(native);
   const retainedStdout = jsonl(rawStdout);
-  await writeFile(join(root, "rpc-success.jsonl"), retainedRpc);
-  await writeFile(join(root, "native-success.jsonl"), retainedNative);
-  await writeFile(join(root, "stdout-success.jsonl"), retainedStdout);
+  await writeFile(join(root, `rpc-${scenario}.jsonl`), retainedRpc);
+  await writeFile(join(root, `native-${scenario}.jsonl`), retainedNative);
+  await writeFile(join(root, `stdout-${scenario}.jsonl`), retainedStdout);
   await writeFile(join(root, "capture.json"), JSON.stringify({
-    vendor: "pi", version, provider: "deterministic loopback OpenAI-compatible SSE fixture",
+    vendor: "pi", version, scenario, provider: "deterministic loopback OpenAI-compatible SSE fixture",
     expected_text: "SYLPH_PI_AA_OK", remote_model: false, tools_enabled: false,
     source_sha256: { rpc: digest(encodedRpc), stdout: digest(rawStdout), native: digest(native) },
     retained_sha256: { rpc: digest(retainedRpc), stdout: digest(retainedStdout), native: digest(retainedNative) },

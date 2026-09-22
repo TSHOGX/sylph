@@ -5,7 +5,7 @@ use std::{collections::BTreeSet, sync::Arc};
 use serde::{Deserialize, Serialize};
 use sylph_protocol::trace::*;
 use sylph_trace::{
-    mapping::{ArchiveHistoryContent, ArchiveSemantic},
+    mapping::{ArchiveEntryProof, ArchiveHistoryContent, ArchiveSemantic},
     reducer::{IndependentAppend, MessageUpdate, Reduction, Resolved, ResolvedObject},
 };
 
@@ -178,11 +178,28 @@ fn include_object(
         _ => return,
     }
     let mut evidence = BTreeSet::new();
+    let mut entry_proofs = imbl::OrdMap::new();
     for reference in support {
         work.support_claims_examined += 1;
         if let Some(claim) = claims.get(reference) {
             evidence.extend(claim.evidence.iter().cloned());
+            if matches!(value, TraceObject::HistoryEntry(_)) {
+                if let ObjectAddress::Occurrence { position, .. } = claim.claim_ref.address() {
+                    entry_proofs.insert(
+                        reference.clone(),
+                        ArchiveEntryProof {
+                            position: position.clone(),
+                            evidence: claim.evidence.clone(),
+                        },
+                    );
+                }
+            }
         }
+    }
+    if let TraceObject::HistoryEntry(entry) = value {
+        semantic
+            .history_entry_proofs
+            .insert(entry.entry_ref.clone(), entry_proofs);
     }
     semantic
         .object_evidence

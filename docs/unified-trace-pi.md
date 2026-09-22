@@ -39,15 +39,18 @@ missing stop reasons, mixed vendor field spellings, and cross-file fork pointers
 Historical vendor spellings remain legitimate external contracts. This does not permit
 compatibility aliases for Sylph's replaced internal model.
 
-The controlled Pi 0.85.1 success pair in
-[`fixtures/unified-trace/manifest.json`](../fixtures/unified-trace/manifest.json) was
+The controlled Pi 0.85.1 success, retry and compaction pairs in
+[`fixtures/unified-trace/manifest.json`](../fixtures/unified-trace/manifest.json) were
 captured from the installed CLI by `scripts/capture-pi-trace.mjs`. A loopback provider
 emits deterministic marker chunks, including two separate equal text deltas; Pi emits
 its own RPC events and writes its own native session. Tools, extensions, context files,
 personal configuration and startup network operations are disabled. This proves the
 observed Pi framing, streaming and persistence slice, not remote provider behavior or
 a live/native message identity certificate. The provider's content is synthetic and
-the fixture metadata labels it accordingly.
+the fixture metadata labels it accordingly. The `retry` scenario returns two controlled
+HTTP 503 failures before a successful response; the real CLI schedules both retries and
+persists both failed attempts. The `compaction` scenario completes the marker response
+before requesting manual compaction, retaining both the live result and native checkpoint.
 
 ## Acquisition and source generations
 
@@ -179,7 +182,9 @@ proof that the outer invocation settled.
 | `tool_execution_update` | Result-progress snapshot or segment according to the concrete event shape |
 | `tool_execution_end` | Operation's execution result and error flag, separate from the later admitted tool-result message |
 | `agent_end` | End of the inner run, retaining `willRetry` when exposed; outer Activation remains open |
-| `auto_retry_*`, `auto_compaction_*` | Retry/context work, with its own observed lifecycle and diagnostics |
+| `auto_retry_start` / `auto_retry_end` | One retry episode; successive scheduled attempts are progress results and the final retry result closes only that operation |
+| `compaction_start` / `compaction_end` | Context-maintenance operation; manual compaction can have no enclosing Activation |
+| Assistant response start/end | Observed inference operation with its own response outcome; failure remains visible when a later retry succeeds |
 | `agent_settled` | End of the outer active interval; correlate the terminal outcome with the final actual work |
 | Process exit, aborted transport, or native EOF | Source/supervisor fact; EOF does not create a vendor outcome |
 
@@ -195,6 +200,27 @@ An assistant `stopReason` describes its model response: `toolUse`, `stop`, `leng
 `aborted`, and `error` are not interchangeable. Message end with `toolUse` cannot finish
 the enclosing Activation. An aborted response preserves its partial content and
 termination reason. A successful activation may contain failed tools.
+
+The pinned 0.85.1 source and controlled retry/compaction captures use these exact
+maintenance event names. An observed assistant response can fail independently of the
+outer run; its error payload remains a runtime result of that inference operation.
+An explicit assistant `errorMessage` also remains a `reported_failure` diagnostic on
+that observed revision, including native-only captures with no inference boundary.
+A retry episode starts at its first scheduling event and retains later attempts as
+separate progress occurrences. The retry producer resets its counter only at
+`auto_retry_end`, so a second scheduling event does not invent a completed retry.
+Compaction outcome comes from its result, aborted flag and error fields; `willRetry`
+describes continuation, not compaction success. Missing starts remain explicit gaps.
+No maintenance boundary closes an Activation. A live compaction result can establish
+an opaque summary checkpoint but cannot supply an unobserved native checkpoint ID,
+exact context membership, or exact model request. Native checkpoint entries retain
+their independent identities and memberships.
+
+A native compaction's preserved-entry proof uses predecessor declarations from its own
+source generation and retained header observation. An RPC entry snapshot uses the entries
+inside that snapshot. Later agreeing observations do not extend an earlier proof: doing so
+would make its provenance depend on replay batch boundaries. A missing predecessor in the
+coherent view stays unresolved even when another view contains an entry with that ID.
 
 Native JSONL persists completed messages, not the full outer lifecycle. User-message
 boundaries, `stopReason: stop`, file EOF, and wall-clock gaps do not prove a settled

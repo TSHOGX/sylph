@@ -225,8 +225,13 @@ async fn assert_expected(corpus: &Corpus, fixture: &Fixture, store: &GenerationS
         assert_eq!(message.author, Author::Unknown);
     }
 
-    assert_eq!(reduced.executions.len(), 1);
-    let (execution, state) = reduced.executions.iter().next().unwrap();
+    let activations: Vec<_> = reduced
+        .executions
+        .iter()
+        .filter(|(reference, _)| matches!(reference, AnyObjectRef::Activation(_)))
+        .collect();
+    assert_eq!(activations.len(), 1);
+    let (execution, state) = activations[0];
     let AnyObjectRef::Activation(activation) = execution else {
         panic!("The marker run must close its own activation")
     };
@@ -512,3 +517,5 @@ async fn claude_retained_pair_preserves_record_identity_across_source_orders_and
 async fn pi_retained_pair_preserves_unjoined_live_messages_across_source_orders_and_restarts() {
     replay(&PI).await;
 }
+
+mod pi_maintenance;

@@ -182,8 +182,9 @@ fn recorded_rpc_equal_deltas_are_readable_before_message_end() {
             .reducer
             .resolve()
             .executions
-            .values()
-            .all(|execution| execution.outcome.known().is_none()));
+            .iter()
+            .filter(|(reference, _)| matches!(reference, AnyObjectRef::Activation(_)))
+            .all(|(_, execution)| execution.outcome.known().is_none()));
     }
     assert_eq!(expected, "SYLPH_PI_AA_OK");
     assert_eq!(stream.assistant_parts()[0].2, expected);
@@ -198,7 +199,14 @@ fn recorded_rpc_equal_deltas_are_readable_before_message_end() {
         .unwrap();
     stream.push(&frames[settled]);
     let reduced = stream.reducer.resolve();
-    assert_eq!(reduced.executions.len(), 1);
+    assert_eq!(
+        reduced
+            .executions
+            .keys()
+            .filter(|reference| matches!(reference, AnyObjectRef::Activation(_)))
+            .count(),
+        1
+    );
     assert_eq!(
         reduced.executions.values().next().unwrap().outcome.known(),
         Some(&TerminalOutcome::Succeeded)
@@ -238,8 +246,9 @@ fn reasoning_and_text_keep_their_content_indices_through_terminal_replacement() 
         .reducer
         .resolve()
         .executions
-        .values()
-        .all(|execution| execution.outcome.known().is_none()));
+        .iter()
+        .filter(|(reference, _)| matches!(reference, AnyObjectRef::Activation(_)))
+        .all(|(_, execution)| execution.outcome.known().is_none()));
 }
 
 #[test]
@@ -309,16 +318,26 @@ fn partial_tool_arguments_stay_opaque_until_the_complete_toolcall_arrives() {
         .objects
         .values()
         .filter_map(|resolved| match resolved.declaration.known() {
-            Some(TraceObject::Operation(operation)) => Some(operation),
+            Some(TraceObject::Operation(operation))
+                if matches!(operation.category, OperationCategory::Tool { .. }) =>
+            {
+                Some(operation)
+            }
             _ => None,
         })
         .collect();
     assert_eq!(operations.len(), 1);
     assert_eq!(operations[0].argument_state, ArgumentState::Sealed);
     assert!(reduced
+        .execution(&AnyObjectRef::Operation(
+            operations[0].operation_ref.clone()
+        ))
+        .is_none_or(|execution| execution.outcome.known().is_none()));
+    assert!(reduced
         .executions
-        .values()
-        .all(|execution| execution.outcome.known().is_none()));
+        .iter()
+        .filter(|(reference, _)| matches!(reference, AnyObjectRef::Activation(_)))
+        .all(|(_, execution)| execution.outcome.known().is_none()));
 }
 
 #[test]

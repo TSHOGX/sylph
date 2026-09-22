@@ -46,11 +46,19 @@ The retained material is:
   with source/retained digests and explicit path substitution/JSON reserialization.
   These preserve semantic bodies and identity relationships; they do not claim the
   sanitized bytes reproduce original lexical encoding or establish unobserved Pi joins.
-- The Pi 0.85.1 success pair in that same manifest uses the real CLI with a deterministic
-  loopback provider. `scripts/capture-pi-trace.mjs` preserves independent stdout, RPC
+- The Pi 0.85.1 success, retry and compaction pairs in that same manifest use the real CLI
+  with a deterministic loopback provider. `scripts/capture-pi-trace.mjs` preserves independent stdout, RPC
   direction records and native output. Its repeated equal text deltas and settled outer
   run establish Pi's emitted shapes; the synthetic provider response establishes neither
   a remote model's behavior nor a missing live/native identity join.
+  The retry capture includes two failed inference responses followed by recovery;
+  manual compaction occurs after outer settlement. Production replay in
+  `crates/server/src/trace/worker/tests/corpus/pi_maintenance.rs` checks independent
+  operation outcomes, exact result payloads, native history and checkpoint identity,
+  the open outer interval at retry completion, and same-cut provenance across cold,
+  live-first, alternating, duplicate-delivery and restarted schedules. Synthetic
+  malformed-result and missing-end cases separately test conservative outcomes and
+  episode isolation; they are not vendor captures.
 - The retained Codex 0.150.1 [delegation capture](measurements/codex/captures/s10_delegation_fork.jsonl)
   supplies all inbound app-server frames to the production replay in
   `crates/server/src/trace/worker/tests/delegation.rs`. A pinned digest guards the complete

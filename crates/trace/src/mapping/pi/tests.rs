@@ -69,6 +69,18 @@ fn run(values: &[Value], live: bool) -> Vec<MapOutput> {
                 Fact::Declare {
                     object: TraceObject::HistoryEntry(entry),
                 } => {
+                    archive
+                        .semantic_mut()
+                        .history_entry_proofs
+                        .entry(entry.entry_ref.clone())
+                        .or_default()
+                        .insert(
+                            claim.claim_ref.clone(),
+                            crate::mapping::ArchiveEntryProof {
+                                position: capture.source_position.clone(),
+                                evidence: claim.evidence.clone(),
+                            },
+                        );
                     archive.semantic_mut().object_evidence.insert(
                         AnyObjectRef::HistoryEntry(entry.entry_ref.clone()),
                         claim.evidence.clone().into(),
@@ -276,8 +288,11 @@ fn recorded_failed_rpc_run_settles_only_after_inner_end() {
     assert_eq!(
         reduced
             .executions
-            .values()
-            .filter(|execution| execution.outcome.known() == Some(&TerminalOutcome::Failed))
+            .iter()
+            .filter(
+                |(reference, execution)| matches!(reference, AnyObjectRef::Activation(_))
+                    && execution.outcome.known() == Some(&TerminalOutcome::Failed)
+            )
             .count(),
         1
     );
@@ -779,3 +794,5 @@ fn intrinsic_source_owner_requires_native_header_and_keeps_its_generation() {
     );
     assert!(run(&[state()], true)[0].source_owners.is_empty());
 }
+
+mod maintenance;

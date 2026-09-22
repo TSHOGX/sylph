@@ -67,6 +67,78 @@
       "retained_sha256": "bdcc01cd679cafafb9df835214ae855a7f7f0c7952004d3e40e2f9f9a015f2c0",
       "records": 5,
       "result": "failed model response: retired configured model; genuine agent_settled observed"
+    },
+    {
+      "vendor": "pi",
+      "cli_version": "0.85.1",
+      "captured_on": "2026-09-22",
+      "path": "pi/rpc-retry.jsonl",
+      "source_sha256": "f796a7062cf012b765a745aed5ecd6c8c349a1537d5c04b449dd3ac6318d3b98",
+      "retained_sha256": "788529c8044349bbc42714174074c8189458609fa1c5bca46ca6cc4ddae64442",
+      "records": 40,
+      "result": "two observed failed attempts followed by a successful retry in one outer run",
+      "method": "scripts/capture-pi-trace.mjs retry; real CLI, deterministic loopback provider, no remote model, tools, extensions or personal configuration",
+      "sanitization": "Parse JSON records, replace only temporary capture path prefixes, serialize compact JSONL. Preserve IDs, values, event order and duplicate delta occurrences. RPC direction wrappers are recorder metadata; stdout is captured independently as exact source bytes before sanitization."
+    },
+    {
+      "vendor": "pi",
+      "cli_version": "0.85.1",
+      "captured_on": "2026-09-22",
+      "path": "pi/stdout-retry.jsonl",
+      "source_sha256": "d2ebae4c2b01705e4c333b5d7bd29daf84cf9921a14db09abc34ba83b80d3d4c",
+      "retained_sha256": "eca2587ef6817843663d86816a77a7d5b6466e73e6b48a69ce459e96baacd20a",
+      "records": 35,
+      "result": "two observed failed attempts followed by a successful retry in one outer run",
+      "method": "scripts/capture-pi-trace.mjs retry; real CLI, deterministic loopback provider, no remote model, tools, extensions or personal configuration",
+      "sanitization": "Parse JSON records, replace only temporary capture path prefixes, serialize compact JSONL. Preserve IDs, values, event order and duplicate delta occurrences. RPC direction wrappers are recorder metadata; stdout is captured independently as exact source bytes before sanitization."
+    },
+    {
+      "vendor": "pi",
+      "cli_version": "0.85.1",
+      "captured_on": "2026-09-22",
+      "path": "pi/native-retry.jsonl",
+      "source_sha256": "88246dba60ba546a334a676f14dc379e81f1366fef82764570702b78390e9986",
+      "retained_sha256": "6314d0240bfa95034e12bb91fa20a29d44926801ab6d1a9c0643238601cd9040",
+      "records": 7,
+      "result": "two observed failed attempts followed by a successful retry in one outer run",
+      "method": "scripts/capture-pi-trace.mjs retry; real CLI, deterministic loopback provider, no remote model, tools, extensions or personal configuration",
+      "sanitization": "Parse JSON records, replace only temporary capture path prefixes, serialize compact JSONL. Preserve IDs, values, event order and duplicate delta occurrences. RPC direction wrappers are recorder metadata; stdout is captured independently as exact source bytes before sanitization."
+    },
+    {
+      "vendor": "pi",
+      "cli_version": "0.85.1",
+      "captured_on": "2026-09-22",
+      "path": "pi/rpc-compaction.jsonl",
+      "source_sha256": "ce99fabb4785f52d775cec759e1d701f95bbce5b53ffb58f0b87f8edf8131ae8",
+      "retained_sha256": "39fc3f1a587774bd433c0a21c8d62c557d62b627180b2cbfe7ce32f26d25cad0",
+      "records": 29,
+      "result": "successful manual compaction after outer settlement, with retained native checkpoint",
+      "method": "scripts/capture-pi-trace.mjs compaction; real CLI, deterministic loopback provider, no remote model, tools, extensions or personal configuration",
+      "sanitization": "Parse JSON records, replace only temporary capture path prefixes, serialize compact JSONL. Preserve IDs, values, event order and duplicate delta occurrences. RPC direction wrappers are recorder metadata; stdout is captured independently as exact source bytes before sanitization."
+    },
+    {
+      "vendor": "pi",
+      "cli_version": "0.85.1",
+      "captured_on": "2026-09-22",
+      "path": "pi/stdout-compaction.jsonl",
+      "source_sha256": "2b326650a0a54e384b6a1ba7da88f8207da027b1ab344d7e692d601680ad9b79",
+      "retained_sha256": "f935c0cecdd4c1680261bb07aaebbf8f356ce4a2422fad5b62df93def7d11338",
+      "records": 23,
+      "result": "successful manual compaction after outer settlement, with retained native checkpoint",
+      "method": "scripts/capture-pi-trace.mjs compaction; real CLI, deterministic loopback provider, no remote model, tools, extensions or personal configuration",
+      "sanitization": "Parse JSON records, replace only temporary capture path prefixes, serialize compact JSONL. Preserve IDs, values, event order and duplicate delta occurrences. RPC direction wrappers are recorder metadata; stdout is captured independently as exact source bytes before sanitization."
+    },
+    {
+      "vendor": "pi",
+      "cli_version": "0.85.1",
+      "captured_on": "2026-09-22",
+      "path": "pi/native-compaction.jsonl",
+      "source_sha256": "2509629c7184ab212ec628f7897b3312e18f5200527ad69a903c37586e7d4836",
+      "retained_sha256": "2cdb10ae277a3ec40c0d8765ed14db6c95b16f18f25a1749b491debf8d53ccab",
+      "records": 6,
+      "result": "successful manual compaction after outer settlement, with retained native checkpoint",
+      "method": "scripts/capture-pi-trace.mjs compaction; real CLI, deterministic loopback provider, no remote model, tools, extensions or personal configuration",
+      "sanitization": "Parse JSON records, replace only temporary capture path prefixes, serialize compact JSONL. Preserve IDs, values, event order and duplicate delta occurrences. RPC direction wrappers are recorder metadata; stdout is captured independently as exact source bytes before sanitization."
     }
   ]
 }

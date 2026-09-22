@@ -165,6 +165,15 @@ membership and reported usage. Controlled real captures establish a Claude succe
 Pi failed settlement, and a Pi 0.85.1 success pair against a deterministic loopback
 provider. The latter establishes actual Pi streaming/persistence while clearly labeling
 the provider's synthetic marker bytes; it supplies no missing live/native certificate.
+The controlled Pi retry and manual-compaction pairs now retain failed inference attempts,
+retry scheduling/progress and recovery, and separate live/native summary checkpoints.
+Production replay verifies their exact result bytes, own outcomes, outer settlement and
+unchanged claims/reader projections across source ordering, duplicate delivery, restart
+and same-cut rebuild. This exposed compaction membership proofs borrowing later snapshot
+evidence; predecessor proofs now remain scoped to their coherent source view. Missing
+maintenance ends release the association without inventing completion, and explicit native
+assistant errors remain diagnostics without invented execution. These cases extend S2
+acceptance; the complete vendor clause/certificate audit remains open.
 
 ### Runtime and reader cutover checkpoint
 
@@ -251,7 +260,7 @@ and same-cut rebuilding. It retains all inbound frame bytes from the pinned reco
 artifact. A sole unclosed observed activation now remains visible in its agent header after
 an earlier activation terminates, even without live following coverage. The capture supplies
 no child follow-up, spawn result, delayed sidecar or native/live pair; these remain separate
-conformance work. Distinct-scope epoch provenance fails the gate above and remains open.
+conformance work. Distinct-scope epoch provenance is covered by the closed S1.1 gate above.
 
 Reader candidates now carry source and target authorization metadata in covering indexes.
 Current grants and deletion epochs filter candidates before body hydration, including

@@ -128,10 +128,19 @@ pub struct ArchiveContext {
 pub struct ArchiveSemantic {
     pub agents: imbl::OrdMap<AgentRef, AgentThread>,
     pub history_entries: imbl::OrdMap<EntryRef, HistoryEntry>,
+    pub history_entry_proofs: imbl::OrdMap<EntryRef, imbl::OrdMap<ClaimRef, ArchiveEntryProof>>,
     pub history_contents: imbl::OrdMap<EntryRef, imbl::Vector<ArchiveHistoryContent>>,
     pub operations: imbl::OrdMap<OperationRef, Operation>,
     pub object_evidence: imbl::OrdMap<AnyObjectRef, imbl::Vector<ObservationRef>>,
     pub result_operations: imbl::OrdMap<ResultRef, OperationRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchiveEntryProof {
+    /// The declaration's source view, kept separate from other observations of
+    /// the same native entry so derived membership has reproducible provenance.
+    pub position: SourcePosition,
+    pub evidence: Vec<ObservationRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
