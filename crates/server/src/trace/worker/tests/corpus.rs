@@ -518,4 +518,42 @@ async fn pi_retained_pair_preserves_unjoined_live_messages_across_source_orders_
     replay(&PI).await;
 }
 
+fn assert_projection(actual: &Projection, expected: &Projection) {
+    fn maps<K: Ord + std::fmt::Debug, V: PartialEq + std::fmt::Debug>(
+        name: &str,
+        actual: &BTreeMap<K, V>,
+        expected: &BTreeMap<K, V>,
+    ) {
+        for key in actual.keys().chain(expected.keys()) {
+            if actual.get(key) != expected.get(key) {
+                panic!("{name} differs: actual_count={} expected_count={}\nkey={:.250}\nactual={:.2200}\nexpected={:.2200}",actual.len(),expected.len(),format!("{key:?}"),format!("{:?}",actual.get(key)),format!("{:?}",expected.get(key)));
+            }
+        }
+    }
+    maps("claims", &actual.claims, &expected.claims);
+    maps("reader rows", &actual.reader.rows, &expected.reader.rows);
+    maps(
+        "memberships",
+        &actual.reader.memberships,
+        &expected.reader.memberships,
+    );
+    maps("anchors", &actual.reader.anchors, &expected.reader.anchors);
+    maps(
+        "read counts",
+        &actual.reader.read_counts,
+        &expected.reader.read_counts,
+    );
+    maps(
+        "membership counts",
+        &actual.reader.membership_counts,
+        &expected.reader.membership_counts,
+    );
+    maps(
+        "payloads",
+        &actual.reader.payloads,
+        &expected.reader.payloads,
+    );
+}
+
+mod claude_workflow;
 mod pi_maintenance;

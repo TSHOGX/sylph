@@ -14,6 +14,8 @@ use super::{
 
 pub struct ClaudeMapper;
 
+mod workflow;
+
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct ClaudeState {
     streams: BTreeMap<String, LiveStream>,
@@ -34,7 +36,7 @@ struct LiveStream {
 
 impl SemanticMapper for ClaudeMapper {
     fn build(&self) -> &'static str {
-        "claude-2"
+        "claude-3"
     }
     fn map(&self, input: MapInput<'_>) -> MapOutput {
         let mut output = MapOutput {
@@ -105,7 +107,7 @@ impl Context<'_, '_> {
     fn add(&mut self, owner: &AgentRef, slot: &str, fact: Fact) {
         self.output
             .claims
-            .push(claim(self.input, owner, slot, "claude-2", fact));
+            .push(claim(self.input, owner, slot, ClaudeMapper.build(), fact));
     }
     fn object(&mut self, owner: &AgentRef, slot: &str, object: TraceObject) {
         self.add(owner, slot, Fact::Declare { object });
@@ -200,6 +202,10 @@ impl Context<'_, '_> {
     }
 
     fn native(&mut self, value: &Value) {
+        if value.get("sessionId").is_none() && value.get("key").is_some() {
+            self.workflow_journal(value);
+            return;
+        }
         let Some(root) = text(value, "sessionId").and_then(|id| self.root(id)) else {
             self.issue(
                 None,
@@ -925,6 +931,9 @@ impl Context<'_, '_> {
                 &format!("{slot}/structured"),
             );
         }
+        if text(structured, "taskType") == Some("local_workflow") {
+            self.workflow_launch(owner, root, &operation, structured, slot);
+        }
         if let Some(child_id) = text(structured, "agentId") {
             let child = Self::child(root, child_id);
             self.declare_agent(
@@ -1103,6 +1112,10 @@ impl Context<'_, '_> {
             return;
         };
         let child = &provenance.agent;
+        if value.get("runId").is_some() {
+            self.workflow_manifest(value, &provenance);
+            return;
+        }
         if !matches!(child,AgentRef::Embedded{namespace,..}if namespace=="claude.agent") {
             self.issue(
                 None,

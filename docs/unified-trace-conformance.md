@@ -59,6 +59,16 @@ The retained material is:
   live-first, alternating, duplicate-delivery and restarted schedules. Synthetic
   malformed-result and missing-end cases separately test conservative outcomes and
   episode isolation; they are not vendor captures.
+- The [Claude workflow bundles](../fixtures/unified-trace/claude/workflow/capture.json)
+  retain a 2.1.238 successful two-child demo and a 2.1.245 failed host with two journal
+  starts and no returns. Each bundle keeps launch records, manifest and journal with
+  original record numbers and digests; the successful bundle also keeps native child
+  input/answer records. Production replay in
+  `crates/server/src/trace/worker/tests/corpus/claude_workflow.rs` verifies exact results,
+  native answer ownership, independent host/activity/invocation outcomes, reported clocks
+  and scoped usage, late source/launch joins, restart, duplicate delivery and same-cut
+  rebuilding. These historical artifacts do not establish absent child Activation
+  boundaries or equality between progress indices and journal keys.
 - The retained Codex 0.150.1 [delegation capture](measurements/codex/captures/s10_delegation_fork.jsonl)
   supplies all inbound app-server frames to the production replay in
   `crates/server/src/trace/worker/tests/delegation.rs`. A pinned digest guards the complete

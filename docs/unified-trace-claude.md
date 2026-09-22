@@ -181,7 +181,7 @@ tool names cannot prove which operation executed or whether it succeeded.
 | Synchronous result with explicit child identity and terminal status | Caller result plus that particular child execution outcome, when the source establishes the run association |
 | Delegate metadata `toolUseId` | Child-to-invocation relation; the invocation's owner establishes the parent |
 | Delegate metadata `parentAgentId` | Explicit child-to-parent agent relation, independent of metadata directory depth |
-| Workflow result `runId` joined to manifest `runId` and manifest `agentId` | Workflow Resource/Operation to actual child references; one host can fan out to several agents |
+| Workflow result `runId` joined to manifest `runId` and `workflowProgress[].agentId` | Workflow Resource/Operation to actual child references; one host can fan out to several agents |
 | Task event `task_id`, `task_type`, optional `tool_use_id` | Task resource/activity identity and routing; the native child ID requires its own documented join |
 | Forwarded `parent_tool_use_id` | Multiplexing/host correlation; it is not generally equal to native `agentId` |
 
@@ -201,6 +201,46 @@ same child AgentRef. Waiting, status polling, result notification, and closing a
 each have their own operations/relations. None creates another child. The parent's
 receipt of a summary is a new delivery occurrence related to the child's answer; the
 child's answer retains its original owner.
+
+### Workflow bundles
+
+The retained Claude 2.1.238 workflow bundle in
+[`fixtures/unified-trace/claude/workflow/manifest.json`](../fixtures/unified-trace/claude/workflow/manifest.json)
+records an asynchronous launch, a completed manifest, invocation journal and two native
+child transcripts. The capture inventory records the selected original record numbers,
+source digests and path substitutions; omitted predecessor records remain missing.
+The paired Claude 2.1.245 failed probe retains a failed host manifest that knows one
+child, plus a journal with two child starts and no results. A missing child ID in that
+manifest cannot erase the second independently identified child or close either invocation.
+The [capture inventory](../fixtures/unified-trace/claude/workflow/capture.json) records both
+source versions and extraction boundaries.
+
+The launch result's `runId` identifies the workflow resource, while the enclosing
+`tool_result.tool_use_id` identifies its creator operation. `taskId` remains a task
+handle, not a child ID. A manifest uses its retained companion-transcript association
+and matching launch `runId`; neither the filename nor the capture's routing subject
+establishes its owner. Its `status` governs the workflow resource alone. The manifest's
+full result and progress remain runtime representations of the invocation, independent
+of the earlier caller-facing launch result.
+
+Only `workflowProgress` entries with explicit `agentId` identify children. Phase rows,
+queued entries without an ID and `agentCount` do not create agents. A progress entry
+can establish a child interaction and an activity resource scoped to its run, index and
+attempt, with its own reported state and usage. Its index and attempt are not
+assumed equal to the invocation journal's `key`. Reported workflow totals and child
+counters remain distinct scopes.
+
+The manifest's `startTime` and each activity's `startedAt` are reported wall-clock
+milliseconds. `durationMs` is a reported duration; it does not manufacture a missing
+terminal timestamp. Journal records without timestamps gain no elapsed-time claim.
+
+The launch result's `transcriptDir` locates its journal. A retained source definition
+and that exact captured locator bind journal records to the workflow. Each journal
+`key` identifies a delegation operation; `started` and `result` describe that
+invocation, with `agentId` naming its target. A result preserves its exact value and
+finishes that invocation. It does not manufacture a child Activation boundary or a
+delivery of the parent's summary. Missing journals and unmatched locators remain gaps,
+and a failed workflow cannot finish an invocation whose result was not observed.
 
 ## Lifecycle and result authority
 

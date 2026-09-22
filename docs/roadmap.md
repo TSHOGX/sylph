@@ -175,6 +175,17 @@ maintenance ends release the association without inventing completion, and expli
 assistant errors remain diagnostics without invented execution. These cases extend S2
 acceptance; the complete vendor clause/certificate audit remains open.
 
+Claude workflow bundles now retain resource identity and own status separately from child
+activity snapshots and keyed journal invocations. Source inventory binds manifests and
+journals to the observed containing transcript; retained launch IDs and exact journal
+locators supply the remaining joins. The recorded success pair preserves both child
+answers and scoped usage. The recorded failed host knows one child in its manifest but
+two in its journal, with neither invocation returned; host failure cannot erase the
+second child or finish either invocation. Production replay covers both bundles with
+late joins, restart, redelivery and same-cut rebuilding. Progress indices and journal
+keys remain unjoined, and absent child Activation boundaries remain unknown. Broader
+vendor certificates, reusable-child delivery cases and reader acceptance remain open.
+
 ### Runtime and reader cutover checkpoint
 
 The product path is now acquisition → durable capture/upload → evidence → pure mapping

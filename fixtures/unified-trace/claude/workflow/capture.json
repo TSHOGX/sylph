@@ -1,0 +1,115 @@
+{
+  "method": "Existing native Claude 2.1.238 minimal workflow demo. Full selected records, manifest, journal and metadata; no vendor process executed. Root keeps only the invocation and launch result; child files omit the skill-listing attachment. Missing predecessor records remain missing. Path prefix substitution and compact JSON reserialization preserve every other key/value, IDs and message body. The Claude 2.1.245 failed workflow probe retains its complete manifest and journal plus the invoking root records. Its manifest knows one child; its journal independently records two starts and no results. The scripts in both manifests are retained evidence and were not executed.",
+  "captures": [
+    {
+      "path": "root.jsonl",
+      "source_locator": "~/.claude/projects/-Users-hsw--agents/9074a8da-e264-4e3a-87c3-95211e986faf.jsonl",
+      "source_sha256": "9996563eb65d9c63eec720710495497708bf53c711d77bc3cd1a104c64d7a09f",
+      "source_lines": [
+        80,
+        85
+      ],
+      "retained_sha256": "dc34f128b5c5c4a8ccfd7f3564d2369f35a1f58e5698a07d41dce6bea0792a59",
+      "records": 2,
+      "version": [
+        "2.1.238"
+      ]
+    },
+    {
+      "path": "manifest.json",
+      "source_locator": "~/.claude/projects/-Users-hsw--agents/9074a8da-e264-4e3a-87c3-95211e986faf/workflows/wf_8078fad7-6fc.json",
+      "source_sha256": "a058d47cf8b35d5691cb1c552df12a4821c10bfba5262ce7688b31afef4682cb",
+      "source_lines": null,
+      "retained_sha256": "71b76c40a74b8d60a4f193acc98001982403a6a0d3baa4752ae1f9f5e9ce3c7c",
+      "records": 1,
+      "version": []
+    },
+    {
+      "path": "journal.jsonl",
+      "source_locator": "~/.claude/projects/-Users-hsw--agents/9074a8da-e264-4e3a-87c3-95211e986faf/subagents/workflows/wf_8078fad7-6fc/journal.jsonl",
+      "source_sha256": "fdb33fe3445518003b1d8626a0a75eb1c21f8094ef07081e2a253fb20881e0f8",
+      "source_lines": null,
+      "retained_sha256": "fdb33fe3445518003b1d8626a0a75eb1c21f8094ef07081e2a253fb20881e0f8",
+      "records": 4,
+      "version": []
+    },
+    {
+      "path": "agent-ab4e2619af6457242.jsonl",
+      "source_locator": "~/.claude/projects/-Users-hsw--agents/9074a8da-e264-4e3a-87c3-95211e986faf/subagents/workflows/wf_8078fad7-6fc/agent-ab4e2619af6457242.jsonl",
+      "source_sha256": "52697ea1cc3c430334e65787de84bba0b594ea890653257410cc9cbb21ecd10e",
+      "source_lines": [
+        1,
+        3
+      ],
+      "retained_sha256": "9e7b1eb7d23e75080b973198e55988bc6746abd01485dc3da5cd77e1c847e0e7",
+      "records": 2,
+      "version": [
+        "2.1.238"
+      ]
+    },
+    {
+      "path": "agent-ab4e2619af6457242.meta.json",
+      "source_locator": "~/.claude/projects/-Users-hsw--agents/9074a8da-e264-4e3a-87c3-95211e986faf/subagents/workflows/wf_8078fad7-6fc/agent-ab4e2619af6457242.meta.json",
+      "source_sha256": "768d1630f4b8b8a2a989b38ab37b0057091afe3e93276fec5aa789433b9c0e2b",
+      "source_lines": null,
+      "retained_sha256": "9e282bb0224d052eee9a4788b298ec9107f647bd8eca89a3af2f9780c69492a8",
+      "records": 1,
+      "version": []
+    },
+    {
+      "path": "agent-aa28b7d5605fea7e9.jsonl",
+      "source_locator": "~/.claude/projects/-Users-hsw--agents/9074a8da-e264-4e3a-87c3-95211e986faf/subagents/workflows/wf_8078fad7-6fc/agent-aa28b7d5605fea7e9.jsonl",
+      "source_sha256": "6feb88b32b9711277acb5295ce8284dfe4c718c9441f39d59e13f92acf7cd706",
+      "source_lines": [
+        1,
+        3
+      ],
+      "retained_sha256": "7e6aa709b2ace2634a68a359397a11b59b2fdd84d9846c6bae9ccc392fce766d",
+      "records": 2,
+      "version": [
+        "2.1.238"
+      ]
+    },
+    {
+      "path": "agent-aa28b7d5605fea7e9.meta.json",
+      "source_locator": "~/.claude/projects/-Users-hsw--agents/9074a8da-e264-4e3a-87c3-95211e986faf/subagents/workflows/wf_8078fad7-6fc/agent-aa28b7d5605fea7e9.meta.json",
+      "source_sha256": "768d1630f4b8b8a2a989b38ab37b0057091afe3e93276fec5aa789433b9c0e2b",
+      "source_lines": null,
+      "retained_sha256": "9e282bb0224d052eee9a4788b298ec9107f647bd8eca89a3af2f9780c69492a8",
+      "records": 1,
+      "version": []
+    },
+    {
+      "path": "failed-root.jsonl",
+      "source_locator": "~/.claude/projects/-Users-hsw-Workspace-sylph-web/f0795606-660f-4d7d-9146-448198093b59.jsonl",
+      "source_sha256": "3ff426d1155916bcceb10c5494cd5ae06578df70c52786063d6a3bba3816a94b",
+      "source_lines": [
+        8,
+        9
+      ],
+      "retained_sha256": "cb14893e77aa93f928122969eb83900597931d380812d76521a70c5c6c8d5512",
+      "records": 2,
+      "version": [
+        "2.1.245"
+      ]
+    },
+    {
+      "path": "failed-manifest.json",
+      "source_locator": "~/.claude/projects/-Users-hsw-Workspace-sylph-web/f0795606-660f-4d7d-9146-448198093b59/workflows/wf_39a54a67-df2.json",
+      "source_sha256": "1cfe48a5d77c2b2c898849ef3a8d9e323b335d08fe97d81409659fff1e44f733",
+      "source_lines": null,
+      "retained_sha256": "191b775ac8666a14d1ea72c5e931f4c08226a5d09e9b76bdfdde8fd6a92eec22",
+      "records": 1,
+      "version": []
+    },
+    {
+      "path": "failed-journal.jsonl",
+      "source_locator": "~/.claude/projects/-Users-hsw-Workspace-sylph-web/f0795606-660f-4d7d-9146-448198093b59/subagents/workflows/wf_39a54a67-df2/journal.jsonl",
+      "source_sha256": "b3075d4cee418a51d04f929abb5613766c7128d3a8cf689a3706769035f271b9",
+      "source_lines": null,
+      "retained_sha256": "b3075d4cee418a51d04f929abb5613766c7128d3a8cf689a3706769035f271b9",
+      "records": 2,
+      "version": []
+    }
+  ]
+}

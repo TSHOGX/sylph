@@ -962,3 +962,5 @@ fn interleaved_live_messages_keep_their_owners_and_same_index_parts_distinct() {
         .contains(&capture(3, true).observation_ref));
     assert_eq!(reduce(&outputs).histories.len(), 2);
 }
+
+mod workflow;

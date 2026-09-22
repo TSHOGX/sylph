@@ -287,7 +287,10 @@ pub fn lookup(vendor: &str, id: &NativeId) -> Result<Option<NativeSummary>> {
 }
 
 pub fn sources(vendor: &str, id: &NativeId) -> Result<Vec<NativeSource>> {
-    let all = files(vendor);
+    sources_from(vendor, id, files(vendor))
+}
+
+fn sources_from(vendor: &str, id: &NativeId, all: Vec<SessionCandidate>) -> Result<Vec<NativeSource>> {
     let metadata: Vec<_> = all
         .iter()
         .filter_map(|file| summary(vendor, file).map(|summary| (file.path.clone(), summary)))
@@ -341,7 +344,20 @@ pub fn sources(vendor: &str, id: &NativeId) -> Result<Vec<NativeSource>> {
                     );
                     Some(path.to_string_lossy().into_owned())
                 } else {
-                    None
+                    // Workflow manifests and journals belong to the containing
+                    // transcript bundle. The companion's retained native record
+                    // proves the root identity; directory names never mint it.
+                    let relative = candidate.path.strip_prefix(&interior).ok();
+                    let workflow_manifest = relative.is_some_and(|path| {
+                        path.parent() == Some(Path::new("workflows"))
+                            && path.extension().is_some_and(|ext| ext == "json")
+                    });
+                    let workflow_journal = relative.is_some_and(|path| {
+                        path.starts_with("subagents/workflows")
+                            && path.file_name().is_some_and(|name| name == "journal.jsonl")
+                    });
+                    (workflow_manifest || workflow_journal)
+                        .then(|| root.to_string_lossy().into_owned())
                 };
                 paths.insert(candidate.path, companion);
             }
@@ -508,6 +524,31 @@ fn native_owner(vendor: &str, path: &Path) -> Option<(sylph_protocol::NativeOwne
 mod tests {
     use super::*;
     use sylph_protocol::NativeOwner;
+
+    #[test]
+    fn workflow_bundle_sources_cite_the_observed_root_transcript_without_filename_identity() {
+        let directory = std::env::temp_dir().join(format!("sylph-workflow-inventory-{}", uuid::Uuid::new_v4()));
+        let root = directory.join("misleading-root.jsonl");
+        let bundle = root.with_extension("");
+        let manifest = bundle.join("workflows/wf-one.json");
+        let journal = bundle.join("subagents/workflows/wf-one/journal.jsonl");
+        std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
+        std::fs::write(&root, b"{\"type\":\"user\",\"sessionId\":\"observed-root\",\"uuid\":\"request\",\"message\":{\"role\":\"user\",\"content\":\"fixture\"}}\n").unwrap();
+        std::fs::write(&manifest, b"{\"runId\":\"wf-one\",\"status\":\"failed\"}").unwrap();
+        std::fs::write(&journal, b"{\"type\":\"started\",\"key\":\"invocation\",\"agentId\":\"actual-child\"}\n").unwrap();
+        let sources = sources_from("claude", &NativeId::new("observed-root"), vec![SessionCandidate::of(&root).unwrap()]).unwrap();
+        assert_eq!(sources.len(), 3);
+        for (path, format) in [(&manifest, NativeSourceFormat::Snapshot), (&journal, NativeSourceFormat::Jsonl)] {
+            let source = sources.iter().find(|source| source.locator == path.to_string_lossy()).unwrap();
+            assert_eq!(source.format, format);
+            assert_eq!(source.owner, Some(NativeOwner::Session { native_id: NativeId::new("observed-root") }));
+            assert_eq!(source.companion_locator.as_deref(), root.to_str());
+            assert_eq!(source.identity_record_ordinal, None);
+        }
+        assert!(sources_from("claude", &NativeId::new("misleading-root"), vec![SessionCandidate::of(&root).unwrap()]).is_err());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn physical_history_bases_are_followed_without_selecting_one_duplicate_locator() {

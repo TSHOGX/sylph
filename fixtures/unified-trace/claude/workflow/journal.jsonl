@@ -1,0 +1,4 @@
+{"type":"started","key":"v2:0f4cffd795d71208869f1185e681b9d17dd86987f9034b61d41b32f2fd8f75b1","agentId":"ab4e2619af6457242"}
+{"type":"started","key":"v2:e184b02b2542f4493ebda5b31cc5fa355ed3ccca98b9a471eb3ef80736eace9c","agentId":"aa28b7d5605fea7e9"}
+{"type":"result","key":"v2:0f4cffd795d71208869f1185e681b9d17dd86987f9034b61d41b32f2fd8f75b1","agentId":"ab4e2619af6457242","result":"hello"}
+{"type":"result","key":"v2:e184b02b2542f4493ebda5b31cc5fa355ed3ccca98b9a471eb3ef80736eace9c","agentId":"aa28b7d5605fea7e9","result":"world"}
