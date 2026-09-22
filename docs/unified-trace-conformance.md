@@ -117,6 +117,18 @@ The retained material is:
   resource identity and reader-visible counter units through reread, interleaving,
   restart and rebuild. Replacement, missing-row and idless public-event scenarios are
   explicitly synthetic variations, not additional vendor recordings.
+- The [Codex reusable-child excerpt](../fixtures/unified-trace/codex/reuse/capture.json)
+  retains a root and one child from the native structural inventory, using
+  `scripts/capture-codex-reuse.py`. Two child activations, equal-text task deliveries,
+  an intervening non-triggering message, child replies, activity notices and parent
+  calls retain their actual IDs, clocks and original source coordinates. Prose is
+  replaced by deterministic equality-preserving markers and headers are structural
+  extracts; this is neither a complete history nor a live/native pair. Production
+  replay in `crates/server/src/trace/worker/tests/corpus/codex_reuse.rs` checks stable
+  identities and immutable late routing refinements under independent source order,
+  duplicate receipts, rereads, restarts and same-cut rebuild. Synthetic two-peer
+  routing additionally tests independent author/recipient certificates. Unknown
+  selected heads and request inclusion remain unknown.
 - The retained Codex 0.150.1 [delegation capture](measurements/codex/captures/s10_delegation_fork.jsonl)
   supplies all inbound app-server frames to the production replay in
   `crates/server/src/trace/worker/tests/delegation.rs`. A pinned digest guards the complete

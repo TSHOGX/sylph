@@ -738,7 +738,7 @@ fn native_routing_keeps_unresolved_author_and_exact_admission_trigger_evidence()
             serde_json::json!({"type":"session_meta","ordinal":0,"payload":{"id":"child","session_id":"root","agent_path":"/root/worker"}}),
             serde_json::json!({"type":"event_msg","ordinal":1,"payload":{"type":"task_started","turn_id":"child-turn"}}),
             serde_json::json!({"type":"inter_agent_communication_metadata","ordinal":2,"payload":{"trigger_turn":true}}),
-            serde_json::json!({"type":"response_item","ordinal":3,"payload":{"type":"agent_message","id":"assignment-a","author":"/root","recipient":"/root/worker","content":[{"type":"input_text","text":"task bytes"}]}}),
+            serde_json::json!({"type":"response_item","ordinal":3,"payload":{"type":"agent_message","id":"assignment-a","author":"/root/unobserved-peer","recipient":"/root/worker","content":[{"type":"input_text","text":"task bytes"}]}}),
         ],
         false,
     );
@@ -762,7 +762,7 @@ fn native_routing_keeps_unresolved_author_and_exact_admission_trigger_evidence()
     ));
     assert_eq!(message.purpose, MessagePurpose::TaskInput);
     assert_eq!(output.payloads[0].bytes, b"task bytes");
-    assert!(output.requests.iter().any(|request|matches!(request,ArchiveRequest::Correlation{namespace,key,..} if namespace=="codex.agent-path"&&key==&["/root"])));
+    assert!(output.requests.iter().any(|request|matches!(request,ArchiveRequest::Correlation{namespace,key,..} if namespace=="codex.agent-path"&&key==&["/root/unobserved-peer"])));
     let trigger = output
         .claims
         .iter()
@@ -850,3 +850,4 @@ fn mapping_completeness_names_only_the_actual_record_coordinates() {
         .any(|claim| matches!(claim.fact, Fact::HistoryMappingComplete { .. })));
 }
 mod accounting;
+mod reuse;

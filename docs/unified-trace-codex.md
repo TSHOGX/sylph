@@ -99,6 +99,17 @@ no parent-local synthetic agent is created first. An unresolved path/name remain
 unresolved reference, outside real-agent counts.
 
 An agent path is scoped to its owning multi-agent root and supported topology evidence.
+The native `session_id` explicitly identifies the root thread, and the pinned
+[agent registry](https://github.com/openai/codex/blob/968835997714baaff199cfed5f89a2c65d8ca77d/codex-rs/core/src/agent/registry.rs)
+registers that thread at `/root`. This is sufficient routing identity evidence even
+when the root header omits `agent_path`; it does not move child-authored work to the
+root. A missing root identity cannot be replaced by the containing child when looking
+up another path. An explicit conflicting path binding remains unresolved.
+Routed communication occurrences keep their address in the containing history while
+the author and recipient retain their own identities. Late path certificates add
+explicitly superseding declarations with their retained evidence; they never mutate an
+existing claim or move its message address. Cold replay includes the same unresolved
+claims and evidenced refinements as incremental replay.
 Two roots can both contain `/root/worker`. A nickname, role, or task name is metadata;
 it is not a merge key. When child headers and parent observations disagree about
 parentage, preserve the conflict rather than replacing a parent edge.

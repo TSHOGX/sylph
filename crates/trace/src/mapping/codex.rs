@@ -15,12 +15,13 @@ pub mod history;
 
 pub struct CodexMapper;
 impl CodexMapper {
-    const BUILD: &'static str = "codex-4";
+    const BUILD: &'static str = "codex-5";
 }
 mod accounting;
 mod collaboration;
 mod goal;
 mod runtime;
+mod routing;
 
 /// Checkpointed source knowledge. A copied parent header cannot replace the first
 /// governing header, and a parent connection does not own forwarded child frames.
@@ -1212,155 +1213,6 @@ impl Context<'_, '_> {
             .entry_by_agent
             .insert(owner.encode(), entry.clone());
         self.output.state.previous_entry = Some(entry);
-    }
-
-    fn communication(&mut self, containing: &AgentRef, value: &Value) {
-        let root = self
-            .state
-            .accounting_root
-            .clone()
-            .unwrap_or(containing.clone());
-        let resolve = |path: &str| -> OwnerRef {
-            if self.state.agent_path.as_deref() == Some(path) {
-                return OwnerRef::Agent {
-                    agent: containing.clone(),
-                };
-            }
-            let key = correlation_key(&root, "codex.agent-path", &[path.into()]);
-            match self.input.archive.correlations.get(&key) {
-                Some(AnyObjectRef::Agent(agent)) => OwnerRef::Agent {
-                    agent: agent.clone(),
-                },
-                _ => OwnerRef::Unresolved {
-                    scope: root.clone(),
-                    namespace: "codex.agent-path".into(),
-                    native_key: vec![path.into()],
-                    reason: "Agent path requires a retained root-scoped identity binding".into(),
-                },
-            }
-        };
-        let author = string(value, "author").map(resolve);
-        let recipient = string(value, "recipient").map(resolve);
-        for path in [string(value, "author"), string(value, "recipient")]
-            .into_iter()
-            .flatten()
-        {
-            if self.state.agent_path.as_deref() != Some(path)
-                && !self
-                    .input
-                    .archive
-                    .correlations
-                    .contains_key(&correlation_key(&root, "codex.agent-path", &[path.into()]))
-            {
-                self.output.requests.push(ArchiveRequest::Correlation {
-                    agent: root.clone(),
-                    namespace: "codex.agent-path".into(),
-                    key: vec![path.into()],
-                });
-            }
-        }
-        let owner = match &author {
-            Some(OwnerRef::Agent { agent }) => agent.clone(),
-            _ => containing.clone(),
-        };
-        let Some(revision) = self.message(&owner, value, "/payload", None, RevisionForm::Complete)
-        else {
-            return;
-        };
-        let sender = author
-            .clone()
-            .map_or(Author::Unknown, |agent| Author::Agent { agent });
-        // The authored message and its containing history can have different owners.
-        if let Some(Claim {
-            fact:
-                Fact::Declare {
-                    object: TraceObject::Message(message),
-                },
-            ..
-        }) = self.output.claims.iter_mut().rev().find(|claim| {
-            matches!(
-                &claim.fact,
-                Fact::Declare {
-                    object: TraceObject::Message(_)
-                }
-            )
-        }) {
-            message.author = sender.clone();
-            message.purpose = if self
-                .state
-                .communication_metadata
-                .as_ref()
-                .is_some_and(|(trigger, _)| *trigger)
-            {
-                MessagePurpose::TaskInput
-            } else {
-                MessagePurpose::Unclassified
-            };
-        }
-        self.history(
-            containing,
-            vec![HistoryContent::Message(revision.clone())],
-            author,
-        );
-        let entry = self.output.state.previous_entry.clone();
-        let delivery = DeliveryRef::occurrence(
-            containing.clone(),
-            self.input.capture.source_position.clone(),
-            vec!["agent-message".into()],
-        )
-        .unwrap();
-        self.declare(
-            containing,
-            "codex/communication-delivery",
-            TraceObject::Delivery(Delivery {
-                delivery_ref: delivery.clone(),
-                sender,
-                recipient: recipient.map_or(Recipient::Unknown, |agent| Recipient::Agent { agent }),
-                route: DeliveryRoute::VendorMailbox {
-                    namespace: "codex.agent-message".into(),
-                    occurrence: vec![string(value, "id").unwrap_or("").into()],
-                },
-            }),
-        );
-        self.add(
-            containing,
-            "codex/communication-delivery-revision",
-            Fact::DeliveryRevisionObserved {
-                delivery: delivery.clone(),
-                revision,
-            },
-        );
-        self.add(
-            containing,
-            "codex/communication-admitted",
-            Fact::DeliveryStage {
-                delivery: delivery.clone(),
-                stage: DeliveryStage::Admitted { entry },
-            },
-        );
-        if let Some((true, metadata)) = self.state.communication_metadata.clone() {
-            if let Some(activation) = self
-                .state
-                .active_by_agent
-                .get(&containing.encode())
-                .cloned()
-            {
-                self.add(
-                    containing,
-                    "codex/communication-trigger",
-                    Fact::Relation {
-                        relation: Relation::Trigger {
-                            delivery,
-                            activation,
-                        },
-                    },
-                );
-                let claim = self.output.claims.last_mut().unwrap();
-                if !claim.evidence.contains(&metadata) {
-                    claim.evidence.push(metadata);
-                }
-            }
-        }
     }
 
     fn model_call(&mut self, owner: &AgentRef, value: &Value, kind: &str) {

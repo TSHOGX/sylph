@@ -237,6 +237,17 @@ inference. Production replay checks duplicate receipts, rereads, source order, i
 restarts and same-cut rebuild. Targeted mutations fail the accounting regressions. The
 complete S2 audit and S3 gates remain open.
 
+The retained Codex reusable-child excerpt now tests two child activations, three incoming
+communications (including repeated equal task text), independent parent calls and child
+replies. It exposed root headers omitting `agent_path` despite explicit root `session_id`,
+and late path resolution rewriting immutable claims. Routing now uses the vendor's root
+identity contract and retains stable containing-history message addresses; evidenced
+refinements explicitly supersede unresolved author/recipient declarations. Production
+replay covers native source order, duplicate receipts, rereads, restart and same-cut
+rebuild; synthetic two-peer cases verify independent certificate arrival, and targeted
+mutations fail the new regressions. The remaining
+vendor certificate audit and S3 reader gates stay open.
+
 ### Runtime and reader cutover checkpoint
 
 The product path is now acquisition → durable capture/upload → evidence → pure mapping
