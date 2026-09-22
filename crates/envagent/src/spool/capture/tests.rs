@@ -479,8 +479,15 @@ async fn capture_crash_probe() {
         "before_ack_transaction" => "before_ack_transaction",
         "before_ack_commit" => "before_ack_commit",
         "after_ack_commit" => "after_ack_commit",
+        "before_tail_commit" => "before_tail_commit",
+        "after_tail_commit" => "after_tail_commit",
         _ => panic!("unknown crash stage"),
     });
+    if stage.contains("tail") {
+        let frontier = registry.closed_tail_frontier().await.unwrap();
+        registry.drain_closed_tails(frontier).await.unwrap();
+        panic!("tail probe returned without SIGKILL");
+    }
     if stage.contains("ack") {
         let receipts: Vec<CaptureReceipt> =
             serde_json::from_slice(&std::fs::read(directory.join("receipts.json")).unwrap())
@@ -656,7 +663,7 @@ async fn native_ownership_proof_names_the_identity_record_after_blank_and_unrela
     let pass = fixture.capture().await;
     let proof = fixture
         .registry
-        .source_proof(&fixture.source.reference, pass.generation)
+        .source_proof(&fixture.source.reference, pass.generation, &authorization("epoch-1").epoch)
         .await
         .unwrap()
         .unwrap();
@@ -938,3 +945,5 @@ async fn recycled_file_identity_cannot_hide_changed_committed_bytes_after_restar
         .observations
         .is_empty());
 }
+
+mod tails;

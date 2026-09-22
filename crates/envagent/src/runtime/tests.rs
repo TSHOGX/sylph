@@ -529,3 +529,29 @@ async fn browse_contract_and_quick_start_use_the_environment_root_with_contained
     assert_eq!(quick, root.canonicalize().unwrap().join("scratch"));
     assert!(quick.is_dir());
 }
+
+#[tokio::test]
+async fn replaced_native_source_delivers_its_terminal_staged_bytes_after_the_queue_drains() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("native.jsonl");
+    let transport = Arc::new(MemoryTransport::default());
+    let runtime = runtime(dir.path(), transport.clone()).await;
+    let source = runtime.registry.register_jsonl("native", &path).await.unwrap();
+    std::fs::write(&path, b"first\n{broken").unwrap();
+    runtime.registry.capture_jsonl(&source, local_authorization(&auth(), 100)).await.unwrap();
+    runtime.flush_snapshot().await.unwrap();
+    std::fs::write(&path, b"replacement\n").unwrap();
+    runtime.registry.capture_jsonl(&source, local_authorization(&auth(), 200)).await.unwrap();
+    runtime.flush_snapshot().await.unwrap();
+    let retained = transport.retained.lock().await;
+    let chunks = transport.chunks.lock().await;
+    let terminal = retained.values().find(|capture| chunks.get(capture.payload_ref.as_str()).is_some_and(|bytes| bytes == b"{broken"))
+        .expect("the replaced generation's staged fragment must reach retained evidence");
+    assert_eq!(terminal.source_position.generation, 0);
+    assert_eq!(terminal.source_position.locator, trace::SourceLocator::Jsonl {byte_start:6,byte_end:13,record_ordinal:1});
+    assert_eq!(terminal.ingestion_authorization_epoch, auth().epoch);
+    assert_eq!(terminal.captured_at.value, 100);
+    assert!(terminal.capture_diagnostics.iter().any(|diagnostic|diagnostic.code==trace::CaptureDiagnosticCode::IncompleteRecord));
+    assert_eq!(runtime.spool.size_bytes().await.unwrap(), 0);
+    assert!(runtime.spool.is_empty().await.unwrap());
+}

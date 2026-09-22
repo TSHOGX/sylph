@@ -74,7 +74,11 @@ impl SemanticMapper for InventoryMapper {
                     });
                     return output;
                 };
-                if owner.agent != definition.owner || !owner.evidence.contains(observation) {
+                let same_identity_position = owner
+                    .evidence
+                    .iter()
+                    .any(|proof| input.archive.observation_sources.get(proof) == Some(position));
+                if owner.agent != definition.owner || !same_identity_position {
                     issue(
                         &input,
                         &mut output,
@@ -83,7 +87,10 @@ impl SemanticMapper for InventoryMapper {
                     );
                     return output;
                 }
-                (owner.evidence.clone(), owner.rule.as_str())
+                // Independent retention epochs can capture this same native
+                // identity record. Cite this declaration's actual proof instead
+                // of recursively inheriting prior inventory announcements.
+                (vec![observation.clone()], owner.rule.as_str())
             }
             SourceOwnerBasis::CompanionTranscript { source, generation } => {
                 let Some(owner) = input
@@ -112,9 +119,12 @@ impl SemanticMapper for InventoryMapper {
         evidence.push(input.canonical_observation.clone());
         evidence.sort();
         evidence.dedup();
-        output.source_definitions.push(super::codex::history::RecordedSource {
-            definition:definition.clone(),observation:input.canonical_observation.clone(),
-        });
+        output
+            .source_definitions
+            .push(super::codex::history::RecordedSource {
+                definition: definition.clone(),
+                observation: input.canonical_observation.clone(),
+            });
         output.source_owners.push(SourceOwnership {
             source: definition.source,
             generation: definition.generation,
@@ -204,7 +214,15 @@ mod tests {
             },
         };
         let archive = ArchiveContext {
-            semantic:std::sync::Arc::new(super::super::ArchiveSemantic {object_evidence:[(AnyObjectRef::Agent(agent.clone()),imbl::vector![proof.clone()])].into_iter().collect(),..Default::default()}),
+            semantic: std::sync::Arc::new(super::super::ArchiveSemantic {
+                object_evidence: [(
+                    AnyObjectRef::Agent(agent.clone()),
+                    imbl::vector![proof.clone()],
+                )]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            }),
             source_owners: [(
                 (definition.source.clone(), 0),
                 SourceOwner {
@@ -249,6 +267,41 @@ mod tests {
         assert_eq!(known.source_owners.len(), 1);
         assert_eq!(known.source_owners[0].owner.agent, definition.owner);
         assert_eq!(known.source_owners[0].owner.evidence.len(), 2);
+    }
+
+    #[test]
+    fn another_retained_copy_of_the_identity_record_supplies_its_own_bounded_proof() {
+        let (capture, mut definition, mut archive) = fixture();
+        let SourceOwnerBasis::NativeIdentity {
+            observation: original,
+        } = &definition.basis
+        else {
+            panic!()
+        };
+        let mut copy = original.clone();
+        copy.producer_seq += 100;
+        let position = archive.observation_sources[original].clone();
+        archive.observation_sources.insert(copy.clone(), position);
+        definition.basis = SourceOwnerBasis::NativeIdentity {
+            observation: copy.clone(),
+        };
+        let mapped = run(&capture, &definition, &archive);
+        assert!(mapped.diagnostics.is_empty());
+        assert_eq!(mapped.source_owners.len(), 1);
+        let mut expected = vec![copy, capture.observation_ref.clone()];
+        expected.sort();
+        assert_eq!(mapped.source_owners[0].owner.evidence, expected);
+        archive.source_owners.insert(
+            (definition.source.clone(), definition.generation),
+            mapped.source_owners[0].owner.clone(),
+        );
+        assert_eq!(
+            run(&capture, &definition, &archive).source_owners[0]
+                .owner
+                .evidence,
+            expected,
+            "repeated inventory cannot grow a recursive proof chain"
+        );
     }
 
     #[test]

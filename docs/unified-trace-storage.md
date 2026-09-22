@@ -102,6 +102,25 @@ does not advance the complete-record cursor, and is reported as pending. If the 
 ends with permanently malformed bytes, those bytes are retained as an undecodable
 occurrence with a diagnostic. Empty semantic output is not success.
 
+Staged bytes remain split into bounded durable chunks. When a generation is replaced
+or becomes unavailable, a durable drain job transfers its staged complete records and
+terminal fragment to the receipt-gated queue in bounded passes, without reading the
+vendor path again. The fragment carries an incomplete-record diagnostic. Positions,
+original capture authorization and capture clock stay fixed to that staged generation;
+a later adoption cannot retag them. Each queue insertion and staging release commits
+atomically. Delivery drains these jobs even when no further source poll occurs.
+
+Staging reserves metadata credit sufficient to enqueue one record from its bytes.
+Queued drain records borrow that credit until their terminal receipt, so repackaging
+cannot deadlock a full spool or exceed its byte ceiling. Drains have independent item
+and byte budgets, with one record allowed to exceed the pass byte budget only within
+the record-size bound. A finite import freezes its drain-job frontier and waits for
+that work and its receipts; later source closures cannot extend the barrier.
+Native ownership proofs are scoped to the admission epoch that retained their header.
+Separate retained copies of the same identity position can prove the same source
+binding. Their proof receipts remain independent; a differing proof is not a changed
+locator or owner, and inventory announcements do not recursively become native identity.
+
 Source generations are immutable prefixes. Append extends a known prefix; truncation,
 replacement, in-place revision, or changed native content revision starts a new generation.
 A new mapper build or a newly installed vendor binary alone changes provenance or mapper

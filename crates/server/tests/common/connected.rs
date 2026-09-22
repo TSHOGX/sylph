@@ -33,6 +33,7 @@ pub struct CaptureAgents {
     pub fixture: FixtureAgents,
     captures: Arc<Mutex<HashMap<String, Arc<dyn RawCaptureSink>>>>,
     pub journal: PathBuf,
+    pub native_files: Arc<Mutex<HashMap<String, PathBuf>>>,
 }
 impl AdapterSource for CaptureAgents {
     fn for_agent(&self, name: &str) -> Option<Box<dyn Adapter>> {
@@ -63,8 +64,13 @@ impl Adapter for CaptureAgents {
             journal: self.journal.clone(),
         }))
     }
-    async fn native_sources(&self, _: &NativeId) -> Result<Vec<NativeSource>> {
-        Ok(vec![])
+    async fn native_sources(&self, id: &NativeId) -> Result<Vec<NativeSource>> {
+        Ok(self.native_files.lock().unwrap().get(id.as_str()).map(|path| NativeSource {
+            locator: path.to_string_lossy().into_owned(), namespace: "codex.native".into(),
+            format: NativeSourceFormat::Jsonl, companion_locator: None,
+            owner: Some(NativeOwner::Session { native_id: id.clone() }),
+            identity_record_ordinal: Some(0),
+        }).into_iter().collect())
     }
     async fn enumerate(&self, _: &StoreFilter) -> Result<Vec<NativeSummary>> {
         Ok(vec![])

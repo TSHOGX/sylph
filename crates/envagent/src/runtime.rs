@@ -1347,7 +1347,7 @@ impl EnvAgent {
             } else {
                 let Some(observation) = self
                     .registry
-                    .source_proof(&registered.reference, *generation)
+                    .source_proof(&registered.reference, *generation, &authorization.epoch)
                     .await?
                 else {
                     continue;
@@ -1410,11 +1410,17 @@ impl EnvAgent {
     }
 
     pub async fn flush_snapshot(&self) -> Result<()> {
-        // Freeze the original prefix, then the sidecar observations discovered while
-        // draining it. New live work cannot extend either barrier indefinitely.
-        for _ in 0..2 {
-            let through = self.registry.pending_frontiers().await?;
-            while self.flush_pending_through(32, Some(&through)).await? != 0 {}
+        // Freeze closed-generation jobs as well as each producer prefix. A finite
+        // import waits for its already-observed tails; ongoing acquisition cannot
+        // keep extending this barrier with later generation closures.
+        let tails = self.registry.closed_tail_frontier().await?;
+        loop {
+            self.registry.drain_closed_tails(tails).await?;
+            for _ in 0..2 {
+                let through = self.registry.pending_frontiers().await?;
+                while self.flush_pending_through(32, Some(&through)).await? != 0 {}
+            }
+            if !self.registry.closed_tails_pending(tails).await? { break; }
         }
         Ok(())
     }

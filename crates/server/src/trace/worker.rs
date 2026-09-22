@@ -1290,13 +1290,18 @@ impl ProjectionWorker {
                 definition.definition.source.clone(),
                 definition.definition.generation,
             );
-            if unit
-                .next
-                .source_definitions
-                .get(&index_key)
-                .is_some_and(|prior| prior.definition != definition.definition)
-            {
-                return Err(WorkerError::CorrelationConflict);
+            if let Some(prior) = unit.next.source_definitions.get(&index_key) {
+                // Ownership is validated by the inventory mapper. Different
+                // retained proofs can establish the same source binding; their
+                // receipt identity is not a conflicting locator or owner.
+                if prior.definition.locator != definition.definition.locator
+                    || prior.definition.owner != definition.definition.owner
+                {
+                    return Err(WorkerError::CorrelationConflict);
+                }
+                if prior.observation <= definition.observation {
+                    continue;
+                }
             }
             unit.batch.mapper_states.insert(
                 format!("source_definition:{}", serde_json::to_string(&key)?),

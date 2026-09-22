@@ -155,6 +155,8 @@ whether a component is a symlink.
 `spool.max_bytes` bounds the buffer, and overflow stops the agent rather than dropping
 events: a gap in the record is worse than a stopped turn (`docs/environments.md`
 § Spooling).
+The charged total includes staged bytes and their reserved drain metadata. Repackaging
+borrows that reservation until acknowledgment instead of temporarily exceeding the cap.
 
 Quick Start is an environment-level action. The wire carries an explicit sentinel and
 the selected envagent resolves it to that machine's local `scratch` directory; the

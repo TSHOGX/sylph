@@ -149,8 +149,9 @@ A late completion for an earlier native turn cannot settle its successor.
 
 The shared WAL-mode SQLite capture registry commits source identity, generation, lexical
 position, producer sequence, authorization epoch and payload bytes together. Partial JSONL
-tails remain durable without advancing the complete cursor. Snapshot reads are bounded
-before allocation and verified again before a revision is committed.
+tails remain durable without advancing the complete cursor. Superseded staging drains
+under its original authorization as specified in `docs/unified-trace-storage.md` § Source identity and generations.
+Snapshot reads are bounded before allocation and verified again before a revision is committed.
 
 Only a terminal retained or authorized-deletion receipt releases queued bytes. Reconnect
 replays the same observations and authorization epochs; it does not reserialize vendor

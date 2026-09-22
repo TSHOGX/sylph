@@ -3,6 +3,127 @@ use crate::trace::reading_store::read_scope;
 use serde_json::json;
 
 #[tokio::test]
+async fn independent_admissions_of_one_source_keep_one_message_and_survive_origin_deletion() {
+    let fixture = Fixture::new().await;
+    let lines: Vec<_> = CODEX_NATIVE
+        .split_inclusive(|byte| *byte == b'\n')
+        .collect();
+    let header = fixture.native(1, 0, lines[0]).await;
+    let answer = fixture.native(2, lines[0].len() as u64, lines[3]).await;
+    let second_scope = IngestionScope::Inventory(InventoryRef {
+        environment: agent().environment().clone(),
+        vendor: AgentName::parse("codex").unwrap(),
+        instance: "independent-retained-copy".into(),
+    });
+    let second_epoch = fixture
+        .evidence
+        .authorize_scope(&second_scope, &[])
+        .await
+        .unwrap();
+    for (index, original) in [header.clone(), answer.clone()].into_iter().enumerate() {
+        let mut copy = original;
+        copy.observation_ref.producer_seq = index as u64 + 3;
+        copy.ingestion_authorization_epoch = second_epoch.clone();
+        fixture
+            .evidence
+            .admit_batch(&copy.observation_ref.issuer, std::slice::from_ref(&copy))
+            .await
+            .unwrap();
+    }
+    for (sequence, epoch, proof_sequence) in
+        [(5, fixture.epoch.clone(), 1), (6, second_epoch.clone(), 3)]
+    {
+        let definition = SourceDefinition {
+            source: header.source_position.source.clone(),
+            generation: 0,
+            locator: "/native/rollout.jsonl".into(),
+            owner: agent(),
+            basis: SourceOwnerBasis::NativeIdentity {
+                observation: native_observation(proof_sequence),
+            },
+        };
+        let mut capture = header.clone();
+        capture.observation_ref.producer_seq = sequence;
+        capture.ingestion_authorization_epoch = epoch;
+        capture.transport_kind = TransportKind::SourceInventory;
+        capture.source_position = SourcePosition {
+            source: SourceRef {
+                issuer: capture.observation_ref.issuer.clone(),
+                instance: format!("inventory-{sequence}"),
+            },
+            generation: 0,
+            locator: SourceLocator::Frame { ordinal: 0 },
+        };
+        capture.payload_ref = fixture
+            .stage(&serde_json::to_vec(&definition).unwrap())
+            .await;
+        fixture
+            .evidence
+            .admit_batch(
+                &capture.observation_ref.issuer,
+                std::slice::from_ref(&capture),
+            )
+            .await
+            .unwrap();
+    }
+    for deleted in [false, true] {
+        if deleted {
+            fixture.evidence.delete_scope(&fixture.scope).await.unwrap();
+        }
+        let (generation, _) = fixture
+            .generation(if deleted {
+                "retained-copy"
+            } else {
+                "two-copies"
+            })
+            .await;
+        fixture.worker().catch_up(&generation, 1, 6).await.unwrap();
+        let snapshot = generation.checkpoint().await.unwrap().snapshot;
+        let page = generation
+            .read_page(
+                &snapshot,
+                &read_scope(&agent(), None, "history"),
+                None,
+                None,
+                None,
+                8,
+                false,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            page.rows.len(),
+            1,
+            "independent retention cannot duplicate conversation content"
+        );
+        assert!(page.rows[0]
+            .body
+            .to_string()
+            .contains("The transcript is available."));
+        let revisions: BTreeSet<_> = claims(&generation)
+            .await
+            .into_iter()
+            .filter_map(|claim| match claim.fact {
+                Fact::Declare {
+                    object: TraceObject::MessageRevision(revision),
+                } if revision.message == message("answer-1") => Some(revision.revision_ref),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            revisions.len(),
+            1,
+            "agreeing proof claims must retain one domain revision"
+        );
+        let bodies = revision_bytes(&fixture, &generation, &message("answer-1")).await;
+        assert!(!bodies.is_empty());
+        assert!(bodies
+            .iter()
+            .all(|body| body == b"The transcript is available."));
+    }
+}
+
+#[tokio::test]
 async fn unknown_required_vendor_kind_retains_exact_bytes_and_an_evidenced_decode_gap() {
     let fixture = Fixture::new().await;
     let header = CODEX_NATIVE

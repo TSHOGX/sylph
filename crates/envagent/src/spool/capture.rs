@@ -159,6 +159,8 @@ struct Cursor {
     revision: i64,
     generation: u64,
     absent: bool,
+    closed: bool,
+    tail_reserve: u64,
     identity: Option<String>,
     global_offset: u64,
     global_ordinal: u64,
@@ -454,18 +456,18 @@ impl CaptureRegistry {
             .policy
             .contain_write_target(&source.locator)
             .map_err(invalid)?;
+        let cursor = self.cursor(source, &authorization.epoch).await?;
         let maximum = self.limits.max_record_bytes;
         let snapshot = tokio::task::spawn_blocking(move || read_snapshot(&path, maximum))
             .await
             .map_err(invalid)??;
-        let cursor = self.cursor(source, &authorization.epoch).await?;
         let Some((bytes, identity)) = snapshot else {
-            sqlx::query(
-                "UPDATE capture_sources SET absent=1,revision=revision+1 WHERE source_ref=?",
-            )
-            .bind(source.reference.encode())
-            .execute(&self.spool.pool)
-            .await?;
+            let mut tx = self.spool.pool.begin_with("BEGIN IMMEDIATE").await?;
+            let changed = sqlx::query("UPDATE capture_sources SET absent=1,revision=revision+1 WHERE source_ref=? AND revision=?")
+                .bind(source.reference.encode()).bind(cursor.revision).execute(&mut *tx).await?;
+            if changed.rows_affected() != 1 { return Err(CaptureSpoolError::ReservationChanged); }
+            tails::schedule(&mut tx, &source.reference.encode(), cursor.generation, "source became unavailable").await?;
+            tx.commit().await?;
             return Ok(CapturePass {
                 observations: vec![],
                 generation: cursor.generation,
@@ -509,13 +511,13 @@ impl CaptureRegistry {
         &self,
         source: &RegisteredSource,
         authorization: CaptureAuthorization,
-        cursor: Cursor,
+        mut cursor: Cursor,
         bytes: Vec<u8>,
         identity: String,
         transport: TransportKind,
     ) -> Result<CapturePass> {
         let digest = blake3::hash(&bytes).to_hex().to_string();
-        if !cursor.absent
+        if !cursor.absent && !cursor.closed
             && cursor.identity.as_deref() == Some(&identity)
             && cursor.prefix_digest == digest
             && cursor.offset == bytes.len() as u64
@@ -529,7 +531,7 @@ impl CaptureRegistry {
                 generation_changed: false,
             });
         }
-        let generation = if cursor.absent
+        let generation = if cursor.closed || cursor.absent
             || cursor
                 .identity
                 .as_ref()
@@ -542,6 +544,11 @@ impl CaptureRegistry {
         } else {
             cursor.generation
         };
+        if generation != cursor.generation && !cursor.closed {
+            self.close_generation(source, &cursor, "source snapshot replaced").await?;
+            cursor.revision += 1;
+            cursor.closed = true;
+        }
         let mut item = self.prepare(
             &authorization,
             SourcePosition {
@@ -554,6 +561,7 @@ impl CaptureRegistry {
             bytes.clone(),
         )?;
         item.capture.transport_kind = transport;
+        let authorization_json = serde_json::to_string(&authorization)?;
         let mut tx = self.spool.pool.begin_with("BEGIN IMMEDIATE").await?;
         let source_key = source.reference.encode();
         let issuer = serde_json::to_string(&self.issuer)?;
@@ -582,8 +590,11 @@ impl CaptureRegistry {
         sqlx::query("INSERT INTO capture_snapshot_revisions(source_ref,generation,ingestion_epoch,capture_json) VALUES(?,?,?,?) ON CONFLICT DO NOTHING")
             .bind(&source_key).bind(signed(generation)?).bind(authorization.epoch.as_str()).bind(serde_json::to_string(&item.capture)?).execute(&mut *tx).await?;
         sqlx::query("UPDATE capture_generations SET file_identity=?,complete_offset=?,next_ordinal=1,prefix_digest=? WHERE source_ref=? AND generation=?").bind(&identity).bind(bytes.len()as i64).bind(digest).bind(&source_key).bind(signed(generation)?).execute(&mut *tx).await?;
-        sqlx::query("INSERT INTO capture_epoch_progress(source_ref,generation,ingestion_epoch,complete_offset,next_ordinal) VALUES(?,?,?,?,1) ON CONFLICT(source_ref,generation,ingestion_epoch) DO UPDATE SET complete_offset=excluded.complete_offset,next_ordinal=1")
-            .bind(&source_key).bind(signed(generation)?).bind(authorization.epoch.as_str()).bind(bytes.len()as i64).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO capture_epoch_progress(source_ref,generation,ingestion_epoch,complete_offset,next_ordinal,authorization_json) VALUES(?,?,?,?,1,?) ON CONFLICT(source_ref,generation,ingestion_epoch) DO UPDATE SET complete_offset=excluded.complete_offset,next_ordinal=1,authorization_json=excluded.authorization_json,revision=revision+1")
+            .bind(&source_key).bind(signed(generation)?).bind(authorization.epoch.as_str()).bind(bytes.len()as i64).bind(&authorization_json).execute(&mut *tx).await?;
+        if generation != cursor.generation {
+            tails::schedule(&mut tx, &source_key, cursor.generation, "source snapshot replaced").await?;
+        }
         tx.commit().await?;
         Ok(CapturePass {
             observations: vec![item.capture.observation_ref],
@@ -608,7 +619,7 @@ impl CaptureRegistry {
             cursor.ordinal,
             cursor.offset,
             cursor.tail.len() as u64,
-            cursor.absent,
+            cursor.absent || cursor.closed,
         ))
     }
 
@@ -629,8 +640,9 @@ impl CaptureRegistry {
         &self,
         source: &SourceRef,
         generation: u64,
+        epoch: &IngestionEpoch,
     ) -> Result<Option<ObservationRef>> {
-        let value:Option<String>=sqlx::query_scalar("SELECT observation_json FROM capture_source_proofs WHERE source_ref=? AND generation=?").bind(source.encode()).bind(signed(generation)?).fetch_optional(&self.spool.readers).await?;
+        let value:Option<String>=sqlx::query_scalar("SELECT observation_json FROM capture_source_proofs WHERE source_ref=? AND generation=? AND ingestion_epoch=?").bind(source.encode()).bind(signed(generation)?).bind(epoch.as_str()).fetch_optional(&self.spool.readers).await?;
         value
             .map(|value| serde_json::from_str(&value).map_err(CaptureSpoolError::from))
             .transpose()
@@ -669,7 +681,7 @@ impl CaptureRegistry {
         let reservation = self.reserve(&source.reference).await;
         let _held = reservation.lock().await;
         for _ in 0..4 {
-            let cursor = self.cursor(source, &authorization.epoch).await?;
+            let mut cursor = self.cursor(source, &authorization.epoch).await?;
             let path = self
                 .policy
                 .contain_write_target(&source.locator)
@@ -680,6 +692,13 @@ impl CaptureRegistry {
                 tokio::task::spawn_blocking(move || acquire(&path, &read_cursor, limits))
                     .await
                     .map_err(invalid)??;
+            if acquired.new_generation.is_some() && !cursor.closed {
+                match self.close_generation(source, &cursor, "source generation replaced").await {
+                    Ok(()) => { cursor.revision += 1; cursor.closed = true; }
+                    Err(CaptureSpoolError::ReservationChanged) => continue,
+                    Err(error) => return Err(error),
+                }
+            }
             match self.commit(source, &authorization, &cursor, acquired).await {
                 Err(CaptureSpoolError::ReservationChanged) => continue,
                 other => return other,
@@ -689,8 +708,9 @@ impl CaptureRegistry {
     }
 
     async fn cursor(&self, source: &RegisteredSource, epoch: &IngestionEpoch) -> Result<Cursor> {
-        let row = sqlx::query("SELECT s.revision,s.generation,s.absent,s.locator,g.file_identity,g.complete_offset AS global_offset,g.next_ordinal AS global_ordinal,g.prefix_digest,p.complete_offset,p.next_ordinal,p.tail FROM capture_sources s JOIN capture_generations g ON g.source_ref=s.source_ref AND g.generation=s.generation LEFT JOIN capture_epoch_progress p ON p.source_ref=s.source_ref AND p.generation=s.generation AND p.ingestion_epoch=? WHERE s.source_ref=?")
-            .bind(epoch.as_str()).bind(source.reference.encode()).fetch_one(&self.spool.readers).await?;
+        let mut tx = self.spool.readers.begin().await?;
+        let row = sqlx::query("SELECT s.revision,s.generation,s.absent,s.locator,g.closed,g.file_identity,g.complete_offset AS global_offset,g.next_ordinal AS global_ordinal,g.prefix_digest,p.complete_offset,p.next_ordinal,p.tail_bytes,p.tail_reserve FROM capture_sources s JOIN capture_generations g ON g.source_ref=s.source_ref AND g.generation=s.generation LEFT JOIN capture_epoch_progress p ON p.source_ref=s.source_ref AND p.generation=s.generation AND p.ingestion_epoch=? WHERE s.source_ref=?")
+            .bind(epoch.as_str()).bind(source.reference.encode()).fetch_one(&mut *tx).await?;
         if row.try_get::<String, _>("locator")?
             != source
                 .locator
@@ -699,10 +719,17 @@ impl CaptureRegistry {
         {
             return Err(invalid("source locator was changed"));
         }
+        let offset = unsigned(row.try_get::<Option<i64>, _>("complete_offset")?.unwrap_or(0))?;
+        let generation = unsigned(row.try_get("generation")?)?;
+        let tail_bytes = unsigned(row.try_get::<Option<i64>, _>("tail_bytes")?.unwrap_or(0))?;
+        let tail = self.load_tail(&mut tx, source, generation, epoch, offset, tail_bytes).await?;
+        tx.commit().await?;
         Ok(Cursor {
             revision: row.try_get("revision")?,
             generation: unsigned(row.try_get("generation")?)?,
             absent: row.try_get::<i64, _>("absent")? != 0,
+            closed: row.try_get("closed")?,
+            tail_reserve: unsigned(row.try_get::<Option<i64>, _>("tail_reserve")?.unwrap_or(0))?,
             identity: row.try_get("file_identity")?,
             global_offset: unsigned(row.try_get("global_offset")?)?,
             global_ordinal: unsigned(row.try_get("global_ordinal")?)?,
@@ -712,9 +739,7 @@ impl CaptureRegistry {
                     .unwrap_or(0),
             )?,
             ordinal: unsigned(row.try_get::<Option<i64>, _>("next_ordinal")?.unwrap_or(0))?,
-            tail: row
-                .try_get::<Option<Vec<u8>>, _>("tail")?
-                .unwrap_or_default(),
+            tail,
         })
     }
 
@@ -764,6 +789,8 @@ impl CaptureRegistry {
                 .sum::<u64>();
             ordinal += 1;
         }
+        let tail_reserve = self.tail_reserve(source, authorization, generation, &acquired.tail)?;
+        let authorization_json = serde_json::to_string(authorization)?;
         let mut tx = self.spool.pool.begin_with("BEGIN IMMEDIATE").await?;
         let source_key = source.reference.encode();
         let changed = sqlx::query(
@@ -781,6 +808,7 @@ impl CaptureRegistry {
                 .bind(&source_key)
                 .execute(&mut *tx)
                 .await?;
+            tails::schedule(&mut tx, &source_key, cursor.generation, "source became unavailable").await?;
             tx.commit().await?;
             return Ok(CapturePass {
                 observations: vec![],
@@ -792,6 +820,7 @@ impl CaptureRegistry {
             });
         }
         if let Some(reason) = acquired.new_generation {
+            tails::schedule(&mut tx, &source_key, cursor.generation, reason).await?;
             sqlx::query("INSERT INTO capture_generations(source_ref,generation,predecessor,reason,prefix_digest) VALUES (?,?,?,?,?)")
                 .bind(&source_key).bind(signed(generation)?).bind(signed(cursor.generation)?).bind(reason).bind(blake3::hash(&[]).to_hex().as_str()).execute(&mut *tx).await?;
         }
@@ -805,21 +834,21 @@ impl CaptureRegistry {
                 .bind(serde_json::to_string(&self.issuer)?).bind(&self.producer_id).bind(&self.producer_epoch).fetch_one(&mut *tx).await?;
             item.capture.observation_ref.producer_seq = unsigned(seq)?;
         }
-        let old_tail_length = if acquired.new_generation.is_some() {
+        let old_tail_charge = if acquired.new_generation.is_some() {
             0
         } else {
-            cursor.tail.len()
+            cursor.tail.len() as u64 + cursor.tail_reserve
         };
         let incoming = prepared
             .iter()
-            .try_fold(acquired.tail.len() as u64, |sum, item| {
+            .try_fold(acquired.tail.len() as u64 + tail_reserve, |sum, item| {
                 sum.checked_add(item_size(item)?)
                     .ok_or_else(|| invalid("capture size overflow"))
             })?;
         let used: i64 = sqlx::query_scalar("SELECT bytes FROM spool_usage WHERE singleton=1")
             .fetch_one(&mut *tx)
             .await?;
-        let used = unsigned(used)?.saturating_sub(old_tail_length as u64);
+        let used = unsigned(used)?.saturating_sub(old_tail_charge);
         if used
             .checked_add(incoming)
             .is_none_or(|sum| sum > self.capacity(TransportKind::NativeJsonl))
@@ -836,12 +865,15 @@ impl CaptureRegistry {
         }
         if let Some(first) = prepared.iter().find(|item| matches!(item.capture.source_position.locator,
             SourceLocator::Jsonl { record_ordinal, .. } if Some(record_ordinal) == source.identity_record_ordinal)) {
-            sqlx::query("INSERT INTO capture_source_proofs(source_ref,generation,observation_json) VALUES(?,?,?) ON CONFLICT DO NOTHING")
-            .bind(&source_key).bind(signed(generation)?).bind(serde_json::to_string(&first.capture.observation_ref)?).execute(&mut *tx).await?;
+            sqlx::query("INSERT INTO capture_source_proofs(source_ref,generation,ingestion_epoch,observation_json) VALUES(?,?,?,?) ON CONFLICT DO NOTHING")
+            .bind(&source_key).bind(signed(generation)?).bind(authorization.epoch.as_str()).bind(serde_json::to_string(&first.capture.observation_ref)?).execute(&mut *tx).await?;
         }
 
-        sqlx::query("INSERT INTO capture_epoch_progress (source_ref,generation,ingestion_epoch,complete_offset,next_ordinal,tail) VALUES (?,?,?,?,?,?) ON CONFLICT(source_ref,generation,ingestion_epoch) DO UPDATE SET complete_offset=excluded.complete_offset,next_ordinal=excluded.next_ordinal,tail=excluded.tail")
-            .bind(&source_key).bind(signed(generation)?).bind(authorization.epoch.as_str()).bind(signed(acquired.offset)?).bind(signed(acquired.ordinal)?).bind(&acquired.tail).execute(&mut *tx).await?;
+        sqlx::query("DELETE FROM capture_tail_chunks WHERE source_ref=? AND generation=? AND ingestion_epoch=?")
+            .bind(&source_key).bind(signed(generation)?).bind(authorization.epoch.as_str()).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO capture_epoch_progress (source_ref,generation,ingestion_epoch,complete_offset,next_ordinal,authorization_json,identity_record_ordinal,tail_reserve) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(source_ref,generation,ingestion_epoch) DO UPDATE SET complete_offset=excluded.complete_offset,next_ordinal=excluded.next_ordinal,authorization_json=excluded.authorization_json,identity_record_ordinal=excluded.identity_record_ordinal,tail_reserve=excluded.tail_reserve,revision=revision+1")
+            .bind(&source_key).bind(signed(generation)?).bind(authorization.epoch.as_str()).bind(signed(acquired.offset)?).bind(signed(acquired.ordinal)?).bind(&authorization_json).bind(source.identity_record_ordinal.map(signed).transpose()?).bind(signed(tail_reserve)?).execute(&mut *tx).await?;
+        self.insert_tail(&mut tx, &source_key, generation, &authorization.epoch, acquired.offset, &acquired.tail).await?;
         sqlx::query("UPDATE capture_generations SET file_identity=?,complete_offset=?,next_ordinal=?,prefix_digest=? WHERE source_ref=? AND generation=?")
             .bind(acquired.identity).bind(signed(acquired.global_offset)?).bind(signed(acquired.global_ordinal)?).bind(acquired.prefix_digest).bind(&source_key).bind(signed(generation)?).execute(&mut *tx).await?;
         #[cfg(test)]
@@ -961,11 +993,15 @@ impl CaptureRegistry {
     }
 
     async fn insert(&self, tx: &mut Transaction<'_, Sqlite>, item: &QueuedCapture) -> Result<()> {
+        self.insert_credited(tx, item, 0).await
+    }
+
+    async fn insert_credited(&self, tx: &mut Transaction<'_, Sqlite>, item: &QueuedCapture, credit: u64) -> Result<()> {
         let observation = &item.capture.observation_ref;
         let issuer = serde_json::to_string(&observation.issuer)?;
         let manifest = item.manifest.as_ref().map(serde_json::to_vec).transpose()?;
-        sqlx::query("INSERT INTO capture_queue (issuer_json,producer_id,producer_epoch,producer_seq,source_ref,generation,ingestion_epoch,position_key,capture_json,manifest_json,encoded_bytes,metadata_bytes,chunk_count) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)")
-            .bind(&issuer).bind(&observation.producer_id).bind(&observation.producer_epoch).bind(signed(observation.producer_seq)?).bind(item.capture.source_position.source.encode()).bind(signed(item.capture.source_position.generation)?).bind(item.capture.ingestion_authorization_epoch.as_str()).bind(item.capture.source_position.encode()).bind(serde_json::to_vec(&item.capture)?).bind(manifest).bind(signed(item_size(item)?)?).bind(signed(item_metadata_size(item)?)?).bind(item.chunks.len()as i64).execute(&mut **tx).await?;
+        sqlx::query("INSERT INTO capture_queue (issuer_json,producer_id,producer_epoch,producer_seq,source_ref,generation,ingestion_epoch,position_key,capture_json,manifest_json,encoded_bytes,metadata_bytes,chunk_count,staging_credit) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+            .bind(&issuer).bind(&observation.producer_id).bind(&observation.producer_epoch).bind(signed(observation.producer_seq)?).bind(item.capture.source_position.source.encode()).bind(signed(item.capture.source_position.generation)?).bind(item.capture.ingestion_authorization_epoch.as_str()).bind(item.capture.source_position.encode()).bind(serde_json::to_vec(&item.capture)?).bind(manifest).bind(signed(item_size(item)?)?).bind(signed(item_metadata_size(item)?)?).bind(item.chunks.len()as i64).bind(signed(credit)?).execute(&mut **tx).await?;
         for (ordinal, (digest, bytes)) in item.chunks.iter().enumerate() {
             sqlx::query("INSERT INTO capture_payload_chunks (issuer_json,producer_id,producer_epoch,producer_seq,ordinal,digest,bytes) VALUES (?,?,?,?,?,?,?)")
                 .bind(&issuer).bind(&observation.producer_id).bind(&observation.producer_epoch).bind(signed(observation.producer_seq)?).bind(ordinal as i64).bind(digest.as_str()).bind(bytes).execute(&mut **tx).await?;
@@ -1207,7 +1243,9 @@ fn acquire(path: &Path, cursor: &Cursor, limits: CaptureLimits) -> Result<Acquir
         return Err(invalid("capture source is not a regular file"));
     }
     let identity = serde_json::to_string(&FileIdentity::of(&metadata))?;
-    let mut reason = if cursor.absent && cursor.identity.is_some() {
+    let mut reason = if cursor.closed {
+        Some("closed_generation")
+    } else if cursor.absent && cursor.identity.is_some() {
         Some("reappeared")
     } else if cursor
         .identity
@@ -1354,3 +1392,5 @@ fn unsigned(value: i64) -> Result<u64> {
 
 #[cfg(test)]
 mod tests;
+
+mod tails;

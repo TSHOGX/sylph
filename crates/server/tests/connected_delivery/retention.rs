@@ -7,6 +7,74 @@ use sylph_protocol::{
     SourceAttachmentEvent,
 };
 
+#[tokio::test]
+async fn native_reread_retains_a_superseded_fragment_before_reporting_completion() {
+    let backend = ConnectedBackend::start(false).await;
+    let session = backend.create_session("closed native tail seed").await;
+    let native = SessionId::decode(&session).unwrap();
+    let path = backend.root.path().join("native-tail.jsonl");
+    let header = lexical(json!({"type":"session_meta","payload":{"id":native.native_id}}));
+    std::fs::write(&path, [header.as_slice(), b"{broken"].concat()).unwrap();
+    backend
+        .source
+        .native_files
+        .lock()
+        .unwrap()
+        .insert(native.native_id.to_string(), path.clone());
+    let reread = format!("/api/v1/sessions/{session}/reread");
+    let (status, body) = backend.request("POST", &reread, None).await;
+    assert_eq!(status, 200, "{body}");
+    std::fs::write(&path, &header).unwrap();
+    let (status, body) = backend.request("POST", &reread, None).await;
+    assert_eq!(status, 200, "{body}");
+    let evidence = backend.state.trace.evidence();
+    let page = evidence.admissions_after(0, 64).await.unwrap();
+    assert!(!page.has_more);
+    let terminal = page
+        .captures
+        .iter()
+        .find(|entry| {
+            entry.capture.capture_diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == sylph_protocol::trace::CaptureDiagnosticCode::IncompleteRecord
+            })
+        })
+        .expect("finite reread completion must include the retired source fragment");
+    assert_eq!(terminal.capture.source_position.generation, 0);
+    assert_eq!(
+        terminal.capture.source_position.locator,
+        sylph_protocol::trace::SourceLocator::Jsonl {
+            byte_start: header.len() as u64,
+            byte_end: header.len() as u64 + 7,
+            record_ordinal: 1,
+        }
+    );
+    assert_eq!(
+        evidence
+            .capture_payload(&terminal.capture.observation_ref, 100)
+            .await
+            .unwrap(),
+        Some(b"{broken".to_vec())
+    );
+    assert!(matches!(
+        evidence
+            .receipt(&terminal.capture.observation_ref)
+            .await
+            .unwrap()
+            .unwrap()
+            .disposition,
+        ReceiptDisposition::Retained { .. }
+    ));
+    backend.state.trace.rebuild().await.unwrap();
+    assert_eq!(
+        evidence
+            .capture_payload(&terminal.capture.observation_ref, 100)
+            .await
+            .unwrap(),
+        Some(b"{broken".to_vec())
+    );
+    backend.drained().await;
+}
+
 async fn attachment(
     backend: &ConnectedBackend,
     parent: &ObservationRef,

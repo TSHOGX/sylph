@@ -488,6 +488,13 @@ history selection, context checkpoint, measurement, coverage, and diagnostic.
 Required fields for each family are typed. Unsupported vendor detail stays in retained
 evidence with a surfaced diagnostic/coverage effect; an empty successful parse is invalid.
 
+A mapped claim identifies its canonical retained observation as well as the source
+position, mapper build and structural selector. Independently authorized captures of
+one physical position therefore contribute separate agreeing claims with their own
+retention provenance; producer rereads within one admission epoch reuse the canonical
+observation. This distinction belongs to claims, not to native objects or history entry
+identities, which remain source/native scoped.
+
 Claims are interpreted evidence, not another authority. A new mapper can withdraw a
 previous interpretation by rebuilding a generation; source bytes survive. Core field
 resolution is deterministic and specific:

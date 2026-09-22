@@ -151,18 +151,31 @@ impl ArchiveContext {
         let mut prefixes = BTreeMap::<_, Vec<_>>::new();
         for claim in self.claims.values() {
             if let Fact::HistoryMappingComplete { extent } = &claim.fact {
-                prefixes.entry(extent.source.clone()).or_default().push(extent);
+                prefixes
+                    .entry(extent.source.clone())
+                    .or_default()
+                    .push(extent);
             }
         }
         prefixes
     }
 
     pub fn native_history_positions(&self) -> BTreeMap<EntryRef, SourcePosition> {
-        self.claims.values().filter_map(|claim| match &claim.fact {
-            Fact::HistoryPosition { entry, position, coordinate: HistoryCoordinate::LocalRecordIndex, mapping_rule, .. }
-                if mapping_rule == "codex/native-history" => Some((entry.clone(), position.clone())),
-            _ => None,
-        }).collect()
+        self.claims
+            .values()
+            .filter_map(|claim| match &claim.fact {
+                Fact::HistoryPosition {
+                    entry,
+                    position,
+                    coordinate: HistoryCoordinate::LocalRecordIndex,
+                    mapping_rule,
+                    ..
+                } if mapping_rule == "codex/native-history" => {
+                    Some((entry.clone(), position.clone()))
+                }
+                _ => None,
+            })
+            .collect()
     }
 }
 
@@ -311,7 +324,14 @@ pub fn claim(input: &MapInput<'_>, scope: &AgentRef, slot: &str, build: &str, fa
         claim_ref: ClaimRef::occurrence(
             scope.clone(),
             input.capture.source_position.clone(),
-            vec![build.into(), slot.into()],
+            // A physical source can be retained by independent authorization
+            // scopes. Its domain objects keep their source/native identities;
+            // each canonical capture supplies a distinct immutable proof claim.
+            vec![
+                build.into(),
+                slot.into(),
+                input.canonical_observation.encode(),
+            ],
         )
         .expect("validated capture position and nonempty mapper selector"),
         fact,
@@ -320,5 +340,114 @@ pub fn claim(input: &MapInput<'_>, scope: &AgentRef, slot: &str, build: &str, fa
         mapper_build: build.into(),
         supersedes: vec![],
         source_revision: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn independent_capture_proofs_share_domain_identity_without_reusing_a_claim_identity() {
+        let agent =
+            AgentRef::Session(sylph_protocol::SessionId::decode("env:codex:native").unwrap());
+        let issuer = Issuer::Environment(agent.environment().clone());
+        let first = Capture {
+            observation_ref: ObservationRef {
+                issuer: issuer.clone(),
+                producer_id: "capture".into(),
+                producer_epoch: "one".into(),
+                producer_seq: 1,
+            },
+            source_position: SourcePosition {
+                source: SourceRef {
+                    issuer,
+                    instance: "native-file".into(),
+                },
+                generation: 0,
+                locator: SourceLocator::Jsonl {
+                    byte_start: 0,
+                    byte_end: 2,
+                    record_ordinal: 0,
+                },
+            },
+            ingestion_authorization_epoch: IngestionEpoch::new("launch-scope").unwrap(),
+            declared_subject_refs: vec![agent.clone()],
+            captured_at: TimeEvidence {
+                domain: "capture".into(),
+                value: 0,
+                unit: TimeUnit::Milliseconds,
+                precision: Some(1),
+                basis: TimeBasis::ServerReceipt,
+            },
+            source_clock: None,
+            transport_kind: TransportKind::NativeJsonl,
+            vendor_build: None,
+            schema_fingerprint: None,
+            payload_ref: PayloadRef::bytes("a".repeat(64)).unwrap(),
+            attachments: vec![],
+            capture_diagnostics: vec![],
+        };
+        let mut independent = first.clone();
+        independent.observation_ref.producer_seq = 2;
+        independent.ingestion_authorization_epoch = IngestionEpoch::new("agent-scope").unwrap();
+        let state = MapperState::default();
+        let archive = ArchiveContext::default();
+        let object = TraceObject::Agent(AgentThread {
+            agent_ref: agent.clone(),
+            vendor: agent.anchor_session().agent.clone(),
+            name: None,
+            model: None,
+        });
+        let map = |capture: &Capture, canonical: &ObservationRef| {
+            claim(
+                &MapInput {
+                    capture,
+                    canonical_observation: canonical,
+                    raw: b"{}",
+                    state: &state,
+                    archive: &archive,
+                },
+                &agent,
+                "/agent",
+                "proof-test",
+                Fact::Declare {
+                    object: object.clone(),
+                },
+            )
+        };
+        let a = map(&first, &first.observation_ref);
+        let b = map(&independent, &independent.observation_ref);
+        assert_ne!(a.claim_ref, b.claim_ref);
+        assert_eq!(a.fact, b.fact);
+        assert_eq!(a.evidence, vec![first.observation_ref.clone()]);
+        assert_eq!(b.evidence, vec![independent.observation_ref.clone()]);
+        let mut alias = first.clone();
+        alias.observation_ref.producer_seq = 99;
+        assert_eq!(
+            map(&alias, &first.observation_ref),
+            a,
+            "reread receipts must reuse the canonical occurrence's claim"
+        );
+        let mut reducer = crate::reducer::Reducer::default();
+        reducer
+            .apply(
+                &[a, b],
+                &[first.observation_ref, independent.observation_ref]
+                    .into_iter()
+                    .collect(),
+                10,
+            )
+            .unwrap();
+        let resolved = reducer.resolve();
+        assert_eq!(resolved.objects.len(), 1);
+        assert_eq!(
+            resolved
+                .object(&AnyObjectRef::Agent(agent))
+                .unwrap()
+                .declaration
+                .known(),
+            Some(&object)
+        );
     }
 }
