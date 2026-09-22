@@ -1126,6 +1126,8 @@ impl CaptureRegistry {
             return Err(CaptureSpoolError::ReceiptMismatch);
         }
         let issuer = serde_json::to_string(&first.issuer)?;
+        #[cfg(test)]
+        self.crash_at("before_ack_transaction");
         let mut tx = self.spool.pool.begin_with("BEGIN IMMEDIATE").await?;
         let mut through:i64=sqlx::query_scalar("SELECT acked_through FROM capture_producers WHERE issuer_json=? AND producer_id=? AND producer_epoch=?")
             .bind(&issuer).bind(&first.producer_id).bind(&first.producer_epoch).fetch_one(&mut *tx).await?;
@@ -1172,7 +1174,11 @@ impl CaptureRegistry {
         }
         sqlx::query("UPDATE capture_producers SET acked_through=? WHERE issuer_json=? AND producer_id=? AND producer_epoch=?")
             .bind(through).bind(&issuer).bind(&first.producer_id).bind(&first.producer_epoch).execute(&mut *tx).await?;
+        #[cfg(test)]
+        self.crash_at("before_ack_commit");
         tx.commit().await?;
+        #[cfg(test)]
+        self.crash_at("after_ack_commit");
         Ok(deleted)
     }
 }

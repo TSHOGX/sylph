@@ -970,7 +970,11 @@ impl ControlStore {
             .bind(command_id)
             .execute(&mut *tx)
             .await?;
+        #[cfg(test)]
+        kill_at("before_result_commit");
         tx.commit().await?;
+        #[cfg(test)]
+        kill_at("after_result_commit");
         Ok(occurrence.capture.observation_ref)
     }
 
@@ -1205,7 +1209,11 @@ impl ControlStore {
             .bind(name).bind(cut).bind(observation.producer_seq as i64).execute(&mut *tx).await?;
         sqlx::query("UPDATE control_producer SET pending_count = pending_count - 1, pending_bytes = pending_bytes - ? WHERE singleton = 1")
             .bind(row.get::<i64, _>("encoded_bytes")).execute(&mut *tx).await?;
+        #[cfg(test)]
+        kill_at("before_export_mark_commit");
         tx.commit().await?;
+        #[cfg(test)]
+        kill_at("after_export_mark_commit");
         Ok(())
     }
 
@@ -1224,3 +1232,21 @@ impl ControlStore {
 
 #[cfg(test)]
 mod tests;
+
+// Hooks exist only in test binaries. The fixture marker and selected point are
+// set exclusively on a spawned probe; the suite process cannot kill itself.
+#[cfg(test)]
+pub(crate) fn kill_at(point: &str) {
+    #[cfg(unix)]
+    if std::env::var_os("SYLPH_OUTBOX_CRASH_FIXTURE").is_some()
+        && std::env::var("SYLPH_OUTBOX_CRASH_POINT").as_deref() == Ok(point)
+    {
+        unsafe extern "C" {
+            fn kill(pid: i32, signal: i32) -> i32;
+        }
+        // SAFETY: SIGKILL targets only the isolated probe's own process.
+        unsafe { kill(std::process::id() as i32, 9) };
+        unreachable!("SIGKILL must terminate the outbox probe");
+    }
+    let _ = point;
+}

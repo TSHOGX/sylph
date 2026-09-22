@@ -476,8 +476,18 @@ async fn capture_crash_probe() {
     registry.crash_point = Some(match stage.as_str() {
         "before_commit" => "before_commit",
         "after_commit" => "after_commit",
+        "before_ack_transaction" => "before_ack_transaction",
+        "before_ack_commit" => "before_ack_commit",
+        "after_ack_commit" => "after_ack_commit",
         _ => panic!("unknown crash stage"),
     });
+    if stage.contains("ack") {
+        let receipts: Vec<CaptureReceipt> =
+            serde_json::from_slice(&std::fs::read(directory.join("receipts.json")).unwrap())
+                .unwrap();
+        registry.acknowledge(&receipts).await.unwrap();
+        panic!("acknowledgment probe returned without SIGKILL");
+    }
     let source = registry
         .register_jsonl("pi.native", directory.join("native.jsonl"))
         .await
@@ -753,4 +763,114 @@ async fn capture_delivery_barrier_cannot_be_extended_by_later_live_frames() {
             .observation_ref,
         second
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn killed_acknowledgment_commits_receipts_queue_release_and_watermark_together() {
+    use std::os::unix::process::ExitStatusExt;
+    for stage in [
+        "before_ack_transaction",
+        "before_ack_commit",
+        "after_ack_commit",
+    ] {
+        let fixture = Fixture::new(CaptureLimits::default(), 1024 * 1024).await;
+        fixture.write(b"{\"key\":1,\"key\":2}\r\nsecond\nunrelated tail\n");
+        fixture.capture().await;
+        let original = fixture.registry.pending(10).await.unwrap();
+        assert_eq!(original.len(), 3);
+        let receipts = vec![
+            CaptureReceipt::Retained {
+                observation: original[0].capture.observation_ref.clone(),
+                admission_seq: 17,
+            },
+            CaptureReceipt::DiscardedByDeletion {
+                observation: original[1].capture.observation_ref.clone(),
+                tombstone: "deleted-scope".into(),
+            },
+        ];
+        std::fs::write(
+            fixture.dir.path().join("receipts.json"),
+            serde_json::to_vec(&receipts).unwrap(),
+        )
+        .unwrap();
+        // No original connection remains to checkpoint the WAL during the kill.
+        fixture.registry.spool.pool.close().await;
+        let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args([
+                "--exact",
+                "spool::capture::tests::capture_crash_probe",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("SYLPH_CAPTURE_CRASH_PATH", fixture.dir.path())
+            .env("SYLPH_CAPTURE_CRASH_STAGE", stage)
+            .kill_on_drop(true);
+        let output = tokio::time::timeout(std::time::Duration::from_secs(20), child.output())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            output.status.signal(),
+            Some(9),
+            "{stage}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let recovered = fixture.reopen().await;
+        let committed = stage == "after_ack_commit";
+        let queued = recovered.pending(10).await.unwrap();
+        assert_eq!(queued, original[if committed { 2 } else { 0 }..], "{stage}");
+        let through: i64 = sqlx::query_scalar("SELECT acked_through FROM capture_producers")
+            .fetch_one(&recovered.spool.pool)
+            .await
+            .unwrap();
+        assert_eq!(through, if committed { 2 } else { 0 }, "{stage}");
+        let persisted: Vec<String> =
+            sqlx::query_scalar("SELECT receipt_json FROM capture_receipts ORDER BY producer_seq")
+                .fetch_all(&recovered.spool.pool)
+                .await
+                .unwrap();
+        let persisted: Vec<CaptureReceipt> = persisted
+            .iter()
+            .map(|value| serde_json::from_str(value).unwrap())
+            .collect();
+        assert_eq!(
+            persisted,
+            if committed { receipts.clone() } else { vec![] },
+            "{stage}"
+        );
+        assert_eq!(
+            recovered.acknowledge(&receipts).await.unwrap(),
+            if committed { 0 } else { 2 }
+        );
+        assert_eq!(recovered.pending(10).await.unwrap(), original[2..]);
+        assert_eq!(
+            bytes(&recovered.pending(10).await.unwrap()[0]),
+            b"unrelated tail\n"
+        );
+        // Retried terminal receipts are immutable, including their dispositions.
+        assert!(recovered
+            .acknowledge(&[CaptureReceipt::Retained {
+                observation: original[1].capture.observation_ref.clone(),
+                admission_seq: 18,
+            }])
+            .await
+            .is_err());
+        recovered
+            .acknowledge(&[CaptureReceipt::Retained {
+                observation: original[2].capture.observation_ref.clone(),
+                admission_seq: 19,
+            }])
+            .await
+            .unwrap();
+        assert!(recovered.pending(10).await.unwrap().is_empty());
+        assert_eq!(recovered.spool.size_bytes().await.unwrap(), 0);
+        assert!(recovered
+            .capture_jsonl(&fixture.source, authorization("epoch-1"))
+            .await
+            .unwrap()
+            .observations
+            .is_empty());
+    }
 }

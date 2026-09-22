@@ -96,7 +96,11 @@ impl OutboxExporter {
         let occurrences = self.control.pending().await?;
         let mut progress = ExportProgress::default();
         for occurrence in occurrences {
+            #[cfg(test)]
+            crate::db::control::kill_at("before_export_admission");
             let disposition = self.admit(&occurrence).await?;
+            #[cfg(test)]
+            crate::db::control::kill_at("after_export_admission");
             self.control
                 .mark_exported(&occurrence.capture.observation_ref, disposition)
                 .await?;
@@ -537,3 +541,6 @@ mod tests {
         assert!(fixture.exporter().run_once().await.is_ok());
     }
 }
+
+#[cfg(all(test, unix))]
+mod crash_tests;
