@@ -874,3 +874,67 @@ async fn killed_acknowledgment_commits_receipts_queue_release_and_watermark_toge
             .is_empty());
     }
 }
+
+#[tokio::test]
+async fn recycled_file_identity_cannot_hide_changed_committed_bytes_after_restart() {
+    let fixture = Fixture::new(CaptureLimits::default(), 1024 * 1024).await;
+    let first = b"{\"id\":\"same\",\"text\":\"old\"}\r\n";
+    let replacement = b"{\"id\":\"same\",\"text\":\"new\"}\r\n";
+    fixture.write(first);
+    fixture.capture().await;
+    let original = fixture.registry.pending(10).await.unwrap();
+    let replacement_path = fixture.dir.path().join("replacement.jsonl");
+    std::fs::write(&replacement_path, replacement).unwrap();
+    std::fs::rename(&replacement_path, &fixture.source.locator).unwrap();
+    // Make the durable observation equal the replacement's complete file identity.
+    // This deterministically exercises identity reuse, including a filesystem
+    // without a distinct birth time, without waiting for the kernel to recycle an
+    // inode. The stored prefix digest and all captured bytes remain untouched.
+    let recycled = serde_json::to_string(&FileIdentity::of(
+        &std::fs::metadata(&fixture.source.locator).unwrap(),
+    ))
+    .unwrap();
+    sqlx::query(
+        "UPDATE capture_generations SET file_identity=? WHERE source_ref=? AND generation=0",
+    )
+    .bind(recycled)
+    .bind(fixture.source.reference.encode())
+    .execute(&fixture.registry.spool.pool)
+    .await
+    .unwrap();
+    let registry = fixture.reopen().await;
+    let pass = registry
+        .capture_jsonl(&fixture.source, authorization("epoch-1"))
+        .await
+        .unwrap();
+    assert_eq!(
+        pass.generation, 1,
+        "matching file identity cannot certify the retained prefix"
+    );
+    assert!(pass.generation_changed);
+    let mut queued = registry.pending(10).await.unwrap();
+    queued.sort_by_key(|item| item.capture.source_position.generation);
+    assert_eq!(queued.len(), 2);
+    assert_eq!(queued[0], original[0]);
+    assert_eq!(bytes(&queued[0]), first);
+    assert_eq!(bytes(&queued[1]), replacement);
+    assert_eq!(
+        queued[1].capture.source_position.source,
+        fixture.source.reference
+    );
+    assert_eq!(queued[1].capture.source_position.generation, 1);
+    assert_eq!(
+        queued[1].capture.source_position.locator,
+        SourceLocator::Jsonl {
+            byte_start: 0,
+            byte_end: replacement.len() as u64,
+            record_ordinal: 0,
+        }
+    );
+    assert!(registry
+        .capture_jsonl(&fixture.source, authorization("epoch-1"))
+        .await
+        .unwrap()
+        .observations
+        .is_empty());
+}

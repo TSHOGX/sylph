@@ -193,8 +193,17 @@ being marked transferred. Other admission failures remain Nacks and cannot skip 
 A newly admitted capture owns durable upload receipts for its declared payload chunks,
 fixed to its ObservationRef and ingestion epoch. A global CAS digest alone cannot import
 another scope's bytes or count an erased occurrence as recaptured. An exact reread may
-reuse payloads already rooted by that same SourcePosition in the current epoch; all new
-payload references require provided and verified bytes. Upload roots precede physical
+reuse payloads already rooted by that same SourcePosition in the current epoch. An
+attachment relation can likewise name an already admitted sidecar SourcePosition: its
+issuer, fixed admission epoch, source generation, locator and primary payload reference
+must all match an admitted observation of the retained occurrence. Rereads can supply
+different manifest layouts of the same decoded source bytes; each admitted primary
+representation remains eligible. The server reconstructs that payload's bounded
+transfer declarations from retained metadata, pins its chunks for the upload, and
+rechecks the source proof in the admission transaction. This also works after the
+vendor removes the sidecar. A known digest, a path, a source position in another epoch,
+or an unadmitted source cannot supply this proof. All other new payload references
+require provided and verified bytes. Upload roots precede physical
 publication, and complete upload ownership is checked in the receipt transaction.
 
 The envagent spool preserves its existing enqueue-before-send and terminal-receipt-before-delete

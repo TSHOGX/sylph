@@ -79,9 +79,12 @@ late. Re-adoption issues a fresh epoch; neither old spool frames nor old server 
 occurrences can be retagged with it.
 
 Payload addresses distinguish exact bytes from manifests while retaining one physical
-BLAKE3 CAS. Capture-upload records prove which fixed observation actually supplied each
-chunk. A global digest is insufficient authority to import another environment's bytes.
-A same-source, same-position reread may reuse proof within its original admission epoch.
+BLAKE3 CAS. Capture-upload records retain byte-transfer receipts and reusable
+source-occurrence proofs under `docs/unified-trace-storage.md` § Admission and acknowledgments.
+These include attachment relations to already admitted sidecar occurrences; a global
+digest alone supplies no ownership proof. Each observation indexes its own primary
+payload reference, so alternate admitted manifest layouts remain eligible without
+scanning receipt envelopes.
 
 ## Semantic generations and snapshots
 

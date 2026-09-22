@@ -4,10 +4,22 @@ use crate::trace::{
     upload::{AdmissionGuard, Result, UploadError},
 };
 use sqlx::{Row, SqliteConnection};
-use sylph_protocol::trace::{Capture, Issuer, PayloadRef};
+use std::collections::{BTreeMap, BTreeSet};
+use sylph_protocol::trace::{Capture, CaptureAttachment, Issuer, PayloadRef};
 use sylph_protocol::{CaptureUploadTicket, PayloadDeclaration};
 
 impl EvidenceCatalogue {
+    pub(crate) async fn retained_attachment(
+        &self,
+        capture: &Capture,
+        attachment: &CaptureAttachment,
+    ) -> Result<bool> {
+        let mut conn = self.evidence.readers.acquire().await?;
+        Ok(attachment_occurrence(&mut conn, capture, attachment)
+            .await?
+            .is_some())
+    }
+
     pub(crate) async fn begin_capture_upload(
         &self,
         issuer: &Issuer,
@@ -50,6 +62,28 @@ impl EvidenceCatalogue {
         let epoch = capture.ingestion_authorization_epoch.as_str();
         let occurrence:Option<i64>=sqlx::query_scalar("SELECT occurrence_id FROM occurrences WHERE ingestion_epoch=? AND source_ref=? AND generation=? AND locator_json=?")
             .bind(epoch).bind(capture.source_position.source.encode()).bind(capture.source_position.generation as i64).bind(serde_json::to_string(&capture.source_position.locator)?).fetch_optional(&mut *tx).await?;
+        // Reuse is proved by a retained source occurrence in this exact epoch,
+        // never by the fact that a global CAS digest happens to exist. Build the
+        // chunk index once so attachment fan-out does not multiply writer work.
+        let by_ref: BTreeMap<_, _> = declarations
+            .iter()
+            .map(|declaration| (declaration.reference(), declaration))
+            .collect();
+        let mut attachments = BTreeMap::new();
+        for attachment in &capture.attachments {
+            if let Some(source) = attachment_occurrence(&mut tx, capture, attachment).await? {
+                let reference = attachment
+                    .payload_ref
+                    .as_ref()
+                    .expect("proved attachment payload");
+                attachments.insert(reference.clone(), source);
+                if let Some(PayloadDeclaration::Manifest { manifest, .. }) = by_ref.get(reference) {
+                    for chunk in &manifest.chunks {
+                        attachments.insert(chunk.digest.clone(), source);
+                    }
+                }
+            }
+        }
         let id = uuid::Uuid::new_v4().to_string();
         sqlx::query("INSERT INTO trace_capture_uploads VALUES(?,?,?,?,?,?,?,'open')")
             .bind(&id)
@@ -75,7 +109,7 @@ impl EvidenceCatalogue {
                     ("manifest", None, Some(serde_json::to_string(manifest)?))
                 }
             };
-            let reused = if let Some(occurrence) = occurrence {
+            let reused = if let Some(occurrence) = attachments.get(reference).copied().or(occurrence) {
                 source_has_payload(&mut tx, occurrence, reference)
                     .await?
                     .then_some(occurrence)
@@ -190,6 +224,26 @@ impl EvidenceCatalogue {
     }
 }
 
+async fn attachment_occurrence(
+    conn: &mut SqliteConnection,
+    capture: &Capture,
+    attachment: &CaptureAttachment,
+) -> Result<Option<i64>> {
+    let (Some(position), Some(payload)) = (&attachment.source_position, &attachment.payload_ref)
+    else {
+        return Ok(None);
+    };
+    if position.source.issuer != capture.observation_ref.issuer || position.generation > i64::MAX as u64 {
+        return Ok(None);
+    }
+    Ok(sqlx::query_scalar("SELECT c.occurrence_id FROM occurrences c JOIN ingestion_epoch_tombstones t ON t.epoch=c.ingestion_epoch JOIN payloads p ON p.payload_ref=? WHERE c.ingestion_epoch=? AND c.source_ref=? AND c.generation=? AND c.locator_json=? AND t.tombstone_id IS NULL AND p.availability='available' AND p.complete=1 AND EXISTS(SELECT 1 FROM observations o WHERE o.occurrence_id=c.occurrence_id AND o.primary_payload_ref=p.payload_ref)")
+        .bind(payload.as_str())
+        .bind(capture.ingestion_authorization_epoch.as_str())
+        .bind(position.source.encode()).bind(position.generation as i64)
+        .bind(serde_json::to_string(&position.locator)?)
+        .fetch_optional(conn).await?)
+}
+
 async fn authenticate(
     conn: &mut SqliteConnection,
     issuer: &Issuer,
@@ -266,13 +320,27 @@ pub(crate) async fn verify_guard(
             ));
         }
         let reused=sqlx::query("SELECT payload_ref,reused_occurrence FROM trace_capture_payloads WHERE upload_id=? AND reused_occurrence IS NOT NULL").bind(&guard.upload_id).fetch_all(&mut *conn).await?;
+        if reused.is_empty() {
+            return Ok(());
+        }
+        let mut authorized = BTreeSet::new();
+        let source: Option<i64> = sqlx::query_scalar("SELECT occurrence_id FROM occurrences WHERE ingestion_epoch=? AND source_ref=? AND generation=? AND locator_json=?")
+            .bind(capture.ingestion_authorization_epoch.as_str()).bind(capture.source_position.source.encode())
+            .bind(capture.source_position.generation as i64).bind(serde_json::to_string(&capture.source_position.locator)?)
+            .fetch_optional(&mut *conn).await?;
+        authorized.extend(source);
+        for attachment in &capture.attachments {
+            authorized.extend(
+                attachment_occurrence(conn, capture, attachment)
+                    .await
+                    .map_err(|error| EvidenceError::Invalid(error.to_string()))?,
+            );
+        }
         for reused in reused {
             let occurrence: i64 = reused.try_get("reused_occurrence")?;
-            let same:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM occurrences WHERE occurrence_id=? AND ingestion_epoch=? AND source_ref=? AND generation=? AND locator_json=?)")
-                .bind(occurrence).bind(capture.ingestion_authorization_epoch.as_str()).bind(capture.source_position.source.encode()).bind(capture.source_position.generation as i64).bind(serde_json::to_string(&capture.source_position.locator)?).fetch_one(&mut *conn).await?;
             let reference = PayloadRef::parse(reused.try_get::<String, _>("payload_ref")?)
                 .map_err(|e| EvidenceError::Invalid(e.to_string()))?;
-            if !same
+            if !authorized.contains(&occurrence)
                 || !source_has_payload(conn, occurrence, &reference)
                     .await
                     .map_err(|e| EvidenceError::Invalid(e.to_string()))?

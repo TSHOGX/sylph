@@ -12,6 +12,9 @@ use std::{
 use sylph_protocol::{SessionId, trace::AgentRef};
 use sylph_server::trace::evidence::ReceiptDisposition;
 
+#[path = "connected_delivery/retention.rs"]
+mod retention;
+
 fn lexical(value: Value) -> Vec<u8> {
     format!(" \t{} \r\n", value).into_bytes()
 }

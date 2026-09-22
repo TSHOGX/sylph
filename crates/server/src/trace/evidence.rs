@@ -747,8 +747,8 @@ impl EvidenceStore {
                         .bind(epoch).bind(&source_key).bind(generation).bind(&locator).bind(capture.payload_ref.as_str()).bind(&decoded_digest).bind(&observation_key).execute(&mut *tx).await?.last_insert_rowid()
                 };
                 let envelope_bytes = envelope.len() as i64;
-                let admission_seq = sqlx::query("INSERT INTO observations (observation_ref, occurrence_id, envelope_json, envelope_bytes, admitted_at_ms) VALUES (?, ?, ?, ?, ?)")
-                    .bind(&observation_key).bind(occurrence_id).bind(envelope).bind(envelope_bytes).bind(now_ms()).execute(&mut *tx).await?.last_insert_rowid();
+                let admission_seq = sqlx::query("INSERT INTO observations (observation_ref, occurrence_id, primary_payload_ref, envelope_json, envelope_bytes, admitted_at_ms) VALUES (?, ?, ?, ?, ?, ?)")
+                    .bind(&observation_key).bind(occurrence_id).bind(capture.payload_ref.as_str()).bind(envelope).bind(envelope_bytes).bind(now_ms()).execute(&mut *tx).await?.last_insert_rowid();
                 sqlx::query("INSERT INTO source_replay_records VALUES(?,?,?,?,?) ON CONFLICT(occurrence_id) DO NOTHING")
                     .bind(epoch).bind(&source_key).bind(generation).bind(admission_seq).bind(occurrence_id).execute(&mut *tx).await?;
                 for payload in capture_payload_refs(capture) {

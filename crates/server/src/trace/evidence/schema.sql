@@ -92,11 +92,15 @@ CREATE TABLE observations (
   admission_seq INTEGER PRIMARY KEY AUTOINCREMENT,
   observation_ref TEXT NOT NULL UNIQUE,
   occurrence_id INTEGER NOT NULL REFERENCES occurrences(occurrence_id),
+  primary_payload_ref TEXT NOT NULL REFERENCES payloads(payload_ref),
   envelope_json TEXT NOT NULL,
   envelope_bytes INTEGER NOT NULL CHECK (envelope_bytes >= 0),
   admitted_at_ms INTEGER NOT NULL
 );
 CREATE INDEX observations_by_occurrence ON observations(occurrence_id, admission_seq);
+-- Rereads may retain different manifest layouts for the same exact source bytes.
+-- Index their primary representations without scanning every receipt envelope.
+CREATE INDEX observations_by_primary_payload ON observations(occurrence_id, primary_payload_ref);
 
 -- One canonical occurrence per exact source incarnation and authorization epoch.
 -- Replay keysets skip unrelated sources and duplicate reread receipts directly.

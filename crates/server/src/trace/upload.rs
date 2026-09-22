@@ -110,6 +110,7 @@ impl CaptureUploads {
             }
             CapturePreflight::RequiresPayload => {}
         }
+        let declarations = self.attachment_declarations(&capture, declarations).await?;
         let declarations = self.validate_declarations(&capture, declarations)?;
         let ticket = self
             .catalogue
@@ -228,6 +229,98 @@ impl CaptureUploads {
     /// retry cannot remove the durable guards of another in-flight filesystem write.
     pub async fn recover_interrupted_writes(&self) -> Result<()> {
         self.catalogue.recover_blob_writes().await?;
+        Ok(())
+    }
+
+    /// Attachment observations describe an already captured sidecar occurrence.
+    /// Its source proof survives vendor removal and queue acknowledgment; requiring
+    /// its old bytes to be uploaded a second time would strand the producer. This
+    /// read is advisory: the upload and admission transactions recheck the proof.
+    async fn attachment_declarations(
+        &self,
+        capture: &Capture,
+        mut declarations: Vec<PayloadDeclaration>,
+    ) -> Result<Vec<PayloadDeclaration>> {
+        let mut metadata_bytes = serde_json::to_vec(&declarations)?.len();
+        if declarations.len() > self.limits.max_declarations
+            || metadata_bytes > self.limits.max_metadata_bytes
+        {
+            return Err(UploadError::Limit("payload declarations"));
+        }
+        let mut declared: BTreeSet<_> = declarations
+            .iter()
+            .map(|value| value.reference().clone())
+            .collect();
+        if declared.len() != declarations.len() {
+            return Err(UploadError::Invalid("duplicate payload declaration".into()));
+        }
+        for attachment in &capture.attachments {
+            let Some(reference) = &attachment.payload_ref else {
+                continue;
+            };
+            if declared.contains(reference) {
+                continue;
+            }
+            if !self
+                .catalogue
+                .retained_attachment(capture, attachment)
+                .await?
+            {
+                return Err(UploadError::Incomplete);
+            }
+            let mut chunks = BTreeSet::new();
+            if let Some(manifest) = self.evidence().payload_manifest(reference).await? {
+                chunks.extend(manifest.chunks.iter().map(|chunk| chunk.digest.clone()));
+                self.add_attachment_declaration(
+                    &mut declarations,
+                    &mut declared,
+                    &mut metadata_bytes,
+                    PayloadDeclaration::Manifest {
+                        reference: reference.clone(),
+                        manifest,
+                    },
+                )?;
+            } else {
+                chunks.insert(reference.clone());
+            }
+            for chunk in chunks {
+                if declared.contains(&chunk) {
+                    continue;
+                }
+                let length = self
+                    .evidence()
+                    .payload_length(&chunk)
+                    .await?
+                    .ok_or(UploadError::Incomplete)?;
+                self.add_attachment_declaration(
+                    &mut declarations,
+                    &mut declared,
+                    &mut metadata_bytes,
+                    PayloadDeclaration::Bytes {
+                        reference: chunk,
+                        length,
+                    },
+                )?;
+            }
+        }
+        Ok(declarations)
+    }
+
+    fn add_attachment_declaration(
+        &self,
+        declarations: &mut Vec<PayloadDeclaration>,
+        declared: &mut BTreeSet<PayloadRef>,
+        metadata_bytes: &mut usize,
+        value: PayloadDeclaration,
+    ) -> Result<()> {
+        *metadata_bytes = metadata_bytes.saturating_add(serde_json::to_vec(&value)?.len() + 1);
+        if declarations.len() == self.limits.max_declarations
+            || *metadata_bytes > self.limits.max_metadata_bytes
+        {
+            return Err(UploadError::Limit("retained attachment declarations"));
+        }
+        declared.insert(value.reference().clone());
+        declarations.push(value);
         Ok(())
     }
 

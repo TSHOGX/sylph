@@ -21,9 +21,9 @@ physical digest is BLAKE3 over exact CAS bytes. A manifest can share physical st
 a raw captured byte string without becoming the same logical object. Manifests retain
 ordered chunk mappings, encoding, media type, total length when known, and available ranges.
 
-Capture uploads reserve ownership before CAS publication. Admission requires each new
-observation's byte receipts or a proven reread of the same source occurrence in the same
-epoch. Unknown content and incomplete sidecars remain explicit evidence states.
+Capture uploads reserve ownership before CAS publication. Transfer receipts and scoped
+source-occurrence proofs follow `docs/unified-trace-storage.md` § Admission and acknowledgments.
+Unknown content and incomplete sidecars remain explicit evidence states.
 
 ## Search
 

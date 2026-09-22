@@ -20,6 +20,8 @@ use sylph_protocol::{
 };
 use sylph_protocol::{CaptureUploadTicket, PayloadDeclaration};
 
+mod attachments;
+
 struct Fixture {
     dir: tempfile::TempDir,
     evidence: EvidenceStore,
