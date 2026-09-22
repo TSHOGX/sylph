@@ -259,7 +259,7 @@ holds that window open before completing the competing operation.
 | --- | --- |
 | Admission | Crash/kill before and after payload sync, evidence commit and acknowledgment; compare accepted prefixes and exact bytes |
 | Operational outbox | Crash around dispatch, result receipt, export and export marking; assert unknown at-most-once outcome is not retried |
-| Source acquisition | Partial JSONL, CRLF/duplicate JSON keys, truncate/rewrite, inode reuse, same-ID changed payload, concurrent reread/follower, large record across chunks |
+| Source acquisition | Partial JSONL, superseded staged tails, CRLF/duplicate JSON keys, truncate/rewrite, inode reuse, same-ID changed payload, concurrent reread/follower, large record across chunks |
 | Sidecars | Missing then available; mutable locator revisions; interrupted chunk publication; corrupt digest; vendor removal after complete retention |
 | Reducer | Late parents, cycles, conflict withdrawal, equivalence merge then split, absent native owner, unknown required enum, excessive semantic expansion |
 | Rebuild | Fail each validation/publication step; race admitted arrivals and an in-flight old writer; cut never regresses and no half-generation is served |
@@ -268,7 +268,7 @@ holds that window open before completing the competing operation.
 | Payload access | At R1 a readable anchor X references P1; X/R1 cannot read newer P2; an authorized copied entry can read its retained inherited bytes without origin-environment access |
 | Action target | Focusing an embedded child without a control route never sends Stop or input to its anchor/root Session |
 | Search | Lag index behind trace and temporal GC; pin matching view/cut, or invalidate explicitly; never current text with old membership |
-| Retention | A confirmed native watermark cannot remove a unique live delta, clock or raw field |
+| Retention | Declaring a complete native prefix cannot remove a unique live delta, clock or raw field |
 | Explicit deletion | Cancel old reads/jobs; reject known old receipts AND never-admitted pre-deletion spool/outbox items by their fixed ingestion epoch; re-adoption cannot revive old snapshots or count erased bytes as recaptured; terminal deletion receipts release unrelated producer work without claiming admission |
 | CAS collection | Shared payload across evidence, active/private/leased generations, search and export jobs survives until its last live root is released |
 | Resource pressure | Projection stall does not hold evidence/control writer; bounded queues report actual admission/capture limits and recover from durable checkpoints |

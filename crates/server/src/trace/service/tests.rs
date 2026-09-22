@@ -922,3 +922,7 @@ async fn a_search_index_left_behind_by_collection_refuses_instead_of_serving_sta
         "a collected index answered a query at its old cut: {stale:?}"
     );
 }
+
+mod publication_failures;
+
+mod retention;

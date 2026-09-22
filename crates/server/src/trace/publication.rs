@@ -118,26 +118,46 @@ impl PublicationCoordinator {
         now_ms: i64,
     ) -> Result<(BuildTicket, GenerationStore)> {
         let ticket = self.catalogue.begin_build(manifest, now_ms).await?;
-        let created = GenerationStore::create(
+        match self.prepare_private(&ticket).await {
+            Ok(store) => Ok((ticket, store)),
+            Err(error) => {
+                // Until setup returns, the caller has no ticket with which to
+                // cancel the job. Creation, validation and file registration must
+                // therefore share this owner of the failed build's capacity.
+                self.catalogue
+                    .cancel_build(&ticket, &error.to_string())
+                    .await?;
+                Err(error)
+            }
+        }
+    }
+
+    async fn prepare_private(&self, ticket: &BuildTicket) -> Result<GenerationStore> {
+        #[cfg(test)]
+        self.crash_at(PublicationCrash::BeforeCreate)?;
+        let store = GenerationStore::create(
             self.directory.join(&ticket.relative_file),
             ticket.manifest.clone(),
             self.limits.queries.clone(),
         )
+        .await?;
+        let registered: Result<()> = async {
+            #[cfg(test)]
+            self.crash_at(PublicationCrash::BeforeInitialValidation)?;
+            let validation = store.validate_for_publication().await?;
+            #[cfg(test)]
+            self.crash_at(PublicationCrash::BeforeFileRegistration)?;
+            self.catalogue
+                .register_file(ticket, &validation.database_identity)
+                .await?;
+            Ok(())
+        }
         .await;
-        let store = match created {
-            Ok(store) => store,
-            Err(error) => {
-                self.catalogue
-                    .cancel_build(&ticket, "generation file creation failed")
-                    .await?;
-                return Err(error.into());
-            }
-        };
-        let validation = store.validate_for_publication().await?;
-        self.catalogue
-            .register_file(&ticket, &validation.database_identity)
-            .await?;
-        Ok((ticket, store))
+        if let Err(error) = registered {
+            store.close().await;
+            return Err(error);
+        }
+        Ok(store)
     }
 
     pub async fn publish(
@@ -219,14 +239,22 @@ impl PublicationCoordinator {
             .evidence_cut()
             .await
             .map_err(|e| PublicationError::Worker(anyhow::anyhow!(e)))?;
+        #[cfg(test)]
+        self.crash_at(PublicationCrash::BeforeReplay)?;
         worker
             .catch_up(private, private_token, background_cut)
             .await
             .map_err(PublicationError::Worker)?;
+        #[cfg(test)]
+        self.crash_at(PublicationCrash::BeforeReplayCut)?;
         require_cut(private, background_cut).await?;
         // Semantic validation covers this exact baseline. A concurrent same-cut
         // continuation remains in the tail instead of silently joining the baseline.
+        #[cfg(test)]
+        self.crash_at(PublicationCrash::BeforeBaselineValidation)?;
         let baseline = private.validate_for_publication().await?;
+        #[cfg(test)]
+        self.crash_at(PublicationCrash::BeforeSemanticValidation)?;
         worker
             .validate_generation(private, &baseline.checkpoint)
             .await
@@ -296,6 +324,8 @@ impl PublicationCoordinator {
         guard: &PublicationGuard,
         recovery_cut: Option<u64>,
     ) -> Result<PublishedGeneration> {
+        #[cfg(test)]
+        self.crash_at(PublicationCrash::BeforeOldFence)?;
         let old_fence = match (old, old_token) {
             (Some(old), Some(token)) => Some(old.fence(token).await?),
             _ => None,
@@ -314,16 +344,28 @@ impl PublicationCoordinator {
         if publication_cut < old_cut {
             return Err(PublicationError::GenerationMismatch);
         }
+        #[cfg(test)]
+        self.crash_at(PublicationCrash::BeforeTailReplay)?;
         worker
             .catch_up(private, private_token, publication_cut)
             .await
             .map_err(PublicationError::Worker)?;
+        #[cfg(test)]
+        self.crash_at(PublicationCrash::BeforeTailCut)?;
         require_cut(private, publication_cut).await?;
+        #[cfg(test)]
+        self.crash_at(PublicationCrash::BeforePrivateFence)?;
         let private_fence = private.fence(private_token).await?;
+        #[cfg(test)]
+        self.crash_at(PublicationCrash::BeforeTailValidation)?;
         let validated = private
             .validate_tail(baseline, &private_fence, self.limits.max_tail_revisions)
             .await?;
+        #[cfg(test)]
+        self.crash_at(PublicationCrash::BeforeSeal)?;
         let identity = private.seal(&private_fence, &validated).await?;
+        #[cfg(test)]
+        self.crash_at(PublicationCrash::BeforeReady)?;
         self.catalogue
             .record_ready(
                 ticket,
@@ -384,6 +426,11 @@ impl PublicationCoordinator {
     }
 
     #[cfg(test)]
+    pub(crate) fn inject_crash(&mut self, point: Option<PublicationCrash>) {
+        self.crash = point;
+    }
+
+    #[cfg(test)]
     fn crash_at(&self, point: PublicationCrash) -> Result<()> {
         if self.crash != Some(point) {
             return Ok(());
@@ -403,7 +450,21 @@ impl PublicationCoordinator {
 
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PublicationCrash {
+pub(crate) enum PublicationCrash {
+    BeforeCreate,
+    BeforeInitialValidation,
+    BeforeFileRegistration,
+    BeforeReplay,
+    BeforeReplayCut,
+    BeforeBaselineValidation,
+    BeforeSemanticValidation,
+    BeforeOldFence,
+    BeforeTailReplay,
+    BeforeTailCut,
+    BeforePrivateFence,
+    BeforeTailValidation,
+    BeforeSeal,
+    BeforeReady,
     AfterReady,
     AfterPointer,
 }

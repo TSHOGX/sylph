@@ -740,3 +740,5 @@ async fn deleting_separately_retained_content_blocks_reader_payload_and_search_a
     let (_, search) = fixture.get(&format!("/api/v1/trace/search?q={body}")).await;
     assert!(!search.to_string().contains(body), "{search}");
 }
+
+mod coverage;

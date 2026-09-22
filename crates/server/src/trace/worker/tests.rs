@@ -1800,3 +1800,5 @@ fn native_history_coordinate_conflicts_cannot_replace_a_retained_witness() {
     .unwrap();
     assert_eq!(records, reordered);
 }
+
+mod semantic_acceptance;
