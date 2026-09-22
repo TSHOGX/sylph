@@ -76,7 +76,7 @@ struct LiveMessage {
 
 impl SemanticMapper for PiMapper {
     fn build(&self) -> &'static str {
-        "pi-5"
+        "pi-6"
     }
 
     fn map(&self, input: MapInput<'_>) -> MapOutput {
@@ -435,6 +435,12 @@ impl Context<'_, '_> {
                         content: ContextContent::Summary { payload },
                         coverage: InclusionCoverage::Summary,
                     }),
+                );
+                self.usage(
+                    owner,
+                    &value["usage"],
+                    &format!("{slot}/usage"),
+                    AnyObjectRef::ContextCheckpoint(checkpoint.clone()),
                 );
                 if kind == "compaction" {
                     if let (Some(first), Some(parent)) = (
@@ -1983,6 +1989,7 @@ impl Context<'_, '_> {
                     owner,
                     &format!("{selector}/usage/{field}"),
                     TraceObject::Measurement(Measurement {
+                        model: None,
                         measurement_ref: MeasurementRef::occurrence(
                             owner.clone(),
                             self.input.capture.source_position.clone(),
@@ -2007,6 +2014,7 @@ impl Context<'_, '_> {
                 owner,
                 &format!("{selector}/cost/total"),
                 TraceObject::Measurement(Measurement {
+                    model: None,
                     measurement_ref: MeasurementRef::occurrence(
                         owner.clone(),
                         self.input.capture.source_position.clone(),

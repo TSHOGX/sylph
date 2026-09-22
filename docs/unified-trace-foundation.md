@@ -1,6 +1,6 @@
 # Unified Trace Foundation
 
-Status: **Normative target design. Implementation and production conformance are pending.**
+Status: **Normative semantic contract.**
 
 Design review: 2026-09-15. Progress and rollout gates live only in
 [roadmap.md](roadmap.md#unified-trace-foundation-review).
@@ -463,6 +463,7 @@ Every Measurement identifies:
 
 ```text
 measurement_ref, subject_ref, metric, unit, value,
+model_scope? = (reported_name, canonical_name?, provider?),
 mode = interval | cumulative | gauge,
 interval_ref? | (counter_domain, reset_epoch, sample_position)?,
 aggregation_scope, component_relationships, evidence_refs
@@ -475,6 +476,9 @@ is not substituted for an unknown baseline. Inclusive ancestor totals cannot be 
 to child totals without proven disjoint scopes. Cached and reasoning token components
 retain the vendor's inclusion rules. Monetary cost needs currency and pricing basis;
 tokens alone do not prove cost. Measurements never split messages or create prose rows.
+An explicitly reported model scope distinguishes per-model counters from aggregate
+measurements on the same subject. Model labels are not embedded in metric names or
+used to invent an inference operation.
 
 ## Evidence, claims, and deterministic reduction
 

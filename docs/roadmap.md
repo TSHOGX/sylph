@@ -227,6 +227,16 @@ same resources and facts across source ordering and rebuild. Unrelated durable l
 retain unknown identity scope until a creator/project certificate is available. These
 cases extend vendor conformance; the clause-level S2 audit and reader gates remain open.
 
+Retained accounting fixtures now distinguish Codex response, turn, response-event thread,
+thread token-count and latest samples, including native cache-write tokens. Missing actual
+owners cannot borrow causal root identities. A controlled Claude process with two queries
+establishes query-local usage versus cumulative model usage and total cost; typed model
+scope survives projection and prevents cross-model deltas. Pi compaction and branch-summary
+usage belongs to its ContextCheckpoint, preserving explicit zeroes without invented
+inference. Production replay checks duplicate receipts, rereads, source order, incremental
+restarts and same-cut rebuild. Targeted mutations fail the accounting regressions. The
+complete S2 audit and S3 gates remain open.
+
 ### Runtime and reader cutover checkpoint
 
 The product path is now acquisition → durable capture/upload → evidence → pure mapping

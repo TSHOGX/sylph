@@ -282,3 +282,25 @@ fn native_failed_response_preserves_its_reported_error_without_inventing_executi
         .contains("Controlled overloaded provider attempt")
         && matches!(diagnostic.subject, Some(AnyObjectRef::MessageRevision(_)))));
 }
+
+#[test]
+fn recorded_compaction_usage_belongs_to_its_checkpoint_without_invented_inference() {
+    let rows = frames(include_str!(
+        "../../../../../../fixtures/unified-trace/pi/native-compaction.jsonl"
+    ));
+    let output = run(&rows, false);
+    let values: Vec<_> = objects(&output)
+        .filter_map(|object| match object {
+            TraceObject::Measurement(value)
+                if matches!(value.subject, AnyObjectRef::ContextCheckpoint(_)) => Some(value),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(values.len(), 6);
+    assert!(values.iter().all(|value| value.value.as_f64() == Some(0.0)));
+    assert!(values.iter().all(|value| value.mode == MeasurementMode::Gauge
+        && value.aggregation_scope == AggregationScope::NamedSubject));
+    assert!(!objects(&output).any(|object| matches!(
+        object, TraceObject::Operation(_) | TraceObject::Activation(_)
+    )));
+}

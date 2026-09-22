@@ -915,6 +915,7 @@ pub fn cumulative_delta(
         || ar != br
         || previous.subject != current.subject
         || previous.metric != current.metric
+        || previous.model != current.model
         || previous.unit != current.unit
         || previous.aggregation_scope != current.aggregation_scope
         || source_order(ap, bp) != Some(std::cmp::Ordering::Less)

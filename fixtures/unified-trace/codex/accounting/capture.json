@@ -1,0 +1,42 @@
+{
+  "source_locator": "~/.codex/sessions/2026/09/03/rollout-2026-09-03T23-52-38-01a067f8-de0e-77a0-ac73-e484ccc9959a.jsonl",
+  "method": "Retain the first three token_usage_record records and the next three token_count records in physical order. The header is explicitly a structural extract; accounting rows retain complete original bytes. No historical content is executed.",
+  "records": [
+    {
+      "line": 1,
+      "source_sha256": "4f77f9a64780d82627cac2e9a97c86ef83205ce4e1a01fe27163023fbcc3deb2",
+      "representation": "structural header; omitted instructions, paths and git metadata"
+    },
+    {
+      "line": 11871,
+      "source_sha256": "2fe7f9bf6bcca715efc88806ea9780b9c7ec1141a1c7e7cc54a54991625215b5",
+      "representation": "complete original lexical record"
+    },
+    {
+      "line": 11874,
+      "source_sha256": "6045e4f83c6fbc0dc11192e2f7e7fb86044317071629471f384898e85d370dfd",
+      "representation": "complete original lexical record"
+    },
+    {
+      "line": 11879,
+      "source_sha256": "32818ef9aba7fefee0f96a3aa3eaa8be3b2fcfd77a12c8a1cd0da00596a40f4e",
+      "representation": "complete original lexical record"
+    },
+    {
+      "line": 11885,
+      "source_sha256": "b0ddd21f81a8d1a044947a964a2fb0060eef77ef6e8abc981981571bb1ea6c33",
+      "representation": "complete original lexical record"
+    },
+    {
+      "line": 11891,
+      "source_sha256": "55b3c57dbd3ed816cece87a3f4edba763e48d204dc729ca83e03eae0994d4297",
+      "representation": "complete original lexical record"
+    },
+    {
+      "line": 11893,
+      "source_sha256": "2df773477eae5a2b201d989aae4a9e4fda0c67bd9a5ec03dea550b0a8a5550b0",
+      "representation": "complete original lexical record"
+    }
+  ],
+  "retained_sha256": "ee059b3e6bded273a78dc2d1c3dc13a26b7f1082a22dd992521949969827b9ed"
+}

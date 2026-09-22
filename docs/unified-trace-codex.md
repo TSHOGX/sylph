@@ -1,14 +1,15 @@
 # Codex Unified Trace Adapter
 
-Status: **Implementation contract; replacement adapter is not implemented.**
+Status: **Normative vendor mapping contract.**
 
 This specification maps Codex evidence into
 [unified-trace-foundation.md](unified-trace-foundation.md). The foundation owns semantic
 objects, identities, correction, and ordering. This document owns vendor interpretation;
 [unified-trace-storage.md](unified-trace-storage.md) owns retention and publication, and
 [unified-trace-conformance.md](unified-trace-conformance.md) owns the common acceptance
-gate. Existing control behavior continues to follow [agents.md](agents.md) until its
-replacement is implemented. The existing renderer does not constrain these mappings.
+gate. Control behavior follows [agents.md](agents.md). Implementation and acceptance
+gates live in [roadmap.md](roadmap.md#unified-trace-foundation-review); the renderer
+does not constrain these mappings.
 
 ## Evidence baseline
 
@@ -404,6 +405,15 @@ synthetic inference operations.
 latest values nor cumulative snapshots are summed as new usage. Inherited checkpoints
 do not increment local accounting, resets establish a new compatible series boundary
 only when evidenced, and an unknown baseline leaves derived deltas unavailable.
+The [retained accounting excerpt](../fixtures/unified-trace/codex/accounting/capture.json)
+proves that response-event `thread_token_usage` and `token_count` totals are different
+counter series even for the same thread; their samples must not share a counter domain.
+Turn samples use their actual `turn_id`, never causal `root_turn_id`, and response
+ownership requires `thread_id`, never causal `session_id` or the containing source.
+A measurement naming an Activation does not assert that execution was observed.
+Native `cache_write_input_tokens` remains a distinct vendor subcount; no unobserved
+live spelling is assumed.
+
 Cached-input and reasoning values remain vendor-defined subcounts, not extra tokens
 added to totals. Goal/root accounting and child usage are not presumed disjoint.
 

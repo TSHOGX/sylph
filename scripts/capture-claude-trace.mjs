@@ -10,12 +10,12 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 
 const scenario = process.argv[2] ?? "read";
-if (!["read", "sidecar", "schedule"].includes(scenario)) throw new Error("Expected read, sidecar, or schedule scenario");
+if (!["read", "sidecar", "schedule", "usage"].includes(scenario)) throw new Error("Expected read, sidecar, schedule, or usage scenario");
 const root = await mkdtemp(join(tmpdir(), "sylph-claude-loopback-"));
 const config = join(root, "config");
 await mkdir(config);
 await writeFile(join(root, "marker.txt"), "SYLPH_CLAUDE_TOOL_BYTES\n");
-const tool = scenario === "schedule" ? "CronCreate,CronDelete,CronList" : scenario === "read" ? "Read" : "Bash";
+const tool = scenario === "usage" ? "" : scenario === "schedule" ? "CronCreate,CronDelete,CronList" : scenario === "read" ? "Read" : "Bash";
 const requestCount = scenario === "schedule" ? 6 : 2;
 let scheduleId;
 let receiveCreation;
@@ -45,7 +45,7 @@ const server = createServer(async (request, response) => {
     const ordinal = requests.length;
     if (ordinal > requestCount) throw new Error("Unexpected additional model request");
     if (scenario === "schedule" && ordinal === 2) { await creation; if (!scheduleId) throw new Error("Schedule creation did not return an identity"); }
-    const invoke = ordinal < requestCount;
+    const invoke = scenario !== "usage" && ordinal < requestCount;
     const activeTool = scenario !== "schedule" ? tool : ordinal === 1 ? "CronCreate" : ordinal === 2 || ordinal === 4 ? "CronList" : "CronDelete";
     const activeArguments = scenario !== "schedule" ? argumentsValue : ordinal === 1
       ? { cron: "0 0 1 1 *", prompt: "Controlled inert fixture; no external actions.", recurring: false, durable: false }
@@ -59,7 +59,7 @@ const server = createServer(async (request, response) => {
     };
     emit("message_start", { message: {
       id: `msg_controlled_${ordinal}`, type: "message", role: "assistant", model: body.model,
-      content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 1, output_tokens: 0 },
+      content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: scenario === "usage" ? ordinal * 10 : 1, output_tokens: 0 },
     } });
     emit("content_block_start", { index: 0, content_block: invoke
       ? { type: "tool_use", id: callId, name: activeTool, input: {} }
@@ -68,7 +68,7 @@ const server = createServer(async (request, response) => {
       ? { type: "input_json_delta", partial_json: JSON.stringify(activeArguments) }
       : { type: "text_delta", text: "SYLPH_CLAUDE_TOOL_OK" } });
     emit("content_block_stop", { index: 0 });
-    emit("message_delta", { delta: { stop_reason: invoke ? "tool_use" : "end_turn", stop_sequence: null }, usage: { output_tokens: 1 } });
+    emit("message_delta", { delta: { stop_reason: invoke ? "tool_use" : "end_turn", stop_sequence: null }, usage: { output_tokens: scenario === "usage" ? ordinal : 1 } });
     emit("message_stop", {});
     response.end();
   } catch (error) {
@@ -93,8 +93,8 @@ try {
     "--output-format", "stream-json", "--include-partial-messages", "--model", "claude-sonnet-4-6",
     "--tools", tool, "--allowedTools", tool, "--setting-sources", "", "--strict-mcp-config",
     "--mcp-config", '{"mcpServers":{}}', "--system-prompt", "Use the controlled local tool and return the marker.",
-    "Run the controlled local fixture tool and return the marker.",
-  ], { cwd: root, env, stdio: ["ignore", "pipe", "pipe"] });
+    ...(scenario === "usage" ? ["--input-format", "stream-json"] : ["Run the controlled local fixture tool and return the marker."]),
+  ], { cwd: root, env, stdio: [scenario === "usage" ? "pipe" : "ignore", "pipe", "pipe"] });
   const output = [];
   const errors = [];
   let bytes = 0;
@@ -115,6 +115,15 @@ try {
       }
     } catch (error) { streamError = error; child.kill("SIGTERM"); }
   });
+  if (scenario === "usage") {
+    let completed = 0;
+    const send = (index) => child.stdin.write(JSON.stringify({ type: "user", message: { role: "user", content: `Accounting fixture ${index}` } }) + "\n");
+    createInterface({ input: child.stdout }).on("line", (line) => {
+      try { if (JSON.parse(line).type === "result") { completed += 1; if (completed === 1) send(2); else child.stdin.end(); } }
+      catch (error) { streamError = error; child.kill("SIGTERM"); }
+    });
+    send(1);
+  }
   child.stderr.on("data", (chunk) => retain(errors, chunk));
   timeout = setTimeout(() => {
     streamError = new Error("Claude capture exceeded 30 seconds");
@@ -128,10 +137,10 @@ try {
   if (code !== 0 || requests.length !== requestCount) throw new Error(`Unexpected exit ${code}/${signal} or request count ${requests.length}; capture is in ${root}`);
   const frames = stdout.toString("utf8").trimEnd().split("\n").map((line) => JSON.parse(line));
   const init = frames.find((frame) => frame.type === "system" && frame.subtype === "init");
-  if (JSON.stringify([...(init?.tools ?? [])].sort()) !== JSON.stringify(tool.split(",").sort()) || init.skills.length || init.plugins.length || init.mcp_servers.length)
+  if (JSON.stringify([...(init?.tools ?? [])].sort()) !== JSON.stringify(tool ? tool.split(",").sort() : []) || init.skills.length || init.plugins.length || init.mcp_servers.length)
     throw new Error("Capture did not isolate the requested built-in tool");
   const result = frames.find((frame) => Object.hasOwn(frame, "tool_use_result"));
-  if (!result || result.message.content.some((part) => part.is_error)) throw new Error("Expected a successful structured tool result");
+  if (scenario !== "usage" && (!result || result.message.content.some((part) => part.is_error))) throw new Error("Expected a successful structured tool result");
   if (!frames.some((frame) => frame.type === "result" && frame.result === "SYLPH_CLAUDE_TOOL_OK" && !frame.is_error))
     throw new Error("Claude did not finish with the controlled marker");
   const relativeFiles = await readdir(join(config, "projects"), { recursive: true });
@@ -139,8 +148,8 @@ try {
   if (nativeFiles.length !== 1) throw new Error("Expected one native transcript for the observed session");
   const native = await readFile(join(config, "projects", nativeFiles[0]));
   const nativeRows = native.toString("utf8").trimEnd().split("\n").map((line) => JSON.parse(line));
-  const nativeResult = nativeRows.find((row) => row.uuid === result.uuid);
-  if (JSON.stringify(nativeResult?.toolUseResult) !== JSON.stringify(result.tool_use_result))
+  const nativeResult = result && nativeRows.find((row) => row.uuid === result.uuid);
+  if (result && JSON.stringify(nativeResult?.toolUseResult) !== JSON.stringify(result.tool_use_result))
     throw new Error("Live and native records did not preserve the observed structured result");
   const substitutions = [[await realpath(root), "/workspace/claude-capture"], [root, "/workspace/claude-capture"]];
   let sidecar;
@@ -162,6 +171,12 @@ try {
         || !results[4].message.content.some((part) => part.is_error))
       throw new Error("Schedule registration/list/deletion/failure cycle did not match observed results");
   }
+  if (scenario === "usage") {
+    const results = frames.filter((frame) => frame.type === "result");
+    if (results.length !== 2 || results[0].usage.input_tokens !== 10 || results[1].usage.input_tokens !== 20
+        || Object.values(results[0].modelUsage)[0].inputTokens !== 10 || Object.values(results[1].modelUsage)[0].inputTokens !== 30)
+      throw new Error("The accounting capture did not observe query-local usage and cumulative model usage");
+  }
   substitutions.sort((a, b) => b[0].length - a[0].length);
   const sanitize = (value) => {
     if (typeof value === "string") return substitutions.reduce((text, [from, to]) => text.replaceAll(from, to), value);
@@ -179,8 +194,8 @@ try {
   await writeFile(join(root, "provider-response.sse"), providerFrames.join(""));
   const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
   await writeFile(join(root, "capture.json"), JSON.stringify({
-    vendor: "claude", version, scenario, session_id: init.session_id, result_uuid: result.uuid,
-    method: `scripts/capture-claude-trace.mjs ${scenario}; real CLI with a deterministic loopback provider and only ${tool} enabled. Isolated configuration, safe mode, disabled skills and an explicitly checked local API key isolate the capture. Bare mode is also used except for schedules, which it disables. No remote model or external messages.`,
+    vendor: "claude", version, scenario, session_id: init.session_id, result_uuid: result?.uuid ?? null,
+    method: `scripts/capture-claude-trace.mjs ${scenario}; real CLI with a deterministic loopback provider and ${tool || "no tools"} enabled. Isolated configuration, safe mode, disabled skills and an explicitly checked local API key isolate the capture. Bare mode is also used except for schedules, which it disables. No remote model or external messages.`,
     limits: "Provider tool calls, response text and usage are synthetic; CLI frames, native records, tool execution and sidecar bytes are observed. This capture proves those emitted shapes, not remote-model behavior.",
     sanitization: "Replace only temporary capture roots and the exact produced sidecar path, then compact JSON reserialization. All keys, IDs, values and event order remain. Sidecar bytes are unchanged.",
     source_sha256: { stdout: digest(stdout), native: digest(native), ...(sidecar ? { sidecar: digest(sidecar) } : {}) },

@@ -494,6 +494,7 @@ fn a_late_append_is_retained_without_reopening_a_final_revision() {
 #[test]
 fn cumulative_measurements_require_the_same_counter_domain_and_known_baseline() {
     let sample = |seq, value| Measurement {
+        model: None,
         measurement_ref: MeasurementRef::native(agent("root"), "usage", vec![format!("{seq}")])
             .unwrap(),
         subject: AnyObjectRef::Agent(agent("root")),
@@ -518,6 +519,13 @@ fn cumulative_measurements_require_the_same_counter_domain_and_known_baseline() 
     let mut unrelated = c.clone();
     unrelated.subject = AnyObjectRef::Agent(agent("child"));
     assert_eq!(cumulative_delta(&b, &unrelated), None);
+    let mut different_model = c.clone();
+    different_model.model = Some(MeasurementModel {
+        reported_name: "another-model".into(),
+        canonical_name: None,
+        provider: None,
+    });
+    assert_eq!(cumulative_delta(&b, &different_model), None);
     let mut unknown = a;
     unknown.mode = MeasurementMode::Gauge;
     assert_eq!(cumulative_delta(&unknown, &c), None);

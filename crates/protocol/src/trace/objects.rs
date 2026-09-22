@@ -811,10 +811,19 @@ pub struct MeasurementComponent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MeasurementModel {
+    pub reported_name: String,
+    pub canonical_name: Option<String>,
+    pub provider: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Measurement {
     pub measurement_ref: MeasurementRef,
     pub subject: AnyObjectRef,
+    pub model: Option<MeasurementModel>,
     pub metric: Metric,
     pub unit: MeasurementUnit,
     pub value: serde_json::Number,

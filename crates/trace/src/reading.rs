@@ -712,6 +712,7 @@ impl Index<'_> {
             },
             TraceObject::Measurement(measurement) => ReadObjectContent::Measurement {
                 metric: measurement.metric.clone(),
+                model: measurement.model.clone(),
                 unit: measurement.unit.clone(),
                 value: measurement.value.clone(),
                 scope: format!("{:?}", measurement.aggregation_scope),

@@ -1202,6 +1202,15 @@ function ObjectContent({
           </dd>
           <dt>{t("trace.scope")}</dt>
           <dd>{content.scope}</dd>
+          {content.model && (
+            <>
+              <dt>{t("composer.model")}</dt>
+              <dd>
+                {content.model.reportedName}
+                {content.model.provider ? ` · ${content.model.provider}` : ""}
+              </dd>
+            </>
+          )}
           <dt>{t("trace.interpretation")}</dt>
           <dd>{content.mode.kind}</dd>
         </dl>

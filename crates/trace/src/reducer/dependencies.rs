@@ -357,6 +357,7 @@ impl Dependencies {
                 self.inclusion(coverage);
             }
             TraceObject::Measurement(Measurement {
+                model: _,
                 measurement_ref: _,
                 subject,
                 metric: _,
@@ -944,6 +945,7 @@ mod tests {
         contains(
             Fact::Declare {
                 object: TraceObject::Measurement(Measurement {
+                    model: None,
                     measurement_ref: measurement.clone(),
                     subject: AnyObjectRef::Agent(agent("root")),
                     metric: Metric::OutputTokens,

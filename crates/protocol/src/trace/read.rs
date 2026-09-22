@@ -563,6 +563,7 @@ pub enum ReadObjectContent {
     },
     Measurement {
         metric: Metric,
+        model: Option<MeasurementModel>,
         unit: MeasurementUnit,
         value: serde_json::Number,
         scope: String,

@@ -14,8 +14,9 @@ use super::{
 
 pub struct ClaudeMapper;
 
-mod workflow;
+mod accounting;
 mod schedule;
+mod workflow;
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct ClaudeState {
@@ -37,7 +38,7 @@ struct LiveStream {
 
 impl SemanticMapper for ClaudeMapper {
     fn build(&self) -> &'static str {
-        "claude-5"
+        "claude-6"
     }
     fn map(&self, input: MapInput<'_>) -> MapOutput {
         let mut output = MapOutput {
@@ -1311,35 +1312,14 @@ impl Context<'_, '_> {
                     "claude/result-usage",
                     AnyObjectRef::Activation(activation.clone()),
                 );
-                if let Some(amount) = value.get("total_cost_usd").and_then(Value::as_number) {
-                    self.object(
-                        &owner,
-                        "claude/sdk-reported-cost",
-                        TraceObject::Measurement(Measurement {
-                            measurement_ref: MeasurementRef::occurrence(
-                                owner.clone(),
-                                self.input.capture.source_position.clone(),
-                                vec!["sdk-cost".into()],
-                            )
-                            .unwrap(),
-                            subject: AnyObjectRef::Activation(activation.clone()),
-                            metric: Metric::Cost {
-                                pricing_basis: "claude/sdk-reported-total_cost_usd".into(),
-                            },
-                            unit: MeasurementUnit::Currency { code: "USD".into() },
-                            value: amount.clone(),
-                            mode: MeasurementMode::Gauge,
-                            aggregation_scope: AggregationScope::NamedSubject,
-                            components: vec![],
-                        }),
-                    );
-                }
+                self.process_accounting(&owner, value);
                 for field in ["duration_ms", "duration_api_ms"] {
                     if let Some(number) = value.get(field).and_then(Value::as_number) {
                         self.object(
                             &owner,
                             &format!("claude/result/{field}"),
                             TraceObject::Measurement(Measurement {
+                                model: None,
                                 measurement_ref: MeasurementRef::occurrence(
                                     owner.clone(),
                                     self.input.capture.source_position.clone(),
@@ -1880,6 +1860,7 @@ impl Context<'_, '_> {
                     owner,
                     &format!("{slot}/{field}"),
                     TraceObject::Measurement(Measurement {
+                        model: None,
                         measurement_ref: MeasurementRef::occurrence(
                             owner.clone(),
                             self.input.capture.source_position.clone(),
@@ -1905,6 +1886,7 @@ impl Context<'_, '_> {
                 owner,
                 &format!("{slot}/thinking_tokens"),
                 TraceObject::Measurement(Measurement {
+                    model: None,
                     measurement_ref: MeasurementRef::occurrence(
                         owner.clone(),
                         self.input.capture.source_position.clone(),

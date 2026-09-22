@@ -216,6 +216,7 @@ pub(super) fn map_database(input: MapInput<'_>, snapshot: NativeDatabaseSnapshot
             &format!("codex/goal/{field}"),
             Fact::Declare {
                 object: TraceObject::Measurement(Measurement {
+                    model: None,
                     measurement_ref: MeasurementRef::occurrence(
                         owner.clone(),
                         input.capture.source_position.clone(),

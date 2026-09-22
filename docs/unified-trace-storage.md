@@ -1,6 +1,6 @@
 # Unified Trace Storage and Read Protocol
 
-Status: **Normative target design; not the current database implementation.**
+Status: **Normative storage and read contract.**
 
 [unified-trace-foundation.md](unified-trace-foundation.md) owns the objects and semantics.
 This document makes their durable capture, publication, and query contracts concrete.

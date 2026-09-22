@@ -1,6 +1,6 @@
 # Pi Unified Trace Adapter
 
-Status: **Target implementation contract.**
+Status: **Normative vendor mapping contract.**
 
 This specification maps Pi's session tree and runtime events into
 [unified-trace-foundation.md](unified-trace-foundation.md). Acquisition and process
@@ -357,7 +357,10 @@ epoch timestamp can establish a time for that message, not a universal timezone 
 every older entry.
 
 Message usage, compaction usage, branch-summary usage, and session aggregate snapshots
-have different scopes. Usage on a failed attempt is still reported usage. Cost and
+have different scopes. Native compaction and branch-summary usage names the corresponding
+ContextCheckpoint without manufacturing an inference or Activation. Explicit zero token
+and cost samples are observations, not missing values. Usage on a failed attempt is
+still reported usage. Cost and
 token counters retain their units and reset/cumulative domains. A session total is not
 summed with its component inference totals. Stream arrival intervals are receipt-time
 measurements; native timestamps do not reveal token duration.

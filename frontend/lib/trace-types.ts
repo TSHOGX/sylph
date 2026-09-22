@@ -444,6 +444,11 @@ export type ObjectContent =
   | {
       kind: "measurement";
       metric: Metric;
+      model: {
+        reportedName: string;
+        canonicalName: string | null;
+        provider: string | null;
+      } | null;
       unit: MeasurementUnit;
       value: number;
       scope: string;

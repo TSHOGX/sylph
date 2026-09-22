@@ -15,8 +15,9 @@ pub mod history;
 
 pub struct CodexMapper;
 impl CodexMapper {
-    const BUILD: &'static str = "codex-3";
+    const BUILD: &'static str = "codex-4";
 }
+mod accounting;
 mod collaboration;
 mod goal;
 mod runtime;
@@ -1904,6 +1905,7 @@ impl Context<'_, '_> {
             owner,
             "codex/reported-duration",
             TraceObject::Measurement(Measurement {
+                model: None,
                 measurement_ref: MeasurementRef::occurrence(
                     owner.clone(),
                     self.input.capture.source_position.clone(),
@@ -1921,104 +1923,6 @@ impl Context<'_, '_> {
                 components: vec![],
             }),
         );
-    }
-
-    fn token_count(&mut self, owner: &AgentRef, value: &Value, live: bool) {
-        if value.is_null() {
-            return;
-        }
-        let total = &value[if live { "total" } else { "total_token_usage" }];
-        self.tokens(owner, total, live, None);
-    }
-
-    fn response_usage(&mut self, owner: &AgentRef, value: &Value) {
-        let reported_owner = string(value, "thread_id")
-            .and_then(|id| self.agent(id))
-            .unwrap_or(owner.clone());
-        let Some(response) = string(value, "response_id") else {
-            self.issue(
-                owner,
-                "codex/response-id-missing",
-                DiagnosticCode::MissingOwner,
-                "Response accounting omits its response ID",
-            );
-            return;
-        };
-        self.tokens(&reported_owner, &value["usage"], false, Some(response));
-    }
-
-    fn tokens(&mut self, owner: &AgentRef, value: &Value, live: bool, response: Option<&str>) {
-        let mut observed = false;
-        for (snake, camel, metric) in [
-            ("input_tokens", "inputTokens", Metric::InputTokens),
-            ("output_tokens", "outputTokens", Metric::OutputTokens),
-            (
-                "cached_input_tokens",
-                "cachedInputTokens",
-                Metric::CachedTokens,
-            ),
-            (
-                "reasoning_output_tokens",
-                "reasoningOutputTokens",
-                Metric::ReasoningTokens,
-            ),
-            ("total_tokens", "totalTokens", Metric::TotalTokens),
-        ] {
-            let key = if live { camel } else { snake };
-            let Some(number) = value.get(key).and_then(Value::as_number) else {
-                continue;
-            };
-            observed = true;
-            let reference = if let Some(response) = response {
-                MeasurementRef::native(
-                    owner.clone(),
-                    "codex.response-usage",
-                    vec![response.into(), key.into()],
-                )
-                .unwrap()
-            } else {
-                MeasurementRef::occurrence(
-                    owner.clone(),
-                    self.input.capture.source_position.clone(),
-                    vec!["usage".into(), key.into()],
-                )
-                .unwrap()
-            };
-            self.declare(
-                owner,
-                &format!("codex/usage/{key}"),
-                TraceObject::Measurement(Measurement {
-                    measurement_ref: reference,
-                    subject: AnyObjectRef::Agent(owner.clone()),
-                    metric,
-                    unit: MeasurementUnit::Tokens,
-                    value: number.clone(),
-                    mode: if response.is_some() {
-                        MeasurementMode::Gauge
-                    } else {
-                        MeasurementMode::Cumulative {
-                            counter_domain: Some(correlation_key(
-                                owner,
-                                "codex.thread-token-count",
-                                &[key.into()],
-                            )),
-                            reset_epoch: None,
-                            sample_position: self.input.capture.source_position.clone(),
-                        }
-                    },
-                    aggregation_scope: AggregationScope::NamedSubject,
-                    components: vec![],
-                }),
-            );
-        }
-        if observed && response.is_none() {
-            self.issue(
-                owner,
-                "codex/unknown-counter-baseline",
-                DiagnosticCode::UnknownCounterBaseline,
-                "The thread reports cumulative usage without an evidenced reset epoch or baseline",
-            );
-        }
     }
 }
 

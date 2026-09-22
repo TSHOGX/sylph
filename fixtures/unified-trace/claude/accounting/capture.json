@@ -1,0 +1,22 @@
+{
+  "vendor": "claude",
+  "version": "2.1.278 (Claude Code)",
+  "scenario": "usage",
+  "session_id": "dc353f37-448a-48ea-94fa-a10980215d4a",
+  "result_uuid": null,
+  "method": "scripts/capture-claude-trace.mjs usage; real CLI with a deterministic loopback provider and no tools enabled. Isolated configuration, safe mode, disabled skills and an explicitly checked local API key isolate the capture. Bare mode is also used except for schedules, which it disables. No remote model or external messages.",
+  "limits": "Provider tool calls, response text and usage are synthetic; CLI frames, native records, tool execution and sidecar bytes are observed. This capture proves those emitted shapes, not remote-model behavior.",
+  "sanitization": "Replace only temporary capture roots and the exact produced sidecar path, then compact JSON reserialization. All keys, IDs, values and event order remain. Sidecar bytes are unchanged.",
+  "source_sha256": {
+    "stdout": "ce67ddd8842a6a6177c0ffe1a7e1db3f4e6d33e17d6fe078ec295071cf310ce7",
+    "native": "b1a98aeda129fbdc9c3c6d9269b6f1cc2ad5f3a2ae3315a5982568d01fbbd35c"
+  },
+  "retained_sha256": {
+    "stdout": "2e269614999d17a6f8d8ad9a8e561dc473187ece2feaefa973a9009a7baf555c",
+    "native": "5eef99bc06c25d410850819756540427127fc6146cf3083bcb9c86f4b3566320"
+  },
+  "records": {
+    "stdout": 20,
+    "native": 15
+  }
+}

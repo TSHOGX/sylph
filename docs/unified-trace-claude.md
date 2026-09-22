@@ -1,6 +1,6 @@
 # Claude Unified Trace Adapter
 
-Status: **Target implementation contract.**
+Status: **Normative vendor mapping contract.**
 
 This specification maps Claude Code evidence into the objects and invariants in
 [unified-trace-foundation.md](unified-trace-foundation.md). Acquisition runs in the
@@ -358,6 +358,14 @@ series. Repeated usage on records sharing `message.id` requires the vendor's doc
 aggregation rule before summation. Root `modelUsage` and child task usage are not assumed
 disjoint. `duration_ms`, `duration_api_ms`, tool elapsed seconds, and arrival timestamps
 keep distinct units and clock provenance.
+
+SDK `usage` is local to the completed query. The controlled two-query capture reports
+input usage 10 then 20, while `modelUsage` reports 10 then 30 and `total_cost_usd`
+also accumulates. Model usage and total cost are therefore agent-scoped cumulative
+samples in the observed SDK source, not separate costs charged to each Activation.
+Each model sample retains its reported name, optional canonical name and provider.
+Model context/output limits are gauges, and reported cost keeps its pricing basis.
+These samples supply no unobserved zero baseline or disjointness certificate.
 
 ## Cross-source reconciliation and coverage
 

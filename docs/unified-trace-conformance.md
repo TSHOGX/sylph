@@ -1,7 +1,6 @@
 # Unified Trace Conformance and Evidence
 
-Status: **Normative acceptance contract. Retained corpus replay and production storage
-tests cover specific promises; the complete semantic, failure and workload matrices remain open.**
+Status: **Normative acceptance contract.**
 
 [unified-trace-foundation.md](unified-trace-foundation.md) defines meanings;
 [unified-trace-storage.md](unified-trace-storage.md) defines durability and reads.
@@ -99,6 +98,16 @@ The retained material is:
   registration/cancellation facts, exact requested cron/prompt, failed-call outcome,
   delayed invocation classification, source ordering, restart and rebuild. It does not
   claim a firing or a cross-session identity certificate for project-wide schedules.
+- The [Codex accounting excerpt](../fixtures/unified-trace/codex/accounting/capture.json)
+  retains complete lexical accounting rows and an explicitly extracted structural header.
+  Its response, turn, response-event thread and token-count thread series have independent
+  expected values. The [Claude two-query capture](../fixtures/unified-trace/claude/accounting/capture.json),
+  produced by `scripts/capture-claude-trace.mjs usage`, isolates query-local usage from
+  process-cumulative model usage and cost with synthetic provider usage and real CLI
+  framing and persistence. Together with the Pi compaction bundle, production replay in
+  `crates/server/src/trace/worker/tests/corpus/accounting.rs` checks typed model scope,
+  checkpoint usage, receipt deduplication, source ordering, incremental restart and
+  same-cut rebuild without assuming disjoint totals or an unknown zero baseline.
 - The [Codex goal snapshot](../fixtures/unified-trace/codex/goal/capture.json) retains one
   actual `thread_goals` row and its schema from a read-only SQLite transaction. It is a
   logical row capture, not a database-page copy; its producing binary version is unknown.

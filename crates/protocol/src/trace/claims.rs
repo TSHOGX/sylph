@@ -804,6 +804,7 @@ mod tests {
     fn token_counts_cannot_be_published_as_unpriced_money() {
         let value = claim(Fact::Declare {
             object: TraceObject::Measurement(Measurement {
+                model: None,
                 measurement_ref: MeasurementRef::native(
                     agent(),
                     "usage",

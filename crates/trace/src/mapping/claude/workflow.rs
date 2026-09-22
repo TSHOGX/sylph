@@ -405,6 +405,7 @@ impl Context<'_, '_> {
                 root,
                 &format!("{slot}/{field}"),
                 TraceObject::Measurement(Measurement {
+                    model: None,
                     measurement_ref: MeasurementRef::occurrence(
                         root.clone(),
                         self.input.capture.source_position.clone(),

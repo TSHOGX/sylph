@@ -1,7 +1,9 @@
 # Unified Trace Reading and Interaction
 
-Status: **Implementation design based on the unified trace foundation; not a claim that
-the current frontend implements these contracts.**
+Status: **Normative reading and interaction contract.**
+
+Implementation and acceptance gates live in
+[roadmap.md](roadmap.md#unified-trace-foundation-review).
 
 ## Authority and objective
 

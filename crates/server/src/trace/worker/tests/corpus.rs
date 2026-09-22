@@ -73,6 +73,10 @@ struct Record {
 }
 
 fn records(corpus: &Corpus, order: SourceOrder) -> Vec<Record> {
+    source_records(corpus.native, corpus.live, order)
+}
+
+fn source_records(native_bytes: &'static [u8], live_bytes: &'static [u8], order: SourceOrder) -> Vec<Record> {
     let source = |raw: &'static [u8], name| {
         let mut offset = 0;
         raw.split_inclusive(|byte| *byte == b'\n')
@@ -89,8 +93,8 @@ fn records(corpus: &Corpus, order: SourceOrder) -> Vec<Record> {
             })
             .collect::<Vec<_>>()
     };
-    let native = source(corpus.native, "corpus-native");
-    let live = source(corpus.live, "corpus-live");
+    let native = source(native_bytes, "corpus-native");
+    let live = source(live_bytes, "corpus-live");
     match order {
         SourceOrder::NativeFirst => native.into_iter().chain(live).collect(),
         SourceOrder::LiveFirst => live.into_iter().chain(native).collect(),
@@ -561,3 +565,5 @@ mod codex_goal;
 mod claude_tools;
 mod pi_tools;
 mod claude_schedule;
+
+mod accounting;

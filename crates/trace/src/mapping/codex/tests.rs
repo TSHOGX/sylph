@@ -849,3 +849,4 @@ fn mapping_completeness_names_only_the_actual_record_coordinates() {
         .iter()
         .any(|claim| matches!(claim.fact, Fact::HistoryMappingComplete { .. })));
 }
+mod accounting;
