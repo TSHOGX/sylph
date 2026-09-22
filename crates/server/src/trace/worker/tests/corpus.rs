@@ -569,3 +569,5 @@ mod claude_schedule;
 mod accounting;
 
 mod codex_reuse;
+
+mod claude_delegation;

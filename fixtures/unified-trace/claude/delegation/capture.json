@@ -1,0 +1,37 @@
+{
+  "vendor": "claude",
+  "version": "2.1.278 (Claude Code)",
+  "scenario": "delegation",
+  "session_id": "e9b9839b-607e-4acd-b5a8-f4b1d8c3b38f",
+  "result_uuid": "96041bf7-4c59-4e7f-8c52-f5548aeca63e",
+  "child_id": "a834a416191ccc0e0",
+  "companions": [
+    {
+      "file": "child.jsonl",
+      "source_sha256": "6cd24ab8e8be44974ffc3426f4470144188e382fbdba873d54b3f759c9078ae4",
+      "retained_sha256": "1f72e75a89b8601956188007237d58b4ebc9a18ea1816064bc55f288e2c98832",
+      "records": 10
+    },
+    {
+      "file": "child.meta.json",
+      "source_sha256": "192896df732efd94253ebb1a6028313b026ed59716f8e2ef995daa047e179149",
+      "retained_sha256": "e21464577f4bb6cfab3819ab4207471077426eafba97c85e3b8814cae4e86ed6",
+      "records": 1
+    }
+  ],
+  "method": "scripts/capture-claude-trace.mjs delegation; real CLI with a deterministic loopback provider and Agent,SendMessage enabled. Isolated configuration, safe mode, disabled skills and an explicitly checked local API key isolate the capture. Bare mode is also used except for schedules and delegation, which it disables. No remote model or external messages.",
+  "limits": "Provider tool calls, response text and usage are synthetic; CLI frames, native records, tool execution and sidecar bytes are observed. This capture proves those emitted shapes, not remote-model behavior.",
+  "sanitization": "Replace only temporary capture roots and exact sidecar/task-output locators, then compact JSON reserialization. All keys, IDs, values and event order remain. Sidecar bytes are unchanged.",
+  "source_sha256": {
+    "stdout": "325dbfbeafed5c9ad26193f6d344a47a0c2413549a844a5b758bfa6d2121934a",
+    "native": "3ac92f8d625c93343dfc6f0c04ce51e91ca85924c39c0eecef3c0fb2667ff0b3"
+  },
+  "retained_sha256": {
+    "stdout": "ab802cbd1a8b14798e531ed0bb1ab1d1231bd2fc4ee351ec74d3bb8523503112",
+    "native": "67aa8900c90f4aff01ea8b0b301e01561f72db0e4465982cddeefd602c6c9199"
+  },
+  "records": {
+    "stdout": 48,
+    "native": 27
+  }
+}

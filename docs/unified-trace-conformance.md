@@ -89,6 +89,18 @@ The retained material is:
   referencing the same physical snapshot proves result identity remains qualified
   by its invocation. Acquisition tests separately verify transport-specific selectors,
   immutable parent bytes and retained file revisions after removal.
+- The controlled [Claude delegation bundle](../fixtures/unified-trace/claude/delegation/capture.json)
+  retains root SDK/native records, the child transcript and its companion metadata.
+  `scripts/capture-claude-trace.mjs delegation` uses an isolated loopback provider to
+  observe a synchronous Agent hand-back and a successful SendMessage resume. The same
+  child/task handle has two task-start UUIDs and invocation IDs, while forwarding and
+  metadata can keep the original host ID. Production replay in
+  `crates/server/src/trace/worker/tests/corpus/claude_delegation.rs` checks independent
+  activity states, invocation outcomes, usage units, both exact child answers and one
+  spawn across early metadata, source order, reread, restart and same-cut rebuild.
+  Synthetic failures separately test unrelated agentId fields, failed resume results,
+  overlapping starts, old notifications, transient missing invocation evidence and
+  bounded completed-task checkpoints. No unobserved child SDK loop is fabricated.
 - The controlled [Claude schedule cycle](../fixtures/unified-trace/claude/schedule/capture.json)
   retains creation, nonempty listing, deletion, empty listing and missing-ID deletion
   failure from one real CLI process. The local provider supplies the tool requests;

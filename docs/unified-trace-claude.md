@@ -150,6 +150,11 @@ not have equal bytes, equal cardinality, or a one-to-one relationship.
 | A `tool_result` inside `message.content` | Tool/caller result message; role `user` does not make the author human |
 | `interruptedMessageId` | An interrupt relation to the identified message; the prose need not match an English sentinel |
 
+Explicit SDK `origin.kind: human` has the same human-origin meaning as an absent origin
+on the documented human input surface. A channel origin names its `server`, while a
+peer origin names `from`. Forwarded child input without an origin does not become human
+merely because it is a user-role SDK envelope; its routing provenance is kept separately.
+
 The SDK's documented absent-origin default applies to its particular user-message
 surface after synthetic/tool/context classification. It is not a rule for every native
 `user` envelope. Unknown native provenance stays unknown. Native records sharing a
@@ -201,6 +206,40 @@ same child AgentRef. Waiting, status polling, result notification, and closing a
 each have their own operations/relations. None creates another child. The parent's
 receipt of a summary is a new delivery occurrence related to the child's answer; the
 child's answer retains its original owner.
+
+### Reused task handles and forwarding
+
+The controlled [delegation capture](../fixtures/unified-trace/claude/delegation/capture.json)
+uses Claude 2.1.278 with a loopback provider, first calling `Agent` synchronously and
+then `SendMessage` to the returned child. The follow-up result explicitly names
+`resumedAgentId`; both native answers belong to the same `agentId`. The child's metadata
+continues to name the original `toolUseId`, and resumed SDK assistant output can still
+carry that original `parent_tool_use_id`. Neither field identifies the current task
+episode. The current provider schema has no `Agent.resume` parameter; that spelling
+in an older vendor contract is not a substitute for the observed `SendMessage` route.
+
+The two observed `task_started` records reuse `task_id` but have different
+`tool_use_id` and record UUIDs. Each start establishes a distinct task activity resource;
+the task handle remains a routing key. A later notification naming `tool_use_id` targets
+that activity, not whichever same-handle activity arrived most recently. An update
+without invocation identity needs a coherent source-local active episode; missing or
+ambiguous starts cannot fabricate a creation or overwrite another episode's state.
+
+Returned child identities acquire delegation meaning through their actual retained
+invocation. An unrelated tool returning an `agentId` key cannot create a directory agent.
+A failed `SendMessage` result creates no resume or accepted delivery merely because the
+SDK itself completed normally. A successful resume identifies the existing child and
+its interaction, not another spawn. Task outcome, invocation outcome and child execution
+remain separate unless a retained run association proves the corresponding link.
+Task progress/notification usage belongs to the identified activity resource. Reported
+token totals, tool counts and duration milliseconds retain separate units; they do not
+establish missing execution endpoints or disjointness from child/root accounting.
+Completed activity history lives in the archive, not an ever-growing source checkpoint.
+
+The recorder waits for the first child answer to reach the native transcript before
+requesting resume: a synchronous hand-back can precede that file's flush, and a premature
+resume can legitimately report that its transcript was not found. This is a capture
+precondition, not an adapter sleep or a guarantee about every vendor run.
 
 ### Workflow bundles
 

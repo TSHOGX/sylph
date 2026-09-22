@@ -15,14 +15,17 @@ use super::{
 pub struct ClaudeMapper;
 
 mod accounting;
+mod delegation;
 mod schedule;
+mod task;
 mod workflow;
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct ClaudeState {
     streams: BTreeMap<String, LiveStream>,
     runs: BTreeMap<String, (ActivationRef, ObservationRef)>,
-    delegation_starts: BTreeMap<String, bool>,
+    tasks: BTreeMap<String, task::Episode>,
+    invocation_evidence: BTreeMap<String, ObservationRef>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -38,7 +41,7 @@ struct LiveStream {
 
 impl SemanticMapper for ClaudeMapper {
     fn build(&self) -> &'static str {
-        "claude-6"
+        "claude-7"
     }
     fn map(&self, input: MapInput<'_>) -> MapOutput {
         let mut output = MapOutput {
@@ -344,7 +347,7 @@ impl Context<'_, '_> {
                     agent: owner.clone(),
                 },
             }
-        } else if live {
+        } else if live || value.get("origin").is_some_and(Value::is_object) {
             self.live_author(containing, value)
         } else if text(value, "promptSource") == Some("typed") {
             Author::Human { subject: None }
@@ -531,12 +534,14 @@ impl Context<'_, '_> {
                 }
             }
             Some("channel") => Author::External {
-                identity: text(origin, "channel").map(str::to_owned),
+                identity: text(origin, "server").map(str::to_owned),
             },
             Some("task-notification" | "coordinator") => Author::Harness {
                 identity: text(origin, "kind").map(str::to_owned),
             },
-            None => Author::Human { subject: None },
+            Some("human") => Author::Human { subject: None },
+            None if text(value, "parent_tool_use_id").is_none() => Author::Human { subject: None },
+            None => Author::Unknown,
             Some(_) => Author::Unknown,
         }
     }
@@ -907,10 +912,17 @@ impl Context<'_, '_> {
                 argument_state: ArgumentState::Sealed,
             }),
         );
-        if delegation {
-            self.state
-                .delegation_starts
-                .insert(operation.encode(), value["input"].get("resume").is_none());
+        if delegation || name == "SendMessage" {
+            self.state.invocation_evidence.insert(
+                operation.encode(),
+                self.input.canonical_observation.clone(),
+            );
+        }
+        if delegation && value["input"].get("resume").is_none() {
+            self.output.correlations.insert(
+                correlation_key(owner, "claude.delegation-create", &[operation.encode()]),
+                AnyObjectRef::Operation(operation.clone()),
+            );
         }
         self.schedule_call(owner, &operation, name, &value["input"]);
         self.output.correlations.insert(
@@ -961,64 +973,34 @@ impl Context<'_, '_> {
         if text(structured, "taskType") == Some("local_workflow") {
             self.workflow_launch(owner, root, &operation, structured, slot);
         }
-        if let Some(child_id) = text(structured, "agentId") {
-            let child = Self::child(root, child_id);
-            self.declare_agent(
-                &child,
-                None,
-                text(structured, "resolvedModel").map(str::to_owned),
-            );
-            self.output.correlations.insert(
-                correlation_key(root, "claude.parent-tool-use", &[id.into()]),
-                AnyObjectRef::Agent(child.clone()),
-            );
-            if self.state.delegation_starts.get(&operation.encode()) == Some(&true) {
-                self.add(
-                    owner,
-                    &format!("{slot}/spawn"),
-                    Fact::Relation {
-                        relation: Relation::Spawn {
-                            parent: owner.clone(),
-                            child: child.clone(),
-                            operation: Some(operation.clone()),
-                        },
-                    },
-                );
-                self.output.correlations.insert(
-                    correlation_key(&child, "claude.spawn-operation", &[id.into()]),
-                    AnyObjectRef::Operation(operation.clone()),
-                );
-            }
-            self.add(
-                owner,
-                &format!("{slot}/interaction"),
-                Fact::Relation {
-                    relation: Relation::Interaction {
-                        sender: owner.clone(),
-                        recipient: child,
-                        delivery: None,
-                        operation: Some(operation.clone()),
-                    },
-                },
-            );
-        }
-        if let Some(error) = part.get("is_error").and_then(Value::as_bool) {
+        let interpretation = self.delegation_result(owner, root, &operation, part, structured, slot);
+        let (outcome, evidence) = match interpretation {
+            delegation::ResultInterpretation::AwaitingInvocation => (None, vec![]),
+            delegation::ResultInterpretation::Unclassified => (
+                part.get("is_error").and_then(Value::as_bool).map(|error| {
+                    if error { TerminalOutcome::Failed } else { TerminalOutcome::Succeeded }
+                }),
+                vec![],
+            ),
+            delegation::ResultInterpretation::Outcome(outcome, evidence) => (Some(outcome), evidence),
+        };
+        if let Some(outcome) = outcome {
             self.add(
                 owner,
                 &format!("{slot}/outcome"),
                 Fact::Execution {
                     execution: ExecutionRef::Operation(operation.clone()),
                     boundary: ExecutionBoundary::Outcome {
-                        outcome: if error {
-                            TerminalOutcome::Failed
-                        } else {
-                            TerminalOutcome::Succeeded
-                        },
+                        outcome,
                         reason: None,
                         detail: None,
                     },
                 },
             );
+            let claim = self.output.claims.last_mut().unwrap();
+            claim.evidence.extend(evidence);
+            claim.evidence.sort();
+            claim.evidence.dedup();
         }
         for field in ["persistedOutputPath", "outputFile"] {
             if let Some(path) = text(structured, field) {
@@ -1080,7 +1062,7 @@ impl Context<'_, '_> {
                 }
             }
         }
-        self.state.delegation_starts.remove(&operation.encode());
+        self.state.invocation_evidence.remove(&operation.encode());
     }
 
     fn result(
@@ -1226,12 +1208,14 @@ impl Context<'_, '_> {
                 Some(AnyObjectRef::Agent(agent)) => agent.clone(),
                 _ => {
                     self.request(&root, "claude.parent-tool-use", vec![host.into()]);
-                    self.issue(
-                        Some(&root),
-                        "claude/unresolved-forward",
-                        DiagnosticCode::MissingOwner,
-                        "Forwarded tool host is not a proven native child identity",
-                    );
+                    // A missing join describes this mapping attempt. Keeping it
+                    // as an immutable failure would make source arrival order
+                    // change the final archive after that identity is proved.
+                    self.output.diagnostics.push(MappingDiagnostic {
+                        evidence: vec![self.input.canonical_observation.clone()],
+                        code: DiagnosticCode::MissingOwner,
+                        message: "Forwarded tool host is not a proven native child identity".into(),
+                    });
                     return;
                 }
             }
@@ -1251,7 +1235,7 @@ impl Context<'_, '_> {
             "system"
                 if matches!(
                     text(value, "subtype"),
-                    Some("task_started" | "task_updated" | "task_notification")
+                    Some("task_started" | "task_updated" | "task_notification" | "task_progress")
                 ) =>
             {
                 self.task(&owner, value)
@@ -1775,71 +1759,6 @@ impl Context<'_, '_> {
             ),
         }
         self.state.streams.insert(key, stream);
-    }
-
-    fn task(&mut self, owner: &AgentRef, value: &Value) {
-        let Some(id) = text(value, "task_id") else {
-            self.issue(
-                Some(owner),
-                "claude/task-id",
-                DiagnosticCode::MissingOwner,
-                "Task event has no task_id",
-            );
-            return;
-        };
-        let resource = ResourceRef::native(
-            owner.clone(),
-            "claude.task",
-            vec![
-                self.input.capture.observation_ref.producer_epoch.clone(),
-                id.into(),
-            ],
-        )
-        .unwrap();
-        if let Some(task_type) = text(value, "task_type") {
-            self.object(
-                owner,
-                "claude/task-resource",
-                TraceObject::Resource(Resource {
-                    resource_ref: resource.clone(),
-                    creator: text(value, "tool_use_id").map(|id| operation(owner, id)),
-                    host: Some(OwnerRef::Agent {
-                        agent: owner.clone(),
-                    }),
-                    kind: ResourceKind::Extension {
-                        namespace: "claude.task".into(),
-                        name: task_type.into(),
-                    },
-                }),
-            );
-        }
-        let status = text(&value["patch"], "status").or_else(|| text(value, "status"));
-        let state = if text(value, "subtype") == Some("task_started") {
-            ResourceState::Running
-        } else {
-            match status {
-                Some("completed") => ResourceState::Closed {
-                    outcome: TerminalOutcome::Succeeded,
-                    reason: None,
-                },
-                Some("failed") => ResourceState::Closed {
-                    outcome: TerminalOutcome::Failed,
-                    reason: None,
-                },
-                Some("stopped") => ResourceState::Closed {
-                    outcome: TerminalOutcome::Interrupted,
-                    reason: None,
-                },
-                _ => ResourceState::Unknown {
-                    reason: "Task status does not establish a terminal outcome".into(),
-                },
-            }
-        };
-        self.add(
-            owner,
-            "claude/task-state",
-            Fact::ResourceState { resource, state },
-        );
     }
 
     fn measurements(&mut self, owner: &AgentRef, value: &Value, slot: &str, subject: AnyObjectRef) {
