@@ -1,5 +1,6 @@
 //! Indexed late certificates refine immutable declarations in bounded continuations.
 use super::*;
+use std::collections::BTreeMap;
 use crate::mapping::{CorrelationProof, CorrelationProofs};
 use std::ops::Bound::{Excluded, Included, Unbounded};
 
@@ -7,15 +8,15 @@ use std::ops::Bound::{Excluded, Included, Unbounded};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Plan {
     pub base: ClaimRef,
-    pub author: Option<String>,
+    pub owner: Option<String>,
     pub recipient: Option<String>,
 }
 pub type PlanIndex = imbl::OrdMap<String, imbl::OrdMap<ClaimRef, Plan>>;
-pub const ROUTE_PAGE_WORK: usize = 64;
-const CONTINUATION: &str = "codex.routing-continuation";
+pub const OWNER_PAGE_WORK: usize = 64;
+const CONTINUATION: &str = "owner-resolution-continuation";
 
 pub fn retain_plan(index: &mut PlanIndex, plan: Plan) {
-    for key in plan.author.iter().chain(&plan.recipient) {
+    for key in plan.owner.iter().chain(&plan.recipient) {
         index
             .entry(key.clone())
             .or_default()
@@ -26,7 +27,7 @@ pub fn retain_plan(index: &mut PlanIndex, plan: Plan) {
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 struct Variant {
     mask: u8,
-    author: Option<CorrelationProof>,
+    owner: Option<CorrelationProof>,
     recipient: Option<CorrelationProof>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,23 +67,23 @@ pub(crate) fn refine(input: &MapInput<'_>, output: &mut MapOutput) {
             output.diagnostics.push(MappingDiagnostic {
                 evidence: vec![input.canonical_observation.clone()],
                 code: DiagnosticCode::DecodeFailure,
-                message: "The routing continuation checkpoint is invalid".into(),
+                message: "The owner-resolution continuation checkpoint is invalid".into(),
             });
             return;
         }
     };
     output.state.values.remove(CONTINUATION);
     if cursor.is_none()
-        && output.routing_plans.is_empty()
+        && output.owner_resolution_plans.is_empty()
         && !output
             .correlations
             .keys()
-            .any(|key| input.archive.routing_plans.contains_key(key))
+            .any(|key| input.archive.owner_resolution_plans.contains_key(key))
     {
         return;
     }
     let local_plans = cursor.as_ref().map_or_else(
-        || output.routing_plans.clone(),
+        || output.owner_resolution_plans.clone(),
         |cursor| cursor.local.clone(),
     );
     let local: imbl::OrdMap<_, _> = local_plans
@@ -111,20 +112,20 @@ pub(crate) fn refine(input: &MapInput<'_>, output: &mut MapOutput) {
                 .cloned()
                 .unwrap_or_else(|| vec![input.canonical_observation.clone()]),
         );
-        if input.archive.routing_plans.contains_key(key) {
+        if input.archive.owner_resolution_plans.contains_key(key) {
             keys.push(key.clone());
         }
     }
     keys.sort();
     keys.dedup();
-    let mut budget = ROUTE_PAGE_WORK;
+    let mut budget = OWNER_PAGE_WORK;
     for source in std::iter::once(None).chain(keys.iter().cloned().map(Some)) {
         if cursor.as_ref().is_some_and(|cursor| source < cursor.source) {
             continue;
         }
         let plans = match &source {
             None => &local,
-            Some(key) => &input.archive.routing_plans[key],
+            Some(key) => &input.archive.owner_resolution_plans[key],
         };
         let checkpoint = cursor.as_ref().filter(|cursor| cursor.source == source);
         let lower = match checkpoint {
@@ -148,7 +149,8 @@ pub(crate) fn refine(input: &MapInput<'_>, output: &mut MapOutput) {
                 output.diagnostics.push(MappingDiagnostic {
                     evidence: vec![input.canonical_observation.clone()],
                     code: DiagnosticCode::MissingSource,
-                    message: "A retained routing plan lacks its immutable base claim".into(),
+                    message: "A retained owner-resolution plan lacks its immutable base claim"
+                        .into(),
                 });
                 (true, Variant::default())
             };
@@ -166,10 +168,12 @@ pub(crate) fn refine(input: &MapInput<'_>, output: &mut MapOutput) {
                         local: local_plans,
                         sources: keys.clone(),
                     })
-                    .expect("typed routing cursor"),
+                    .expect("typed owner-resolution cursor"),
                 );
                 output.continuation_state = Some(state);
-                output.requests.push(ArchiveRequest::ContinueRouting);
+                output
+                    .requests
+                    .push(ArchiveRequest::ContinueOwnerResolution);
                 return;
             }
         }
@@ -182,7 +186,7 @@ fn endpoint<'a>(key: Option<&String>, proofs: &'a CorrelationProofs) -> Option<&
 }
 fn owner(proof: &CorrelationProof) -> OwnerRef {
     let AnyObjectRef::Agent(agent) = &proof.reference else {
-        unreachable!("agent-path certificates name agents")
+        unreachable!("owner certificates name agents")
     };
     OwnerRef::Agent {
         agent: agent.clone(),
@@ -212,9 +216,9 @@ fn variants(
     budget: &mut usize,
     output: &mut Vec<Claim>,
 ) -> (bool, Variant) {
-    let author = endpoint(plan.author.as_ref(), proofs);
+    let owner_proofs = endpoint(plan.owner.as_ref(), proofs);
     let recipient = endpoint(plan.recipient.as_ref(), proofs);
-    let known = u8::from(author.is_some()) | (u8::from(recipient.is_some()) << 1);
+    let known = u8::from(owner_proofs.is_some()) | (u8::from(recipient.is_some()) << 1);
     let mut last = after.cloned().unwrap_or_default();
     for mask in 1..=3u8 {
         if mask & known != mask || after.is_some_and(|after| mask < after.mask) {
@@ -222,11 +226,11 @@ fn variants(
         }
         let same_mask = after.filter(|after| mask == after.mask);
         for sender in alternatives(
-            author,
+            owner_proofs,
             mask & 1 != 0,
-            same_mask.and_then(|after| after.author.as_ref()),
+            same_mask.and_then(|after| after.owner.as_ref()),
         ) {
-            let same_sender = same_mask.filter(|after| after.author.as_ref() == sender);
+            let same_sender = same_mask.filter(|after| after.owner.as_ref() == sender);
             for target in alternatives(
                 recipient,
                 mask & 2 != 0,
@@ -234,7 +238,7 @@ fn variants(
             ) {
                 let variant = Variant {
                     mask,
-                    author: sender.cloned(),
+                    owner: sender.cloned(),
                     recipient: target.cloned(),
                 };
                 if after.is_some_and(|after| variant <= *after) {
@@ -245,24 +249,24 @@ fn variants(
                 }
                 *budget -= 1;
                 let mut refined = base.clone();
-                refined.claim_ref = route_claim(&base.claim_ref, &variant);
+                refined.claim_ref = resolved_claim(&base.claim_ref, &variant);
                 refined.supersedes.push(base.claim_ref.clone());
                 // Every two-sided certificate supersedes its one-sided subsets.
                 // Other independent certificates remain alternative sufficient proofs.
                 if mask == 3 {
-                    refined.supersedes.push(route_claim(
+                    refined.supersedes.push(resolved_claim(
                         &base.claim_ref,
                         &Variant {
                             mask: 1,
-                            author: variant.author.clone(),
+                            owner: variant.owner.clone(),
                             recipient: None,
                         },
                     ));
-                    refined.supersedes.push(route_claim(
+                    refined.supersedes.push(resolved_claim(
                         &base.claim_ref,
                         &Variant {
                             mask: 2,
-                            author: None,
+                            owner: None,
                             recipient: variant.recipient.clone(),
                         },
                     ));
@@ -297,7 +301,12 @@ fn variants(
                             };
                         }
                     }
-                    _ => unreachable!("routing plans only refine their declared families"),
+                    Fact::Relation {
+                        relation: Relation::ContextLineage { original_owner, .. },
+                    } => {
+                        *original_owner = owner(sender.unwrap());
+                    }
+                    _ => unreachable!("owner-resolution plans only refine their declared families"),
                 }
                 output.push(refined);
                 last = variant;
@@ -306,7 +315,7 @@ fn variants(
     }
     (true, last)
 }
-fn route_claim(base: &ClaimRef, variant: &Variant) -> ClaimRef {
+fn resolved_claim(base: &ClaimRef, variant: &Variant) -> ClaimRef {
     let ObjectAddress::Occurrence {
         scope,
         position,
@@ -316,7 +325,8 @@ fn route_claim(base: &ClaimRef, variant: &Variant) -> ClaimRef {
         unreachable!("mapper claims identify a retained occurrence")
     };
     let mut slot = local_slot.clone();
-    let digest = blake3::hash(&serde_json::to_vec(variant).expect("typed routing certificate"));
-    slot.push(format!("route-resolution-{}-{digest}", variant.mask));
+    let digest =
+        blake3::hash(&serde_json::to_vec(variant).expect("typed owner-resolution certificate"));
+    slot.push(format!("owner-resolution-{}-{digest}", variant.mask));
     ClaimRef::occurrence(scope.clone(), position.clone(), slot).unwrap()
 }

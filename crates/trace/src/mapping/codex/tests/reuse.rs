@@ -270,11 +270,11 @@ fn corroborating_route_proofs_cannot_reuse_an_immutable_claim_identity() {
 
 #[test]
 fn routing_certificate_pairs_page_without_remapping_bodies_or_skipping_alternative_support() {
-    use super::super::routing::{retain_plan, ROUTE_PAGE_WORK};
+    use crate::mapping::owner_resolution::{retain_plan, OWNER_PAGE_WORK};
     let initial = run(&[serde_json::json!({"type":"session_meta","ordinal":0,"payload":{"id":"observer","session_id":"root","agent_path":"/root/observer"}})], false).remove(0);
     let raw = serde_json::to_vec(&serde_json::json!({"type":"response_item","ordinal":1,"payload":{"type":"agent_message","id":"paged-certificates","author":"/root/sender","recipient":"/root/recipient","content":[{"type":"input_text","text":"retain this body only once"}]}})).unwrap();
     let observation = capture(2, false);
-    let count = ROUTE_PAGE_WORK / 2 + 3;
+    let count = OWNER_PAGE_WORK / 2 + 3;
     let mut archive = ArchiveContext::default();
     for (id, start) in [("sender", 100), ("recipient", 1000)] {
         let key = correlation_key(&agent("root"), "codex.agent-path", &[format!("/root/{id}")]);
@@ -306,7 +306,7 @@ fn routing_certificate_pairs_page_without_remapping_bodies_or_skipping_alternati
                 "a metadata continuation restaged the original body"
             );
             assert!(
-                output.claims.len() <= ROUTE_PAGE_WORK,
+                output.claims.len() <= OWNER_PAGE_WORK,
                 "one routing continuation exceeded its work budget"
             );
         }
@@ -325,8 +325,8 @@ fn routing_certificate_pairs_page_without_remapping_bodies_or_skipping_alternati
             }
             archive.claims.insert(claim.claim_ref.clone(), claim);
         }
-        for plan in output.routing_plans {
-            retain_plan(&mut archive.routing_plans, plan);
+        for plan in output.owner_resolution_plans {
+            retain_plan(&mut archive.owner_resolution_plans, plan);
         }
         if !output.requests.iter().any(ArchiveRequest::is_continuation) {
             break;
@@ -365,7 +365,7 @@ fn a_malformed_routing_checkpoint_reports_a_decode_failure_instead_of_panicking(
     let observation = capture(2, false);
     let mut state = MapperState::default();
     state.values.insert(
-        "codex.routing-continuation".into(),
+        "owner-resolution-continuation".into(),
         serde_json::json!({"after":"damaged"}),
     );
     let output = CodexMapper.map(MapInput {

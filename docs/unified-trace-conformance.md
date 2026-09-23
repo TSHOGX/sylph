@@ -194,6 +194,15 @@ The retained material is:
   This fixture does not establish a universal copied-prefix cutoff or a context
   checkpoint, and it does not contain the original session's transcript.
 
+The historical Pi fork headers from `fixtures/native/pi/fork-parent.jsonl` and
+`fixtures/native/pi/fork-child.jsonl` are replayed with explicit source-inventory
+certificates in `crates/server/src/trace/worker/tests/pi_origin.rs`. The inventory is
+harness-authored acquisition metadata, while the header bytes are retained fixtures.
+Every ordering, worker restart and same-cut rebuild preserves the origin identity;
+independent-proof deletion and contradictory bindings preserve the appropriate current
+and older views. This source join does not certify which copied entries belong to the
+fork or where child-local production begins.
+
 Sanitization preserves equality relationships, key scope, missing-versus-empty values,
 ordering and branch structure. Replacing two distinct IDs with one placeholder would
 destroy the very property under test. Full payload fixtures use controlled substitute

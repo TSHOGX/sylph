@@ -298,9 +298,9 @@ async fn deleting_one_route_certificate_keeps_independent_support_until_the_last
 
 #[tokio::test]
 async fn a_late_route_certificate_resumes_bounded_refinements_from_a_committed_checkpoint() {
-    use mapping::codex::routing::ROUTE_PAGE_WORK;
+    use mapping::owner_resolution::OWNER_PAGE_WORK;
     let fixture = Fixture::new().await;
-    let count = ROUTE_PAGE_WORK * 2;
+    let count = OWNER_PAGE_WORK * 2;
     observer_history(&fixture, count).await;
     let (store, _) = fixture.generation("paged-routing").await;
     let worker = fixture.worker();
@@ -330,19 +330,18 @@ async fn a_late_route_certificate_resumes_bounded_refinements_from_a_committed_c
         .prepare_unit(&store, &state, &captures, before + 1)
         .await
         .unwrap();
-    assert!(
-        unit.next
-            .pending
-            .values()
-            .any(|pending| pending.requests.contains(&ArchiveRequest::ContinueRouting))
-    );
+    assert!(unit.next.pending.values().any(|pending| {
+        pending
+            .requests
+            .contains(&ArchiveRequest::ContinueOwnerResolution)
+    }));
     assert!(
         unit.batch
             .claims
             .iter()
             .filter(|claim| !claim.supersedes.is_empty())
             .count()
-            <= ROUTE_PAGE_WORK
+            <= OWNER_PAGE_WORK
     );
     worker.commit_effects(&store, &unit).await.unwrap();
     crate::trace::worker::reconciliation::apply(&store, 1, &checkpoint.snapshot, &unit.batch)

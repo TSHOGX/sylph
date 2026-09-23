@@ -1,9 +1,7 @@
 //! Native routing follows explicit root identity and root-scoped path certificates.
 use super::*;
 
-mod refinement;
-pub use refinement::{Plan, PlanIndex, retain_plan, ROUTE_PAGE_WORK};
-pub(super) use refinement::{refine, resume};
+use crate::mapping::owner_resolution::Plan;
 
 impl Context<'_, '_> {
     fn communication_owner(&mut self, containing: &AgentRef, path: &str) -> OwnerRef {
@@ -201,9 +199,9 @@ impl Context<'_, '_> {
                 _ => continue,
             };
             if author.is_some() || recipient.is_some() {
-                self.output.routing_plans.push(Plan {
+                self.output.owner_resolution_plans.push(Plan {
                     base: base.claim_ref.clone(),
-                    author,
+                    owner: author,
                     recipient,
                 });
             }

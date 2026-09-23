@@ -108,6 +108,17 @@ which becomes captured source-generation evidence.
 | `contentIndex` inside the current assistant message stream | Part index, never a session-wide identity |
 | Header `parentSession` or historical `parent_session` | A source path requiring capture of the referenced header to resolve actual fork Session identity |
 
+The fork source path joins only to a retained source-inventory certificate from the
+same environment and vendor. That certificate cites the captured native identity
+record as well as the locator binding; a filename or declared routing hint supplies
+neither identity nor copied membership. Each independent certificate remains an
+alternative proof. Different identities at the same locator remain conflicting
+lineage rather than selecting whichever inventory record arrived first.
+Late certificates refine an immutable unresolved lineage claim in bounded passes,
+including after restart. The resolved lineage cites both the fork header and the
+inventory/native-header proof. Deleting one proof cannot borrow another scope's
+authorization, and a rebuild uses only the retained evidence that survives deletion.
+
 The entry tree includes model settings, thinking settings, custom entries, labels,
 session metadata, messages, and checkpoints. Omitting a non-message node from a reading
 projection does not remove its predecessor relationship or arbitrarily reparent its

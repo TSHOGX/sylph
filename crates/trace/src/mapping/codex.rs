@@ -15,7 +15,7 @@ pub mod history;
 
 pub struct CodexMapper;
 impl CodexMapper {
-    const BUILD: &'static str = "codex-11";
+    const BUILD: &'static str = "codex-12";
 }
 mod accounting;
 mod collaboration;
@@ -58,7 +58,7 @@ impl SemanticMapper for CodexMapper {
     }
 
     fn map(&self, input: MapInput<'_>) -> MapOutput {
-        if let Some(output) = routing::resume(&input) {
+        if let Some(output) = super::owner_resolution::resume(&input) {
             return output;
         }
         if input.capture.transport_kind == TransportKind::NativeDatabase {
@@ -149,7 +149,7 @@ impl SemanticMapper for CodexMapper {
             "codex".into(),
             serde_json::to_value(state).expect("typed Codex checkpoint serializes"),
         );
-        routing::refine(&input, &mut output);
+        super::owner_resolution::refine(&input, &mut output);
         output
     }
 }

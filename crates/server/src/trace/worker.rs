@@ -192,13 +192,13 @@ struct WorkerState {
     source_states: imbl::OrdMap<String, Arc<MapperState>>,
     correlations: imbl::OrdMap<String, AnyObjectRef>,
     correlation_proofs: mapping::CorrelationProofs,
-    routing_plans: mapping::codex::routing::PlanIndex,
+    owner_resolution_plans: mapping::owner_resolution::PlanIndex,
     pending: imbl::OrdMap<String, Arc<PendingMapping>>,
     source_replays: imbl::OrdMap<String, SourceReplayCursor>,
     available_evidence: imbl::OrdSet<ObservationRef>,
     gaps: imbl::OrdMap<String, SourceGap>,
     source_owners: imbl::OrdMap<(SourceRef, u64), mapping::SourceOwner>,
-    source_definitions: imbl::OrdMap<(SourceRef, u64), mapping::codex::history::RecordedSource>,
+    source_definitions: imbl::OrdMap<(SourceRef, u64), mapping::RecordedSource>,
     history_records: mapping::codex::history::HistoryRecords,
     captured_payloads: imbl::OrdMap<String, imbl::Vector<mapping::CapturedPayloadBinding>>,
     observation_sources: imbl::OrdMap<ObservationRef, SourcePosition>,
@@ -1048,9 +1048,9 @@ impl ProjectionWorker {
                     &binding.proofs,
                 );
                 state.correlation_proofs.insert(key.into(), binding.proofs);
-            } else if key.starts_with("routing:") {
-                mapping::codex::routing::retain_plan(
-                    &mut state.routing_plans,
+            } else if key.starts_with("owner_resolution:") {
+                mapping::owner_resolution::retain_plan(
+                    &mut state.owner_resolution_plans,
                     serde_json::from_value(value)?,
                 );
             } else if let Some(key) = key.strip_prefix("source_replay:") {
@@ -1070,8 +1070,7 @@ impl ProjectionWorker {
                     .captured_payloads
                     .insert(key.into(), serde_json::from_value(value)?);
             } else if key.starts_with("source_definition:") {
-                let definition: mapping::codex::history::RecordedSource =
-                    serde_json::from_value(value)?;
+                let definition: mapping::RecordedSource = serde_json::from_value(value)?;
                 state.source_definitions.insert(
                     (
                         definition.definition.source.clone(),
@@ -1288,12 +1287,12 @@ impl ProjectionWorker {
             self.limits.max_claims_per_observation,
         )?;
         unit.batch.claims.extend(output.claims);
-        for plan in output.routing_plans {
+        for plan in output.owner_resolution_plans {
             unit.batch.mapper_states.insert(
-                format!("routing:{}", plan.base.encode()),
+                format!("owner_resolution:{}", plan.base.encode()),
                 serde_json::to_value(&plan)?,
             );
-            mapping::codex::routing::retain_plan(&mut unit.next.routing_plans, plan);
+            mapping::owner_resolution::retain_plan(&mut unit.next.owner_resolution_plans, plan);
         }
 
         for definition in output.source_definitions {
@@ -1807,7 +1806,7 @@ fn archive_context(state: &mut WorkerState) -> ArchiveContext {
         history_records: state.history_records.clone(),
         correlations: state.correlations.clone(),
         correlation_proofs: state.correlation_proofs.clone(),
-        routing_plans: state.routing_plans.clone(),
+        owner_resolution_plans: state.owner_resolution_plans.clone(),
         claims: state.reducer.claim_snapshot(),
         ..ArchiveContext::default()
     };
@@ -1891,7 +1890,7 @@ fn has_ready_continuations(
 fn requests_may_resolve(requests: &[ArchiveRequest], state: &WorkerState) -> bool {
     requests.iter().any(|request|match request {
         ArchiveRequest::CapturedPayload {parent,slot}=>state.captured_payloads.contains_key(&mapping::captured_payload_key(parent,slot)),
-        ArchiveRequest::ContinueHistory | ArchiveRequest::ContinueRouting=>true,
+        ArchiveRequest::ContinueHistory | ArchiveRequest::ContinueOwnerResolution=>true,
         ArchiveRequest::HistoryLocator {issuer,physical_id}=>state.source_definitions.values().any(|source|&source.definition.source.issuer==issuer&&mapping::codex::history::physical_id(&source.definition.locator)==Some(physical_id.as_str())),
         ArchiveRequest::HistorySource {source,generation}=>state.history_records.contains_key(&(source.clone(), *generation)),
         ArchiveRequest::AttachmentTarget {parent,slot,locator}=>state.correlations.contains_key(&mapping::attachment_key(parent,slot,locator)),

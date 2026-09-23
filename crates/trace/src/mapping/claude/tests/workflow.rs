@@ -1,5 +1,5 @@
 use super::*;
-use crate::mapping::{codex::history::RecordedSource, inventory::InventoryMapper};
+use crate::mapping::{RecordedSource, inventory::InventoryMapper};
 
 const ROOT: &str = "9074a8da-e264-4e3a-87c3-95211e986faf";
 const RUN: &str = "wf_8078fad7-6fc";

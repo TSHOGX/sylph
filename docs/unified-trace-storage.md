@@ -407,6 +407,14 @@ the dependency resumes bounded pages from the last committed mapper state; a lon
 tail cannot prevent the projection from reaching the later attachment that releases it.
 Independent correlation joins do not impose this source-order barrier.
 
+Late owner and origin certificates share one vendor-independent refinement mechanism.
+Plans index the exact dependency keys and retain immutable base claim references,
+without duplicating vendor bodies or source state. A continuation bounds both the
+plans examined and the certificate variants emitted, resumes at its exact pair, and
+retains its progress in the same publication transaction. Independent sufficient
+proofs produce independent immutable refinements, so arrival order cannot choose an
+owner and deleting one proof does not invalidate another retained certificate.
+
 Current projection may lag evidence admission. Serve both cuts, worker status, affected
 source gaps and diagnostics. Do not turn projection failure into an agent failure.
 Full replay is deterministic over the complete cut. Incremental scheduling can change

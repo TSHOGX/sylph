@@ -266,8 +266,11 @@ fn run(values: &[Value], live: bool) -> Vec<MapOutput> {
                     .unwrap_or_else(|| vec![capture.observation_ref.clone()]),
             );
         }
-        for plan in &output.routing_plans {
-            super::routing::retain_plan(&mut archive.routing_plans, plan.clone());
+        for plan in &output.owner_resolution_plans {
+            crate::mapping::owner_resolution::retain_plan(
+                &mut archive.owner_resolution_plans,
+                plan.clone(),
+            );
         }
         state = output.state.clone();
         outputs.push(output);

@@ -10,6 +10,7 @@ pub mod claude;
 pub mod codex;
 pub mod inventory;
 pub mod observation;
+pub mod owner_resolution;
 pub mod pi;
 pub mod server;
 
@@ -22,7 +23,7 @@ pub mod server;
 )]
 pub enum ArchiveRequest {
     ContinueHistory,
-    ContinueRouting,
+    ContinueOwnerResolution,
     HistoryLocator {
         issuer: Issuer,
         physical_id: String,
@@ -71,7 +72,7 @@ pub enum ArchiveRequest {
 
 impl ArchiveRequest {
     pub fn is_continuation(&self) -> bool {
-        matches!(self, Self::ContinueHistory | Self::ContinueRouting)
+        matches!(self, Self::ContinueHistory | Self::ContinueOwnerResolution)
     }
 }
 
@@ -114,17 +115,23 @@ pub fn captured_payload_key(parent: &ObservationRef, slot: &str) -> String {
     serde_json::to_string(&(parent, slot)).expect("typed captured payload key")
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordedSource {
+    pub definition: SourceDefinition,
+    pub observation: ObservationRef,
+}
+
 /// Only evidence-proved inventory and correlation data may populate this context.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ArchiveContext {
     pub semantic: std::sync::Arc<ArchiveSemantic>,
     pub captured_payloads: imbl::OrdMap<String, CapturedPayload>,
     pub correlations: imbl::OrdMap<String, AnyObjectRef>,
-    pub source_definitions: imbl::OrdMap<(SourceRef, u64), codex::history::RecordedSource>,
+    pub source_definitions: imbl::OrdMap<(SourceRef, u64), RecordedSource>,
     pub history_records: codex::history::HistoryRecords,
     pub observations: imbl::OrdSet<ObservationRef>,
     pub correlation_proofs: CorrelationProofs,
-    pub routing_plans: codex::routing::PlanIndex,
+    pub owner_resolution_plans: owner_resolution::PlanIndex,
     pub source_owners: imbl::OrdMap<(SourceRef, u64), SourceOwner>,
     pub observation_sources: imbl::OrdMap<ObservationRef, SourcePosition>,
     pub claims: imbl::OrdMap<ClaimRef, Claim>,
@@ -318,10 +325,10 @@ pub struct MapOutput {
     /// These identity witnesses are alternatives used by reactive joins. Other
     /// correlations retain one current checkpoint witness, not a polling log.
     pub corroborating_correlations: std::collections::BTreeSet<String>,
-    pub routing_plans: Vec<codex::routing::Plan>,
+    pub owner_resolution_plans: Vec<owner_resolution::Plan>,
     pub bound_agents: Vec<AgentRef>,
     pub source_owners: Vec<SourceOwnership>,
-    pub source_definitions: Vec<codex::history::RecordedSource>,
+    pub source_definitions: Vec<RecordedSource>,
     pub history_records: Vec<codex::history::HistoryRecord>,
     pub continuation_state: Option<MapperState>,
 }
@@ -337,6 +344,11 @@ pub struct MappingDiagnostic {
 
 pub fn correlation_key(agent: &AgentRef, namespace: &str, key: &[String]) -> String {
     serde_json::to_string(&(agent, namespace, key)).expect("typed correlation key serialization")
+}
+
+pub fn native_source_owner_key(issuer: &Issuer, vendor: &str, locator: &str) -> String {
+    serde_json::to_string(&("native-source-owner", issuer, vendor, locator))
+        .expect("typed source owner key")
 }
 
 pub fn attachment_key(parent: &ObservationRef, slot: &str, locator: &str) -> String {

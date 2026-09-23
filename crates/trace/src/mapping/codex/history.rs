@@ -23,12 +23,6 @@ pub struct HistoryHeader {
     pub inherited_from: Option<AgentRef>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RecordedSource {
-    pub definition: SourceDefinition,
-    pub observation: ObservationRef,
-}
-
 pub type HistoryRecords = imbl::OrdMap<(SourceRef, u64), imbl::OrdMap<u64, HistoryRecord>>;
 
 pub(super) fn record_source(input: &MapInput<'_>, value: &Value, output: &mut MapOutput) {

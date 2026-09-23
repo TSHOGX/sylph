@@ -673,7 +673,7 @@ impl TraceService {
     fn manifest(generation: String) -> GenerationManifest {
         GenerationManifest {
             generation: generation.clone(),
-            semantic_schema: "trace-9".into(),
+            semantic_schema: "trace-10".into(),
             mapper_builds: [
                 ("server", mapping::server::ServerMapper.build()),
                 ("codex", mapping::codex::CodexMapper.build()),
@@ -690,7 +690,7 @@ impl TraceService {
             .map(|(vendor, build)| (vendor.into(), build.into()))
             .collect(),
             reducer_build: "trace-reducer-2".into(),
-            capture_inventory_build: "source-inventory-1".into(),
+            capture_inventory_build: "source-inventory-2".into(),
             encoding_build: "typed-blake3-1".into(),
         }
     }

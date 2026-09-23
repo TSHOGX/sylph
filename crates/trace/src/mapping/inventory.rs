@@ -11,10 +11,13 @@ pub struct InventoryMapper;
 
 impl SemanticMapper for InventoryMapper {
     fn build(&self) -> &'static str {
-        "source-inventory-1"
+        "source-inventory-2"
     }
 
     fn map(&self, input: MapInput<'_>) -> MapOutput {
+        if let Some(output) = super::owner_resolution::resume(&input) {
+            return output;
+        }
         let mut output = MapOutput {
             state: input.state.clone(),
             ..MapOutput::default()
@@ -119,12 +122,24 @@ impl SemanticMapper for InventoryMapper {
         evidence.push(input.canonical_observation.clone());
         evidence.sort();
         evidence.dedup();
-        output
-            .source_definitions
-            .push(super::codex::history::RecordedSource {
-                definition: definition.clone(),
-                observation: input.canonical_observation.clone(),
-            });
+        // A companion proves who contains a sidecar, not that this locator is
+        // itself a native session file. Fork paths require that file's identity.
+        if matches!(definition.basis, SourceOwnerBasis::NativeIdentity { .. }) {
+            let key = super::native_source_owner_key(
+                &definition.source.issuer,
+                definition.owner.anchor_session().agent.as_str(),
+                &definition.locator,
+            );
+            output.corroborating_correlations.insert(key.clone());
+            output
+                .correlations
+                .insert(key.clone(), AnyObjectRef::Agent(definition.owner.clone()));
+            output.correlation_evidence.insert(key, evidence.clone());
+        }
+        output.source_definitions.push(super::RecordedSource {
+            definition: definition.clone(),
+            observation: input.canonical_observation.clone(),
+        });
         output.source_owners.push(SourceOwnership {
             source: definition.source,
             generation: definition.generation,
@@ -134,6 +149,7 @@ impl SemanticMapper for InventoryMapper {
                 rule: rule.into(),
             },
         });
+        super::owner_resolution::refine(&input, &mut output);
         output
     }
 }

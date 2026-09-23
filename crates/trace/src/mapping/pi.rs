@@ -76,10 +76,13 @@ struct LiveMessage {
 
 impl SemanticMapper for PiMapper {
     fn build(&self) -> &'static str {
-        "pi-6"
+        "pi-7"
     }
 
     fn map(&self, input: MapInput<'_>) -> MapOutput {
+        if let Some(output) = super::owner_resolution::resume(&input) {
+            return output;
+        }
         let mut output = MapOutput {
             state: input.state.clone(),
             ..MapOutput::default()
@@ -137,6 +140,7 @@ impl SemanticMapper for PiMapper {
                 .entry(key.clone())
                 .or_insert_with(|| vec![input.canonical_observation.clone()]);
         }
+        super::owner_resolution::refine(&input, &mut output);
         output
     }
 }
@@ -300,6 +304,41 @@ impl Context<'_, '_> {
                 .and_then(Value::as_str)
                 .map(str::to_owned);
             self.declare_agent(&owner, None);
+            if let Some(path) = self
+                .state
+                .fork_source
+                .clone()
+                .filter(|path| !path.is_empty())
+            {
+                self.add(
+                    &owner,
+                    "pi/fork-origin",
+                    Fact::Relation {
+                        relation: Relation::ContextLineage {
+                            recipient: owner.clone(),
+                            checkpoint: None,
+                            original_owner: OwnerRef::Unresolved {
+                                scope: owner.clone(),
+                                namespace: "pi.fork-source".into(),
+                                native_key: vec![path.clone()],
+                                reason: "Fork source identity needs its retained locator and native header".into(),
+                            },
+                        },
+                    },
+                );
+                let base = self.output.claims.last().unwrap().claim_ref.clone();
+                self.output
+                    .owner_resolution_plans
+                    .push(super::owner_resolution::Plan {
+                        base,
+                        owner: Some(super::native_source_owner_key(
+                            &self.input.capture.observation_ref.issuer,
+                            "pi",
+                            &path,
+                        )),
+                        recipient: None,
+                    });
+            }
             self.issue(
                 Some(&owner),
                 "pi/native-selection",
@@ -342,7 +381,7 @@ impl Context<'_, '_> {
                     scope: containing.clone(),
                     namespace: "pi.fork-entry".into(),
                     native_key: key,
-                    reason: "Fork source and copied membership have not been resolved".into(),
+                    reason: "Copied membership has not been established for this entry".into(),
                 })
             }
         }
