@@ -160,6 +160,39 @@ refer to the same delivery and an observed vendor representation. Human authorsh
 comes from accepted control provenance or explicit vendor input semantics; a
 `user`-role context block remains context when that is what the source establishes.
 
+### Native content annotations
+
+`internal_chat_message_metadata_passthrough.content_item_kinds` is a host-owned
+classification parallel to a native message's content array. The pinned
+[fragment constructor](https://github.com/openai/codex/blob/968835997714baaff199cfed5f89a2c65d8ca77d/codex-rs/context-fragments/src/fragment.rs)
+preserves that annotation independently of the protocol role and text. Classification
+requires a nonempty, fully aligned array and the expected text-part shape. A missing,
+malformed or unknown annotation cannot be replaced by recognizing a text wrapper.
+
+For a `user`-role message, an internal-context kind from a valid extension source, such
+as `goal.internal_context`, or `environments.environment_context` identifies harness
+context. Explicit harness notices, such as `generic.turn_aborted` and
+`multi_agent.subagent_notification`, identify notices. `user.text` identifies ordinary
+task input without establishing a human Subject. Mixed purposes remain unclassified;
+authorship is harness-owned only when every part has a known harness classification.
+Native and live `UserMessage` items independently establish task-input purpose through
+their typed item kind, without establishing a human Subject.
+The reported protocol role and every content byte remain unchanged. Output phases
+classify assistant output; they cannot turn a user-role input into an answer.
+
+The controlled [goal-context capture](../fixtures/unified-trace/codex/goal-context/capture.json)
+uses Codex 0.155.1 with a bounded loopback provider. It holds a goal inference open,
+pauses the goal and observes interruption, then submits the exact retained goal text
+as ordinary input. The two texts are equal, while their retained content annotations
+are different. Provider output and usage are synthetic; the vendor's classifications,
+identifiers, lifecycle and persistence are observed.
+
+The provider-request witness contains `turn_trigger: "goal"`; the captured public and
+native turn-start records omit it. Provider requests are research witnesses, not an
+acquisition surface supplied to the production mapper. Neither a goal context annotation
+nor a textual abort notice establishes a trigger relation, goal instance or execution
+boundary. Those facts require their own retained evidence.
+
 ### Submitted input correlation
 
 The controlled [input capture](../fixtures/unified-trace/codex/input/capture.json)

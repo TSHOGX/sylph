@@ -1,0 +1,60 @@
+{
+  "vendor": "codex",
+  "version": "codex-cli 0.155.1",
+  "session_id": "01a0cbf1-b409-72c2-af37-b18f8fed912c",
+  "method": "scripts/capture-codex-goal-context.py; real isolated app-server and bounded loopback Responses provider. Set an isolated goal, hold the second provider request, pause the goal and interrupt that observed turn before releasing it, then submit its exact context text as an ordinary new turn. Only the checked local fixture key is supplied; no remote model or requested tool execution.",
+  "limits": "Provider output and usage are synthetic. Vendor IDs, goal state, wire frames, native persistence and provider-request annotations are observed. Provider requests are research witnesses, not an acquisition surface available to Sylph. Provider headers are a logical field map, not original HTTP framing. A context annotation does not identify a goal instance or prove a turn trigger; matching text cannot supply either.",
+  "sanitization": "Substitute only the temporary root path and compactly reserialize complete JSON frames and native records. No fields or records are removed.",
+  "source_sha256": {
+    "stdin": "7b83f7176f969379dd157752ccda9286fc81324a9333761f636b563466f3851a",
+    "stdout": "dc0d162b6e8f6c916858f34327eff87cfaf9f92955fb99b6aa15248433f08722",
+    "wire": "ae418ab05a8b04baaa51cf77a24db5a3ee5e0e71df885cff79d2d5eaf8f8a539",
+    "native": "02c75f8cefcb72477d7c94617639de5feff70c99f9969129b2b9b74a0cb2e524",
+    "provider": "564ba4f3f6861b2677fbbd7ad44e5d931b573eaa5eb4c7664250e4a3ece24590",
+    "provider_headers": "10b84381b4271e228231a15fa00918aadd0d9c993fd8899332011268882aa6e1"
+  },
+  "retained_sha256": {
+    "stdin": "475a41127444be1dc87c85784c7854ecb3a96ee8a5ef0d2cca742c4c2d0838e6",
+    "stdout": "48e0fb2567b365543376f20dd23696106c9c364c8b16dd5c84ae85ada650c263",
+    "wire": "d5a235ea6c018df561f3c032d95e2b9d33b18b7b42d1dc36de7711626cbdb429",
+    "native": "bd82b434f5a77c942fec7aad9ebb9fe34c967a50d03a4fd8623e564551b23845",
+    "provider": "45c97d658df44e731e5091727fcdcf1c718c534be0edf435ffe3a436ead73be1",
+    "provider_headers": "10b84381b4271e228231a15fa00918aadd0d9c993fd8899332011268882aa6e1"
+  },
+  "records": {
+    "stdin": 7,
+    "stdout": 33,
+    "wire": 40,
+    "native": 29,
+    "provider": 3,
+    "provider_headers": 3
+  },
+  "observed": {
+    "goal_context_message_ids": [
+      "msg_01a0cbf1-b532-7bb1-a5ec-b9955b7764e5",
+      "msg_01a0cbf1-b558-7692-a8a8-bc09f2ef3076"
+    ],
+    "literal_message_id": "msg_01a0cbf1-b577-7bd1-94cc-ccbd1a1cf0b9",
+    "literal_turn_id": "01a0cbf1-b567-77d3-bb9f-fc4bc5812f49",
+    "equal_goal_text_message_ids": [
+      "msg_01a0cbf1-b532-7bb1-a5ec-b9955b7764e5"
+    ],
+    "goal_request_turn_ids": [
+      "01a0cbf1-b50d-7c32-86da-a0db2a2f561f",
+      "01a0cbf1-b552-7f02-9892-668feb49568f"
+    ],
+    "native_turn_ids": [
+      "01a0cbf1-b50d-7c32-86da-a0db2a2f561f",
+      "01a0cbf1-b552-7f02-9892-668feb49568f",
+      "01a0cbf1-b567-77d3-bb9f-fc4bc5812f49"
+    ]
+  },
+  "goal_snapshot": {
+    "method": "scripts/capture-codex-goal.py: one read-only transaction reads the actual thread_goals schema, every selected column and every SQLite storage class, including committed WAL data. No model or goal mutation is requested.",
+    "limits": "This is a logical database-row snapshot, not a copy or hash of SQLite file pages. The producing binary version is not exposed by this row and is not inferred from another installed CLI. Only databaseLocator is substituted; all row values and identities are retained.",
+    "source_snapshot_sha256": "e3f3782dab28098971165d46ec3de6c2597aba44ddb822457baf700de186df7b",
+    "retained_sha256": "57e2bba0cecddaed16ea3c194e7fcf07c4d573dcc9322de5d718d081252cfe27",
+    "schema_sha256": "b3aac485fec27eaefbdd3e68651bdf6d640908fb10226f3562cc5ffe92ca3d1f",
+    "thread_id": "01a0cbf1-b409-72c2-af37-b18f8fed912c"
+  }
+}

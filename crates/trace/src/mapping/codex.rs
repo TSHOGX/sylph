@@ -15,12 +15,13 @@ pub mod history;
 
 pub struct CodexMapper;
 impl CodexMapper {
-    const BUILD: &'static str = "codex-7";
+    const BUILD: &'static str = "codex-8";
 }
 mod accounting;
 mod collaboration;
 mod goal;
 mod input;
+mod content_annotation;
 pub mod routing;
 mod runtime;
 
@@ -993,6 +994,9 @@ impl Context<'_, '_> {
             Some("tool") => Some(ProtocolRole::Tool),
             _ => None,
         };
+        let annotation = (role == Some(ProtocolRole::User))
+            .then(|| content_annotation::classify(value))
+            .flatten();
         let author = match role {
             Some(ProtocolRole::Assistant) => Author::Agent {
                 agent: OwnerRef::Agent {
@@ -1002,18 +1006,23 @@ impl Context<'_, '_> {
             Some(ProtocolRole::Developer | ProtocolRole::System) => Author::Harness {
                 identity: Some("codex".into()),
             },
-            _ => Author::Unknown,
-        };
-        let purpose = match string(value, "phase").or_else(|| string(value, "channel")) {
-            Some("final_answer" | "final") => MessagePurpose::Answer,
-            Some("commentary" | "analysis") => MessagePurpose::Progress,
-            _ => {
-                if matches!(role, Some(ProtocolRole::System | ProtocolRole::Developer)) {
-                    MessagePurpose::Context
-                } else {
-                    MessagePurpose::Unclassified
+            Some(ProtocolRole::User) if annotation.is_some_and(|value| value.harness) => {
+                Author::Harness {
+                    identity: Some("codex".into()),
                 }
             }
+            _ => Author::Unknown,
+        };
+        let purpose = match role {
+            Some(ProtocolRole::Assistant) => {
+                match string(value, "phase").or_else(|| string(value, "channel")) {
+                    Some("final_answer" | "final") => MessagePurpose::Answer,
+                    Some("commentary" | "analysis") => MessagePurpose::Progress,
+                    _ => MessagePurpose::Unclassified,
+                }
+            }
+            Some(ProtocolRole::System | ProtocolRole::Developer) => MessagePurpose::Context,
+            _ => annotation.map_or(MessagePurpose::Unclassified, |value| value.purpose),
         };
         self.declare(
             owner,

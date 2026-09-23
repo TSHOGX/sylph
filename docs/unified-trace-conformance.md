@@ -123,6 +123,17 @@ The retained material is:
 - The [Codex goal snapshot](../fixtures/unified-trace/codex/goal/capture.json) retains one
   actual `thread_goals` row and its schema from a read-only SQLite transaction. It is a
   logical row capture, not a database-page copy; its producing binary version is unknown.
+- The controlled Codex 0.155.1 [goal-context capture](../fixtures/unified-trace/codex/goal-context/capture.json)
+  runs a bounded loopback provider, holds the second goal request until interruption,
+  and submits the exact retained goal text as ordinary input after pausing the goal.
+  The native `goal.internal_context` and `user.text` annotations differ despite equal
+  bodies. Private provider metadata witnesses the goal trigger, while captured public
+  and native turn-start records omit it. Provider requests and logical header maps are
+  research witnesses, not production mapper input. The production replay in
+  `crates/server/src/trace/worker/tests/corpus/codex_context.rs` verifies purposes,
+  authorship, exact bytes, independent turn outcomes, goal state/counters, missing causal
+  joins, source order, restart, redelivery and same-cut rebuild. Provider output and usage
+  are synthetic; native persistence and the app-server lifecycle are observed.
   `crates/envagent/src/runtime/database.rs` verifies goal acquisition against that schema
   with committed WAL data and an added opaque column. Production replay in
   `crates/server/src/trace/worker/tests/corpus/codex_goal.rs` keeps exact captured detail,
