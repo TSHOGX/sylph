@@ -167,8 +167,12 @@ The retained material is:
   `crates/server/src/trace/worker/tests/route_proofs.rs` uses minimal protocol-derived
   headers to verify corroborating certificates across source order, restart, retained
   proof deletion and bounded late-join continuations. These are implementation regressions,
-  not additional controlled vendor captures. Unknown
-  selected heads and request inclusion remain unknown.
+  not additional controlled vendor captures. The production reader also proves that new
+  mailbox admissions are not inherited history. `crates/server/src/trace/worker/tests/copied_communication.rs`
+  wraps complete retained communication payloads in explicit protocol-level copied-prefix
+  fixtures; it verifies missing/late/deleted origins, exact text and opaque parts, preserved
+  lineage and the absence of replayed child deliveries or execution. Unknown selected
+  heads and request inclusion remain unknown.
 - The retained Codex 0.150.1 [delegation capture](measurements/codex/captures/s10_delegation_fork.jsonl)
   supplies all inbound app-server frames to the production replay in
   `crates/server/src/trace/worker/tests/delegation.rs`. A pinned digest guards the complete

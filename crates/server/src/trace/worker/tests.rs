@@ -1804,3 +1804,5 @@ fn native_history_coordinate_conflicts_cannot_replace_a_retained_witness() {
 mod semantic_acceptance;
 
 mod route_proofs;
+
+mod copied_communication;

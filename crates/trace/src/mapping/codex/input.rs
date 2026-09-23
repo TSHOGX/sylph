@@ -47,31 +47,13 @@ impl Context<'_, '_> {
         let previous = self.preceding_input.as_ref()?;
         if previous.owner != *owner
             || string(envelope, "turn_id") != Some(previous.turn.as_str())
-            || previous.position.source != self.input.capture.source_position.source
-            || previous.position.generation != self.input.capture.source_position.generation
+            || !adjacent_native(&previous.position, &self.input.capture.source_position)
         {
             return None;
         }
-        let (
-            SourceLocator::Jsonl {
-                byte_end,
-                record_ordinal: before,
-                ..
-            },
-            SourceLocator::Jsonl {
-                byte_start,
-                record_ordinal: current,
-                ..
-            },
-        ) = (
-            &previous.position.locator,
-            &self.input.capture.source_position.locator,
-        )
-        else {
-            return None;
-        };
-        (*byte_end == *byte_start && before.checked_add(1) == Some(*current)).then_some(previous)
+        Some(previous)
     }
+
     pub(super) fn input_admission(
         &mut self,
         owner: &AgentRef,
@@ -189,5 +171,27 @@ impl Context<'_, '_> {
             claim.evidence.sort();
             claim.evidence.dedup();
         }
+    }
+}
+
+/// Physical adjacency is independent of receipt order or a vendor's ordinal base.
+pub(super) fn adjacent_native(previous: &SourcePosition, current: &SourcePosition) -> bool {
+    if previous.source != current.source || previous.generation != current.generation {
+        return false;
+    }
+    match (&previous.locator, &current.locator) {
+        (
+            SourceLocator::Jsonl {
+                byte_end,
+                record_ordinal: before,
+                ..
+            },
+            SourceLocator::Jsonl {
+                byte_start,
+                record_ordinal: after,
+                ..
+            },
+        ) => byte_end == byte_start && before.checked_add(1) == Some(*after),
+        _ => false,
     }
 }

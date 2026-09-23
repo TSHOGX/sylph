@@ -271,7 +271,15 @@ communications (including repeated equal task text), independent parent calls an
 replies. It exposed root headers omitting `agent_path` despite explicit root `session_id`,
 and late path resolution rewriting immutable claims. Routing now uses the vendor's root
 identity contract and retains stable containing-history message addresses; evidenced
-refinements explicitly supersede unresolved author/recipient declarations. Production
+refinements explicitly supersede unresolved author/recipient declarations. Fresh received
+messages remain local history instead of borrowing an inherited-owner label from their
+sender. Genuine copied communications retain their original containing-history identity,
+including opaque encrypted parts, without replaying delivery or triggering the child.
+Copied authorship stays unknown until the original message is retained and returns to
+unknown after origin deletion while the copied bytes remain readable. Metadata pairs
+require adjacent retained positions, and task-input purpose cites that metadata directly.
+The copied-prefix, inheritance-label, metadata-gap and ciphertext regressions were
+observed failing before their fixes or under their targeted mutations. Production
 replay covers native source order, duplicate receipts, rereads, restart and same-cut
 rebuild; synthetic two-peer cases verify independent certificate arrival, and targeted
 mutations fail the new regressions. Independently retained headers corroborating one

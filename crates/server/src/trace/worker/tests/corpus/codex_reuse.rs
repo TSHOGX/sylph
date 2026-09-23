@@ -205,6 +205,41 @@ async fn expected(fixture: &Fixture, store: &GenerationStore) {
         assert_eq!(bodies.len(), 1);
         assert!(bodies[0].starts_with(b"SYLPH_REUSE_TEXT_bd1e5fafd732b198"));
     }
+    let snapshot = store.checkpoint().await.unwrap().snapshot;
+    let page = store
+        .read_page(
+            &snapshot,
+            &read_scope(&owner(CHILD), None, "history"),
+            None,
+            None,
+            None,
+            store.limits().max_items,
+            false,
+        )
+        .await
+        .unwrap();
+    assert!(!page.has_after);
+    let mut received = 0;
+    for row in page.rows {
+        let unit: ReadingUnit = serde_json::from_value(row.body).unwrap();
+        if let ReadingContent::Message {
+            delivery: Some(_),
+            original_owner,
+            author,
+            ..
+        } = unit.content
+        {
+            assert!(
+                matches!(author, ReadAuthor::Agent { agent: Some(ref sender), .. } if sender.address.agent() == owner(ROOT))
+            );
+            assert!(
+                original_owner.is_none(),
+                "a fresh mailbox admission was rendered as inherited context"
+            );
+            received += 1;
+        }
+    }
+    assert_eq!(received, 3);
     assert!(!retained.iter().any(|claim| matches!(
         &claim.fact,
         Fact::DeliveryStage {

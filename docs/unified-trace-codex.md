@@ -106,7 +106,17 @@ when the root header omits `agent_path`; it does not move child-authored work to
 root. A missing root identity cannot be replaced by the containing child when looking
 up another path. An explicit conflicting path binding remains unresolved.
 Routed communication occurrences keep their address in the containing history while
-the author and recipient retain their own identities. Late path certificates add
+the author and recipient retain their own identities. A fresh mailbox admission is
+local history, even when its author is another agent; it has no copied-history original
+owner. The inherited-prefix rule remains the evidence for copied history. A copied
+`agent_message` retains its bytes and original containing-history identity without
+creating a delivery or trigger for the child. Its author remains unknown until the
+original message supplies that fact; the child's current root/path namespace cannot
+reinterpret an inherited speaker. A copied metadata pair may identify the original
+message's task-input purpose without triggering the child.
+Metadata pairing requires adjacent retained source positions in the same source
+incarnation. An intervening record or an uncaptured gap cannot carry a trigger forward.
+Late path certificates add
 explicitly superseding declarations with their retained evidence; they never mutate an
 existing claim or move its message address. Cold replay includes the same unresolved
 claims and evidenced refinements as incremental replay.
@@ -135,6 +145,7 @@ there is no compatibility path for Sylph's replaced internal event model.
 | Native `UserMessage.id`, optional `client_id`, and live user-message equivalent | Delivery/content evidence with their distinct vendor/client namespaces; link an accepted Sylph input only through the supported client/request correlation |
 | `AgentMessage` or response assistant message | Authored assistant content; preserve analysis/commentary/final distinction where present |
 | `response_item/agent_message` | Routed communication with `id`, author, recipient, and exact recorded content |
+| Communication `encrypted_content` part | Known opaque content, retained in full without claiming plaintext; absent or malformed ciphertext has a decode diagnostic |
 | `inter_agent_communication_metadata` immediately preceding that agent message | Associated routing/trigger evidence; preserve the pair's source adjacency |
 | Reasoning summary, raw reasoning, encrypted reasoning | Distinct payload representations with readable/opaque coverage; absent plaintext is not absent evidence |
 | A model function/custom call | Invocation message content linked to an Operation |

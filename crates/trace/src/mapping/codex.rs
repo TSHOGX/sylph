@@ -15,7 +15,7 @@ pub mod history;
 
 pub struct CodexMapper;
 impl CodexMapper {
-    const BUILD: &'static str = "codex-8";
+    const BUILD: &'static str = "codex-9";
 }
 mod accounting;
 mod collaboration;
@@ -35,7 +35,7 @@ struct CodexState {
     header_evidence: Option<ObservationRef>,
     accounting_root: Option<AgentRef>,
     agent_path: Option<String>,
-    communication_metadata: Option<(bool, ObservationRef)>,
+    communication_metadata: Option<CommunicationMetadata>,
     native_input: Option<input::NativeInput>,
     last_vendor_ordinal: Option<u64>,
     active_by_agent: BTreeMap<String, ActivationRef>,
@@ -43,6 +43,13 @@ struct CodexState {
     entry_by_agent: BTreeMap<String, EntryRef>,
     rpc_requests: BTreeMap<String, (String, ObservationRef)>,
     runtime: runtime::RuntimeState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CommunicationMetadata {
+    trigger: bool,
+    observation: ObservationRef,
+    position: SourcePosition,
 }
 
 impl SemanticMapper for CodexMapper {
@@ -415,6 +422,23 @@ impl Context<'_, '_> {
             }
         }
         self.state.last_vendor_ordinal = ordinal.or(self.state.last_vendor_ordinal);
+        let kind = if outer == "event_msg" || outer == "response_item" {
+            string(payload, "type").unwrap_or("")
+        } else {
+            outer
+        };
+        if kind == "inter_agent_communication_metadata" {
+            self.state.communication_metadata = payload
+                .get("trigger_turn")
+                .and_then(Value::as_bool)
+                .map(|trigger| CommunicationMetadata {
+                    trigger,
+                    observation: self.input.canonical_observation.clone(),
+                    position: self.input.capture.source_position.clone(),
+                });
+            self.mapping_complete(&containing);
+            return;
+        }
         let inherited = match (self.state.inherited_before, ordinal) {
             (Some(cutoff), Some(ordinal)) => ordinal < cutoff,
             (Some(_), None) => {
@@ -426,10 +450,17 @@ impl Context<'_, '_> {
         if inherited {
             // Inherited telemetry and lifecycle are retained evidence, never local
             // execution. Content keeps its original owner when the header proves it.
-            if outer == "response_item" && string(payload, "type") == Some("message") {
+            if outer == "response_item" && matches!(kind, "message" | "agent_message") {
                 if let Some(origin) = self.state.inherited_from.clone() {
+                    let first = self.output.claims.len();
                     let content =
                         self.message(&origin, payload, "/payload", None, RevisionForm::Complete);
+                    if kind == "agent_message" {
+                        // A copied speaker belongs to the original routing context.
+                        // The child may reuse the same path under a different root;
+                        // only the original Message identity may refine authorship.
+                        self.describe_communication(first, Author::Unknown);
+                    }
                     if let Some(content) = content {
                         self.history(
                             &containing,
@@ -447,17 +478,13 @@ impl Context<'_, '_> {
                 }
             }
             if matches!(outer, "turn_context" | "world_state")
-                || (outer == "response_item" && string(payload, "type") == Some("message"))
+                || (outer == "response_item" && matches!(kind, "message" | "agent_message"))
             {
                 self.mapping_complete(&containing);
             }
+            self.state.communication_metadata = None;
             return;
         }
-        let kind = if outer == "event_msg" || outer == "response_item" {
-            string(payload, "type").unwrap_or("")
-        } else {
-            outer
-        };
         match kind {
             "exec_command_begin"
             | "exec_command_end"
@@ -502,12 +529,6 @@ impl Context<'_, '_> {
             "compacted" => self.compaction(&containing, payload),
             "token_count" => self.token_count(&containing, &payload["info"], false),
             "token_usage_record" => self.response_usage(&containing, payload),
-            "inter_agent_communication_metadata" => {
-                self.state.communication_metadata = payload
-                    .get("trigger_turn")
-                    .and_then(Value::as_bool)
-                    .map(|trigger| (trigger, self.input.canonical_observation.clone()));
-            }
             "turn_context" | "world_state" | "thread_settings_applied" => {}
             _ => self.issue(
                 &containing,
@@ -516,9 +537,7 @@ impl Context<'_, '_> {
                 &format!("Retained native record kind {kind:?} has no declared semantic mapping"),
             ),
         }
-        if kind != "inter_agent_communication_metadata" {
-            self.state.communication_metadata = None;
-        }
+        self.state.communication_metadata = None;
         self.mapping_complete(&containing);
     }
 
@@ -1081,12 +1100,19 @@ impl Context<'_, '_> {
                     self.opaque(part, &pointer)
                 };
                 if kind == ContentKind::Opaque {
-                    self.issue(
-                        owner,
-                        &format!("codex/unknown-part/{index}"),
-                        DiagnosticCode::UnsupportedKind,
-                        "Unknown content part is retained as opaque JSON",
-                    );
+                    if string(part, "type") == Some("encrypted_content") {
+                        if string(part, "encrypted_content").is_none() {
+                            self.issue(owner, &format!("codex/encrypted-part-shape/{index}"), DiagnosticCode::DecodeFailure,
+                                "Encrypted content lacks its ciphertext string; the complete part is retained as opaque JSON");
+                        }
+                    } else {
+                        self.issue(
+                            owner,
+                            &format!("codex/unknown-part/{index}"),
+                            DiagnosticCode::UnsupportedKind,
+                            "Unknown content part is retained as opaque JSON",
+                        );
+                    }
                 }
                 parts.push(ContentPart {
                     media_type: Some(

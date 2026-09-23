@@ -167,6 +167,14 @@ fn independent_route_certificates_refine_immutable_claims_in_either_arrival_orde
             "cold replay retains every immutable refinement"
         );
         let reduced = reduce(&outputs);
+        for object in reduced.objects.values() {
+            if let Some(TraceObject::HistoryEntry(entry)) = object.declaration.known() {
+                assert!(
+                    entry.original_owner.is_none(),
+                    "late sender certificates cannot manufacture copied-history lineage"
+                );
+            }
+        }
         let messages: Vec<_> = reduced
             .objects
             .values()
@@ -330,12 +338,14 @@ fn routing_certificate_pairs_page_without_remapping_bodies_or_skipping_alternati
     }
     assert!(pages > 1);
     assert_eq!(bodies, 1);
+    // Message authorship has one axis; delivery sender/recipient has both.
+    // Local history ownership is independent and needs no routing refinements.
     assert_eq!(
         retained
             .values()
             .filter(|claim| !claim.supersedes.is_empty())
             .count(),
-        count * count + 4 * count
+        count * count + 3 * count
     );
     for claim in retained
         .values()
@@ -369,4 +379,204 @@ fn a_malformed_routing_checkpoint_reports_a_decode_failure_instead_of_panicking(
     assert!(output.diagnostics.iter().any(|diagnostic| diagnostic.code
         == DiagnosticCode::DecodeFailure
         && diagnostic.evidence.contains(&observation.observation_ref)));
+}
+
+#[test]
+fn received_messages_after_the_inherited_prefix_do_not_become_inherited_entries() {
+    let rows = child_rows();
+    let boundary = rows[0]["payload"]["subagent_history_start_ordinal"]
+        .as_u64()
+        .unwrap();
+    let received: Vec<_> = rows
+        .iter()
+        .filter(|row| row["payload"]["type"] == "agent_message")
+        .collect();
+    assert!(
+        received
+            .iter()
+            .all(|row| row["ordinal"].as_u64().unwrap() >= boundary)
+    );
+    let reduced = reduce(&run(&rows, false));
+    let mut admitted = 0;
+    for stages in reduced.delivery_stages.values() {
+        for (stage, _) in stages {
+            let DeliveryStage::Admitted { entry: Some(entry) } = stage else {
+                continue;
+            };
+            let Some(TraceObject::HistoryEntry(value)) = reduced.objects
+                [&AnyObjectRef::HistoryEntry(entry.clone())]
+                .declaration
+                .known()
+            else {
+                panic!("received entry must remain readable")
+            };
+            assert_eq!(value.containing_agent, agent(CHILD));
+            assert!(
+                value.original_owner.is_none(),
+                "sender identity is not copied-history lineage"
+            );
+            admitted += 1;
+        }
+    }
+    assert_eq!(admitted, received.len());
+}
+
+#[test]
+fn copied_routed_content_keeps_lineage_without_becoming_the_childs_delivery_or_authorship() {
+    let mut received: Value =
+        include_str!("../../../../../../fixtures/unified-trace/codex/reuse/child.jsonl")
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .find(|value| value["payload"]["type"] == "agent_message")
+            .unwrap();
+    let id = received["payload"]["id"].as_str().unwrap().to_owned();
+    let path = received["payload"]["author"].clone();
+    let body = received["payload"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .as_bytes()
+        .to_vec();
+    received["ordinal"] = 2.into();
+    let values = [
+        serde_json::json!({"type":"session_meta","ordinal":0,"payload":{"id":"copy-reader","session_id":"copy-reader","agent_path":path,"forked_from_id":CHILD,"subagent_history_start_ordinal":3}}),
+        serde_json::json!({"type":"inter_agent_communication_metadata","ordinal":1,"payload":{"trigger_turn":true}}),
+        received,
+    ];
+    let outputs = run(&values, false);
+    let reduced = reduce(&outputs);
+    let reference = MessageRef::native(agent(CHILD), "codex.message", vec![id]).unwrap();
+    let Some(TraceObject::Message(message)) = reduced
+        .object(&AnyObjectRef::Message(reference))
+        .and_then(|value| value.declaration.known())
+    else {
+        panic!("copied routed bytes disappeared from normalized history")
+    };
+    assert_eq!(
+        message.author,
+        Author::Unknown,
+        "the new child's path cannot identify an inherited speaker"
+    );
+    assert_eq!(message.purpose, MessagePurpose::TaskInput);
+    assert!(
+        outputs
+            .iter()
+            .flat_map(|output| &output.payloads)
+            .any(|payload| payload.bytes == body)
+    );
+    let entries: Vec<_> = reduced
+        .objects
+        .values()
+        .filter_map(|value| match value.declaration.known() {
+            Some(TraceObject::HistoryEntry(entry)) => Some(entry),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].containing_agent, agent("copy-reader"));
+    assert_eq!(
+        entries[0].original_owner,
+        Some(OwnerRef::Agent {
+            agent: agent(CHILD)
+        })
+    );
+    assert!(reduced.delivery_stages.is_empty());
+    assert!(reduced.executions.is_empty());
+    assert!(
+        !reduced
+            .objects
+            .values()
+            .any(|value| matches!(value.declaration.known(), Some(TraceObject::Delivery(_))))
+    );
+    assert!(
+        !reduced
+            .relations
+            .iter()
+            .any(|value| matches!(value.relation, Relation::Trigger { .. }))
+    );
+}
+
+#[test]
+fn communication_trigger_metadata_requires_the_immediately_preceding_retained_record() {
+    for gap in [false, true] {
+        let initial = run(&[
+            serde_json::json!({"type":"session_meta","ordinal":0,"payload":{"id":"root","session_id":"root","agent_path":"/root"}}),
+            serde_json::json!({"type":"event_msg","ordinal":1,"payload":{"type":"task_started","turn_id":"active"}}),
+        ], false).pop().unwrap();
+        let metadata_capture = capture(3, false);
+        let metadata = CodexMapper.map(MapInput { capture: &metadata_capture, canonical_observation: &metadata_capture.observation_ref,
+            raw: br#"{"type":"inter_agent_communication_metadata","ordinal":2,"payload":{"trigger_turn":true}}"#, state: &initial.state, archive: &ArchiveContext::default() });
+        let mut state = metadata.state;
+        if !gap {
+            let header_capture = capture(4, false);
+            state = CodexMapper.map(MapInput { capture: &header_capture, canonical_observation: &header_capture.observation_ref,
+                raw: br#"{"type":"session_meta","ordinal":3,"payload":{"id":"root","session_id":"root"}}"#, state: &state, archive: &ArchiveContext::default() }).state;
+        }
+        let message_capture = capture(5, false);
+        let output = CodexMapper.map(MapInput { capture: &message_capture, canonical_observation: &message_capture.observation_ref,
+            raw: br#"{"type":"response_item","ordinal":4,"payload":{"type":"agent_message","id":"not-adjacent","author":"/root","recipient":"/root","content":[{"type":"input_text","text":"unproved trigger"}]}}"#, state: &state, archive: &ArchiveContext::default() });
+        let message = output
+            .claims
+            .iter()
+            .find_map(|claim| match &claim.fact {
+                Fact::Declare {
+                    object: TraceObject::Message(message),
+                } => Some(message),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            message.purpose,
+            MessagePurpose::Unclassified,
+            "an intervening record or an unobserved gap broke the metadata pair"
+        );
+        assert!(!output.claims.iter().any(|claim| matches!(
+            claim.fact,
+            Fact::Relation {
+                relation: Relation::Trigger { .. }
+            }
+        )));
+    }
+}
+
+#[test]
+fn encrypted_communication_parts_are_known_opaque_values_and_missing_ciphertext_is_diagnosed() {
+    for present in [true, false] {
+        let rows = child_rows();
+        let mut received = rows
+            .iter()
+            .find(|value| value["payload"]["type"] == "agent_message")
+            .unwrap()
+            .clone();
+        let opaque = &mut received["payload"]["content"][1];
+        assert_eq!(opaque["type"], "encrypted_content");
+        assert!(opaque["encrypted_content"].is_string());
+        if !present {
+            opaque.as_object_mut().unwrap().remove("encrypted_content");
+        }
+        let expected = opaque.clone();
+        let outputs = run(&[rows[0].clone(), received], false);
+        let output = &outputs[1];
+        assert!(!output.claims.iter().any(|claim| matches!(&claim.fact, Fact::Diagnostic { diagnostic } if diagnostic.code == DiagnosticCode::UnsupportedKind)), "the vendor's encrypted content kind is supported as opaque");
+        assert_eq!(output.claims.iter().any(|claim| matches!(&claim.fact, Fact::Diagnostic { diagnostic } if diagnostic.code == DiagnosticCode::DecodeFailure)), !present);
+        let revision = output
+            .claims
+            .iter()
+            .find_map(|claim| match &claim.fact {
+                Fact::Declare {
+                    object: TraceObject::MessageRevision(revision),
+                } => Some(revision),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(revision.parts[1].kind, ContentKind::Opaque);
+        let payload = output
+            .payloads
+            .iter()
+            .find(|payload| payload.reference == revision.parts[1].payload)
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&payload.bytes).unwrap(),
+            expected
+        );
+    }
 }

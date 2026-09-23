@@ -405,6 +405,9 @@ or the entire retained archive.
 ### Inheritance, compaction, and fork
 
 Copied history entries refer to their original owner whenever lineage proves it.
+Receiving a newly addressed message creates a recipient-owned history entry. Its
+sender and author are not copied-history lineage: a different author alone cannot
+populate the entry's original owner or make the entry inherited context.
 The inherited prefix is context in the child, not child-authored messages or rerun tools.
 If the original transcript is absent, retained copied bytes remain readable with the
 known original-owner reference and an explicit unavailable origin. Unknown lineage is

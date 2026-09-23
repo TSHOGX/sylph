@@ -761,6 +761,17 @@ fn native_routing_keeps_unresolved_author_and_exact_admission_trigger_evidence()
         }
     ));
     assert_eq!(message.purpose, MessagePurpose::TaskInput);
+    assert!(
+        output.claims.iter().any(|claim| matches!(
+            &claim.fact,
+            Fact::Declare {
+                object: TraceObject::Message(_)
+            }
+        ) && claim
+            .evidence
+            .contains(&capture(3, false).observation_ref)),
+        "task-input purpose must cite the metadata that establishes it"
+    );
     assert_eq!(output.payloads[0].bytes, b"task bytes");
     let trigger = output
         .claims

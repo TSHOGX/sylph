@@ -297,11 +297,6 @@ fn variants(
                         };
                     }
                     Fact::Declare {
-                        object: TraceObject::HistoryEntry(value),
-                    } => {
-                        value.original_owner = Some(author.as_ref().unwrap().0.clone());
-                    }
-                    Fact::Declare {
                         object: TraceObject::Delivery(value),
                     } => {
                         if sender.is_some() {

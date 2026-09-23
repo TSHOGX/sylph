@@ -55,6 +55,38 @@ impl Context<'_, '_> {
             "Agent path requires a retained root-scoped identity binding",
         )
     }
+    fn preceding_communication(&self) -> Option<&CommunicationMetadata> {
+        self.state
+            .communication_metadata
+            .as_ref()
+            .filter(|metadata| {
+                input::adjacent_native(&metadata.position, &self.input.capture.source_position)
+            })
+    }
+    pub(super) fn describe_communication(&mut self, first: usize, author: Author) {
+        let metadata = self
+            .preceding_communication()
+            .filter(|metadata| metadata.trigger)
+            .cloned();
+        for claim in &mut self.output.claims[first..] {
+            if let Fact::Declare {
+                object: TraceObject::Message(message),
+            } = &mut claim.fact
+            {
+                message.author = author.clone();
+                message.protocol_role = None;
+                message.production = None;
+                message.purpose = if let Some(metadata) = &metadata {
+                    if !claim.evidence.contains(&metadata.observation) {
+                        claim.evidence.push(metadata.observation.clone());
+                    }
+                    MessagePurpose::TaskInput
+                } else {
+                    MessagePurpose::Unclassified
+                };
+            }
+        }
+    }
     pub(super) fn communication(&mut self, containing: &AgentRef, value: &Value) {
         let author = string(value, "author").map(|path| self.communication_owner(containing, path));
         let recipient =
@@ -71,37 +103,13 @@ impl Context<'_, '_> {
         let sender = author
             .clone()
             .map_or(Author::Unknown, |agent| Author::Agent { agent });
-        // The authored message and its containing history can have different owners.
-        if let Some(Claim {
-            fact:
-                Fact::Declare {
-                    object: TraceObject::Message(message),
-                },
-            ..
-        }) = self.output.claims.iter_mut().rev().find(|claim| {
-            matches!(
-                &claim.fact,
-                Fact::Declare {
-                    object: TraceObject::Message(_)
-                }
-            )
-        }) {
-            message.author = sender.clone();
-            message.purpose = if self
-                .state
-                .communication_metadata
-                .as_ref()
-                .is_some_and(|(trigger, _)| *trigger)
-            {
-                MessagePurpose::TaskInput
-            } else {
-                MessagePurpose::Unclassified
-            };
-        }
+        self.describe_communication(first_claim, sender.clone());
+        // A fresh delivery creates local history. Its sender belongs to Message
+        // and Delivery; original-owner evidence is reserved for copied entries.
         self.history(
             containing,
             vec![HistoryContent::Message(revision.clone())],
-            author.clone(),
+            None,
         );
         let entry = self.output.state.previous_entry.clone();
         let delivery = DeliveryRef::occurrence(
@@ -141,7 +149,11 @@ impl Context<'_, '_> {
                 stage: DeliveryStage::Admitted { entry },
             },
         );
-        if let Some((true, metadata)) = self.state.communication_metadata.clone() {
+        if let Some(metadata) = self
+            .preceding_communication()
+            .filter(|metadata| metadata.trigger)
+            .cloned()
+        {
             if let Some(activation) = self
                 .state
                 .active_by_agent
@@ -159,8 +171,8 @@ impl Context<'_, '_> {
                     },
                 );
                 let claim = self.output.claims.last_mut().unwrap();
-                if !claim.evidence.contains(&metadata) {
-                    claim.evidence.push(metadata);
+                if !claim.evidence.contains(&metadata.observation) {
+                    claim.evidence.push(metadata.observation);
                 }
             }
         }
@@ -181,7 +193,7 @@ impl Context<'_, '_> {
             };
             let (author, recipient) = match &base.fact {
                 Fact::Declare {
-                    object: TraceObject::Message(_) | TraceObject::HistoryEntry(_),
+                    object: TraceObject::Message(_),
                 } => (key(author.as_ref()), None),
                 Fact::Declare {
                     object: TraceObject::Delivery(_),
