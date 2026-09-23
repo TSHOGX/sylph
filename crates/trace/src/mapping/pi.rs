@@ -76,7 +76,7 @@ struct LiveMessage {
 
 impl SemanticMapper for PiMapper {
     fn build(&self) -> &'static str {
-        "pi-7"
+        "pi-8"
     }
 
     fn map(&self, input: MapInput<'_>) -> MapOutput {
@@ -360,31 +360,14 @@ impl Context<'_, '_> {
         self.entry(&owner, value, "native", "");
     }
 
-    fn original_owner(&mut self, containing: &AgentRef, id: &str) -> Option<OwnerRef> {
+    fn original_owner(&self, containing: &AgentRef, id: &str) -> Option<OwnerRef> {
         let path = self.state.fork_source.clone()?;
-        let key = vec![path.clone(), id.into()];
-        match self.input.archive.correlations.get(&correlation_key(
-            containing,
-            "pi.fork-entry",
-            &key,
-        )) {
-            Some(AnyObjectRef::HistoryEntry(entry)) => Some(OwnerRef::Agent {
-                agent: entry.scope().clone(),
-            }),
-            _ => {
-                self.output.requests.push(ArchiveRequest::Correlation {
-                    agent: containing.clone(),
-                    namespace: "pi.fork-entry".into(),
-                    key: key.clone(),
-                });
-                Some(OwnerRef::Unresolved {
-                    scope: containing.clone(),
-                    namespace: "pi.fork-entry".into(),
-                    native_key: key,
-                    reason: "Copied membership has not been established for this entry".into(),
-                })
-            }
-        }
+        Some(OwnerRef::Unresolved {
+            scope: containing.clone(),
+            namespace: "pi.entry-origin".into(),
+            native_key: vec![path, id.into()],
+            reason: "Copied membership has not been established for this entry".into(),
+        })
     }
 
     fn entry(&mut self, owner: &AgentRef, value: &Value, selector: &str, source_path: &str) {
@@ -775,7 +758,12 @@ impl Context<'_, '_> {
                                     operation_ref: operation.clone(),
                                     owner: production.clone(),
                                     activation: activation.clone(),
-                                    requester: Some(RequesterRef::Agent(owner.clone())),
+                                    requester: match production {
+                                        OwnerRef::Agent { agent } => {
+                                            Some(RequesterRef::Agent(agent.clone()))
+                                        }
+                                        _ => None,
+                                    },
                                     category: OperationCategory::Tool {
                                         namespace: Some("pi".into()),
                                         name: name.into(),
@@ -914,7 +902,14 @@ impl Context<'_, '_> {
                 self.state.current_pending.remove(id);
             }
         }
-        if protocol_role == Some(ProtocolRole::User) || role == "toolResult" {
+        // A historical snapshot supplies content, not a new receipt. Native
+        // fork records also need a local-production proof: protocol role alone
+        // cannot turn copied input or a copied result into child admission.
+        let admission_observed = native_entry.is_none()
+            || (self.input.capture.transport_kind == TransportKind::NativeJsonl
+                && matches!(production, OwnerRef::Agent { agent } if agent == owner));
+        if admission_observed && (protocol_role == Some(ProtocolRole::User) || role == "toolResult")
+        {
             let delivery = if let Some(entry) = native_entry {
                 DeliveryRef::native(owner.clone(), "pi.entry-admission", vec![entry.into()])
                     .unwrap()

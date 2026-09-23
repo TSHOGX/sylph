@@ -161,6 +161,16 @@ captured membership, and any rewritten edge relationships explicitly.
 | `bashExecution`, `excludeFromContext`, `output`, exit data | Human/extension shell execution and its recorded representation; no model-origin tool call is invented |
 | Unknown entry or content-part type | Opaque retained evidence with a visible coverage diagnostic |
 
+An observed native entry establishes local history admission only when its source
+establishes local production. A fork header alone cannot distinguish inherited entries
+from a later local suffix, so unresolved fork entries do not create fresh child
+deliveries. This applies to both user input and recorded tool results. Their content,
+entry identity and predecessor remain retained and readable.
+RPC `get_entries` and `get_tree` responses establish historical observations and, when
+provided, selected membership. They do not themselves establish new admissions. Direct
+runtime message events and independently proved local native entries retain their own
+admission evidence; a historical read cannot borrow that meaning from its protocol role.
+
 The exact server submission, RPC payload, accepted command response, native admitted
 message, and model request are separate representations and delivery stages. RPC
 `success: true` may mean an input handler accepted or handled a command without any

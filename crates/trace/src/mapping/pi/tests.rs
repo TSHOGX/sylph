@@ -186,7 +186,7 @@ fn native_tree_keeps_nonmessage_predecessors_and_unknown_outer_execution() {
 }
 
 #[test]
-fn native_and_snapshot_admissions_keep_both_revisions_and_leave_idless_live_independent() {
+fn native_and_live_admissions_remain_distinct_while_snapshots_only_reobserve_content() {
     let message = serde_json::json!({"role":"user","content":"retained admission bytes"});
     let entry = serde_json::json!({"type":"message","id":"admitted-entry","parentId":null,"message":message});
     let mut output = run(&[header(), entry.clone()], false);
@@ -205,8 +205,7 @@ fn native_and_snapshot_admissions_keep_both_revisions_and_leave_idless_live_inde
             _ => None,
         })
         .collect();
-    assert_eq!(deliveries.len(), 3);
-    assert_eq!(deliveries[0], deliveries[2]);
+    assert_eq!(deliveries.len(), 2);
     assert_ne!(deliveries[0].delivery_ref, deliveries[1].delivery_ref);
     assert!(
         matches!(deliveries[0].delivery_ref.address(), ObjectAddress::Native { namespace, key, .. } if namespace == "pi.entry-admission" && key == &["admitted-entry"])
@@ -224,13 +223,21 @@ fn native_and_snapshot_admissions_keep_both_revisions_and_leave_idless_live_inde
             _ => None,
         })
         .collect();
-    assert_eq!(bindings.len(), 3);
+    assert_eq!(bindings.len(), 2);
     for (binding, delivery) in bindings.iter().zip(&deliveries) {
         assert_eq!(binding.0, &delivery.delivery_ref);
     }
-    assert_ne!(bindings[0].1, bindings[2].1);
     assert_ne!(bindings[0].1, bindings[1].1);
-    assert_ne!(bindings[1].1, bindings[2].1);
+    let revisions: Vec<_> = objects(&output)
+        .filter_map(|object| match object {
+            TraceObject::MessageRevision(revision) => Some(revision),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(revisions.len(), 3);
+    assert_eq!(revisions[0].message, revisions[2].message);
+    assert_ne!(revisions[0].revision_ref, revisions[2].revision_ref);
+    assert_eq!(revisions[0].parts, revisions[2].parts);
     let admissions: Vec<_> = output
         .iter()
         .flat_map(|output| &output.claims)
@@ -242,8 +249,7 @@ fn native_and_snapshot_admissions_keep_both_revisions_and_leave_idless_live_inde
             _ => None,
         })
         .collect();
-    assert_eq!(admissions.len(), 3);
-    assert_eq!(admissions[0], admissions[2]);
+    assert_eq!(admissions.len(), 2);
     assert!(admissions[0].1.is_some());
     assert!(admissions[1].1.is_none());
     assert_eq!(
@@ -470,7 +476,9 @@ fn compaction_and_unresolved_fork_keep_original_archive_and_uncertainty() {
             ..
         })
     )));
-    assert!(output[1].requests.iter().any(|request|matches!(request,ArchiveRequest::Correlation{namespace,..}if namespace=="pi.fork-entry")));
+    assert!(objects(&output).any(|object| matches!(object,
+        TraceObject::HistoryEntry(HistoryEntry { original_owner: Some(OwnerRef::Unresolved { namespace, .. }), .. }) if namespace == "pi.entry-origin"
+    )));
 }
 
 #[test]
@@ -797,3 +805,116 @@ mod maintenance;
 mod runtime_tools;
 
 mod origin;
+
+#[test]
+fn retained_pi_fork_entries_do_not_replay_user_or_tool_result_admission() {
+    let values: Vec<Value> = include_str!("../../../../../fixtures/native/pi/fork-child.jsonl")
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let mut values = values;
+    values.push(serde_json::json!({"type":"message","id":"tool-copy","parent_id":"92123d75-0330-46ae-abbe-4e5435c601ac","message":{"role":"toolResult","toolCallId":"unknown-original-call","content":[{"type":"text","text":"Copied tool output"}]}}));
+    let output = run(&values, false);
+    let claims: Vec<_> = output.iter().flat_map(|value| &value.claims).collect();
+    assert!(
+        !claims.iter().any(|claim| matches!(
+            claim.fact,
+            Fact::Declare {
+                object: TraceObject::Delivery(_)
+            } | Fact::DeliveryStage { .. }
+                | Fact::DeliveryRevisionObserved { .. }
+        )),
+        "a copied record must not become a fresh input or tool-result delivery"
+    );
+    let entries: Vec<_> = objects(&output)
+        .filter_map(|object| match object {
+            TraceObject::HistoryEntry(entry) => Some(entry),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(entries.len(), values.len() - 1);
+    assert!(
+        entries
+            .iter()
+            .all(|entry| matches!(entry.original_owner, Some(OwnerRef::Unresolved { .. })))
+    );
+    assert!(
+        output
+            .iter()
+            .flat_map(|value| &value.payloads)
+            .any(|body| body.bytes == b"Copied tool output")
+    );
+    assert!(!output.iter().flat_map(|value| &value.requests).any(|request| matches!(request, ArchiveRequest::Correlation { namespace, .. } if namespace == "pi.fork-entry")), "unproved membership must not wait on a correlation with no producer");
+}
+
+#[test]
+fn historical_pi_snapshots_do_not_create_admission_but_direct_message_events_do() {
+    let user = serde_json::json!({"role":"user","content":[{"type":"text","text":"Already retained input"}]});
+    let output = run(
+        &[
+            state(),
+            serde_json::json!({"type":"response","command":"get_entries","success":true,"data":{"entries":[{"type":"message","id":"old-input","parentId":null,"message":user}],"leafId":"old-input"}}),
+            serde_json::json!({"type":"response","command":"get_tree","success":true,"data":{"tree":[{"entry":{"type":"message","id":"old-result","parentId":"old-input","message":{"role":"toolResult","toolCallId":"original","content":[{"type":"text","text":"Already retained result"}]}},"children":[]}],"leafId":"old-result"}}),
+            serde_json::json!({"type":"message_start","message":user}),
+            serde_json::json!({"type":"message_end","message":user}),
+        ],
+        true,
+    );
+    for snapshot in &output[1..3] {
+        assert!(
+            !snapshot.claims.iter().any(|claim| matches!(
+                claim.fact,
+                Fact::Declare {
+                    object: TraceObject::Delivery(_)
+                } | Fact::DeliveryStage { .. }
+                    | Fact::DeliveryRevisionObserved { .. }
+            )),
+            "reading historical membership cannot create an admission"
+        );
+        assert!(
+            snapshot
+                .claims
+                .iter()
+                .any(|claim| matches!(claim.fact, Fact::HistoryContentObserved { .. }))
+        );
+    }
+    assert!(
+        output[4].claims.iter().any(|claim| matches!(
+            claim.fact,
+            Fact::DeliveryStage {
+                stage: DeliveryStage::Admitted { .. },
+                ..
+            }
+        )),
+        "direct runtime receipt still establishes admission"
+    );
+}
+
+#[test]
+fn a_fork_tool_record_keeps_its_unresolved_production_without_naming_the_child_as_requester() {
+    let output = run(
+        &[
+            serde_json::json!({"type":"session","id":"fork","parentSession":"/retained/original.jsonl"}),
+            serde_json::json!({"type":"message","id":"copied-tool","parentId":null,"message":{"role":"assistant","content":[{"type":"toolCall","id":"call","name":"read","arguments":{"path":"recorded.txt"}}]}}),
+        ],
+        false,
+    );
+    let operation = objects(&output)
+        .find_map(|object| match object {
+            TraceObject::Operation(operation) => Some(operation),
+            _ => None,
+        })
+        .unwrap();
+    assert!(matches!(operation.owner, OwnerRef::Unresolved { .. }));
+    assert!(
+        operation.requester.is_none(),
+        "an unresolved copied invocation cannot assert a child requester"
+    );
+    assert_eq!(
+        operation.category,
+        OperationCategory::Tool {
+            namespace: Some("pi".into()),
+            name: "read".into()
+        }
+    );
+}

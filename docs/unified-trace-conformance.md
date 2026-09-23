@@ -201,7 +201,11 @@ harness-authored acquisition metadata, while the header bytes are retained fixtu
 Every ordering, worker restart and same-cut rebuild preserves the origin identity;
 independent-proof deletion and contradictory bindings preserve the appropriate current
 and older views. This source join does not certify which copied entries belong to the
-fork or where child-local production begins.
+fork or where child-local production begins. The complete retained parent/child records
+also run through `crates/server/src/trace/worker/tests/corpus/pi_admission.rs`: parent
+inputs retain their admissions, copied child text stays byte-exact without creating
+child deliveries, and independent child retention survives original-scope deletion and
+rebuild. This is a guard against invented admission, not a copied-membership certificate.
 
 Sanitization preserves equality relationships, key scope, missing-versus-empty values,
 ordering and branch structure. Replacing two distinct IDs with one placeholder would

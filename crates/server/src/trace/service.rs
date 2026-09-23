@@ -673,7 +673,7 @@ impl TraceService {
     fn manifest(generation: String) -> GenerationManifest {
         GenerationManifest {
             generation: generation.clone(),
-            semantic_schema: "trace-10".into(),
+            semantic_schema: "trace-11".into(),
             mapper_builds: [
                 ("server", mapping::server::ServerMapper.build()),
                 ("codex", mapping::codex::CodexMapper.build()),
