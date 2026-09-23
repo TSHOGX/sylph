@@ -37,6 +37,7 @@ import {
 import { describeCount } from "@/lib/trace-window";
 import { ResourceHistory, RevisionPayloads } from "./trace-resource-history";
 import { TracePayload } from "./trace-payload";
+import { TraceEvidence } from "./trace-evidence";
 import { ArtifactsPane } from "./artifacts-pane";
 const Companion = dynamic(() =>
   import("./agent-reader").then((module) => module.AgentReader),
@@ -1007,15 +1008,29 @@ function ObjectInspection({
     traceCacheKey(view, ["object", reference, history]),
     (signal) => traceAPI.object(reference, view, history, signal),
   );
-  if (result.error) return <p role="alert">{result.error.message}</p>;
-  if (!result.data) return <p role="status">{t("trace.loadingDetails")}</p>;
   return (
-    <ObjectContent
-      detail={result.data}
-      history={history}
-      maximum={maximum}
-      onInspect={onInspect}
-    />
+    <div className="space-y-4">
+      {result.error ? (
+        <p role="alert">{result.error.message}</p>
+      ) : !result.data ? (
+        <p role="status">{t("trace.loadingDetails")}</p>
+      ) : (
+        <ObjectContent
+          detail={result.data}
+          history={history}
+          maximum={maximum}
+          onInspect={onInspect}
+        />
+      )}
+      <TraceEvidence
+        key={traceCacheKey(view, [reference, history, "evidence"])}
+        reference={reference}
+        history={history}
+        view={view}
+        maximum={maximum}
+        onInspect={onInspect}
+      />
+    </div>
   );
 }
 
@@ -1242,22 +1257,6 @@ function ObjectContent({
           <dt>{t("trace.interpretation")}</dt>
           <dd>{content.mode.kind}</dd>
         </dl>
-      ) : content.kind === "evidence" ? (
-        <ul className="space-y-3">
-          {content.facts.map((fact) => (
-            <li key={fact.claimRef}>
-              <h4 className="font-medium">{fact.label}</h4>
-              <p className="text-sm">{fact.summary}</p>
-              {fact.payload && (
-                <TracePayload
-                  access={fact.payload}
-                  view={detail.view}
-                  maximum={maximum}
-                />
-              )}
-            </li>
-          ))}
-        </ul>
       ) : (
         <>
           {content.kind === "context" && (

@@ -1,6 +1,9 @@
 import { ApiError, fetchAPI } from "./api";
 import type {
   AgentDirectoryRow,
+  ClaimSummary,
+  ClaimDetail,
+  EvidenceBytes,
   CommandReceipt,
   CommandRequest,
   ControlAvailability,
@@ -92,6 +95,42 @@ export const traceAPI = {
     fetchAPI<ObjectDetail>(
       `${base}/objects/${segment(reference)}${query({ at_snapshot: view.token, selection: history })}`,
       { signal },
+    ),
+  evidence: (
+    reference: string,
+    view: TraceView,
+    history: string | null,
+    cursor: string | null,
+    signal?: AbortSignal,
+    corrects?: string | null,
+  ) =>
+    fetchAPI<TracePage<ClaimSummary>>(
+      `${base}/objects/${segment(reference)}/evidence${query({ at_snapshot: view.token, selection: history, after: cursor, limit: 8, corrects })}`,
+      { signal, cache: "no-store" },
+    ),
+  claim: (
+    reference: string,
+    claim: string,
+    view: TraceView,
+    history: string | null,
+    signal?: AbortSignal,
+  ) =>
+    fetchAPI<ClaimDetail>(
+      `${base}/objects/${segment(reference)}/claims/${segment(claim)}${query({ at_snapshot: view.token, selection: history })}`,
+      { signal, cache: "no-store" },
+    ),
+  evidenceSource: (
+    reference: string,
+    claim: string,
+    observation: string,
+    view: TraceView,
+    history: string | null,
+    start: number,
+    signal?: AbortSignal,
+  ) =>
+    fetchAPI<EvidenceBytes>(
+      `${base}/objects/${segment(reference)}/claims/${segment(claim)}/sources/${segment(observation)}${query({ at_snapshot: view.token, selection: history, start })}`,
+      { signal, cache: "no-store" },
     ),
   parts: (
     reference: string,

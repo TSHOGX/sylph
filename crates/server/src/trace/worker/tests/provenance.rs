@@ -746,3 +746,5 @@ mod coverage;
 mod resources;
 
 mod transfers;
+
+mod inspection;

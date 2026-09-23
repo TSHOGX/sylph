@@ -623,24 +623,10 @@ pub enum ReadObjectContent {
         scope: String,
         mode: MeasurementMode,
     },
-    Evidence {
-        facts: Vec<ReadEvidenceFact>,
-        next_cursor: Option<String>,
-    },
     Generic {
         label: String,
         payloads: Vec<PayloadAccess>,
     },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ReadEvidenceFact {
-    pub claim_ref: ClaimRef,
-    pub label: String,
-    pub summary: String,
-    pub source: Option<SourcePosition>,
-    pub payload: Option<PayloadAccess>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

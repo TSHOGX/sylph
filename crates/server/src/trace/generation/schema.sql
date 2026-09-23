@@ -59,6 +59,8 @@ CREATE TABLE semantic_claims (
   evidence_count INTEGER NOT NULL CHECK (evidence_count >= 0),
   claim_bytes INTEGER NOT NULL CHECK (claim_bytes >= 0),
   claim_json TEXT NOT NULL,
+  preview TEXT NOT NULL,
+  preview_truncated INTEGER NOT NULL CHECK(preview_truncated IN (0,1)),
   first_revision INTEGER NOT NULL REFERENCES projection_revisions(view_revision)
 ) WITHOUT ROWID;
 CREATE TABLE claim_subjects (
@@ -79,9 +81,10 @@ CREATE INDEX claims_by_evidence ON claim_evidence(observation_ref, claim_ref);
 CREATE TABLE claim_supersessions (
   claim_ref TEXT NOT NULL REFERENCES semantic_claims(claim_ref),
   superseded_ref TEXT NOT NULL,
+  first_revision INTEGER NOT NULL,
   PRIMARY KEY (claim_ref, superseded_ref)
 ) WITHOUT ROWID;
-CREATE INDEX supersessions_by_prior ON claim_supersessions(superseded_ref, claim_ref);
+CREATE INDEX supersessions_by_prior ON claim_supersessions(superseded_ref, first_revision, claim_ref);
 
 -- Stable typed object addresses are separate from their temporal interpretations.
 CREATE TABLE objects (

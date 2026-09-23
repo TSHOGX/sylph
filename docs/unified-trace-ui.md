@@ -396,6 +396,13 @@ replaced by reading the present-day file. Opening the current file is a separate
 
 Evidence inspection exposes source, position, supporting claims, and correction history
 on demand. It is a diagnostic surface, not metadata repeated below every paragraph.
+The inspector opens one bounded page of claim previews and retains only one selected
+claim detail. Supporting observations, related objects and explicit correction links
+are paged within that detail. A source body is read only after an explicit action and
+is displayed as a bounded exact byte range, with hexadecimal display when that range
+is not valid UTF-8. Changing the claim or access scope clears its source range. Historical
+claims are labeled as retained interpretations, not collectively presented as current
+truth. Both preceding and later explicit corrections remain reachable.
 Conflicting claims are displayed together with their scopes and why resolution remains
 unknown. All captured content is untrusted data: Markdown cannot execute HTML or unsafe
 links, structured trees cannot invoke tools, and file previews follow the existing

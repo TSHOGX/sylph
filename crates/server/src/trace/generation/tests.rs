@@ -1665,3 +1665,114 @@ async fn mapper_restore_reads_the_checkpoint_and_values_from_one_transaction() {
     }
     result.expect("a concurrent WAL writer must commit while mapper restore retains its snapshot");
 }
+
+#[tokio::test]
+async fn correction_pages_seek_the_old_publication_cut_without_scanning_later_corrections() {
+    let fixture = Fixture::new().await;
+    let reference = AnyObjectRef::Agent(fixture.agent.clone());
+    let base = Claim {
+        claim_ref: ClaimRef::native(fixture.agent.clone(), "claims", vec!["base".into()]).unwrap(),
+        fact: Fact::Declare {
+            object: TraceObject::Agent(AgentThread {
+                agent_ref: fixture.agent.clone(),
+                vendor: sylph_protocol::AgentName::parse("codex").unwrap(),
+                name: None,
+                model: None,
+            }),
+        },
+        evidence: vec![ObservationRef {
+            issuer: Issuer::Server("fixture".into()),
+            producer_id: "claims".into(),
+            producer_epoch: "one".into(),
+            producer_seq: 1,
+        }],
+        rule_id: "correction-bound".into(),
+        mapper_build: "fixture".into(),
+        supersedes: vec![],
+        source_revision: None,
+    };
+    fixture
+        .publish(ProjectionBatch {
+            through_cut: 1,
+            claims: vec![base.clone()],
+            ..Default::default()
+        })
+        .await;
+    let correction = |index: usize| {
+        let mut claim = base.clone();
+        claim.claim_ref = ClaimRef::native(
+            fixture.agent.clone(),
+            "claims",
+            vec![format!("correct-{index:04}")],
+        )
+        .unwrap();
+        claim.supersedes.push(base.claim_ref.clone());
+        claim
+    };
+    let old = fixture
+        .publish(ProjectionBatch {
+            through_cut: 2,
+            claims: (0..8).map(correction).collect(),
+            ..Default::default()
+        })
+        .await;
+    let before = fixture
+        .store
+        .claim_corrections(&old, &reference, &base.claim_ref, None, 2)
+        .await
+        .unwrap();
+    assert_eq!(before.claims.len(), 2);
+    assert!(before.has_more);
+    let continuation = before.next_cursor.clone().unwrap();
+    for batch in 0..10 {
+        fixture
+            .publish(ProjectionBatch {
+                through_cut: 3 + batch,
+                claims: (8 + batch as usize * 64..8 + (batch as usize + 1) * 64)
+                    .map(correction)
+                    .collect(),
+                ..Default::default()
+            })
+            .await;
+    }
+    let after = fixture
+        .store
+        .claim_corrections(&old, &reference, &base.claim_ref, None, 2)
+        .await
+        .unwrap();
+    assert_eq!(
+        after
+            .claims
+            .iter()
+            .map(|claim| &claim.claim_ref)
+            .collect::<Vec<_>>(),
+        before
+            .claims
+            .iter()
+            .map(|claim| &claim.claim_ref)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        after.work.vm_steps <= before.work.vm_steps + 64,
+        "old-cut correction query grew from {} to {} VM steps",
+        before.work.vm_steps,
+        after.work.vm_steps
+    );
+    let next = fixture
+        .store
+        .claim_corrections(&old, &reference, &base.claim_ref, Some(&continuation), 2)
+        .await
+        .unwrap();
+    assert_eq!(next.claims[0].claim_ref, correction(2).claim_ref);
+    assert!(
+        fixture
+            .store
+            .claims_for(&old, &reference, None, Some(&continuation), 2)
+            .await
+            .is_err()
+    );
+    println!(
+        "correction_page_work before={} after={} fetched={}",
+        before.work.vm_steps, after.work.vm_steps, after.work.fetched_candidates
+    );
+}

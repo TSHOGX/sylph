@@ -26,6 +26,8 @@ use sylph_protocol::trace::{
 };
 
 mod reconciliation;
+mod evidence_read;
+mod claim_preview;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -450,6 +452,8 @@ pub struct ChangeBatch {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClaimSummary {
+    pub preview: String,
+    pub preview_truncated: bool,
     pub claim_ref: ClaimRef,
     pub fact_kind: TraceFactKind,
     pub mapper_build: String,
@@ -490,6 +494,7 @@ struct ClaimCursor {
     snapshot: Snapshot,
     subject: AnyObjectRef,
     kind: Option<TraceFactKind>,
+    corrects: Option<ClaimRef>,
     first_revision: u64,
     claim_ref: String,
 }
@@ -699,7 +704,7 @@ impl GenerationStore {
         revision: u64,
     ) -> Result<ChangeBatch> {
         for claim in &batch.claims {
-            save_claim(tx, claim, revision).await?;
+            save_claim(tx, claim, revision, self.limits.max_preview_bytes).await?;
         }
         let mut changed = BTreeSet::new();
         let mut removed = BTreeSet::new();
@@ -1265,6 +1270,31 @@ impl GenerationStore {
         cursor: Option<&str>,
         limit: usize,
     ) -> Result<ClaimPage> {
+        self.claim_page(snapshot, subject, kind, None, cursor, limit)
+            .await
+    }
+
+    pub async fn claim_corrections(
+        &self,
+        snapshot: &Snapshot,
+        subject: &AnyObjectRef,
+        prior: &ClaimRef,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<ClaimPage> {
+        self.claim_page(snapshot, subject, None, Some(prior), cursor, limit)
+            .await
+    }
+
+    async fn claim_page(
+        &self,
+        snapshot: &Snapshot,
+        subject: &AnyObjectRef,
+        kind: Option<TraceFactKind>,
+        corrects: Option<&ClaimRef>,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<ClaimPage> {
         if limit == 0 || limit > self.limits.max_items {
             return Err(GenerationError::Limit("claim page items"));
         }
@@ -1281,7 +1311,10 @@ impl GenerationStore {
             })
             .transpose()?;
         if cursor.as_ref().is_some_and(|cursor| {
-            cursor.snapshot != *snapshot || cursor.subject != *subject || cursor.kind != kind
+            cursor.snapshot != *snapshot
+                || cursor.subject != *subject
+                || cursor.kind != kind
+                || cursor.corrects.as_ref() != corrects
         }) {
             return Err(GenerationError::InvalidCursor);
         }
@@ -1289,11 +1322,14 @@ impl GenerationStore {
         let (after_revision, after_claim) = cursor.as_ref().map_or((0, ""), |cursor| {
             (cursor.first_revision, cursor.claim_ref.as_str())
         });
-        let rows = if let Some(kind) = kind {
-            sqlx::query("SELECT s.first_revision, s.claim_ref, c.fact_kind, c.mapper_build, c.rule_id, c.evidence_count, c.claim_bytes FROM claim_subjects s JOIN semantic_claims c ON c.claim_ref = s.claim_ref WHERE s.subject_ref = ? AND s.fact_kind = ? AND s.first_revision <= ? AND (s.first_revision, s.claim_ref) > (?, ?) ORDER BY s.first_revision, s.claim_ref LIMIT ?")
+        let rows = if let Some(prior) = corrects {
+            sqlx::query("SELECT s.first_revision, s.claim_ref, c.fact_kind, c.mapper_build, c.rule_id, c.evidence_count, c.claim_bytes, c.preview, c.preview_truncated FROM claim_supersessions x JOIN claim_subjects s ON s.claim_ref=x.claim_ref JOIN semantic_claims c ON c.claim_ref=s.claim_ref WHERE x.superseded_ref=? AND s.subject_ref=? AND x.first_revision<=? AND (x.first_revision,x.claim_ref)>(?,?) ORDER BY x.first_revision,x.claim_ref LIMIT ?")
+                .bind(prior.encode()).bind(object_key(subject)?).bind(signed(snapshot.view_revision)?).bind(signed(after_revision)?).bind(after_claim).bind((limit+1) as i64).fetch_all(&mut *conn).await.map_err(map_query_error)?
+        } else if let Some(kind) = kind {
+            sqlx::query("SELECT s.first_revision, s.claim_ref, c.fact_kind, c.mapper_build, c.rule_id, c.evidence_count, c.claim_bytes, c.preview, c.preview_truncated FROM claim_subjects s JOIN semantic_claims c ON c.claim_ref = s.claim_ref WHERE s.subject_ref = ? AND s.fact_kind = ? AND s.first_revision <= ? AND (s.first_revision, s.claim_ref) > (?, ?) ORDER BY s.first_revision, s.claim_ref LIMIT ?")
                 .bind(object_key(subject)?).bind(kind.as_str()).bind(signed(snapshot.view_revision)?).bind(signed(after_revision)?).bind(after_claim).bind((limit + 1) as i64).fetch_all(&mut *conn).await.map_err(map_query_error)?
         } else {
-            sqlx::query("SELECT s.first_revision, s.claim_ref, c.fact_kind, c.mapper_build, c.rule_id, c.evidence_count, c.claim_bytes FROM claim_subjects s JOIN semantic_claims c ON c.claim_ref = s.claim_ref WHERE s.subject_ref = ? AND s.first_revision <= ? AND (s.first_revision, s.claim_ref) > (?, ?) ORDER BY s.first_revision, s.claim_ref LIMIT ?")
+            sqlx::query("SELECT s.first_revision, s.claim_ref, c.fact_kind, c.mapper_build, c.rule_id, c.evidence_count, c.claim_bytes, c.preview, c.preview_truncated FROM claim_subjects s JOIN semantic_claims c ON c.claim_ref = s.claim_ref WHERE s.subject_ref = ? AND s.first_revision <= ? AND (s.first_revision, s.claim_ref) > (?, ?) ORDER BY s.first_revision, s.claim_ref LIMIT ?")
                 .bind(object_key(subject)?).bind(signed(snapshot.view_revision)?).bind(signed(after_revision)?).bind(after_claim).bind((limit + 1) as i64).fetch_all(&mut *conn).await.map_err(map_query_error)?
         };
         let fetched = rows.len();
@@ -1303,6 +1339,8 @@ impl GenerationStore {
         for row in rows.into_iter().take(limit) {
             let kind_value = serde_json::Value::String(row.try_get("fact_kind")?);
             let summary = ClaimSummary {
+                preview: row.try_get("preview")?,
+                preview_truncated: row.try_get("preview_truncated")?,
                 claim_ref: ClaimRef::decode(&row.try_get::<String, _>("claim_ref")?)
                     .map_err(|e| GenerationError::Invalid(e.to_string()))?,
                 fact_kind: serde_json::from_value(kind_value)?,
@@ -1329,6 +1367,7 @@ impl GenerationStore {
                 snapshot: snapshot.clone(),
                 subject: subject.clone(),
                 kind,
+                corrects: corrects.cloned(),
                 first_revision: last.first_revision,
                 claim_ref: last.claim_ref.encode(),
             })?))
@@ -1848,7 +1887,12 @@ async fn reader_pool(path: &Path) -> Result<SqlitePool> {
         .await?)
 }
 
-async fn save_claim(conn: &mut SqliteConnection, claim: &Claim, revision: u64) -> Result<()> {
+async fn save_claim(
+    conn: &mut SqliteConnection,
+    claim: &Claim,
+    revision: u64,
+    max_preview_bytes: usize,
+) -> Result<()> {
     let key = claim.claim_ref.encode();
     let body = serde_json::to_string(claim)?;
     let existing: Option<String> =
@@ -1864,7 +1908,8 @@ async fn save_claim(conn: &mut SqliteConnection, claim: &Claim, revision: u64) -
         };
     }
     let evidence: BTreeSet<_> = claim.evidence.iter().collect();
-    sqlx::query("INSERT INTO semantic_claims (claim_ref, fact_kind, mapper_build, rule_id, evidence_count, claim_bytes, claim_json, first_revision) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+    let (preview, preview_truncated) = claim_preview::preview(claim, max_preview_bytes)?;
+    sqlx::query("INSERT INTO semantic_claims (claim_ref, fact_kind, mapper_build, rule_id, evidence_count, claim_bytes, claim_json, first_revision, preview, preview_truncated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
         .bind(&key)
         .bind(claim.fact.kind().as_str())
         .bind(&claim.mapper_build)
@@ -1873,6 +1918,8 @@ async fn save_claim(conn: &mut SqliteConnection, claim: &Claim, revision: u64) -
         .bind(body.len() as i64)
         .bind(body)
         .bind(signed(revision)?)
+        .bind(preview)
+        .bind(preview_truncated)
         .execute(&mut *conn)
         .await?;
     for subject in claim
@@ -1892,9 +1939,10 @@ async fn save_claim(conn: &mut SqliteConnection, claim: &Claim, revision: u64) -
             .await?;
     }
     for prior in &claim.supersedes {
-        sqlx::query("INSERT INTO claim_supersessions VALUES (?, ?)")
+        sqlx::query("INSERT INTO claim_supersessions VALUES (?, ?, ?)")
             .bind(&key)
             .bind(prior.encode())
+            .bind(signed(revision)?)
             .execute(&mut *conn)
             .await?;
     }

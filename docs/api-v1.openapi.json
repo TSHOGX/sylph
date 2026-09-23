@@ -3353,6 +3353,378 @@
         }
       }
     },
+    "/api/v1/trace/objects/{object}/evidence": {
+      "get": {
+        "summary": "Page authorized retained claim metadata without reading source bodies",
+        "parameters": [
+          {
+            "name": "object",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "at_snapshot",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "selection",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "corrects",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Restrict to claims explicitly superseding this retained claim."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Snapshot-bound authorized retained evidence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "view",
+                    "items",
+                    "afterCursor",
+                    "hasAfter",
+                    "state",
+                    "limits"
+                  ],
+                  "properties": {
+                    "view": {
+                      "$ref": "#/components/schemas/ReadView"
+                    },
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "claimRef",
+                          "factKind",
+                          "mapperBuild",
+                          "ruleId",
+                          "evidenceCount",
+                          "detailBytes",
+                          "preview",
+                          "previewTruncated"
+                        ],
+                        "properties": {
+                          "claimRef": {
+                            "type": "string"
+                          },
+                          "factKind": {
+                            "type": "string"
+                          },
+                          "mapperBuild": {
+                            "type": "string"
+                          },
+                          "ruleId": {
+                            "type": "string"
+                          },
+                          "evidenceCount": {
+                            "type": "integer"
+                          },
+                          "detailBytes": {
+                            "type": "integer"
+                          },
+                          "preview": {
+                            "type": "string"
+                          },
+                          "previewTruncated": {
+                            "type": "boolean"
+                          }
+                        }
+                      }
+                    },
+                    "afterCursor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "hasAfter": {
+                      "type": "boolean"
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "complete",
+                        "more",
+                        "work_budget_exhausted"
+                      ]
+                    },
+                    "limits": {
+                      "$ref": "#/components/schemas/ReadLimits"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request, authorization, retention, or work-budget error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/trace/objects/{object}/claims/{claim}": {
+      "get": {
+        "summary": "Read a bounded retained claim and its explicit correction links",
+        "parameters": [
+          {
+            "name": "object",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "claim",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "at_snapshot",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "selection",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Snapshot-bound authorized retained evidence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "view",
+                    "subject",
+                    "claim",
+                    "related",
+                    "sources"
+                  ],
+                  "properties": {
+                    "view": {
+                      "$ref": "#/components/schemas/ReadView"
+                    },
+                    "subject": {
+                      "type": "string"
+                    },
+                    "claim": {
+                      "type": "object"
+                    },
+                    "related": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "sources": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request, authorization, retention, or work-budget error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/trace/objects/{object}/claims/{claim}/sources/{observation}": {
+      "get": {
+        "summary": "Read an exact bounded source range with retained capture metadata",
+        "parameters": [
+          {
+            "name": "object",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "claim",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "observation",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "at_snapshot",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "selection",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "start",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "end",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Snapshot-bound authorized retained evidence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "view",
+                    "capture",
+                    "start",
+                    "endExclusive",
+                    "totalBytes",
+                    "coverage",
+                    "bytesBase64",
+                    "maxRangeBytes"
+                  ],
+                  "properties": {
+                    "view": {
+                      "$ref": "#/components/schemas/ReadView"
+                    },
+                    "capture": {
+                      "type": "object"
+                    },
+                    "start": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "endExclusive": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "totalBytes": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "coverage": {
+                      "type": "object"
+                    },
+                    "bytesBase64": {
+                      "type": "string",
+                      "contentEncoding": "base64"
+                    },
+                    "maxRangeBytes": {
+                      "type": "integer",
+                      "minimum": 1
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request, authorization, retention, or work-budget error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/trace/reprojection": {
       "get": {"summary":"Read bounded recent reprojection jobs","responses":{"200":{"description":"Active generation and at most 32 recent jobs","content":{"application/json":{"schema":{"type":"object","properties":{"activeGeneration":{"type":["string","null"]},"pointerSerial":{"type":"integer"},"jobs":{"type":"array","items":{"$ref":"#/components/schemas/ReprojectionJob"}},"recovering":{"type":["string","null"]}},"required":["activeGeneration","pointerSerial","jobs","recovering"]}}}},"403":{"description":"Administrator required"}}},
       "post": {"summary":"Admit or coalesce a durable reprojection job","responses":{"202":{"description":"Job admitted before replay completes","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ReprojectionReceipt"}}}},"403":{"description":"Administrator required"}}}
@@ -4112,6 +4484,64 @@
           "editable",
           "cancellable"
         ]
+      },
+      "ReadLimits": {
+        "type": "object",
+        "properties": {
+          "maxItems": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "maxSummaryBytes": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "maxPreviewBytes": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "maxPayloadBytes": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "maxChangeItems": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "maxMountedRows": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "maxMetadataCacheBytes": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "maxPayloadCacheBytes": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "maxHiddenLocations": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "maxVisibleInterests": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "maxItems",
+          "maxSummaryBytes",
+          "maxPreviewBytes",
+          "maxPayloadBytes",
+          "maxChangeItems",
+          "maxMountedRows",
+          "maxMetadataCacheBytes",
+          "maxPayloadCacheBytes",
+          "maxHiddenLocations",
+          "maxVisibleInterests"
+        ],
+        "additionalProperties": false
       },
       "ReadView": {
         "type": "object",

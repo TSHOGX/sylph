@@ -496,17 +496,6 @@ export type ObjectContent =
       scope: string;
       mode: MeasurementMode;
     }
-  | {
-      kind: "evidence";
-      facts: {
-        claimRef: string;
-        label: string;
-        summary: string;
-        source: SourcePosition | null;
-        payload: PayloadAccess | null;
-      }[];
-      nextCursor: string | null;
-    }
   | { kind: "generic"; label: string; payloads: PayloadAccess[] };
 export interface ObjectDetail {
   view: TraceView;
@@ -651,4 +640,48 @@ export function representationLabel(
       } as const
     )[value],
   );
+}
+
+export interface ClaimSummary {
+  preview: string;
+  previewTruncated: boolean;
+  claimRef: string;
+  factKind: string;
+  mapperBuild: string;
+  ruleId: string;
+  evidenceCount: number;
+  detailBytes: number;
+}
+export interface ClaimDetail {
+  view: TraceView;
+  subject: string;
+  claim: {
+    claimRef: string;
+    fact: unknown;
+    evidence: unknown[];
+    ruleId: string;
+    mapperBuild: string;
+    supersedes: string[];
+    sourceRevision: string | null;
+  };
+  related: string[];
+  sources: string[];
+}
+export interface EvidenceBytes {
+  maxRangeBytes: number;
+  view: TraceView;
+  capture: {
+    observationRef: unknown;
+    sourcePosition: SourcePosition;
+    capturedAt: unknown;
+    sourceClock: unknown;
+    transportKind: string;
+    vendorBuild: string | null;
+    [key: string]: unknown;
+  };
+  start: number;
+  endExclusive: number;
+  totalBytes: number | null;
+  coverage: unknown;
+  bytesBase64: string;
 }

@@ -587,6 +587,9 @@ origin and preserve environment-grant checks.
 | `GET /api/v1/trace/agents/{agent_ref}/activations` | Bounded own activation summaries; unknown associations stay outside invented containers |
 | `GET /api/v1/trace/objects/{object_ref}` | One typed summary, provenance and unresolved/conflicting fields; no eager body/tree |
 | `GET /api/v1/trace/objects/{object_ref}/relations` | Bounded operations/results/resources/deliveries/evidence relations, with a typed filter |
+| `GET /api/v1/trace/objects/{object_ref}/evidence` | Private cursor page of retained claim summaries at the exact view; includes superseded and conflicting interpretations; `corrects` filters explicit successors |
+| `GET /api/v1/trace/objects/{object_ref}/claims/{claim_ref}` | One bounded authorized claim, its supporting observation references and explicit correction links |
+| `GET /api/v1/trace/objects/{object_ref}/claims/{claim_ref}/sources/{observation_ref}` | Bounded exact retained source range and its acquired metadata; membership in the named claim is required |
 | `GET /api/v1/trace/payloads/{payload_ref}` | An authorized object/snapshot-scoped manifest or bounded byte/part range; immutable revision required |
 | `GET /api/v1/trace/changes` | SSE change invalidations from a bounded projection cursor, with reset/generation notices |
 | `GET /api/v1/trace/search` | Authorized generation/scoped search at a declared search checkpoint; paged snippets and object anchors |
@@ -637,6 +640,28 @@ Full evidence export and paced playback are explicit streaming jobs with separat
 work and cancellation budgets; they are not hidden implementation paths for an ordinary
 history page. Playback follows captured admission/source timing and states any pacing
 clamp. It is not reconstructed by reading only current object values.
+
+### Evidence inspection
+
+Evidence reads use the indexed claim subject, observation and supersession relations at
+the view's generation, evidence cut and revision. Bounded claim previews are produced
+once at publication; list reads never decode whole claim facts or source bodies. Reverse corrections seek their publication revision in the
+index, including at an older retained snapshot. They include retained corrections and
+conflicts without asserting that every historical claim remains active. A correction
+link names what a claim explicitly supersedes, not a global evidence ranking. A withdrawn
+interpretation retains its claim inspection path; possession of an object or observation
+address does not authorize its content.
+
+Every returned claim requires current observe authority for all supporting ingestion
+epochs. Denied candidates are skipped before their metadata is exposed; private cursors
+bind the Subject, view, object, selection and current grant partition. Candidate work,
+claim detail bytes, supporting references and source ranges have independent bounds.
+An exhausted page advances with an explicit work-budget state. Source reads require
+membership in that exact claim and recheck grants and deletion after reading bytes.
+They read retained evidence, never the vendor's current file. Exact bytes are base64
+encoded alongside their actual range, total length and capture metadata; decoding for
+display cannot replace the retained value. List and claim-detail reads do not fetch
+source bodies.
 
 ### Explicit payload transfer
 

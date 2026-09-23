@@ -1180,6 +1180,29 @@ impl EvidenceStore {
         }
     }
 
+    /// Indexed on-demand metadata at a retained cut; source bytes are read separately.
+    pub async fn retained_capture(
+        &self,
+        observation: &ObservationRef,
+        cut: u64,
+        maximum: usize,
+    ) -> Result<Option<Capture>> {
+        let row = sqlx::query("SELECT o.envelope_bytes FROM observations o JOIN occurrences c ON c.occurrence_id=o.occurrence_id WHERE o.observation_ref=? AND o.admission_seq<=? AND NOT EXISTS(SELECT 1 FROM ingestion_epoch_tombstones d WHERE d.epoch=c.ingestion_epoch AND d.tombstone_id IS NOT NULL)")
+            .bind(observation.encode()).bind(signed(cut)?).fetch_optional(&self.readers).await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        if unsigned(row.try_get("envelope_bytes")?)? > maximum as u64 {
+            return Err(EvidenceError::Limit("capture metadata bytes"));
+        }
+        let body: String =
+            sqlx::query_scalar("SELECT envelope_json FROM observations WHERE observation_ref=?")
+                .bind(observation.encode())
+                .fetch_one(&self.readers)
+                .await?;
+        Ok(Some(serde_json::from_str(&body)?))
+    }
+
     async fn verify_payload(&self, payload: &PayloadRef) -> Result<()> {
         let row = sqlx::query("SELECT kind, stored_length FROM payloads WHERE payload_ref = ?")
             .bind(payload.as_str())
