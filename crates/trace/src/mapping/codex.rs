@@ -15,13 +15,13 @@ pub mod history;
 
 pub struct CodexMapper;
 impl CodexMapper {
-    const BUILD: &'static str = "codex-6";
+    const BUILD: &'static str = "codex-7";
 }
 mod accounting;
 mod collaboration;
 mod goal;
 mod input;
-mod routing;
+pub mod routing;
 mod runtime;
 
 /// Checkpointed source knowledge. A copied parent header cannot replace the first
@@ -50,6 +50,9 @@ impl SemanticMapper for CodexMapper {
     }
 
     fn map(&self, input: MapInput<'_>) -> MapOutput {
+        if let Some(output) = routing::resume(&input) {
+            return output;
+        }
         if input.capture.transport_kind == TransportKind::NativeDatabase {
             return map_database(input);
         }
@@ -138,6 +141,7 @@ impl SemanticMapper for CodexMapper {
             "codex".into(),
             serde_json::to_value(state).expect("typed Codex checkpoint serializes"),
         );
+        routing::refine(&input, &mut output);
         output
     }
 }
@@ -375,10 +379,11 @@ impl Context<'_, '_> {
             self.state.agent_path = string(payload, "agent_path").map(str::to_owned);
             if let (Some(root), Some(path)) = (&self.state.accounting_root, &self.state.agent_path)
             {
-                self.output.correlations.insert(
-                    correlation_key(root, "codex.agent-path", std::slice::from_ref(path)),
-                    AnyObjectRef::Agent(agent.clone()),
-                );
+                let key = correlation_key(root, "codex.agent-path", std::slice::from_ref(path));
+                self.output.corroborating_correlations.insert(key.clone());
+                self.output
+                    .correlations
+                    .insert(key, AnyObjectRef::Agent(agent.clone()));
             }
             self.state.inherited_before = payload
                 .get("subagent_history_start_ordinal")

@@ -64,8 +64,7 @@ impl Harness {
             .correlations
             .extend(output.correlations.clone());
         self.archive
-            .correlation_evidence
-            .extend(output.correlation_evidence.clone());
+            .extend_correlation_evidence(output.correlation_evidence.clone());
         self.output.push(output);
         self.output.last().unwrap()
     }

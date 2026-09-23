@@ -110,6 +110,13 @@ the author and recipient retain their own identities. Late path certificates add
 explicitly superseding declarations with their retained evidence; they never mutate an
 existing claim or move its message address. Cold replay includes the same unresolved
 claims and evidenced refinements as incremental replay.
+Independent headers corroborating the same path remain alternative certificates. Each
+refinement's immutable identity includes the certificates it actually uses; another
+certificate cannot replace its evidence in place. A later certificate refines already
+recorded occurrences just as an earlier certificate does. A proof requiring both author
+and recipient names one certificate for each endpoint; unrelated corroborating headers
+are not combined into one all-required dependency. Deleting one retained proof cannot
+erase a routing fact still supported by an independently retained alternative.
 Two roots can both contain `/root/worker`. A nickname, role, or task name is metadata;
 it is not a merge key. When child headers and parent observations disagree about
 parentage, preserve the conflict rather than replacing a parent edge.

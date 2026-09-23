@@ -286,9 +286,7 @@ fn public_goal_state_keeps_its_missing_instance_even_when_a_database_goal_exists
     let recorded = map(1, &snapshot);
     let mut archive = ArchiveContext::default();
     archive.correlations.extend(recorded.correlations);
-    archive
-        .correlation_evidence
-        .extend(recorded.correlation_evidence);
+    archive.extend_correlation_evidence(recorded.correlation_evidence);
     archive
         .observations
         .insert(capture(1, TransportKind::NativeDatabase).observation_ref);

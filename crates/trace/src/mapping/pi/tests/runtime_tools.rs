@@ -279,9 +279,7 @@ fn echoed_sidecars_require_a_contiguous_prefix_and_exact_message_count() {
             .observations
             .insert(capture(i as u64, true).observation_ref);
         archive.correlations.extend(out.correlations.clone());
-        archive
-            .correlation_evidence
-            .extend(out.correlation_evidence.clone());
+        archive.extend_correlation_evidence(out.correlation_evidence.clone());
     }
     let mut captured = capture(index as u64, true);
     captured.source_position.locator = SourceLocator::Frame {

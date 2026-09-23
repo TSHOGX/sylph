@@ -22,6 +22,7 @@ pub mod server;
 )]
 pub enum ArchiveRequest {
     ContinueHistory,
+    ContinueRouting,
     HistoryLocator {
         issuer: Issuer,
         physical_id: String,
@@ -66,6 +67,12 @@ pub enum ArchiveRequest {
         namespace: String,
         key: Vec<String>,
     },
+}
+
+impl ArchiveRequest {
+    pub fn is_continuation(&self) -> bool {
+        matches!(self, Self::ContinueHistory | Self::ContinueRouting)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,7 +123,8 @@ pub struct ArchiveContext {
     pub source_definitions: imbl::OrdMap<(SourceRef, u64), codex::history::RecordedSource>,
     pub history_records: codex::history::HistoryRecords,
     pub observations: imbl::OrdSet<ObservationRef>,
-    pub correlation_evidence: imbl::OrdMap<String, Vec<ObservationRef>>,
+    pub correlation_proofs: CorrelationProofs,
+    pub routing_plans: codex::routing::PlanIndex,
     pub source_owners: imbl::OrdMap<(SourceRef, u64), SourceOwner>,
     pub observation_sources: imbl::OrdMap<ObservationRef, SourcePosition>,
     pub claims: imbl::OrdMap<ClaimRef, Claim>,
@@ -150,6 +158,26 @@ pub struct ArchiveHistoryContent {
     pub evidence: Vec<ObservationRef>,
 }
 impl ArchiveContext {
+    /// A single correlation lookup uses one deterministic sufficient proof. A
+    /// reactive join enumerates the alternatives instead of conjoining them.
+    pub fn correlation_evidence(&self, key: &str) -> Option<&Vec<ObservationRef>> {
+        self.correlation_proofs.get(key)?.iter().next()
+    }
+
+    pub fn retain_correlation_evidence(&mut self, key: String, evidence: Vec<ObservationRef>) {
+        retain_correlation_proof(&mut self.correlation_proofs, key, evidence);
+    }
+
+    pub fn extend_correlation_evidence(
+        &mut self,
+        evidence: impl IntoIterator<Item = (String, Vec<ObservationRef>)>,
+    ) {
+        for (key, proof) in evidence {
+            self.correlation_proofs.remove(&key);
+            self.retain_correlation_evidence(key, proof);
+        }
+    }
+
     pub fn semantic_mut(&mut self) -> &mut ArchiveSemantic {
         std::sync::Arc::make_mut(&mut self.semantic)
     }
@@ -185,6 +213,21 @@ impl ArchiveContext {
                 _ => None,
             })
             .collect()
+    }
+}
+
+/// Each vector is a conjunction; distinct vectors are independently sufficient.
+pub type CorrelationProofs = imbl::OrdMap<String, imbl::OrdSet<Vec<ObservationRef>>>;
+
+pub fn retain_correlation_proof(
+    proofs: &mut CorrelationProofs,
+    key: String,
+    mut evidence: Vec<ObservationRef>,
+) {
+    evidence.sort();
+    evidence.dedup();
+    if !evidence.is_empty() {
+        proofs.entry(key).or_default().insert(evidence);
     }
 }
 
@@ -224,6 +267,10 @@ pub struct MapOutput {
     pub diagnostics: Vec<MappingDiagnostic>,
     pub correlations: BTreeMap<String, AnyObjectRef>,
     pub correlation_evidence: BTreeMap<String, Vec<ObservationRef>>,
+    /// These identity witnesses are alternatives used by reactive joins. Other
+    /// correlations retain one current checkpoint witness, not a polling log.
+    pub corroborating_correlations: std::collections::BTreeSet<String>,
+    pub routing_plans: Vec<codex::routing::Plan>,
     pub bound_agents: Vec<AgentRef>,
     pub source_owners: Vec<SourceOwnership>,
     pub source_definitions: Vec<codex::history::RecordedSource>,

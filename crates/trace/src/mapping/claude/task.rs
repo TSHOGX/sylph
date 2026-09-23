@@ -107,8 +107,7 @@ impl Context<'_, '_> {
                     resource.clone(),
                     self.input
                         .archive
-                        .correlation_evidence
-                        .get(&binding)
+                        .correlation_evidence(&binding)
                         .cloned()
                         .unwrap_or_default(),
                 )

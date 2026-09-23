@@ -9,11 +9,8 @@ fn assert_shared_roots(before: &WorkerState, after: &WorkerState) {
     assert!(before.previews.ptr_eq(&after.previews));
     assert!(before.object_provenance.ptr_eq(&after.object_provenance));
     assert!(before.correlations.ptr_eq(&after.correlations));
-    assert!(
-        before
-            .correlation_evidence
-            .ptr_eq(&after.correlation_evidence)
-    );
+    assert!(before.correlation_proofs.ptr_eq(&after.correlation_proofs));
+    assert!(before.routing_plans.ptr_eq(&after.routing_plans));
     assert!(before.available_evidence.ptr_eq(&after.available_evidence));
     assert!(before.source_owners.ptr_eq(&after.source_owners));
     assert!(before.source_definitions.ptr_eq(&after.source_definitions));

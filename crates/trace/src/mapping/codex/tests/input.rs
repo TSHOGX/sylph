@@ -37,7 +37,7 @@ fn archive(target: &AgentRef) -> ArchiveContext {
         ] {
             let key = correlation_key(&agent(THREAD), namespace, std::slice::from_ref(&token));
             archive.correlations.insert(key.clone(), reference);
-            archive.correlation_evidence.insert(
+            archive.retain_correlation_evidence(
                 key,
                 vec![ObservationRef {
                     issuer: Issuer::Server("controller".into()),

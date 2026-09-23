@@ -101,8 +101,7 @@ impl Context<'_, '_> {
         let Some(evidence) = self
             .input
             .archive
-            .correlation_evidence
-            .get(&index)
+            .correlation_evidence(&index)
             .filter(|proof| {
                 !proof.is_empty()
                     && proof

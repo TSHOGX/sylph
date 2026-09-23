@@ -114,9 +114,7 @@ fn run(values: &[Value], live: bool) -> Vec<MapOutput> {
             }
         }
         archive.correlations.extend(output.correlations.clone());
-        archive
-            .correlation_evidence
-            .extend(output.correlation_evidence.clone());
+        archive.extend_correlation_evidence(output.correlation_evidence.clone());
         archive.observations.insert(capture.observation_ref);
         outputs.push(output);
     }

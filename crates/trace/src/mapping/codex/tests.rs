@@ -762,7 +762,6 @@ fn native_routing_keeps_unresolved_author_and_exact_admission_trigger_evidence()
     ));
     assert_eq!(message.purpose, MessagePurpose::TaskInput);
     assert_eq!(output.payloads[0].bytes, b"task bytes");
-    assert!(output.requests.iter().any(|request|matches!(request,ArchiveRequest::Correlation{namespace,key,..} if namespace=="codex.agent-path"&&key==&["/root/unobserved-peer"])));
     let trigger = output
         .claims
         .iter()

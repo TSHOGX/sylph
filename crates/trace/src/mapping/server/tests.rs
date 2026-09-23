@@ -443,9 +443,7 @@ fn vendor_correlation_names_the_dispatched_revision_and_never_claims_admission()
     let mut archive = ArchiveContext::default();
     for output in [&accepted, &revised] {
         archive.correlations.extend(output.correlations.clone());
-        archive
-            .correlation_evidence
-            .extend(output.correlation_evidence.clone());
+        archive.extend_correlation_evidence(output.correlation_evidence.clone());
     }
     let fact = OperationalFact::Dispatched {
         command_id: "command-a".into(),

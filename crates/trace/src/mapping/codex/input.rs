@@ -98,8 +98,7 @@ impl Context<'_, '_> {
                 evidence.extend(
                     self.input
                         .archive
-                        .correlation_evidence
-                        .get(&key)
+                        .correlation_evidence(&key)
                         .into_iter()
                         .flatten()
                         .cloned(),

@@ -1,6 +1,10 @@
 //! Native routing follows explicit root identity and root-scoped path certificates.
 use super::*;
 
+mod refinement;
+pub use refinement::{Plan, PlanIndex, retain_plan, ROUTE_PAGE_WORK};
+pub(super) use refinement::{refine, resume};
+
 impl Context<'_, '_> {
     fn communication_owner(&mut self, containing: &AgentRef, path: &str) -> OwnerRef {
         let root = self.state.accounting_root.clone();
@@ -46,14 +50,6 @@ impl Context<'_, '_> {
             );
             return unresolved(containing.clone(), reason);
         };
-        let key = correlation_key(&root, "codex.agent-path", &[path.into()]);
-        if !self.input.archive.correlations.contains_key(&key) {
-            self.output.requests.push(ArchiveRequest::Correlation {
-                agent: root.clone(),
-                namespace: "codex.agent-path".into(),
-                key: vec![path.into()],
-            });
-        }
         unresolved(
             root,
             "Agent path requires a retained root-scoped identity binding",
@@ -168,130 +164,37 @@ impl Context<'_, '_> {
                 }
             }
         }
-        self.refine_communication(first_claim, author.as_ref(), recipient.as_ref());
-    }
-
-    fn routing_resolution(
-        &self,
-        owner: Option<&OwnerRef>,
-    ) -> Option<(OwnerRef, Vec<ObservationRef>)> {
-        let OwnerRef::Unresolved {
-            scope,
-            namespace,
-            native_key,
-            ..
-        } = owner?
-        else {
-            return None;
-        };
-        if native_key.first().is_some_and(|path| path == "/root")
-            || self.state.accounting_root.as_ref() != Some(scope)
-        {
-            return None;
-        }
-        let key = correlation_key(scope, namespace, native_key);
-        let AnyObjectRef::Agent(agent) = self.input.archive.correlations.get(&key)? else {
-            return None;
-        };
-        let evidence = self.input.archive.correlation_evidence.get(&key)?;
-        if evidence.is_empty() {
-            return None;
-        }
-        Some((
-            OwnerRef::Agent {
-                agent: agent.clone(),
-            },
-            evidence.clone(),
-        ))
-    }
-
-    fn refine_communication(
-        &mut self,
-        first: usize,
-        author: Option<&OwnerRef>,
-        recipient: Option<&OwnerRef>,
-    ) {
-        let author = self.routing_resolution(author);
-        let recipient = self.routing_resolution(recipient);
-        let known = u8::from(author.is_some()) | (u8::from(recipient.is_some()) << 1);
-        let originals = self.output.claims[first..].to_vec();
-        for base in originals {
-            let relevant = match &base.fact {
+        for base in &self.output.claims[first_claim..] {
+            let key = |owner: Option<&OwnerRef>| {
+                let OwnerRef::Unresolved {
+                    scope,
+                    namespace,
+                    native_key,
+                    ..
+                } = owner?
+                else {
+                    return None;
+                };
+                (self.state.accounting_root.as_ref() == Some(scope)
+                    && native_key.first().is_some_and(|path| path != "/root"))
+                .then(|| correlation_key(scope, namespace, native_key))
+            };
+            let (author, recipient) = match &base.fact {
                 Fact::Declare {
                     object: TraceObject::Message(_) | TraceObject::HistoryEntry(_),
-                } => 1,
+                } => (key(author.as_ref()), None),
                 Fact::Declare {
                     object: TraceObject::Delivery(_),
-                } => 3,
+                } => (key(author.as_ref()), key(recipient.as_ref())),
                 _ => continue,
             };
-            // Emit every evidenced subset, even on cold replay. A two-sided join
-            // supersedes each one-sided refinement, so source arrival order cannot
-            // change either the retained claims or the resolved record.
-            for mask in 1..=3u8 {
-                if mask & known != mask || mask & relevant != mask {
-                    continue;
-                }
-                let mut refined = base.clone();
-                refined.claim_ref = route_claim(&base.claim_ref, mask);
-                refined.supersedes.push(base.claim_ref.clone());
-                for prior in 1..mask {
-                    if prior & mask == prior {
-                        refined.supersedes.push(route_claim(&base.claim_ref, prior));
-                    }
-                }
-                let sender = author.as_ref().filter(|_| mask & 1 != 0);
-                let target = recipient.as_ref().filter(|_| mask & 2 != 0);
-                for (_, evidence) in sender.into_iter().chain(target) {
-                    refined.evidence.extend(evidence.iter().cloned());
-                }
-                refined.evidence.sort();
-                refined.evidence.dedup();
-                match &mut refined.fact {
-                    Fact::Declare {
-                        object: TraceObject::Message(value),
-                    } => {
-                        value.author = Author::Agent {
-                            agent: sender.unwrap().0.clone(),
-                        };
-                    }
-                    Fact::Declare {
-                        object: TraceObject::HistoryEntry(value),
-                    } => {
-                        value.original_owner = Some(sender.unwrap().0.clone());
-                    }
-                    Fact::Declare {
-                        object: TraceObject::Delivery(value),
-                    } => {
-                        if let Some((owner, _)) = sender {
-                            value.sender = Author::Agent {
-                                agent: owner.clone(),
-                            };
-                        }
-                        if let Some((owner, _)) = target {
-                            value.recipient = Recipient::Agent {
-                                agent: owner.clone(),
-                            };
-                        }
-                    }
-                    _ => unreachable!(),
-                }
-                self.output.claims.push(refined);
+            if author.is_some() || recipient.is_some() {
+                self.output.routing_plans.push(Plan {
+                    base: base.claim_ref.clone(),
+                    author,
+                    recipient,
+                });
             }
         }
     }
-}
-
-fn route_claim(base: &ClaimRef, mask: u8) -> ClaimRef {
-    let ObjectAddress::Occurrence {
-        scope,
-        position,
-        local_slot,
-    } = base.address()
-    else {
-        unreachable!("mapper claims identify a retained occurrence")
-    };
-    let mut slot = local_slot.clone();
-    slot.push(format!("route-resolution-{mask}"));
-    ClaimRef::occurrence(scope.clone(), position.clone(), slot).unwrap()
 }

@@ -147,8 +147,7 @@ impl SemanticMapper for ServerMapper {
             {
                 input
                     .archive
-                    .correlation_evidence
-                    .get(&command_identity_key(
+                    .correlation_evidence(&command_identity_key(
                         &input.capture.observation_ref.issuer,
                         &command.command_id,
                     ))
@@ -448,8 +447,7 @@ impl SemanticMapper for ServerMapper {
                     .unwrap();
                     let mut proof = input
                         .archive
-                        .correlation_evidence
-                        .get(&key)
+                        .correlation_evidence(&key)
                         .cloned()
                         .unwrap_or_default();
                     proof.push(input.canonical_observation.clone());

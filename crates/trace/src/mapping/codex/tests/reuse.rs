@@ -117,9 +117,10 @@ fn independent_route_certificates_refine_immutable_claims_in_either_arrival_orde
         complete
             .correlations
             .insert(binding(id), AnyObjectRef::Agent(agent(id)));
-        complete
-            .correlation_evidence
-            .insert(binding(id), vec![capture(sequence, false).observation_ref]);
+        complete.retain_correlation_evidence(
+            binding(id),
+            vec![capture(sequence, false).observation_ref],
+        );
     }
     let map = |archive: &ArchiveContext| {
         CodexMapper.map(MapInput {
@@ -142,9 +143,9 @@ fn independent_route_certificates_refine_immutable_claims_in_either_arrival_orde
             binding(first),
             complete.correlations[&binding(first)].clone(),
         );
-        partial.correlation_evidence.insert(
+        partial.correlation_proofs.insert(
             binding(first),
-            complete.correlation_evidence[&binding(first)].clone(),
+            complete.correlation_proofs[&binding(first)].clone(),
         );
         let mut outputs = vec![
             initial.clone(),
@@ -220,4 +221,152 @@ fn independent_route_certificates_refine_immutable_claims_in_either_arrival_orde
         outputs.reverse();
         assert_eq!(reduce(&outputs), reduced);
     }
+}
+
+#[test]
+fn corroborating_route_proofs_cannot_reuse_an_immutable_claim_identity() {
+    let header = serde_json::json!({"type":"session_meta","ordinal":0,"payload":{"id":"observer","session_id":"root","agent_path":"/root/observer"}});
+    let initial = run(&[header], false).remove(0);
+    let raw = serde_json::to_vec(&serde_json::json!({"type":"response_item","ordinal":1,"payload":{"type":"agent_message","id":"corroborated","author":"/root/sender","recipient":"/root","content":[{"type":"input_text","text":"independently proved sender"}]}})).unwrap();
+    let observation = capture(2, false);
+    let key = correlation_key(&agent("root"), "codex.agent-path", &["/root/sender".into()]);
+    for order in [[8, 9], [9, 8]] {
+        let mut archive = ArchiveContext::default();
+        let mut retained = BTreeMap::new();
+        for sequence in order {
+            archive
+                .correlations
+                .insert(key.clone(), AnyObjectRef::Agent(agent("sender")));
+            archive.retain_correlation_evidence(
+                key.clone(),
+                vec![capture(sequence, false).observation_ref],
+            );
+            let output = CodexMapper.map(MapInput {
+                capture: &observation,
+                canonical_observation: &observation.observation_ref,
+                raw: &raw,
+                state: &initial.state,
+                archive: &archive,
+            });
+            for claim in output.claims {
+                if let Some(prior) = retained.insert(claim.claim_ref.clone(), claim.clone()) {
+                    assert_eq!(
+                        prior, claim,
+                        "a corroborating identity proof changed an already retained claim"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn routing_certificate_pairs_page_without_remapping_bodies_or_skipping_alternative_support() {
+    use super::super::routing::{retain_plan, ROUTE_PAGE_WORK};
+    let initial = run(&[serde_json::json!({"type":"session_meta","ordinal":0,"payload":{"id":"observer","session_id":"root","agent_path":"/root/observer"}})], false).remove(0);
+    let raw = serde_json::to_vec(&serde_json::json!({"type":"response_item","ordinal":1,"payload":{"type":"agent_message","id":"paged-certificates","author":"/root/sender","recipient":"/root/recipient","content":[{"type":"input_text","text":"retain this body only once"}]}})).unwrap();
+    let observation = capture(2, false);
+    let count = ROUTE_PAGE_WORK / 2 + 3;
+    let mut archive = ArchiveContext::default();
+    for (id, start) in [("sender", 100), ("recipient", 1000)] {
+        let key = correlation_key(&agent("root"), "codex.agent-path", &[format!("/root/{id}")]);
+        archive
+            .correlations
+            .insert(key.clone(), AnyObjectRef::Agent(agent(id)));
+        for sequence in start..start + count as u64 {
+            archive.retain_correlation_evidence(
+                key.clone(),
+                vec![capture(sequence, false).observation_ref],
+            );
+        }
+    }
+    let mut state = initial.state;
+    let mut pages = 0;
+    let mut bodies = 0;
+    let mut retained = BTreeMap::new();
+    loop {
+        let mut output = CodexMapper.map(MapInput {
+            capture: &observation,
+            canonical_observation: &observation.observation_ref,
+            raw: &raw,
+            state: &state,
+            archive: &archive,
+        });
+        if pages > 0 {
+            assert!(
+                output.payloads.is_empty(),
+                "a metadata continuation restaged the original body"
+            );
+            assert!(
+                output.claims.len() <= ROUTE_PAGE_WORK,
+                "one routing continuation exceeded its work budget"
+            );
+        }
+        bodies += usize::from(!output.payloads.is_empty());
+        pages += 1;
+        assert!(
+            pages < count * count,
+            "routing continuation failed to advance"
+        );
+        for claim in output.claims {
+            if let Some(prior) = retained.insert(claim.claim_ref.clone(), claim.clone()) {
+                assert_eq!(
+                    prior, claim,
+                    "a paged certificate changed an immutable claim"
+                );
+            }
+            archive.claims.insert(claim.claim_ref.clone(), claim);
+        }
+        for plan in output.routing_plans {
+            retain_plan(&mut archive.routing_plans, plan);
+        }
+        if !output.requests.iter().any(ArchiveRequest::is_continuation) {
+            break;
+        }
+        state = output
+            .continuation_state
+            .take()
+            .expect("continuation needs its exact next coordinate");
+    }
+    assert!(pages > 1);
+    assert_eq!(bodies, 1);
+    assert_eq!(
+        retained
+            .values()
+            .filter(|claim| !claim.supersedes.is_empty())
+            .count(),
+        count * count + 4 * count
+    );
+    for claim in retained
+        .values()
+        .filter(|claim| !claim.supersedes.is_empty())
+    {
+        for prior in &claim.supersedes {
+            assert!(
+                retained.contains_key(prior),
+                "a joint certificate superseded an unrecorded subset"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_malformed_routing_checkpoint_reports_a_decode_failure_instead_of_panicking() {
+    let observation = capture(2, false);
+    let mut state = MapperState::default();
+    state.values.insert(
+        "codex.routing-continuation".into(),
+        serde_json::json!({"after":"damaged"}),
+    );
+    let output = CodexMapper.map(MapInput {
+        capture: &observation,
+        canonical_observation: &observation.observation_ref,
+        raw: b"{}",
+        state: &state,
+        archive: &ArchiveContext::default(),
+    });
+    assert!(output.claims.is_empty());
+    assert!(output.diagnostics.iter().any(|diagnostic| diagnostic.code
+        == DiagnosticCode::DecodeFailure
+        && diagnostic.evidence.contains(&observation.observation_ref)));
 }

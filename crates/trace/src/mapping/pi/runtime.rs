@@ -334,8 +334,7 @@ impl Context<'_, '_> {
             let Some(proof) = self
                 .input
                 .archive
-                .correlation_evidence
-                .get(&key)
+                .correlation_evidence(&key)
                 .filter(|proof| {
                     !proof.is_empty()
                         && proof.iter().all(|observation| {

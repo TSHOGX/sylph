@@ -1704,8 +1704,8 @@ async fn shared_archive_snapshots_keep_prior_facts_and_refresh_later_reduction_p
     assert!(current.correlations.ptr_eq(&repeated.correlations));
     assert!(
         current
-            .correlation_evidence
-            .ptr_eq(&repeated.correlation_evidence)
+            .correlation_proofs
+            .ptr_eq(&repeated.correlation_proofs)
     );
     assert!(
         previous.semantic.history_entries.is_empty(),
@@ -1802,3 +1802,5 @@ fn native_history_coordinate_conflicts_cannot_replace_a_retained_witness() {
 }
 
 mod semantic_acceptance;
+
+mod route_proofs;

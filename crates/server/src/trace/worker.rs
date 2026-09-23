@@ -140,7 +140,7 @@ impl MembershipWork {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct CorrelationBinding {
     reference: AnyObjectRef,
-    evidence: Vec<ObservationRef>,
+    proofs: imbl::OrdSet<Vec<ObservationRef>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -192,7 +192,8 @@ struct WorkerState {
     // neighboring values on leaf mutation; Arc keeps that cost off mapper bodies.
     source_states: imbl::OrdMap<String, Arc<MapperState>>,
     correlations: imbl::OrdMap<String, AnyObjectRef>,
-    correlation_evidence: imbl::OrdMap<String, Vec<ObservationRef>>,
+    correlation_proofs: mapping::CorrelationProofs,
+    routing_plans: mapping::codex::routing::PlanIndex,
     pending: imbl::OrdMap<String, Arc<PendingMapping>>,
     source_replays: imbl::OrdMap<String, SourceReplayCursor>,
     available_evidence: imbl::OrdSet<ObservationRef>,
@@ -692,7 +693,7 @@ impl ProjectionWorker {
             let before = (
                 unit.next.pending.keys().cloned().collect::<Vec<_>>(),
                 unit.next.correlations.clone(),
-                unit.next.correlation_evidence.clone(),
+                unit.next.correlation_proofs.clone(),
                 unit.next.reducer.len(),
                 unit.next.source_owners.clone(),
             );
@@ -720,7 +721,7 @@ impl ProjectionWorker {
                     ordered_applied += 1;
                 }
 
-                if pending.requests.contains(&ArchiveRequest::ContinueHistory) {
+                if pending.requests.iter().any(ArchiveRequest::is_continuation) {
                     if continuation_applied
                         || captures.iter().any(|capture| {
                             capture.canonical_observation_ref
@@ -797,7 +798,7 @@ impl ProjectionWorker {
             let after = (
                 unit.next.pending.keys().cloned().collect::<Vec<_>>(),
                 unit.next.correlations.clone(),
-                unit.next.correlation_evidence.clone(),
+                unit.next.correlation_proofs.clone(),
                 unit.next.reducer.len(),
                 unit.next.source_owners.clone(),
             );
@@ -808,7 +809,7 @@ impl ProjectionWorker {
             if pass + 1 == self.limits.max_resolution_passes
                 && unit.next.pending.values().any(|pending| {
                     pending.source_order.is_none()
-                        && !pending.requests.contains(&ArchiveRequest::ContinueHistory)
+                        && !pending.requests.iter().any(ArchiveRequest::is_continuation)
                         && requests_may_resolve(&pending.requests, &unit.next)
                 })
             {
@@ -1043,9 +1044,12 @@ impl ProjectionWorker {
             } else if let Some(key) = key.strip_prefix("correlation:") {
                 let binding: CorrelationBinding = serde_json::from_value(value)?;
                 state.correlations.insert(key.into(), binding.reference);
-                state
-                    .correlation_evidence
-                    .insert(key.into(), binding.evidence);
+                state.correlation_proofs.insert(key.into(), binding.proofs);
+            } else if key.starts_with("routing:") {
+                mapping::codex::routing::retain_plan(
+                    &mut state.routing_plans,
+                    serde_json::from_value(value)?,
+                );
             } else if let Some(key) = key.strip_prefix("source_replay:") {
                 state
                     .source_replays
@@ -1281,6 +1285,14 @@ impl ProjectionWorker {
             self.limits.max_claims_per_observation,
         )?;
         unit.batch.claims.extend(output.claims);
+        for plan in output.routing_plans {
+            unit.batch.mapper_states.insert(
+                format!("routing:{}", plan.base.encode()),
+                serde_json::to_value(&plan)?,
+            );
+            mapping::codex::routing::retain_plan(&mut unit.next.routing_plans, plan);
+        }
+
         for definition in output.source_definitions {
             let key = (
                 &definition.definition.source,
@@ -1342,13 +1354,28 @@ impl ProjectionWorker {
             {
                 return Err(WorkerError::CorrelationConflict);
             }
+            let evidence = output
+                .correlation_evidence
+                .get(&key)
+                .cloned()
+                .unwrap_or_else(|| vec![admitted.canonical_observation.clone()]);
+            // Repeated goal/task snapshots also bind their unchanged identity.
+            // Accumulating those witnesses would grow one checkpoint row with
+            // every poll; their individual states already live in retained claims.
+            // Only a mapper-declared corroborating join keeps alternative proofs.
+            if !output.corroborating_correlations.contains(&key) {
+                unit.next.correlation_proofs.remove(&key);
+            }
+            mapping::retain_correlation_proof(
+                &mut unit.next.correlation_proofs,
+                key.clone(),
+                evidence,
+            );
             let binding = CorrelationBinding {
                 reference,
-                evidence: output
-                    .correlation_evidence
-                    .get(&key)
-                    .cloned()
-                    .unwrap_or_else(|| vec![admitted.canonical_observation.clone()]),
+                proofs: unit.next.correlation_proofs.get(&key).cloned().ok_or(
+                    WorkerError::Reduction(sylph_trace::reducer::ReductionError::MissingEvidence),
+                )?,
             };
             unit.batch.mapper_states.insert(
                 format!("correlation:{key}"),
@@ -1357,7 +1384,6 @@ impl ProjectionWorker {
             unit.next
                 .correlations
                 .insert(key.clone(), binding.reference);
-            unit.next.correlation_evidence.insert(key, binding.evidence);
         }
         let id = admitted.canonical_observation.encode();
         if output.requests.is_empty() {
@@ -1774,7 +1800,8 @@ fn archive_context(state: &mut WorkerState) -> ArchiveContext {
         source_definitions: state.source_definitions.clone(),
         history_records: state.history_records.clone(),
         correlations: state.correlations.clone(),
-        correlation_evidence: state.correlation_evidence.clone(),
+        correlation_proofs: state.correlation_proofs.clone(),
+        routing_plans: state.routing_plans.clone(),
         claims: state.reducer.claim_snapshot(),
         ..ArchiveContext::default()
     };
@@ -1848,7 +1875,7 @@ fn has_ready_continuations(
     replays: &imbl::OrdMap<String, SourceReplayCursor>,
 ) -> bool {
     all.values()
-        .any(|pending| pending.requests.contains(&ArchiveRequest::ContinueHistory))
+        .any(|pending| pending.requests.iter().any(ArchiveRequest::is_continuation))
         || replays.keys().any(|key| {
             !all.values()
                 .any(|pending| pending.source_order.as_ref() == Some(key))
@@ -1858,7 +1885,7 @@ fn has_ready_continuations(
 fn requests_may_resolve(requests: &[ArchiveRequest], state: &WorkerState) -> bool {
     requests.iter().any(|request|match request {
         ArchiveRequest::CapturedPayload {parent,slot}=>state.captured_payloads.contains_key(&mapping::captured_payload_key(parent,slot)),
-        ArchiveRequest::ContinueHistory=>true,
+        ArchiveRequest::ContinueHistory | ArchiveRequest::ContinueRouting=>true,
         ArchiveRequest::HistoryLocator {issuer,physical_id}=>state.source_definitions.values().any(|source|&source.definition.source.issuer==issuer&&mapping::codex::history::physical_id(&source.definition.locator)==Some(physical_id.as_str())),
         ArchiveRequest::HistorySource {source,generation}=>state.history_records.contains_key(&(source.clone(), *generation)),
         ArchiveRequest::AttachmentTarget {parent,slot,locator}=>state.correlations.contains_key(&mapping::attachment_key(parent,slot,locator)),
