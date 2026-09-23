@@ -219,8 +219,12 @@ that absence in either order while fork handles stay unresolved. Reducer regress
 `crates/trace/src/reducer/tests/owners.rs` preserve conflicts across known actors and
 native handles; absence cannot bridge incompatible claims. HTTP acceptance in
 `crates/server/src/trace/worker/tests/provenance/unknown_owners.rs` reads retained
-operation input bytes without inventing an owner or execution state. These focused
-fixtures establish the absence/refinement rules, not a new native/live identity join.
+operation input bytes through the Work row's operation target without inventing an owner
+or execution state. `crates/trace/src/reading/tests.rs` preserves history anchors and
+keeps unknown-owned invocations independent of local activity; synthetic desktop/mobile
+browser coverage in `frontend/e2e/trace-unknown-owner.spec.ts` opens retained inputs while
+keeping ownership uncertainty explicit and preserving the draft. These focused fixtures
+establish the absence/refinement and inspection rules, not a new native/live identity join.
 
 Sanitization preserves equality relationships, key scope, missing-versus-empty values,
 ordering and branch structure. Replacing two distinct IDs with one placeholder would

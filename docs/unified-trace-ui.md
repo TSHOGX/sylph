@@ -346,6 +346,12 @@ provides the classification; the browser does not reinterpret a tool named `Agen
 a vendor `success` field. An unknown kind uses a generic operation viewer with evidence
 and structured content available.
 
+An observed invocation remains an inspectable Work item when its producer is unknown
+or unresolved. The row reports unknown ownership and opens that operation's retained
+inputs, results and evidence. Its history entry remains the retention anchor; the
+containing reader supplies neither an owner nor an activation. Unknown ownership is
+not a grouping key for combining separate invocations.
+
 The result surface distinguishes these representations:
 
 | Representation | Label | Meaning |

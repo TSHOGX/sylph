@@ -232,14 +232,12 @@ impl super::Index<'_> {
                         ));
                         continue;
                     };
-                    let OwnerRef::Agent { agent: owner } = &operation.owner else {
-                        units.push(self.unknown(
-                            address,
-                            anchor.clone(),
-                            order_basis,
-                            "Operation owner is unresolved",
-                        ));
-                        continue;
+                    // The invocation is observed even when its producer is not.
+                    // Keep the entry's retention anchor and the operation's own
+                    // inspection target; neither establishes local activity.
+                    let owner = match &operation.owner {
+                        OwnerRef::Agent { agent } => Some(agent),
+                        _ => None,
                     };
                     units.push(ReadingUnit {
                         address,
@@ -249,12 +247,12 @@ impl super::Index<'_> {
                         activation: operation
                             .activation
                             .as_ref()
-                            .filter(|_| owner == &scope.agent)
+                            .filter(|_| owner == Some(&scope.agent))
                             .map(|activation| {
                                 self.execution(&AnyObjectRef::Activation(activation.clone()))
                             }),
                         content: ReadingContent::Work {
-                            owner: self.agent_link(owner),
+                            owner: owner.map(|owner| self.agent_link(owner)),
                             operations: count(1, "this invocation"),
                             agents: unknown_count("agents created by this invocation"),
                             assignments: unknown_count("task deliveries"),
@@ -386,7 +384,11 @@ pub(super) fn group_work(units: impl IntoIterator<Item = ReadingUnit>) -> Vec<Re
                     ..
                 } = &mut previous.content
                 {
-                    if prior_owner.address == owner.address {
+                    if prior_owner
+                        .as_ref()
+                        .zip(owner.as_ref())
+                        .is_some_and(|(a, b)| a.address == b.address)
+                    {
                         prior_operations.value = prior_operations
                             .value
                             .zip(operations.value)

@@ -743,6 +743,11 @@ function TraceRow({
           {t("trace.work")} ·{" "}
           {describeCount(content.operations, t("trace.operations"), t)} ·{" "}
           {describeCount(content.agents, t("trace.agentsNoun"), t)}
+          {!content.owner && (
+            <span className="mt-1 block text-xs">
+              {t("trace.owner", { agent: t("trace.unknown") })}
+            </span>
+          )}
           <span className="mt-1 block text-xs">
             {describeCount(
               content.activeResources,

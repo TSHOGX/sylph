@@ -306,7 +306,7 @@ export type ReadingContent =
     }
   | {
       kind: "work";
-      owner: AgentLink;
+      owner: AgentLink | null;
       operations: TraceCount;
       agents: TraceCount;
       assignments: TraceCount;

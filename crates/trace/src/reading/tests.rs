@@ -1480,3 +1480,85 @@ fn a_unique_fork_lineage_supplies_an_origin_shortcut_without_entering_the_spawn_
         2
     );
 }
+
+#[test]
+fn operations_with_unobserved_owners_keep_inspection_targets_without_becoming_local_activity() {
+    let activation = ActivationRef::native(agent(), "activation", vec!["unowned".into()]).unwrap();
+    let mut objects = vec![
+        declared_agent(agent()),
+        TraceObject::Activation(Activation {
+            activation_ref: activation.clone(),
+            owner: OwnerRef::Unknown,
+        }),
+    ];
+    let mut observations = vec![];
+    let mut expected = vec![];
+    let mut predecessor = None;
+    for (index, owner) in [
+        OwnerRef::Unknown,
+        OwnerRef::Unresolved {
+            scope: agent(),
+            namespace: "native-origin".into(),
+            native_key: vec!["copied".into()],
+            reason: "Origin unavailable".into(),
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let operation = Operation {
+            owner,
+            activation: Some(activation.clone()),
+            ..declared_operation(&format!("unowned-{index}"))
+        };
+        let entry = EntryRef::native(agent(), "entry", vec![format!("unowned-{index}")]).unwrap();
+        expected.push((entry.clone(), operation.operation_ref.clone()));
+        objects.push(TraceObject::Operation(operation.clone()));
+        objects.push(TraceObject::HistoryEntry(HistoryEntry {
+            entry_ref: entry.clone(),
+            containing_agent: agent(),
+            predecessor: predecessor.clone(),
+            original_owner: None,
+        }));
+        observations.push(HistoryContentObservation::complete(
+            entry.clone(),
+            capture(index as u64 + 1).source_position,
+            "unknown-owner-history",
+            vec![HistoryContent::Operation(operation.operation_ref)],
+        ));
+        predecessor = Some(entry);
+    }
+    let projection = objects_projection(objects, vec![], observations);
+    let rows = &projection.windows[&ReadingScope {
+        agent: agent(),
+        selection: None,
+    }];
+    assert_eq!(
+        rows.len(),
+        expected.len(),
+        "unknown ownership must not group independent invocations"
+    );
+    for (row, (entry, operation)) in rows.iter().zip(expected) {
+        assert_eq!(
+            row.anchor,
+            TraceAddress::of(&AnyObjectRef::HistoryEntry(entry))
+        );
+        let ReadingContent::Work {
+            owner,
+            operations_anchor,
+            operations,
+            ..
+        } = &row.content
+        else {
+            panic!("an observed invocation was replaced by a generic unknown row");
+        };
+        assert_eq!(
+            operations_anchor,
+            &TraceAddress::of(&AnyObjectRef::Operation(operation))
+        );
+        assert_eq!(operations.value, Some(1));
+        assert!(owner.is_none());
+        assert!(row.activation.is_none());
+    }
+    assert!(projection.activations[&agent()].is_empty());
+}

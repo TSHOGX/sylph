@@ -384,7 +384,7 @@ pub enum ReadingContent {
         original_owner: Option<AgentLink>,
     },
     Work {
-        owner: AgentLink,
+        owner: Option<AgentLink>,
         operations: ReadCount,
         agents: ReadCount,
         assignments: ReadCount,

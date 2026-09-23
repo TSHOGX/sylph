@@ -100,6 +100,15 @@ erased and no production trace implementation is claimed complete by this design
 
 ### Foundation implementation
 
+Observed operations with unknown or unresolved producers now remain Work rows with
+explicit unknown-owner labels and direct inspection targets. They retain their own
+history-entry anchors and cannot borrow local activation membership or group merely
+because both owners are absent. The operation input HTTP regression follows the target
+returned in the actual reading row; desktop/mobile browser coverage opens retained input
+without dispatching commands or losing the reader draft. Restoring generic unknown rows
+and removing the owner label each fail their corresponding regression. This closes the
+inspection path for unknown-owned work, not inherited-owner classification or attribution.
+
 Pi historical entry/tree snapshots now retain unobserved production ownership instead
 of assigning the containing reader as the actor. `OwnerRef::Unknown` distinguishes
 absence from an unresolved native handle. Field-specific reducer rules refine absence
