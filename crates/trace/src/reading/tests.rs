@@ -1388,3 +1388,95 @@ fn conflicting_message_metadata_keeps_content_without_selecting_disputed_fields(
         assert_eq!(parts[0].preview, "Agreed retained content");
     }
 }
+
+#[test]
+fn a_unique_fork_lineage_supplies_an_origin_shortcut_without_entering_the_spawn_directory() {
+    let origin = AgentRef::Session(sylph_protocol::SessionId::decode("env7:codex:origin").unwrap());
+    let other =
+        AgentRef::Session(sylph_protocol::SessionId::decode("env7:codex:other-origin").unwrap());
+    let capture = capture(1);
+    let facts = vec![
+        Fact::Declare {
+            object: TraceObject::Agent(AgentThread {
+                agent_ref: agent(),
+                vendor: sylph_protocol::AgentName::parse("codex").unwrap(),
+                name: None,
+                model: None,
+            }),
+        },
+        Fact::Declare {
+            object: TraceObject::Agent(AgentThread {
+                agent_ref: origin.clone(),
+                vendor: sylph_protocol::AgentName::parse("codex").unwrap(),
+                name: Some("Original".into()),
+                model: None,
+            }),
+        },
+        Fact::Relation {
+            relation: Relation::ContextLineage {
+                recipient: agent(),
+                checkpoint: None,
+                original_owner: OwnerRef::Agent {
+                    agent: origin.clone(),
+                },
+            },
+        },
+    ];
+    let claims: Vec<_> = facts
+        .into_iter()
+        .enumerate()
+        .map(|(index, fact)| {
+            crate::mapping::claim(
+                &MapInput {
+                    capture: &capture,
+                    canonical_observation: &capture.observation_ref,
+                    raw: b"{}",
+                    state: &MapperState::default(),
+                    archive: &ArchiveContext::default(),
+                },
+                &agent(),
+                &format!("lineage-{index}"),
+                "fixture",
+                fact,
+            )
+        })
+        .collect();
+    let evidence = [capture.observation_ref.clone()].into_iter().collect();
+    let mut reducer = Reducer::default();
+    reducer.apply(&claims, &evidence, 100).unwrap();
+    let projection = project(&reducer.resolve(), &PayloadPreviews::new(), 8);
+    assert_eq!(
+        projection.headers[&agent()]
+            .origin
+            .as_ref()
+            .unwrap()
+            .address
+            .agent(),
+        origin
+    );
+    assert!(projection.headers[&agent()].parent.is_none());
+    assert_eq!(projection.headers[&agent()].descendant_count.value, Some(0));
+    assert_eq!(projection.directory[&origin].component, origin);
+    let mut distinct = claims[2].clone();
+    distinct.claim_ref = ClaimRef::native(agent(), "lineage", vec!["other".into()]).unwrap();
+    distinct.fact = Fact::Relation {
+        relation: Relation::ContextLineage {
+            recipient: agent(),
+            checkpoint: None,
+            original_owner: OwnerRef::Agent { agent: other },
+        },
+    };
+    reducer.apply(&[distinct], &evidence, 100).unwrap();
+    let projection = project(&reducer.resolve(), &PayloadPreviews::new(), 8);
+    assert!(
+        projection.headers[&agent()].origin.is_none(),
+        "multiple origins must not select one by arrival order"
+    );
+    assert_eq!(
+        projection.object_relations[&AnyObjectRef::Agent(agent())]
+            .iter()
+            .filter(|row| row.label == "Context origin")
+            .count(),
+        2
+    );
+}

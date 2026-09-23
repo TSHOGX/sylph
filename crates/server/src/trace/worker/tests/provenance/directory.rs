@@ -66,7 +66,7 @@ async fn directory_scope_includes_the_focused_agent_and_all_spawn_descendants_bu
     lineage.fact = Fact::Relation {
         relation: Relation::ContextLineage {
             recipient: fork,
-            checkpoint,
+            checkpoint: Some(checkpoint),
             original_owner: OwnerRef::Agent {
                 agent: root.clone(),
             },

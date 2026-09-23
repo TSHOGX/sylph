@@ -40,7 +40,8 @@ pub enum Relation {
     },
     ContextLineage {
         recipient: AgentRef,
-        checkpoint: CheckpointRef,
+        /// Absent when the source identifies an origin without naming a checkpoint.
+        checkpoint: Option<CheckpointRef>,
         original_owner: OwnerRef,
     },
     ContextMembership {
@@ -451,10 +452,10 @@ impl Relation {
                 checkpoint,
                 original_owner,
             } => {
-                let mut refs = vec![
-                    AnyObjectRef::ContextCheckpoint(checkpoint.clone()),
-                    AnyObjectRef::Agent(recipient.clone()),
-                ];
+                let mut refs = vec![AnyObjectRef::Agent(recipient.clone())];
+                if let Some(checkpoint) = checkpoint {
+                    refs.push(AnyObjectRef::ContextCheckpoint(checkpoint.clone()));
+                }
                 if let OwnerRef::Agent { agent } = original_owner {
                     refs.push(AnyObjectRef::Agent(agent.clone()));
                 }

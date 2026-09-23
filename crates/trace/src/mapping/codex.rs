@@ -15,7 +15,7 @@ pub mod history;
 
 pub struct CodexMapper;
 impl CodexMapper {
-    const BUILD: &'static str = "codex-10";
+    const BUILD: &'static str = "codex-11";
 }
 mod accounting;
 mod collaboration;
@@ -335,6 +335,30 @@ impl Context<'_, '_> {
                 state: AgentState::Exists,
             },
         );
+        // The vendor records forks separately from spawn ownership. A named
+        // source thread does not establish copied membership or a checkpoint.
+        if let Some(origin) = string(
+            value,
+            if live {
+                "forkedFromId"
+            } else {
+                "forked_from_id"
+            },
+        )
+        .and_then(|id| self.agent(id))
+        {
+            self.add(
+                agent,
+                "codex/fork-origin",
+                Fact::Relation {
+                    relation: Relation::ContextLineage {
+                        recipient: agent.clone(),
+                        checkpoint: None,
+                        original_owner: OwnerRef::Agent { agent: origin },
+                    },
+                },
+            );
+        }
         let parent = string(
             value,
             if live {

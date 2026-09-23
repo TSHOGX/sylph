@@ -362,6 +362,9 @@ ancestor records remains partial membership rather than an invented complete bra
 
 Fork provenance names the source session and any proven copied-entry membership. The
 observed `forkedFrom.messageUuid == uuid` shape cannot supply a universal fork point.
+The native `forkedFrom.sessionId` stamp establishes context lineage independently of
+a checkpoint or cutoff; repeated stamps corroborate the same origin without selecting
+one from contradictory source sessions.
 The child-side copy is a context reference or copied representation, with the original
 authorship preserved. A missing cutoff is recorded as missing.
 

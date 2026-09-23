@@ -76,6 +76,7 @@ struct Index<'a> {
     input_presentations: BTreeMap<MessageRevisionRef, BTreeSet<DeliveryRef>>,
     input_messages: BTreeMap<MessageRef, BTreeSet<DeliveryRef>>,
     parents: BTreeMap<AgentRef, AgentRef>,
+    origins: BTreeMap<AgentRef, BTreeSet<Option<AgentRef>>>,
 }
 
 pub fn project(
@@ -106,6 +107,7 @@ pub fn project(
         input_presentations: BTreeMap::new(),
         input_messages: BTreeMap::new(),
         parents: BTreeMap::new(),
+        origins: BTreeMap::new(),
     };
     for object in reduction
         .objects
@@ -219,6 +221,20 @@ pub fn project(
                 if index.agents.contains_key(child) {
                     index.parents.insert(child.clone(), parent.clone());
                 }
+            }
+            Relation::ContextLineage {
+                recipient,
+                original_owner,
+                ..
+            } => {
+                index
+                    .origins
+                    .entry(recipient.clone())
+                    .or_default()
+                    .insert(match original_owner {
+                        OwnerRef::Agent { agent } => Some(agent.clone()),
+                        _ => None,
+                    });
             }
             Relation::UsesResource {
                 operation,
@@ -1123,7 +1139,16 @@ impl Index<'_> {
                 .parents
                 .get(&agent.agent_ref)
                 .map(|parent| self.agent_link(parent)),
-            origin: None,
+            // The shortcut cannot choose among multiple or unresolved origins.
+            // All retained lineage relations remain inspectable independently.
+            origin: self
+                .origins
+                .get(&agent.agent_ref)
+                .filter(|origins| origins.len() == 1)
+                .and_then(|origins| origins.first())
+                .and_then(Option::as_ref)
+                .filter(|origin| *origin != &agent.agent_ref)
+                .map(|origin| self.agent_link(origin)),
             coverage: self.coverage(&agent.agent_ref),
             descendant_count: count(
                 directory.end_exclusive - directory.position - 1,

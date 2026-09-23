@@ -891,3 +891,59 @@ mod reuse;
 mod input;
 
 mod context;
+
+#[test]
+fn explicit_fork_lineage_does_not_require_a_checkpoint_cutoff_or_spawn_parent() {
+    for (live, value) in [
+        (
+            false,
+            serde_json::json!({"type":"session_meta","ordinal":0,"payload":{"id":"fork","forked_from_id":"original"}}),
+        ),
+        (
+            true,
+            serde_json::json!({"method":"thread/started","params":{"thread":{"id":"fork","forkedFromId":"original"}}}),
+        ),
+    ] {
+        let capture = capture(1, live);
+        let output = CodexMapper.map(MapInput {
+            capture: &capture,
+            canonical_observation: &capture.observation_ref,
+            raw: &serde_json::to_vec(&value).unwrap(),
+            state: &MapperState::default(),
+            archive: &ArchiveContext::default(),
+        });
+        let lineage: Vec<_> = output
+            .claims
+            .iter()
+            .filter_map(|claim| match &claim.fact {
+                Fact::Relation {
+                    relation:
+                        Relation::ContextLineage {
+                            recipient,
+                            checkpoint,
+                            original_owner,
+                        },
+                } => Some((recipient, checkpoint, original_owner)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            lineage,
+            vec![(
+                &agent("fork"),
+                &None,
+                &OwnerRef::Agent {
+                    agent: agent("original")
+                }
+            )]
+        );
+        assert!(!output.claims.iter().any(|claim| matches!(
+            &claim.fact,
+            Fact::Relation {
+                relation: Relation::Spawn { .. }
+            } | Fact::Declare {
+                object: TraceObject::ContextCheckpoint(_)
+            } | Fact::SelectHistory { .. }
+        )));
+    }
+}

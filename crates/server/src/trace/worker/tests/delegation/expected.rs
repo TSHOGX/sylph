@@ -440,6 +440,11 @@ pub(super) async fn assert_expected(
         let value = header(store, &agent).await;
         assert_eq!(value.agent.address.agent(), agent);
         assert!(value.parent.is_none());
+        assert_eq!(
+            value.origin.as_ref().map(|origin| origin.address.agent()),
+            (agent == owner(FORK)).then(|| owner(PARENT)),
+            "the recorded fork origin is lineage, independently of spawn ownership"
+        );
         assert_eq!(value.descendant_count.value, Some(0));
         assert!(value.descendant_count.complete);
         assert!(

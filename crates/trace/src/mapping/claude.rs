@@ -41,7 +41,7 @@ struct LiveStream {
 
 impl SemanticMapper for ClaudeMapper {
     fn build(&self) -> &'static str {
-        "claude-7"
+        "claude-8"
     }
     fn map(&self, input: MapInput<'_>) -> MapOutput {
         let mut output = MapOutput {
@@ -247,6 +247,19 @@ impl Context<'_, '_> {
         }
         self.output.state.governing_agent = Some(root.clone());
         self.declare_agent(&owner, None, None);
+        if let Some(origin) = text(&value["forkedFrom"], "sessionId").and_then(|id| self.root(id)) {
+            self.add(
+                &owner,
+                "claude/fork-origin",
+                Fact::Relation {
+                    relation: Relation::ContextLineage {
+                        recipient: owner.clone(),
+                        checkpoint: None,
+                        original_owner: OwnerRef::Agent { agent: origin },
+                    },
+                },
+            );
+        }
         let kind = text(value, "type").unwrap_or("");
         match kind {
             "assistant" | "user" => self.record(&owner, value, false),

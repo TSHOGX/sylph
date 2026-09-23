@@ -1029,7 +1029,7 @@ mod tests {
             Fact::Relation {
                 relation: Relation::ContextLineage {
                     recipient: agent("root"),
-                    checkpoint,
+                    checkpoint: Some(checkpoint),
                     original_owner: unresolved(agent("lineage-owner")),
                 },
             },

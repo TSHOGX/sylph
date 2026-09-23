@@ -461,6 +461,9 @@ Raw range membership does not promote telemetry or headers into executed history
 
 Inherited records are context occurrences under the child with origin ownership
 preserved when known. They are not child-local activations, operations, or usage.
+Native `forked_from_id` and live `forkedFromId` independently establish context lineage
+to that original thread. They do not establish a spawn parent or a checkpoint, and
+they remain useful when no copied-history cutoff or source transcript was captured.
 Missing origin identity does not authorize merging equal bytes across different
 histories. Physical source references and explicit item identity may resolve the
 origin later. A boundary beyond the captured tail means the child-local portion has

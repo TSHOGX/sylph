@@ -271,7 +271,9 @@ fn normalized_relation(
             original_owner,
         } => Relation::ContextLineage {
             recipient: resolved_ref!(registry, Agent, recipient),
-            checkpoint: resolved_ref!(registry, ContextCheckpoint, checkpoint),
+            checkpoint: checkpoint
+                .as_ref()
+                .map(|checkpoint| resolved_ref!(registry, ContextCheckpoint, checkpoint)),
             original_owner: normalized_owner(registry, original_owner),
         },
         Relation::Representation {

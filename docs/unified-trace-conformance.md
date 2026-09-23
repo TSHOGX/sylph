@@ -179,11 +179,20 @@ The retained material is:
   recorder artifact; `RawValue` extracts each whole frame without JSON reserialization,
   and its original recorder line is retained as the source coordinate. This establishes
   the observed child and command/process lifetimes, parent completion before child
-  completion, distinct answer bodies, and activity notifications without invented agents.
+  completion, distinct answer bodies, activity notifications without invented agents,
+  and the recorded fork origin independently of spawn ownership or a checkpoint.
   It supplies no child follow-up run, delayed sidecar, native/live join, proved spawn
   result or caller-truncation pair. Its independent native replay source is a separate
   session, explicitly not a counterpart to this live recording. Historical tool text
   is retained data and is never executed by the harness.
+- The retained Claude fork records in
+  `fixtures/native/claude/fork-replay-messageuuid-mirrors-own-uuid.jsonl` pass through
+  production admission, mapping and reading in
+  `crates/server/src/trace/worker/tests/corpus/fork_lineage.rs`. Each original-session
+  stamp survives cold replay, restart, overlapping reread and same-cut rebuilding.
+  The origin shortcut remains separate from parentage and descendant membership.
+  This fixture does not establish a universal copied-prefix cutoff or a context
+  checkpoint, and it does not contain the original session's transcript.
 
 Sanitization preserves equality relationships, key scope, missing-versus-empty values,
 ordering and branch structure. Replacing two distinct IDs with one placeholder would

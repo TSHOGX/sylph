@@ -973,3 +973,45 @@ mod schedule;
 mod accounting;
 
 mod delegation;
+
+#[test]
+fn native_fork_lineage_retains_each_origin_stamp_without_fabricating_a_checkpoint() {
+    let values: Vec<Value> = include_str!(
+        "../../../../../fixtures/native/claude/fork-replay-messageuuid-mirrors-own-uuid.jsonl"
+    )
+    .lines()
+    .map(|line| serde_json::from_str(line).unwrap())
+    .collect();
+    let output = run(&values, false);
+    let expected = values
+        .iter()
+        .filter(|value| value.get("forkedFrom").is_some())
+        .count();
+    let lineage: Vec<_> = output
+        .iter()
+        .flat_map(|output| &output.claims)
+        .filter_map(|claim| match &claim.fact {
+            Fact::Relation {
+                relation:
+                    Relation::ContextLineage {
+                        recipient,
+                        checkpoint,
+                        original_owner,
+                    },
+            } => Some((recipient, checkpoint, original_owner)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(lineage.len(), expected);
+    assert!(expected > 1);
+    for (recipient, checkpoint, original) in lineage {
+        assert_eq!(recipient, &owner("f9dc6c53-da48-4d6f-9c68-b9a1708ad6dc"));
+        assert_eq!(checkpoint, &None);
+        assert_eq!(
+            original,
+            &OwnerRef::Agent {
+                agent: owner("bba7f74d-801e-4a61-b814-3091cafeb904")
+            }
+        );
+    }
+}

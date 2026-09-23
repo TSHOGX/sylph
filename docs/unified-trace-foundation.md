@@ -404,6 +404,14 @@ or the entire retained archive.
 
 ### Inheritance, compaction, and fork
 
+Context lineage may name an original agent independently of a context checkpoint.
+The relation's checkpoint is present only when the source identifies that checkpoint;
+a fork header or copied-record origin stamp does not create one. Such lineage never
+establishes spawn ownership, copied membership, a selected head, or repeated execution.
+Multiple retained context origins remain separate relations rather than selecting one
+by arrival order. A single-origin header shortcut is available only for a unique origin;
+the relation and original agent each require their own retained authorization proof.
+
 Copied history entries refer to their original owner whenever lineage proves it.
 Receiving a newly addressed message creates a recipient-owned history entry. Its
 sender and author are not copied-history lineage: a different author alone cannot
