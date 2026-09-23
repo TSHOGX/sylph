@@ -15,6 +15,7 @@ fn assert_shared_roots(before: &WorkerState, after: &WorkerState) {
             .owner_resolution_plans
             .ptr_eq(&after.owner_resolution_plans)
     );
+    assert!(before.pi_copies.shares_roots(&after.pi_copies));
     assert!(before.available_evidence.ptr_eq(&after.available_evidence));
     assert!(before.source_owners.ptr_eq(&after.source_owners));
     assert!(before.source_definitions.ptr_eq(&after.source_definitions));

@@ -74,7 +74,12 @@ for (const width of [1280, 390]) {
       { ...payload("registration", row.anchor), representation: "runtime" },
     ];
     state.relations = [
-      { target: "creator", label: "Creating operation", agent: null },
+      {
+        target: "creator",
+        containingAgent: agentLink().address,
+        label: "Creating operation",
+        agent: null,
+      },
     ];
     fixture.details.set(row.anchor, state);
     fixture.details.set("firing-delivery", {

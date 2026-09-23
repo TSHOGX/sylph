@@ -255,6 +255,7 @@ pub fn project(
             targets
                 .into_iter()
                 .map(|(label, target)| ReadRelation {
+                    containing_agent: AgentAddress::of(target.scope()),
                     agent: match &target {
                         AnyObjectRef::Agent(agent) => Some(index.agent_link(agent)),
                         _ => None,
@@ -671,6 +672,7 @@ impl Index<'_> {
                     .into_iter()
                     .flatten()
                     .map(|resource| ReadRelation {
+                        containing_agent: AgentAddress::of(resource.scope()),
                         target: TraceAddress::of(&AnyObjectRef::Resource(resource.clone())),
                         label: "Independent resource".into(),
                         agent: None,
@@ -769,6 +771,7 @@ impl Index<'_> {
                     .flatten()
                 {
                     relations.push(ReadRelation {
+                        containing_agent: AgentAddress::of(operation.scope()),
                         target: TraceAddress::of(&AnyObjectRef::Operation(operation.clone())),
                         label: "Operation".into(),
                         agent: None,
@@ -1370,6 +1373,7 @@ fn relation_label(relation: &Relation) -> &'static str {
         Relation::UsesResource { .. } => "Resource",
         Relation::HistoryPredecessor { .. } => "History predecessor",
         Relation::ContextLineage { .. } => "Context origin",
+        Relation::ContextCopy { .. } => "Copy lineage",
         Relation::ContextMembership { .. } => "Context membership",
         Relation::Representation { .. } => "Representation",
         Relation::ReadingOrder { .. } => "Reading order",

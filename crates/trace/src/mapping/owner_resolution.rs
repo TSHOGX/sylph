@@ -41,17 +41,8 @@ struct Cursor {
     sources: Vec<String>,
 }
 
-pub(crate) fn resume(input: &MapInput<'_>) -> Option<MapOutput> {
-    input.state.values.get(CONTINUATION)?;
-    let mut output = MapOutput {
-        state: input.state.clone(),
-        ..Default::default()
-    };
-    // Continuations use retained base declarations, not the source's old state
-    // machine or decoded bodies. Replaying the vendor record would restage its
-    // payload for each certificate page and could repeat unrelated mapping work.
-    refine(input, &mut output);
-    Some(output)
+pub(crate) fn has_continuation(input: &MapInput<'_>) -> bool {
+    input.state.values.contains_key(CONTINUATION)
 }
 
 pub(crate) fn refine(input: &MapInput<'_>, output: &mut MapOutput) {
@@ -73,6 +64,9 @@ pub(crate) fn refine(input: &MapInput<'_>, output: &mut MapOutput) {
         }
     };
     output.state.values.remove(CONTINUATION);
+    if let Some(state) = &mut output.continuation_state {
+        state.values.remove(CONTINUATION);
+    }
     if cursor.is_none()
         && output.owner_resolution_plans.is_empty()
         && !output

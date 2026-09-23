@@ -435,6 +435,11 @@ to its original owner and labeled `Inherited context`; it is not counted as the 
 own execution. A child with only inherited context and no observed local work gets that
 specific state, not an empty completed activation.
 
+Related-object links name the target's containing agent. Inspecting an object in another
+agent keeps the retained view and clears the previous agent's history selection instead
+of applying that selection to the foreign object. Back restores the preceding inspection
+scope and draft. This reading navigation does not change the main control target.
+
 A compaction boundary offers `View context change`. Exact replacement membership is
 listed only where recorded. Otherwise the summary stays readable beside `Exact included
 items unavailable`. The ordinary conversation retains earlier work. Context preview is

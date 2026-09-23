@@ -15,6 +15,7 @@ use super::{
 pub struct PiMapper;
 
 mod maintenance;
+pub mod copies;
 mod runtime;
 use maintenance::ObservedWork;
 
@@ -76,11 +77,11 @@ struct LiveMessage {
 
 impl SemanticMapper for PiMapper {
     fn build(&self) -> &'static str {
-        "pi-8"
+        "pi-9"
     }
 
     fn map(&self, input: MapInput<'_>) -> MapOutput {
-        if let Some(output) = super::owner_resolution::resume(&input) {
+        if let Some(output) = super::resume_refinements(&input) {
             return output;
         }
         let mut output = MapOutput {
@@ -141,6 +142,8 @@ impl SemanticMapper for PiMapper {
                 .or_insert_with(|| vec![input.canonical_observation.clone()]);
         }
         super::owner_resolution::refine(&input, &mut output);
+        super::pi::copies::refine(&input, &mut output);
+        super::finish_refinements(&input, &mut output);
         output
     }
 }
@@ -371,7 +374,7 @@ impl Context<'_, '_> {
     }
 
     fn entry(&mut self, owner: &AgentRef, value: &Value, selector: &str, source_path: &str) {
-        let Some(id) = text(value, "id") else {
+        let Some(id) = text(value, "id").filter(|id| !id.is_empty()) else {
             self.issue(
                 Some(owner),
                 "pi/entry-id",
@@ -526,6 +529,24 @@ impl Context<'_, '_> {
             &format!("{slot}/history"),
             TraceObject::HistoryEntry(history),
         );
+        if self.input.capture.transport_kind == TransportKind::NativeJsonl {
+            let base = self.output.claims.last().unwrap().claim_ref.clone();
+            let key = copies::EntryKey::of(id, value);
+            self.output.pi_copy_witnesses.push(copies::Witness {
+                base: base.clone(),
+                key: key.clone(),
+            });
+            if let Some(locator) = self
+                .state
+                .fork_source
+                .clone()
+                .filter(|path| !path.is_empty())
+            {
+                self.output
+                    .pi_copy_plans
+                    .push(copies::Plan { base, key, locator });
+            }
+        }
         self.history_content(
             owner,
             &format!("{slot}/content"),

@@ -105,6 +105,7 @@ impl Index<'_> {
         if let Some(creator) = &resource.creator {
             operations.insert(creator.clone());
             relations.push(ReadRelation {
+                containing_agent: AgentAddress::of(creator.scope()),
                 target: TraceAddress::of(&AnyObjectRef::Operation(creator.clone())),
                 label: "Creating operation".into(),
                 agent: None,
@@ -116,6 +117,7 @@ impl Index<'_> {
             {
                 if let Some(activation) = &value.activation {
                     relations.push(ReadRelation {
+                        containing_agent: AgentAddress::of(activation.scope()),
                         target: TraceAddress::of(&AnyObjectRef::Activation(activation.clone())),
                         label: "Related activation".into(),
                         agent: None,

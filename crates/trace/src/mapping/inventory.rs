@@ -11,11 +11,11 @@ pub struct InventoryMapper;
 
 impl SemanticMapper for InventoryMapper {
     fn build(&self) -> &'static str {
-        "source-inventory-2"
+        "source-inventory-3"
     }
 
     fn map(&self, input: MapInput<'_>) -> MapOutput {
-        if let Some(output) = super::owner_resolution::resume(&input) {
+        if let Some(output) = super::resume_refinements(&input) {
             return output;
         }
         let mut output = MapOutput {
@@ -150,6 +150,8 @@ impl SemanticMapper for InventoryMapper {
             },
         });
         super::owner_resolution::refine(&input, &mut output);
+        super::pi::copies::refine(&input, &mut output);
+        super::finish_refinements(&input, &mut output);
         output
     }
 }

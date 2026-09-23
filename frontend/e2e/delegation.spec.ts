@@ -214,6 +214,7 @@ for (const entry of ["work", "delivery", "evidence"] as const) {
       relations: [
         {
           target: "nested-child-detail",
+          containingAgent: CHILD_AGENT,
           label: "Nested child detail",
           agent: null,
         },

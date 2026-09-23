@@ -506,6 +506,12 @@ impl Dependencies {
                         predecessor: _,
                         entry: _,
                     }
+                    | Relation::ContextCopy {
+                        original: _,
+                        copied: _,
+                        original_position: _,
+                        copied_position: _,
+                    }
                     | Relation::ContextMembership {
                         checkpoint: _,
                         selection: _,

@@ -698,6 +698,11 @@ substitute for full evidence export or paced playback.
 
 ### Snapshot pages and live changes
 
+Every related-object row includes its target's containing agent as typed navigation
+scope. Clients do not decode opaque object references to infer that scope. A cross-agent
+inspection reuses the retained view with its own history scope, never another agent's
+selection token.
+
 The agent directory materializes one preorder row per proven agent and a half-open
 ordinal interval for its spawn subtree, within a coordinate scope owned by that tree
 root. An unrelated tree cannot renumber existing intervals. It does not duplicate a descendant under every

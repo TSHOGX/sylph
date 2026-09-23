@@ -109,7 +109,12 @@ for (const family of ["parts", "relations", "results"] as const) {
                   },
                 }
               : family === "relations"
-                ? { target: `related-${index}`, label, agent: null }
+                ? {
+                    target: `related-${index}`,
+                    containingAgent: agentLink().address,
+                    label,
+                    agent: null,
+                  }
                 : {
                     reference: `result-${index}`,
                     disposition: "final_return",

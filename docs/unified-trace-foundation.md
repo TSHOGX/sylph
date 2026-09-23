@@ -421,6 +421,14 @@ If the original transcript is absent, retained copied bytes remain readable with
 known original-owner reference and an explicit unavailable origin. Unknown lineage is
 not an invitation to use body hashes to merge unrelated work.
 
+A proved copied occurrence has a `ContextCopy` relation from the original history
+entry to the copied entry, with both exact source positions naming the matched versions.
+The entries keep separate identities, content observations
+and predecessor relationships. This relation establishes copy provenance, not another
+execution or admission, and does not equate the two histories. Its evidence and optional
+navigation are authorized independently of the copied entry's own retained content;
+losing the origin must not make independently retained copied bytes unreadable.
+
 A ContextCheckpoint describes known context inclusion, replacement, or summary. Exact
 context requires the observed ordered request or replacement set, settings and payload
 references; a summary alone supplies only summary coverage. Compaction changes model

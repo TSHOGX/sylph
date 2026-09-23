@@ -55,7 +55,7 @@ export interface InspectionScope {
 }
 export type InspectionRequest =
   | { kind: "agents" | "find" | "history" | "coverage" | "files" }
-  | { kind: "object"; reference: string }
+  | { kind: "object"; reference: string; agent?: string }
   | {
       kind: "agent";
       agent: string;
@@ -206,7 +206,7 @@ export function TraceInspector({
     onInspect(next);
   };
   const inspect = (next: InspectionRequest) => {
-    const scope =
+    let scope =
       inspection.kind === "object"
         ? inspection.scope
         : {
@@ -218,6 +218,15 @@ export function TraceInspector({
             anchor: null,
             offset: 0,
           };
+    if (next.kind === "object" && next.agent && next.agent !== scope.agent) {
+      scope = {
+        ...scope,
+        agent: next.agent,
+        history: null,
+        anchor: next.reference,
+        offset: 0,
+      };
+    }
     navigate(next.kind === "object" ? { ...next, scope } : next);
   };
   const back = () => {
@@ -1280,7 +1289,11 @@ function ObjectContent({
               key={relation.target}
               className={button}
               onClick={() =>
-                onInspect({ kind: "object", reference: relation.target })
+                onInspect({
+                  kind: "object",
+                  reference: relation.target,
+                  agent: relation.containingAgent,
+                })
               }
             >
               {relation.label}
@@ -1418,7 +1431,11 @@ function ObjectContent({
                 <button
                   className={button}
                   onClick={() =>
-                    onInspect({ kind: "object", reference: relation.target })
+                    onInspect({
+                      kind: "object",
+                      reference: relation.target,
+                      agent: relation.containingAgent,
+                    })
                   }
                 >
                   {relation.label}
@@ -1487,7 +1504,11 @@ function RelationPages({
             <button
               className={button}
               onClick={() =>
-                onInspect({ kind: "object", reference: relation.target })
+                onInspect({
+                  kind: "object",
+                  reference: relation.target,
+                  agent: relation.containingAgent,
+                })
               }
             >
               {relation.label}

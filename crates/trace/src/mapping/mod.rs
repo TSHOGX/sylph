@@ -24,6 +24,7 @@ pub mod server;
 pub enum ArchiveRequest {
     ContinueHistory,
     ContinueOwnerResolution,
+    ContinueCopies,
     HistoryLocator {
         issuer: Issuer,
         physical_id: String,
@@ -72,7 +73,10 @@ pub enum ArchiveRequest {
 
 impl ArchiveRequest {
     pub fn is_continuation(&self) -> bool {
-        matches!(self, Self::ContinueHistory | Self::ContinueOwnerResolution)
+        matches!(
+            self,
+            Self::ContinueHistory | Self::ContinueOwnerResolution | Self::ContinueCopies
+        )
     }
 }
 
@@ -132,6 +136,7 @@ pub struct ArchiveContext {
     pub observations: imbl::OrdSet<ObservationRef>,
     pub correlation_proofs: CorrelationProofs,
     pub owner_resolution_plans: owner_resolution::PlanIndex,
+    pub pi_copies: pi::copies::Index,
     pub source_owners: imbl::OrdMap<(SourceRef, u64), SourceOwner>,
     pub observation_sources: imbl::OrdMap<ObservationRef, SourcePosition>,
     pub claims: imbl::OrdMap<ClaimRef, Claim>,
@@ -326,6 +331,8 @@ pub struct MapOutput {
     /// correlations retain one current checkpoint witness, not a polling log.
     pub corroborating_correlations: std::collections::BTreeSet<String>,
     pub owner_resolution_plans: Vec<owner_resolution::Plan>,
+    pub pi_copy_witnesses: Vec<pi::copies::Witness>,
+    pub pi_copy_plans: Vec<pi::copies::Plan>,
     pub bound_agents: Vec<AgentRef>,
     pub source_owners: Vec<SourceOwnership>,
     pub source_definitions: Vec<RecordedSource>,
@@ -456,6 +463,82 @@ pub fn claim(input: &MapInput<'_>, scope: &AgentRef, slot: &str, build: &str, fa
         mapper_build: build.into(),
         supersedes: vec![],
         source_revision: None,
+    }
+}
+
+const REFINEMENT_REQUESTS: &str = "refinement-requests";
+
+pub(crate) fn resume_refinements(input: &MapInput<'_>) -> Option<MapOutput> {
+    let owners = owner_resolution::has_continuation(input);
+    let copies = pi::copies::has_continuation(input);
+    if !owners && !copies {
+        return None;
+    }
+    let mut output = MapOutput {
+        state: input.state.clone(),
+        continuation_state: Some(input.state.clone()),
+        ..Default::default()
+    };
+    if owners {
+        owner_resolution::refine(input, &mut output);
+    }
+    if copies {
+        pi::copies::refine(input, &mut output);
+    }
+    finish_refinements(input, &mut output);
+    Some(output)
+}
+
+pub(crate) fn finish_refinements(input: &MapInput<'_>, output: &mut MapOutput) {
+    let mut deferred: Vec<ArchiveRequest> = match input
+        .state
+        .values
+        .get(REFINEMENT_REQUESTS)
+        .map(|value| serde_json::from_value(value.clone()))
+        .transpose()
+    {
+        Ok(value) => value.unwrap_or_default(),
+        Err(_) => {
+            output.diagnostics.push(MappingDiagnostic {
+                evidence: vec![input.canonical_observation.clone()],
+                code: DiagnosticCode::DecodeFailure,
+                message: "The deferred mapping requests are invalid".into(),
+            });
+            return;
+        }
+    };
+    // History expansion belongs to its vendor mapper. Preserve its request and
+    // cursor while the independent metadata refinements finish their own pages.
+    let auxiliary = |request: &ArchiveRequest| {
+        matches!(
+            request,
+            ArchiveRequest::ContinueOwnerResolution | ArchiveRequest::ContinueCopies
+        )
+    };
+    deferred.extend(
+        output
+            .requests
+            .iter()
+            .filter(|request| !auxiliary(request))
+            .cloned(),
+    );
+    output.requests.retain(auxiliary);
+    output.state.values.remove(REFINEMENT_REQUESTS);
+    if let Some(state) = &mut output.continuation_state {
+        state.values.remove(REFINEMENT_REQUESTS);
+    }
+    if output.requests.is_empty() {
+        deferred.dedup();
+        output.requests = deferred;
+    } else if !deferred.is_empty() {
+        output
+            .continuation_state
+            .get_or_insert_with(|| input.state.clone())
+            .values
+            .insert(
+                REFINEMENT_REQUESTS.into(),
+                serde_json::to_value(deferred).unwrap(),
+            );
     }
 }
 

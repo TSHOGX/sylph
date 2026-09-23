@@ -285,6 +285,17 @@ fn normalized_relation(
             transformed: resolved_ref!(registry, MessageRevision, transformed),
             rule: rule.clone(),
         },
+        Relation::ContextCopy {
+            original,
+            copied,
+            original_position,
+            copied_position,
+        } => Relation::ContextCopy {
+            original: resolved_ref!(registry, HistoryEntry, original),
+            copied: resolved_ref!(registry, HistoryEntry, copied),
+            original_position: original_position.clone(),
+            copied_position: copied_position.clone(),
+        },
         Relation::ContextMembership {
             checkpoint,
             selection,

@@ -205,7 +205,12 @@ fork or where child-local production begins. The complete retained parent/child 
 also run through `crates/server/src/trace/worker/tests/corpus/pi_admission.rs`: parent
 inputs retain their admissions, copied child text stays byte-exact without creating
 child deliveries, and independent child retention survives original-scope deletion and
-rebuild. This is a guard against invented admission, not a copied-membership certificate.
+rebuild. The same replay now supplies native inventory and checks `ContextCopy` matches at
+exact original/copied source positions. Early/late inventory and parent/child ordering
+produce identical claims, while deleting the origin removes only the optional source
+links. A separate held-continuation test verifies persisted matching indexes and same-cut
+restart recovery beyond one work budget. These establish positive native record copies,
+not the local-production status of unmatched entries or an ultimate actor for nested copies.
 
 Sanitization preserves equality relationships, key scope, missing-versus-empty values,
 ordering and branch structure. Replacing two distinct IDs with one placeholder would

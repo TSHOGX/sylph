@@ -149,6 +149,21 @@ can remove label nodes and reconnect the copied path. Therefore equal entry IDs 
 do not prove identical predecessor membership across sessions. Retain the fork source,
 captured membership, and any rewritten edge relationships explicitly.
 
+Native copy matching requires the recorded fork locator, its exact source incarnation
+and native identity certificate, and an entry with the same native ID and matching
+record content in that source. The comparison excludes only predecessor fields and,
+for a compaction entry, `firstKeptEntryId`, which the documented branch writer may
+rewrite when removing labels. All other fields, including unknown fields, participate.
+A compact content fingerprint indexes this comparison; it is never an entry identity
+or a substitute for the source/ID proofs. Different IDs, sources, generations or content
+cannot match merely because some text is equal.
+Each independent witness produces a separately evidenced `ContextCopy` relation.
+Late records and locator certificates resolve through indexed bounded continuations,
+without rescanning unrelated histories or retaining another copy of the vendor body.
+An unmatched entry remains unresolved: absence from a captured prefix cannot establish
+a child-local suffix. Copy relations do not rewrite the child's content or predecessor,
+and identifying a copied entry does not itself prove the original actor of nested copies.
+
 ## Messages, provenance, and delivery
 
 | Source shape | Message or payload meaning |

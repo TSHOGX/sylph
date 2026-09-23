@@ -193,6 +193,7 @@ struct WorkerState {
     correlations: imbl::OrdMap<String, AnyObjectRef>,
     correlation_proofs: mapping::CorrelationProofs,
     owner_resolution_plans: mapping::owner_resolution::PlanIndex,
+    pi_copies: mapping::pi::copies::Index,
     pending: imbl::OrdMap<String, Arc<PendingMapping>>,
     source_replays: imbl::OrdMap<String, SourceReplayCursor>,
     available_evidence: imbl::OrdSet<ObservationRef>,
@@ -1053,6 +1054,16 @@ impl ProjectionWorker {
                     &mut state.owner_resolution_plans,
                     serde_json::from_value(value)?,
                 );
+            } else if key.starts_with("pi_copy_source:") {
+                state
+                    .pi_copies
+                    .retain_source(serde_json::from_value(value)?);
+            } else if key.starts_with("pi_copy_witness:") {
+                state
+                    .pi_copies
+                    .retain_witness(serde_json::from_value(value)?);
+            } else if key.starts_with("pi_copy_plan:") {
+                state.pi_copies.retain_plan(serde_json::from_value(value)?);
             } else if let Some(key) = key.strip_prefix("source_replay:") {
                 state
                     .source_replays
@@ -1295,7 +1306,33 @@ impl ProjectionWorker {
             mapping::owner_resolution::retain_plan(&mut unit.next.owner_resolution_plans, plan);
         }
 
+        for witness in output.pi_copy_witnesses {
+            unit.batch.mapper_states.insert(
+                format!("pi_copy_witness:{}", witness.base.encode()),
+                serde_json::to_value(&witness)?,
+            );
+            unit.next.pi_copies.retain_witness(witness);
+        }
+        for plan in output.pi_copy_plans {
+            unit.batch.mapper_states.insert(
+                format!("pi_copy_plan:{}", plan.base.encode()),
+                serde_json::to_value(&plan)?,
+            );
+            unit.next.pi_copies.retain_plan(plan);
+        }
         for definition in output.source_definitions {
+            if definition.definition.owner.anchor_session().agent.as_str() == "pi"
+                && matches!(
+                    definition.definition.basis,
+                    SourceOwnerBasis::NativeIdentity { .. }
+                )
+            {
+                unit.batch.mapper_states.insert(
+                    format!("pi_copy_source:{}", definition.observation.encode()),
+                    serde_json::to_value(&definition)?,
+                );
+                unit.next.pi_copies.retain_source(definition.clone());
+            }
             let key = (
                 &definition.definition.source,
                 definition.definition.generation,
@@ -1807,6 +1844,7 @@ fn archive_context(state: &mut WorkerState) -> ArchiveContext {
         correlations: state.correlations.clone(),
         correlation_proofs: state.correlation_proofs.clone(),
         owner_resolution_plans: state.owner_resolution_plans.clone(),
+        pi_copies: state.pi_copies.clone(),
         claims: state.reducer.claim_snapshot(),
         ..ArchiveContext::default()
     };
@@ -1890,7 +1928,7 @@ fn has_ready_continuations(
 fn requests_may_resolve(requests: &[ArchiveRequest], state: &WorkerState) -> bool {
     requests.iter().any(|request|match request {
         ArchiveRequest::CapturedPayload {parent,slot}=>state.captured_payloads.contains_key(&mapping::captured_payload_key(parent,slot)),
-        ArchiveRequest::ContinueHistory | ArchiveRequest::ContinueOwnerResolution=>true,
+        ArchiveRequest::ContinueHistory | ArchiveRequest::ContinueOwnerResolution | ArchiveRequest::ContinueCopies=>true,
         ArchiveRequest::HistoryLocator {issuer,physical_id}=>state.source_definitions.values().any(|source|&source.definition.source.issuer==issuer&&mapping::codex::history::physical_id(&source.definition.locator)==Some(physical_id.as_str())),
         ArchiveRequest::HistorySource {source,generation}=>state.history_records.contains_key(&(source.clone(), *generation)),
         ArchiveRequest::AttachmentTarget {parent,slot,locator}=>state.correlations.contains_key(&mapping::attachment_key(parent,slot,locator)),

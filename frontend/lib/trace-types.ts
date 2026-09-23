@@ -414,6 +414,7 @@ export interface ResultOccurrence {
 }
 export interface TraceRelation {
   target: TraceAddress;
+  containingAgent: string;
   label: string;
   agent: AgentLink | null;
 }

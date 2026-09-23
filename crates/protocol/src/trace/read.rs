@@ -528,6 +528,7 @@ pub struct ReadResultOccurrence {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ReadRelation {
     pub target: TraceAddress,
+    pub containing_agent: AgentAddress,
     pub label: String,
     pub agent: Option<AgentLink>,
 }

@@ -142,6 +142,7 @@ pub enum RelationFilter {
     Resource,
     HistoryPredecessor,
     ContextLineage,
+    ContextCopy,
     ContextMembership,
     Representation,
     Evidence,

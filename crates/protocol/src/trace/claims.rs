@@ -44,6 +44,12 @@ pub enum Relation {
         checkpoint: Option<CheckpointRef>,
         original_owner: OwnerRef,
     },
+    ContextCopy {
+        original: EntryRef,
+        copied: EntryRef,
+        original_position: SourcePosition,
+        copied_position: SourcePosition,
+    },
     ContextMembership {
         checkpoint: CheckpointRef,
         selection: SelectionRef,
@@ -461,6 +467,12 @@ impl Relation {
                 }
                 refs
             }
+            Self::ContextCopy {
+                original, copied, ..
+            } => vec![
+                AnyObjectRef::HistoryEntry(copied.clone()),
+                AnyObjectRef::HistoryEntry(original.clone()),
+            ],
             Self::Representation {
                 original,
                 transformed,
