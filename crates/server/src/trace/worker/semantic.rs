@@ -332,7 +332,7 @@ mod tests {
                     operation: operation("b"),
                     recipient: None,
                     disposition: ResultDisposition::FinalReturn,
-                    representation: Representation::CallerResult,
+                    representation: ResultRepresentation::CallerResult,
                     payload: None,
                     delivery: None,
                 }),

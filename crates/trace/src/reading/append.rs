@@ -160,6 +160,9 @@ pub fn project_independent_append(
     projected
         .object_relations
         .retain(|reference, _| rendered_objects.contains(reference));
+    projected
+        .result_occurrences
+        .retain(|reference, _| rendered_objects.contains(reference));
     Some(AppendProjection {
         projection: projected,
         index: next_index,

@@ -28,15 +28,14 @@ import {
   agentUrl,
   availabilityLabel,
   executionLabel,
-  representationLabel,
   type ObjectDetail,
   type ReaderBootstrap,
-  type Representation,
   type TraceView,
 } from "@/lib/trace-types";
 import { describeCount } from "@/lib/trace-window";
 import { ResourceHistory, RevisionPayloads } from "./trace-resource-history";
 import { TracePayload } from "./trace-payload";
+import { OperationResults } from "./trace-operation-results";
 import { TraceEvidence } from "./trace-evidence";
 import { ArtifactsPane } from "./artifacts-pane";
 const Companion = dynamic(() =>
@@ -1158,15 +1157,6 @@ function ObjectContent({
 }) {
   const t = useT();
   const content = detail.content;
-  const choices =
-    content.kind === "operation"
-      ? [...new Set(content.results.map((result) => result.representation))]
-      : [];
-  const [selection, setSelection] = useState<Representation | null>(() =>
-    choices.includes("caller_result") ? "caller_result" : (choices[0] ?? null),
-  );
-  const [compare, setCompare] = useState(false);
-  const [compared, setCompared] = useState<Representation[]>([]);
   return (
     <div className="space-y-4">
       <header>
@@ -1189,101 +1179,30 @@ function ObjectContent({
       {content.kind === "operation" ? (
         <>
           <p className="text-xs text-ink-muted">{content.category.kind}</p>
-          <h4 className="font-medium">{t("trace.input")}</h4>
+          {content.input.length > 0 && (
+            <h4 className="font-medium">{t("trace.input")}</h4>
+          )}
           {content.input.map((payload, index) => (
             <TracePayload
               key={index}
               access={payload}
               view={detail.view}
               maximum={maximum}
+              label={t("trace.input")}
             />
           ))}
-          <label className="block text-sm">
-            {t("trace.representation")}
-            <select
-              aria-label={t("trace.representation")}
-              className="ml-2 min-h-11 max-w-full rounded border border-line bg-canvas px-2"
-              value={selection ?? ""}
-              onChange={(event) =>
-                setSelection(event.target.value as Representation)
-              }
-            >
-              {choices.map((choice) => (
-                <option key={choice} value={choice}>
-                  {representationLabel(choice, t)}
-                </option>
-              ))}
-            </select>
-          </label>
-          {choices.length > 1 && (
-            <label className="flex min-h-11 items-center gap-2 text-sm">
-              <input
-                type="checkbox"
-                checked={compare}
-                onChange={(event) => {
-                  setCompare(event.target.checked);
-                  setCompared(selection ? [selection] : []);
-                }}
-              />
-              {t("trace.compare")}
-            </label>
-          )}
-          {compare && (
-            <fieldset>
-              <legend className="text-sm">
-                {t("trace.chooseRepresentations")}
-              </legend>
-              {choices.map((choice) => (
-                <label
-                  key={choice}
-                  className="flex min-h-11 items-center gap-2 text-sm"
-                >
-                  <input
-                    type="checkbox"
-                    checked={compared.includes(choice)}
-                    onChange={(event) =>
-                      setCompared((previous) =>
-                        event.target.checked
-                          ? [...previous, choice]
-                          : previous.filter((value) => value !== choice),
-                      )
-                    }
-                  />
-                  {representationLabel(choice, t)}
-                </label>
-              ))}
-            </fieldset>
-          )}
-          {content.results
-            .filter((result) =>
-              compare
-                ? compared.includes(result.representation)
-                : result.representation === selection,
-            )
-            .map((result) => (
-              <section
-                key={result.reference}
-                className="space-y-2 rounded border border-line p-3"
-              >
-                <h4 className="font-medium">
-                  {result.label} · {result.disposition.replaceAll("_", " ")}
-                </h4>
-                {result.availability.kind !== "available" && (
-                  <p className="text-sm">{result.availability.reason}</p>
-                )}
-                {result.payloads.map((payload, index) => (
-                  <TracePayload
-                    key={index}
-                    access={payload}
-                    view={detail.view}
-                    maximum={maximum}
-                  />
-                ))}
-              </section>
-            ))}
-          {!content.results.length && (
-            <p className="text-sm">{t("trace.noResults")}</p>
-          )}
+          <OperationResults
+            key={traceCacheKey(detail.view, [
+              detail.reference,
+              history,
+              "results",
+            ])}
+            reference={detail.reference}
+            history={history}
+            view={detail.view}
+            catalogue={content.resultRepresentations}
+            maximum={maximum}
+          />
           {content.resources.map((relation) => (
             <button
               key={relation.target}
@@ -1299,15 +1218,6 @@ function ObjectContent({
               {relation.label}
             </button>
           ))}
-          {content.resultsCursor && (
-            <ResultPages
-              reference={detail.reference}
-              history={history}
-              cursor={content.resultsCursor}
-              view={detail.view}
-              maximum={maximum}
-            />
-          )}
           {content.resourcesCursor && (
             <RelationPages
               reference={detail.reference}
@@ -1524,64 +1434,6 @@ function RelationPages({
         {result.error
           ? t("trace.queryRetry")
           : `${t("trace.moreSearch")} · ${kind}`}
-      </button>
-    </div>
-  );
-}
-
-function ResultPages({
-  reference,
-  history,
-  cursor,
-  view,
-  maximum,
-}: {
-  reference: string;
-  history: string | null;
-  cursor: string;
-  view: TraceView;
-  maximum: number;
-}) {
-  const t = useT();
-  const result = useTracePage(
-    traceCacheKey(view, [reference, history, "results"]),
-    cursor,
-    (next, signal) => traceAPI.results(reference, view, history, next, signal),
-  );
-  return (
-    <div>
-      {result.error && <p role="alert">{result.error.message}</p>}
-      {result.data?.items.map((occurrence) => (
-        <section
-          key={occurrence.reference}
-          className="my-2 rounded border border-line p-3"
-        >
-          <h4>
-            {occurrence.label} ·{" "}
-            {representationLabel(occurrence.representation, t)}
-          </h4>
-          <p className="text-xs">
-            {occurrence.disposition.replaceAll("_", " ")}
-          </p>
-          {occurrence.availability.kind !== "available" && (
-            <p>{occurrence.availability.reason}</p>
-          )}
-          {occurrence.payloads.map((payload, index) => (
-            <TracePayload
-              key={index}
-              access={payload}
-              view={view}
-              maximum={maximum}
-            />
-          ))}
-        </section>
-      ))}
-      <button
-        className={button}
-        disabled={result.disabled}
-        onClick={result.load}
-      >
-        {result.error ? t("trace.queryRetry") : t("trace.moreResults")}
       </button>
     </div>
   );

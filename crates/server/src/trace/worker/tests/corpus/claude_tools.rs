@@ -172,14 +172,14 @@ async fn expected(
             .unwrap();
         if result.payload.as_ref() == sidecar_payload {
             assert_eq!(bytes, SIDECAR_BYTES);
-            assert_eq!(result.representation, Representation::Runtime);
+            assert_eq!(result.representation, ResultRepresentation::Runtime);
             sidecars += 1;
             continue;
         }
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         match result.representation {
-            Representation::Runtime => structured.push(value),
-            Representation::CallerResult => callers.push(value),
+            ResultRepresentation::Runtime => structured.push(value),
+            ResultRepresentation::CallerResult => callers.push(value),
             other => panic!("unexpected tool representation {other:?}"),
         }
     }
@@ -295,7 +295,7 @@ async fn replay(
                     .values()
                     .filter_map(|object| match object.declaration.known() {
                         Some(TraceObject::Result(result))
-                            if result.representation == Representation::Runtime
+                            if result.representation == ResultRepresentation::Runtime
                                 && result.payload.as_ref() != sidecar_payload.as_ref() =>
                         {
                             Some(result)

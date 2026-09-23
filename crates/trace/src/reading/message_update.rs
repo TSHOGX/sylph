@@ -319,6 +319,9 @@ fn render_region(
         .object_relations
         .retain(|reference, _| rendered.contains(reference));
     projection
+        .result_occurrences
+        .retain(|reference, _| rendered.contains(reference));
+    projection
 }
 
 #[cfg(test)]

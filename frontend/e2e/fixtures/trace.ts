@@ -10,6 +10,9 @@ import type {
   PayloadAccess,
   ReaderBootstrap,
   ReadingUnit,
+  ResultRepresentation,
+  ResultOccurrence,
+  ResultRepresentationEntry,
   TraceLimits,
   TracePage,
   TraceView,
@@ -45,6 +48,21 @@ export const agentLink = (
   address = MAIN_AGENT,
   name: string | null = "Main agent",
 ) => ({ address, name, vendor: "codex", identitySuffix: address.slice(-8) });
+export function resultCatalogue(
+  available: ResultRepresentation[] = [],
+): ResultRepresentationEntry[] {
+  const representations: ResultRepresentation[] = [
+    "runtime",
+    "caller_result",
+    "conversation",
+  ];
+  return representations.map((representation) => ({
+    representation,
+    state: {
+      kind: available.includes(representation) ? "available" : "unobserved",
+    },
+  }));
+}
 export const unavailableExecution = {
   reference: null,
   state: { kind: "unavailable" as const },
@@ -198,6 +216,7 @@ export async function installTraceFixture(page: Page, rows = [message(0)]) {
       reason: "No independent control route",
     } as ControlAvailability,
     details: new Map<string, ObjectDetail>(),
+    results: new Map<string, ResultOccurrence[]>(),
     bodies: new Map<string, string>(),
     commands: [] as CommandRequest[],
     requests: [] as PendingRequest[],
@@ -322,6 +341,41 @@ export async function installTraceFixture(page: Page, rows = [message(0)]) {
           view,
         ),
       });
+    if (
+      resource === "objects" &&
+      action === "relations" &&
+      q.get("kind") === "results"
+    ) {
+      const representation = q.get("representation");
+      if (!representation)
+        return route.fulfill({
+          status: 400,
+          json: {
+            error: {
+              code: "invalid_cursor",
+              message: "ResultRepresentation required",
+            },
+          },
+        });
+      const results = (state.results.get(id) ?? []).filter(
+        (result) => result.representation === representation,
+      );
+      const limit = Math.min(
+        Number(q.get("limit") ?? 16),
+        traceLimits.maxItems,
+      );
+      const start = q.has("before")
+        ? Math.max(0, Number(q.get("before")) - limit)
+        : Number(q.get("after") ?? 0);
+      return route.fulfill({
+        json: tracePage(
+          results.slice(start, start + limit),
+          view,
+          start,
+          results.length,
+        ),
+      });
+    }
     if (resource === "objects") {
       const detail = state.details.get(id);
       if (detail) return route.fulfill({ json: { ...detail, view } });
@@ -355,7 +409,9 @@ export async function installTraceFixture(page: Page, rows = [message(0)]) {
         status: 206,
         headers: {
           "Content-Type": "text/plain",
-          "Content-Range": `bytes ${start}-${end - 1}/${bytes.length}`,
+          ...(end > start
+            ? { "Content-Range": `bytes ${start}-${end - 1}/${bytes.length}` }
+            : {}),
         },
         body: bytes.subarray(start, end),
       });

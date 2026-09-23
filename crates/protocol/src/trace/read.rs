@@ -518,10 +518,43 @@ pub struct HistoryChoice {
 pub struct ReadResultOccurrence {
     pub reference: TraceAddress,
     pub disposition: ResultDisposition,
-    pub representation: Representation,
+    pub representation: ResultRepresentation,
     pub label: String,
     pub payloads: Vec<PayloadAccess>,
     pub availability: ReadAvailability,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadResultProbePhase {
+    Payload,
+    Occurrence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum ReadResultRepresentationState {
+    Available,
+    Unavailable {
+        reason: String,
+    },
+    Unobserved,
+    Pending {
+        phase: ReadResultProbePhase,
+        cursor: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReadResultRepresentation {
+    pub representation: ResultRepresentation,
+    pub state: ReadResultRepresentationState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -593,8 +626,7 @@ pub enum ReadObjectContent {
     Operation {
         category: OperationCategory,
         input: Vec<PayloadAccess>,
-        results: Vec<ReadResultOccurrence>,
-        results_cursor: Option<String>,
+        result_representations: Vec<ReadResultRepresentation>,
         resources: Vec<ReadRelation>,
         resources_cursor: Option<String>,
     },

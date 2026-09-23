@@ -967,7 +967,7 @@ impl Context<'_, '_> {
             owner,
             &operation,
             payload,
-            Representation::CallerResult,
+            ResultRepresentation::CallerResult,
             slot,
         );
         if let Some(structured) = structured {
@@ -976,7 +976,7 @@ impl Context<'_, '_> {
                 owner,
                 &operation,
                 payload,
-                Representation::Runtime,
+                ResultRepresentation::Runtime,
                 &format!("{slot}/structured"),
             );
         }
@@ -1031,7 +1031,7 @@ impl Context<'_, '_> {
                                 owner,
                                 &operation,
                                 payload,
-                                Representation::Runtime,
+                                ResultRepresentation::Runtime,
                                 &format!("{slot}/{field}"),
                             );
                         }
@@ -1083,7 +1083,7 @@ impl Context<'_, '_> {
         owner: &AgentRef,
         operation: &OperationRef,
         payload: PayloadRef,
-        representation: Representation,
+        representation: ResultRepresentation,
         slot: &str,
     ) {
         self.object(

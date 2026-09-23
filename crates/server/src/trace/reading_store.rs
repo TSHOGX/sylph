@@ -179,6 +179,35 @@ struct Cursor {
     filter: FilterIdentity,
 }
 
+pub(crate) const RESULT_REPRESENTATIONS: [ResultRepresentation; 3] = [
+    ResultRepresentation::Runtime,
+    ResultRepresentation::CallerResult,
+    ResultRepresentation::Conversation,
+];
+
+/// Result cursors use a distinct indexed collection for every representation.
+/// The payload collection certifies readable bytes without scanning missing results.
+pub(crate) fn result_collection(
+    reference: &AnyObjectRef,
+    representation: ResultRepresentation,
+    payload_only: bool,
+) -> String {
+    let representation = match representation {
+        ResultRepresentation::Runtime => "runtime",
+        ResultRepresentation::CallerResult => "caller_result",
+        ResultRepresentation::Conversation => "conversation",
+    };
+    format!(
+        "object-results:{}:{representation}:{}",
+        reference.encode(),
+        if payload_only {
+            "payload"
+        } else {
+            "occurrence"
+        }
+    )
+}
+
 pub fn read_scope(agent: &AgentRef, selection: Option<&SelectionRef>, collection: &str) -> String {
     serde_json::to_string(&(collection, agent, selection)).expect("typed read scope")
 }

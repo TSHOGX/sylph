@@ -152,7 +152,7 @@ impl Context<'_, '_> {
                     owner,
                     work.operation.clone(),
                     payload,
-                    Representation::Runtime,
+                    ResultRepresentation::Runtime,
                     if kind == "tool_execution_update" {
                         ResultDisposition::Progress
                     } else {

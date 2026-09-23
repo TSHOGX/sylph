@@ -367,6 +367,17 @@ selection never falls back silently while preserving the old label. Equal conten
 share a payload, but provenance and occurrence remain distinct. `Compare representations`
 fetches only explicitly selected bodies and names truncation or transformation evidence.
 
+Representation choices come from the authorized result catalogue at the retained view,
+not from whichever result occurrences fit in an initial page. Each representation has
+its own bounded occurrence pages and cursor scope. Switching representations unmounts
+the preceding page and its body controls; comparison mounts only the explicitly chosen
+representations. Missing result bytes remain different from no observed result. An
+unfinished availability probe is reported as pending with an explicit continuation,
+never as absence. With no observed results and no pending probe, show the empty-result
+explanation rather than an empty chooser. Initial selection prefers an established
+available caller result, then another established available representation; a user's
+explicit selection is not silently replaced by later catalogue discovery.
+
 Progress, yield, and final results are ordered occurrences, not updates overwriting a
 single result box. An operation that yields a resource handle links to the continuing
 resource. A later poll or stdin write has its own return under that resource's operation

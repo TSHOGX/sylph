@@ -15,6 +15,8 @@ import type {
   ReaderBootstrap,
   ReadingUnit,
   ResultOccurrence,
+  ResultRepresentationEntry,
+  ResultRepresentation,
   ResourceObservation,
   SearchHit,
   TracePage,
@@ -182,11 +184,26 @@ export const traceAPI = {
     reference: string,
     view: TraceView,
     history: string | null,
-    cursor: string,
+    representation: ResultRepresentation,
+    cursor: string | null,
+    direction: "before" | "after",
     signal?: AbortSignal,
   ) =>
     fetchAPI<TracePage<ResultOccurrence>>(
-      `${base}/objects/${segment(reference)}/relations${query({ at_snapshot: view.token, selection: history, kind: "results", after: cursor })}`,
+      `${base}/objects/${segment(reference)}/relations${query({ at_snapshot: view.token, selection: history, kind: "results", representation, limit: 16, [direction]: cursor })}`,
+      { signal },
+    ),
+  resultRepresentation: (
+    reference: string,
+    view: TraceView,
+    history: string | null,
+    representation: ResultRepresentation,
+    phase: "payload" | "occurrence",
+    cursor: string,
+    signal?: AbortSignal,
+  ) =>
+    fetchAPI<ResultRepresentationEntry>(
+      `${base}/objects/${segment(reference)}/relations${query({ at_snapshot: view.token, selection: history, kind: "result_representations", representation, result_phase: phase, after: cursor })}`,
       { signal },
     ),
   observations: (

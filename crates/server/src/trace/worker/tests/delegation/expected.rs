@@ -387,7 +387,7 @@ pub(super) async fn assert_expected(
                 panic!("runtime result identity preserves the original captured frame");
             };
             assert_eq!(result.operation, command.clone());
-            assert_eq!(result.representation, Representation::Runtime);
+            assert_eq!(result.representation, ResultRepresentation::Runtime);
             assert_eq!(result.disposition, ResultDisposition::FinalReturn);
             assert!(result.recipient.is_none() && result.delivery.is_none());
             assert_eq!(

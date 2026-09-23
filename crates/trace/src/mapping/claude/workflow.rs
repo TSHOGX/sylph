@@ -153,7 +153,7 @@ impl Context<'_, '_> {
             &root,
             &creator,
             payload.clone(),
-            Representation::Runtime,
+            ResultRepresentation::Runtime,
             "claude/workflow/manifest",
         );
         self.workflow_state(
@@ -567,7 +567,7 @@ impl Context<'_, '_> {
                 &root,
                 &operation,
                 payload.clone(),
-                Representation::Runtime,
+                ResultRepresentation::Runtime,
                 "claude/workflow/journal-result",
             );
             self.add(

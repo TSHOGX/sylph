@@ -221,7 +221,7 @@ fn immediate_tool_return_is_a_caller_representation_without_conversation_admissi
             _ => None,
         })
         .unwrap();
-    assert_eq!(result.representation, Representation::CallerResult);
+    assert_eq!(result.representation, ResultRepresentation::CallerResult);
     assert!(result.delivery.is_none());
     assert!(output
         .payloads
@@ -399,7 +399,7 @@ fn initial_code_cell_response_remains_runtime_bytes_before_caller_formatting() {
             _ => None,
         })
         .expect("initial runtime response must be retained");
-    assert_eq!(result.representation, Representation::Runtime);
+    assert_eq!(result.representation, ResultRepresentation::Runtime);
     assert_eq!(result.disposition, ResultDisposition::Yield);
     let caller = map(
         3,
@@ -410,7 +410,7 @@ fn initial_code_cell_response_remains_runtime_bytes_before_caller_formatting() {
             json!({"type":"code_mode_response","value":"caller formatting"}),
         )),
     );
-    assert!(caller.claims.iter().any(|claim|matches!(&claim.fact,Fact::Declare {object:TraceObject::Result(result)} if result.representation==Representation::CallerResult)));
+    assert!(caller.claims.iter().any(|claim|matches!(&claim.fact,Fact::Declare {object:TraceObject::Result(result)} if result.representation==ResultRepresentation::CallerResult)));
 }
 
 

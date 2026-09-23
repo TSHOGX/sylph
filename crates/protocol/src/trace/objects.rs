@@ -163,7 +163,7 @@ pub struct ContentPart {
     pub encoding: PayloadEncoding,
 }
 
-/// The three representations carry different visibility claims even for equal bytes.
+/// Context in which immutable payload bytes were observed or submitted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Representation {
@@ -171,6 +171,25 @@ pub enum Representation {
     CallerResult,
     Conversation,
     Submitted,
+}
+
+/// Result occurrences have output visibility; submitted input is a message revision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResultRepresentation {
+    Runtime,
+    CallerResult,
+    Conversation,
+}
+
+impl From<ResultRepresentation> for Representation {
+    fn from(value: ResultRepresentation) -> Self {
+        match value {
+            ResultRepresentation::Runtime => Self::Runtime,
+            ResultRepresentation::CallerResult => Self::CallerResult,
+            ResultRepresentation::Conversation => Self::Conversation,
+        }
+    }
 }
 
 /// A source prefix is explicit; absence does not imply a snapshot equals prior deltas.
@@ -413,7 +432,7 @@ pub struct ResultOccurrence {
     pub operation: OperationRef,
     pub recipient: Option<Recipient>,
     pub disposition: ResultDisposition,
-    pub representation: Representation,
+    pub representation: ResultRepresentation,
     pub payload: Option<PayloadRef>,
     pub delivery: Option<DeliveryRef>,
 }

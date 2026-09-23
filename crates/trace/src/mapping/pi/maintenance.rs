@@ -66,7 +66,7 @@ impl Context<'_, '_> {
             owner,
             work.operation.clone(),
             payload.clone(),
-            Representation::Runtime,
+            ResultRepresentation::Runtime,
             ResultDisposition::FinalReturn,
             slot,
         );
@@ -139,7 +139,7 @@ impl Context<'_, '_> {
                     owner,
                     work.operation,
                     payload,
-                    Representation::Runtime,
+                    ResultRepresentation::Runtime,
                     ResultDisposition::Progress,
                     "pi/retry-attempt",
                 );

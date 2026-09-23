@@ -720,16 +720,46 @@ fn rows(
             )?;
         }
     }
+    for (reference, results) in &projection.result_occurrences {
+        for (index, result) in results.iter().enumerate() {
+            let readable = result.payloads.iter().any(|payload| {
+                matches!(
+                    payload.availability,
+                    ReadAvailability::Available
+                        | ReadAvailability::Partial { .. }
+                        | ReadAvailability::Opaque { .. }
+                ) && (payload.total_bytes == Some(0) || !payload.available_ranges.is_empty())
+            });
+            for payload_only in [false, true]
+                .into_iter()
+                .filter(|payload_only| !payload_only || readable)
+            {
+                insert(
+                    read_scope(
+                        reference.scope(),
+                        None,
+                        &crate::trace::reading_store::result_collection(
+                            reference,
+                            result.representation,
+                            payload_only,
+                        ),
+                    ),
+                    result.reference.as_str().into(),
+                    Some(result.reference.clone()),
+                    index,
+                    serde_json::to_value(result)?,
+                    reference,
+                    vec![],
+                    true,
+                )?;
+            }
+        }
+    }
     for (reference, detail) in &projection.objects {
         let mut summary = detail.clone();
         summary.relations.clear();
         match &mut summary.content {
-            ReadObjectContent::Operation {
-                results, resources, ..
-            } => {
-                results.clear();
-                resources.clear();
-            }
+            ReadObjectContent::Operation { resources, .. } => resources.clear(),
             ReadObjectContent::Resource { observations, .. } => observations.clear(),
             ReadObjectContent::Revision { payloads, .. } => payloads.clear(),
             ReadObjectContent::Context { memberships, .. } => memberships.clear(),
@@ -751,25 +781,7 @@ fn rows(
             false,
         )?;
         match &detail.content {
-            ReadObjectContent::Operation {
-                results, resources, ..
-            } => {
-                for (index, result) in results.iter().enumerate() {
-                    insert(
-                        read_scope(
-                            reference.scope(),
-                            None,
-                            &format!("object-results:{}", reference.encode()),
-                        ),
-                        result.reference.as_str().into(),
-                        Some(result.reference.clone()),
-                        index,
-                        serde_json::to_value(result)?,
-                        reference,
-                        vec![],
-                        true,
-                    )?;
-                }
+            ReadObjectContent::Operation { resources, .. } => {
                 for (index, resource) in resources.iter().enumerate() {
                     insert(
                         read_scope(
@@ -900,15 +912,28 @@ fn rows(
     let mut selected_rows = Vec::new();
     for (scope, references) in &projection.selected_objects {
         for reference in references {
-            for kind in [
+            let mut collections: Vec<_> = [
                 "relations",
-                "results",
                 "resources",
                 "memberships",
                 "observations",
                 "payloads",
-            ] {
-                let collection = format!("object-{kind}:{}", reference.encode());
+            ]
+            .into_iter()
+            .map(|kind| format!("object-{kind}:{}", reference.encode()))
+            .collect();
+            if matches!(reference, AnyObjectRef::Operation(_)) {
+                for representation in crate::trace::reading_store::RESULT_REPRESENTATIONS {
+                    for payload_only in [false, true] {
+                        collections.push(crate::trace::reading_store::result_collection(
+                            reference,
+                            representation,
+                            payload_only,
+                        ));
+                    }
+                }
+            }
+            for collection in collections {
                 let archive_scope = read_scope(reference.scope(), None, &collection);
                 for ((key, _), row) in rows
                     .range((archive_scope.clone(), String::new())..)
@@ -1009,16 +1034,18 @@ fn anchors(
             }
         }
     }
+    for results in projection.result_occurrences.values() {
+        for result in results {
+            for payload in &result.payloads {
+                add(payload)?;
+            }
+        }
+    }
     for object in projection.objects.values() {
         match &object.content {
-            ReadObjectContent::Operation { input, results, .. } => {
+            ReadObjectContent::Operation { input, .. } => {
                 for payload in input {
                     add(payload)?;
-                }
-                for result in results {
-                    for payload in &result.payloads {
-                        add(payload)?;
-                    }
                 }
             }
             ReadObjectContent::Resource { observations, .. } => {

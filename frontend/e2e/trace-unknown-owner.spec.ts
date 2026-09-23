@@ -3,6 +3,7 @@ import type { ReadingUnit } from "../lib/trace-types";
 import {
   installTraceFixture,
   openTrace,
+  resultCatalogue,
   payload,
   traceView,
   unavailableExecution,
@@ -55,8 +56,7 @@ for (const width of [1280, 390]) {
             availableRanges: [{ start: 0, endExclusive: body.length }],
           },
         ],
-        results: [],
-        resultsCursor: null,
+        resultRepresentations: resultCatalogue(),
         resources: [],
         resourcesCursor: null,
       },
@@ -92,9 +92,10 @@ for (const width of [1280, 390]) {
     await expect(
       inspector.getByText("Execution status unavailable", { exact: true }),
     ).toBeVisible();
-    await inspector
-      .getByRole("button", { name: /^Read runtime output$/i })
-      .click();
+    await expect(
+      inspector.getByRole("combobox", { name: "Representation", exact: true }),
+    ).toHaveCount(0);
+    await inspector.getByRole("button", { name: /^Read input$/i }).click();
     await expect(inspector.getByText(body, { exact: true })).toBeVisible();
     await testInfo.attach(`unknown-owner-input-${width}`, {
       body: await page.screenshot(),

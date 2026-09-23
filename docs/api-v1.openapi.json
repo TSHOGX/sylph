@@ -2863,7 +2863,7 @@
     },
     "/api/v1/trace/objects/{object}/relations": {
       "get": {
-        "summary": "GET /api/v1/trace/objects/{object}/relations",
+        "summary": "Read bounded typed object collections or result availability",
         "parameters": [
           {
             "name": "object",
@@ -2878,7 +2878,8 @@
             "in": "query",
             "schema": {
               "type": "string"
-            }
+            },
+            "description": "Required for result_representations; names the view containing its authenticated continuation."
           },
           {
             "name": "before",
@@ -2920,8 +2921,42 @@
                 "resources",
                 "memberships",
                 "observations",
-                "payloads"
+                "payloads",
+                "result_representations"
               ]
+            }
+          },
+          {
+            "name": "representation",
+            "in": "query",
+            "description": "Required for results and result_representations. Cursors cannot cross representations.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "runtime",
+                "caller_result",
+                "conversation"
+              ]
+            }
+          },
+          {
+            "name": "result_phase",
+            "in": "query",
+            "description": "Required with after when continuing a result_representations probe; omitted for the initial probe.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "payload",
+                "occurrence"
+              ]
+            }
+          },
+          {
+            "name": "selection",
+            "in": "query",
+            "description": "Inspect objects in this retained history selection; cursors cannot cross selections.",
+            "schema": {
+              "type": "string"
             }
           }
         ],
@@ -2931,7 +2966,14 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ReadPage"
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/ReadPage"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ReadResultRepresentation"
+                    }
+                  ]
                 }
               }
             }
@@ -2946,7 +2988,8 @@
               }
             }
           }
-        }
+        },
+        "description": "Result pages require a representation. Result catalogue continuations use kind=result_representations and bind both result_phase and after to the retained view and current authorization."
       }
     },
     "/api/v1/trace/objects/{object}/parts": {
@@ -4880,6 +4923,90 @@
         "required": [
           "requests"
         ]
+      },
+      "ReadResultRepresentation": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "representation",
+          "state"
+        ],
+        "properties": {
+          "representation": {
+            "type": "string",
+            "enum": [
+              "runtime",
+              "caller_result",
+              "conversation"
+            ]
+          },
+          "state": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "kind"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "available",
+                      "unobserved"
+                    ]
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "kind",
+                  "reason"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "unavailable"
+                    ]
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "kind",
+                  "phase",
+                  "cursor"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "pending"
+                    ]
+                  },
+                  "phase": {
+                    "type": "string",
+                    "enum": [
+                      "payload",
+                      "occurrence"
+                    ]
+                  },
+                  "cursor": {
+                    "type": "string"
+                  }
+                }
+              }
+            ]
+          }
+        }
       }
     }
   }

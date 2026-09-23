@@ -31,12 +31,14 @@ export function TracePayload({
   maximum,
   preview = "",
   truncated = true,
+  label,
 }: {
   access: PayloadAccess;
   view: TraceView;
   maximum: number;
   preview?: string;
   truncated?: boolean;
+  label?: string;
 }) {
   const t = useT();
   const [open, setOpen] = useState(false);
@@ -187,6 +189,7 @@ export function TracePayload({
     hasRange,
     rangeEnd,
   ]);
+  const displayLabel = label ?? representationLabel(access.representation, t);
   const availability = availabilityLabel(access.availability);
   const readableRange =
     hasRange &&
@@ -224,18 +227,14 @@ export function TracePayload({
             : !truncated && preview
               ? t("trace.contentActions")
               : t("trace.readRepresentation", {
-                  representation: representationLabel(
-                    access.representation,
-                    t,
-                  ).toLowerCase(),
+                  representation: displayLabel.toLowerCase(),
                 })}
         </button>
       )}
       {open && readableRange && (
         <div className="min-w-0 rounded border border-line p-3">
           <p className="mb-2 text-xs text-ink-muted">
-            {representationLabel(access.representation, t)} ·{" "}
-            {access.mediaType ?? "Media type unknown"} ·{" "}
+            {displayLabel} · {access.mediaType ?? "Media type unknown"} ·{" "}
             {t("trace.bytes", {
               start: current?.displayStart ?? start,
               end: current?.next ?? end,

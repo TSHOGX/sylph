@@ -128,7 +128,7 @@ async fn expected(fixture: &Fixture, store: &GenerationStore, body: &PayloadRef)
             .unwrap();
         assert_eq!(execution.outcome.known(), Some(&TerminalOutcome::Succeeded));
         assert!(!execution.started.is_empty());
-        assert!(reduced.objects.values().any(|object|matches!(object.declaration.known(),Some(TraceObject::Result(result))if result.operation==operation.operation_ref&&result.representation==Representation::CallerResult)));
+        assert!(reduced.objects.values().any(|object|matches!(object.declaration.known(),Some(TraceObject::Result(result))if result.operation==operation.operation_ref&&result.representation==ResultRepresentation::CallerResult)));
     }
     let sidecars: Vec<_> = reduced
         .objects

@@ -62,6 +62,8 @@ pub struct TraceService {
     pub(crate) evidence_read_pause: ReprojectionPause,
     #[cfg(test)]
     pub(crate) directory_read_pause: ReprojectionPause,
+    #[cfg(test)]
+    pub(crate) result_catalogue_read_pause: ReprojectionPause,
     recovery: Arc<RwLock<Option<String>>>,
     gc: TraceGarbageCollector,
     reprojection_wake: Arc<Notify>,
@@ -223,6 +225,8 @@ impl TraceService {
             evidence_read_pause: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             directory_read_pause: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            result_catalogue_read_pause: Arc::new(Mutex::new(None)),
             search_queries: Arc::new(Semaphore::new(search_limits.max_concurrent_queries)),
             search_limits,
             recovery: Arc::new(RwLock::new(None)),
@@ -673,7 +677,7 @@ impl TraceService {
     fn manifest(generation: String) -> GenerationManifest {
         GenerationManifest {
             generation: generation.clone(),
-            semantic_schema: "trace-14".into(),
+            semantic_schema: "trace-15".into(),
             mapper_builds: [
                 ("server", mapping::server::ServerMapper.build()),
                 ("codex", mapping::codex::CodexMapper.build()),

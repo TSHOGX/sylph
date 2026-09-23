@@ -45,13 +45,14 @@ fn recorded_reused_tool_id_keeps_two_live_invocations_and_their_own_results() {
                 _ => None,
             })
             .collect();
-        assert!(results
-            .iter()
-            .any(|result| result.representation == Representation::Runtime
-                && result.disposition == ResultDisposition::FinalReturn));
-        assert!(results
-            .iter()
-            .any(|result| result.representation == Representation::CallerResult));
+        assert!(results.iter().any(|result| result.representation
+            == ResultRepresentation::Runtime
+            && result.disposition == ResultDisposition::FinalReturn));
+        assert!(
+            results
+                .iter()
+                .any(|result| result.representation == ResultRepresentation::CallerResult)
+        );
     }
 }
 
@@ -170,7 +171,7 @@ fn a_native_entry_snapshot_between_runtime_end_and_message_admission_preserves_l
             .known(),
         Some(&TerminalOutcome::Succeeded)
     );
-    assert!(objects(&output[index+2..]).any(|object|matches!(object,TraceObject::Result(result)if result.operation==first&&result.representation==Representation::CallerResult)));
+    assert!(objects(&output[index+2..]).any(|object|matches!(object,TraceObject::Result(result)if result.operation==first&&result.representation==ResultRepresentation::CallerResult)));
     let message_start = index + 2;
     let key = crate::mapping::attachment_key(
         &capture(message_start as u64, true).observation_ref,

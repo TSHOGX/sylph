@@ -232,7 +232,7 @@ async fn expected(fixture: &Fixture, store: &GenerationStore, failed: bool) {
     assert_eq!(invocation_results.len(), 2);
     let mut answers = vec![];
     for result in invocation_results {
-        assert_eq!(result.representation, Representation::Runtime);
+        assert_eq!(result.representation, ResultRepresentation::Runtime);
         let state = reduced
             .execution(&AnyObjectRef::Operation(result.operation.clone()))
             .unwrap();
@@ -479,7 +479,7 @@ async fn expected_failure(fixture: &Fixture, store: &GenerationStore) {
         .values()
         .filter_map(|object| match object.declaration.known() {
             Some(TraceObject::Result(result))
-                if result.representation == Representation::Runtime =>
+                if result.representation == ResultRepresentation::Runtime =>
             {
                 Some(result)
             }

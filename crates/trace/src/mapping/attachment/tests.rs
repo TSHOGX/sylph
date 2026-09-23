@@ -87,7 +87,7 @@ fn a_late_sidecar_keeps_the_caller_result_and_requires_its_capture_owned_bytes()
         })
     };
     let output = run(&capture);
-    assert!(output.claims.iter().any(|claim|matches!(&claim.fact,Fact::Declare {object:TraceObject::Result(result)} if result.operation==operation&&result.representation==Representation::Runtime&&result.delivery.is_none())));
+    assert!(output.claims.iter().any(|claim|matches!(&claim.fact,Fact::Declare {object:TraceObject::Result(result)} if result.operation==operation&&result.representation==ResultRepresentation::Runtime&&result.delivery.is_none())));
     assert!(output.claims.iter().all(|claim| !matches!(
         claim.fact,
         Fact::Execution { .. } | Fact::DeliveryStage { .. }

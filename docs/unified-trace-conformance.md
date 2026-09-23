@@ -232,6 +232,16 @@ destroy the very property under test. Full payload fixtures use controlled subst
 content with provenance that labels substitution; they are never presented as original
 private bytes. Historical prompts and tool bodies are data and are never executed.
 
+Result representation selection is checked independently of the first occurrence page
+in `crates/server/src/trace/worker/tests/provenance/result_representations.rs`. The
+normalized-fact fixture covers a late caller result, representation-bound cursors,
+missing bytes versus absent results, empty bytes, optional contributor retention,
+post-probe authorization changes and bounded availability continuations. Browser cases
+in `frontend/e2e/trace-result-representations.spec.ts` cover active-only result pages,
+comparison, page replacement, explicit choices and continued availability checks. These
+fixtures establish query and interaction contracts; they do not establish vendor
+payload formats or replace the retained vendor result corpus.
+
 ## Reproducible checks
 
 The vendor audit works entirely from retained sanitized artifacts by default:

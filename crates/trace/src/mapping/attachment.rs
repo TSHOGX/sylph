@@ -135,7 +135,7 @@ impl SemanticMapper for AttachmentMapper {
                         operation: operation.clone(),
                         recipient: None,
                         disposition: ResultDisposition::Unknown,
-                        representation: Representation::Runtime,
+                        representation: ResultRepresentation::Runtime,
                         payload: Some(payload),
                         delivery: None,
                     }),

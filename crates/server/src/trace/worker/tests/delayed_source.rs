@@ -292,7 +292,7 @@ async fn ordered_successors_resume_in_bounded_same_cut_pages_after_restart() {
     assert_eq!(final_snapshot.evidence_cut, through);
     assert!(final_snapshot.view_revision >= revision + 3);
     let (_, reduction, _) = restarted.projected_snapshot(&generation).await.unwrap();
-    let results=reduction.objects.values().filter_map(|value|value.declaration.known()).filter(|object|matches!(object,TraceObject::Result(result) if result.representation==Representation::Runtime)).count();
+    let results=reduction.objects.values().filter_map(|value|value.declaration.known()).filter(|object|matches!(object,TraceObject::Result(result) if result.representation==ResultRepresentation::Runtime)).count();
     assert_eq!(results, tails.len() * 2);
 }
 

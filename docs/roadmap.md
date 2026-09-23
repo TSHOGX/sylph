@@ -100,6 +100,27 @@ erased and no production trace implementation is claimed complete by this design
 
 ### Foundation implementation
 
+Operation result inspection now uses an authorized catalogue of the three result
+representations, with separate indexed occurrence and readable-payload collections.
+Bounded presence checks retain private authenticated continuations and cannot borrow content-page
+cursors, manufacture absence at a work limit, or bind optional result contributors to
+the operation's own lease. Grant changes and retired positive witnesses are rechecked
+before replying. Result occurrences no longer accept submitted-input representation;
+operation summaries no longer embed a mixed result preview. The reader chooses an
+available caller result first, preserves explicit choices, and mounts one page per
+selected representation. Unavailable views remain explained; empty catalogues have no
+empty chooser. Inputs are labeled as inputs, and result availability follows payload
+evidence rather than the presence of a reference. Production HTTP and browser regressions cover these contracts; targeted mutations
+reproduce the corresponding authorization, pagination and selection failures.
+
+The representation audit also found a separate remaining payload-format boundary:
+result and operation-input references do not consistently carry their own evidenced
+media type and encoding into the reader. Results currently default to binary and inputs
+to JSON even when the retained derivation supplies a more precise format. Format
+metadata must remain specific to the payload use or scoped derivation; equal physical
+bytes cannot justify choosing another occurrence's format. This remains required work
+before result/payload acceptance, alongside structured exploration and export/playback.
+
 Observed operations with unknown or unresolved producers now remain Work rows with
 explicit unknown-owner labels and direct inspection targets. They retain their own
 history-entry anchors and cannot borrow local activation membership or group merely

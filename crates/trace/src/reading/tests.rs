@@ -1562,3 +1562,46 @@ fn operations_with_unobserved_owners_keep_inspection_targets_without_becoming_lo
     }
     assert!(projection.activations[&agent()].is_empty());
 }
+
+#[test]
+fn a_result_address_does_not_upgrade_partial_or_unavailable_payload_evidence() {
+    let operation = declared_operation("result-availability");
+    let payload = PayloadRef::bytes("e".repeat(64)).unwrap();
+    for availability in [
+        ReadAvailability::Partial {
+            reason: "Only a prefix was retained".into(),
+        },
+        ReadAvailability::Unavailable {
+            reason: "The bytes were not captured".into(),
+        },
+    ] {
+        let mut previews = PayloadPreviews::new();
+        previews.insert(
+            payload.clone(),
+            Arc::new(PayloadPreview {
+                availability: Some(availability.clone()),
+                ..Default::default()
+            }),
+        );
+        let facts = [
+            declared_agent(agent()),
+            TraceObject::Operation(operation.clone()),
+            TraceObject::Result(ResultOccurrence {
+                result_ref: ResultRef::native(agent(), "result", vec!["reported".into()]).unwrap(),
+                operation: operation.operation_ref.clone(),
+                recipient: None,
+                disposition: ResultDisposition::FinalReturn,
+                representation: ResultRepresentation::CallerResult,
+                payload: Some(payload.clone()),
+                delivery: None,
+            }),
+        ]
+        .into_iter()
+        .map(|object| Fact::Declare { object })
+        .collect();
+        let projection = facts_projection(facts, &previews);
+        let result = &projection.result_occurrences
+            [&AnyObjectRef::Operation(operation.operation_ref.clone())][0];
+        assert_eq!(result.availability, availability);
+    }
+}

@@ -45,7 +45,7 @@ impl Context<'_, '_> {
         slot: &str,
         payload: Option<PayloadRef>,
         disposition: ResultDisposition,
-        representation: Representation,
+        representation: ResultRepresentation,
     ) {
         self.declare(
             owner,
@@ -307,7 +307,7 @@ impl Context<'_, '_> {
                     disposition,
                     // The vendor records RuntimeResponse before formatting the
                     // custom-tool output that its caller will receive.
-                    Representation::Runtime,
+                    ResultRepresentation::Runtime,
                 );
                 let state = match status {
                     "starting" | "running" => ResourceState::Running,
@@ -563,9 +563,9 @@ impl Context<'_, '_> {
                     body,
                     ResultDisposition::FinalReturn,
                     if kind == "tool_call_ended" {
-                        Representation::CallerResult
+                        ResultRepresentation::CallerResult
                     } else {
-                        Representation::Runtime
+                        ResultRepresentation::Runtime
                     },
                 );
                 if kind == "tool_call_ended" {
@@ -888,7 +888,7 @@ impl Context<'_, '_> {
                 "codex/structured-runtime-result",
                 Some(body),
                 ResultDisposition::FinalReturn,
-                Representation::Runtime,
+                ResultRepresentation::Runtime,
             );
             let outcome = if patch {
                 if value.get("success").and_then(Value::as_bool) == Some(false) {
@@ -957,7 +957,7 @@ impl Context<'_, '_> {
                     "codex/exec-output-delta",
                     Some(body),
                     ResultDisposition::Progress,
-                    Representation::Runtime,
+                    ResultRepresentation::Runtime,
                 );
             } else {
                 self.issue(
@@ -1126,7 +1126,7 @@ impl Context<'_, '_> {
                         &format!("codex/exec-{channel}"),
                         Some(body),
                         ResultDisposition::FinalReturn,
-                        Representation::Runtime,
+                        ResultRepresentation::Runtime,
                     );
                 }
             }

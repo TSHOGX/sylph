@@ -293,6 +293,9 @@ ran or completed. Disposition distinguishes progress, yield, final return, and r
 where evidence supplies that meaning. An orphan result preserves its call reference
 and evidence; it does not need invented invocation arguments.
 
+Result occurrences accept only runtime, caller-result and conversation representations.
+Submitted input belongs to a MessageRevision, not an operation result.
+
 A sidecar snapshot identifies bytes, not every invocation that refers to those bytes.
 When two operations expose the same snapshot, their result identities remain distinct.
 Repeated observations of that snapshot for the same identified operation can support

@@ -906,7 +906,7 @@ impl Context<'_, '_> {
                     owner,
                     operation.clone(),
                     payload,
-                    Representation::CallerResult,
+                    ResultRepresentation::CallerResult,
                     ResultDisposition::FinalReturn,
                     selector,
                 );
@@ -916,7 +916,7 @@ impl Context<'_, '_> {
                         owner,
                         operation,
                         payload,
-                        Representation::CallerResult,
+                        ResultRepresentation::CallerResult,
                         ResultDisposition::FinalReturn,
                         &format!("{selector}/details"),
                     );
@@ -1240,7 +1240,7 @@ impl Context<'_, '_> {
                 owner,
                 reference.clone(),
                 payload,
-                Representation::Runtime,
+                ResultRepresentation::Runtime,
                 ResultDisposition::FinalReturn,
                 slot,
             );
@@ -1256,7 +1256,7 @@ impl Context<'_, '_> {
         owner: &AgentRef,
         operation: OperationRef,
         payload: PayloadRef,
-        representation: Representation,
+        representation: ResultRepresentation,
         disposition: ResultDisposition,
         slot: &str,
     ) {

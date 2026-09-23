@@ -12,7 +12,9 @@ fn frames(raw: &str) -> Vec<Value> {
 fn runtime_results(output: &[MapOutput]) -> Vec<&ResultOccurrence> {
     objects(output)
         .filter_map(|object| match object {
-            TraceObject::Result(result) if result.representation == Representation::Runtime => {
+            TraceObject::Result(result)
+                if result.representation == ResultRepresentation::Runtime =>
+            {
                 Some(result)
             }
             _ => None,
@@ -42,7 +44,7 @@ fn recorded_sdk_and_native_tool_results_keep_plain_runtime_bytes_separate_from_n
         let caller = objects(&output)
             .find_map(|object| match object {
                 TraceObject::Result(result)
-                    if result.representation == Representation::CallerResult =>
+                    if result.representation == ResultRepresentation::CallerResult =>
                 {
                     Some(result)
                 }
@@ -134,7 +136,7 @@ fn ambiguous_envelope_metadata_cannot_assign_runtime_results_or_children_to_each
                 .filter(|object| matches!(
                     object,
                     TraceObject::Result(ResultOccurrence {
-                        representation: Representation::CallerResult,
+                        representation: ResultRepresentation::CallerResult,
                         ..
                     })
                 ))

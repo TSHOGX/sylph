@@ -459,8 +459,8 @@ fn model_call_and_runtime_output_keep_distinct_invocations_and_exact_representat
         })
         .unwrap();
     assert_ne!(runtime.operation, caller.operation);
-    assert_eq!(runtime.representation, Representation::Runtime);
-    assert_eq!(caller.representation, Representation::CallerResult);
+    assert_eq!(runtime.representation, ResultRepresentation::Runtime);
+    assert_eq!(caller.representation, ResultRepresentation::CallerResult);
     assert_eq!(output[3].payloads[0].bytes, b"SHORT OUTPUT\n");
     assert!(!output
         .iter()

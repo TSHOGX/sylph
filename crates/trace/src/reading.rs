@@ -52,6 +52,7 @@ pub struct ReadingProjection {
     pub operations: BTreeMap<AnyObjectRef, Vec<AnyObjectRef>>,
     pub objects: BTreeMap<AnyObjectRef, ReadObjectDetail>,
     pub object_relations: BTreeMap<AnyObjectRef, Vec<ReadRelation>>,
+    pub result_occurrences: BTreeMap<AnyObjectRef, Vec<ReadResultOccurrence>>,
     pub parts: BTreeMap<String, Vec<PartSummary>>,
     pub selected_objects: BTreeMap<ReadingScope, BTreeSet<AnyObjectRef>>,
 }
@@ -387,6 +388,11 @@ pub fn project(
         let Some(object) = resolved.declaration.known() else {
             continue;
         };
+        if let TraceObject::Operation(operation) = object {
+            result
+                .result_occurrences
+                .insert(object.object_ref(), index.operation_results(operation));
+        }
         let detail = index.object_detail(object);
         result
             .object_relations
@@ -592,6 +598,67 @@ impl Index<'_> {
         included
     }
 
+    fn operation_results(&self, operation: &Operation) -> Vec<ReadResultOccurrence> {
+        let reference = AnyObjectRef::Operation(operation.operation_ref.clone());
+        let scope = ReadingScope {
+            agent: match &operation.owner {
+                OwnerRef::Agent { agent } => agent.clone(),
+                _ => operation.operation_ref.scope().clone(),
+            },
+            selection: None,
+        };
+        self.results
+            .get(&operation.operation_ref)
+            .into_iter()
+            .flatten()
+            .filter_map(
+                |reference| match self.object(&AnyObjectRef::Result(reference.clone())) {
+                    Some(TraceObject::Result(result)) => Some(result),
+                    _ => None,
+                },
+            )
+            .map(|result| {
+                let payloads: Vec<_> = result
+                    .payload
+                    .as_ref()
+                    .map(|payload| {
+                        self.access(
+                            &scope,
+                            &reference,
+                            &result.result_ref.encode(),
+                            payload,
+                            result.representation.into(),
+                            None,
+                            PayloadEncoding::Binary,
+                        )
+                    })
+                    .into_iter()
+                    .collect();
+                let availability = payloads
+                    .first()
+                    .map(|payload| payload.availability.clone())
+                    .unwrap_or_else(|| ReadAvailability::Unavailable {
+                        reason: "Result payload unavailable".into(),
+                    });
+                ReadResultOccurrence {
+                    reference: TraceAddress::of(&AnyObjectRef::Result(result.result_ref.clone())),
+                    disposition: result.disposition,
+                    representation: result.representation,
+                    label: match result.disposition {
+                        ResultDisposition::FinalReturn => "Returned",
+                        ResultDisposition::Yield => "Yielded",
+                        ResultDisposition::Progress => "Progress",
+                        ResultDisposition::Refusal => "Refused",
+                        ResultDisposition::Unknown => "Result",
+                    }
+                    .into(),
+                    payloads,
+                    availability,
+                }
+            })
+            .collect()
+    }
+
     fn object_detail(&self, object: &TraceObject) -> ReadObjectDetail {
         let reference = object.object_ref();
         let owning_agent =
@@ -649,56 +716,6 @@ impl Index<'_> {
         let mut relations = self.relations.get(&reference).cloned().unwrap_or_default();
         let content = match object {
             TraceObject::Operation(operation) => {
-                let results = self
-                    .results
-                    .get(&operation.operation_ref)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|reference| {
-                        match self.object(&AnyObjectRef::Result(reference.clone())) {
-                            Some(TraceObject::Result(result)) => Some(result),
-                            _ => None,
-                        }
-                    })
-                    .map(|result| ReadResultOccurrence {
-                        reference: TraceAddress::of(&AnyObjectRef::Result(
-                            result.result_ref.clone(),
-                        )),
-                        disposition: result.disposition,
-                        representation: result.representation,
-                        label: match result.disposition {
-                            ResultDisposition::FinalReturn => "Returned",
-                            ResultDisposition::Yield => "Yielded",
-                            ResultDisposition::Progress => "Progress",
-                            ResultDisposition::Refusal => "Refused",
-                            ResultDisposition::Unknown => "Result",
-                        }
-                        .into(),
-                        payloads: result
-                            .payload
-                            .as_ref()
-                            .map(|payload| {
-                                self.access(
-                                    &scope,
-                                    &reference,
-                                    &result.result_ref.encode(),
-                                    payload,
-                                    result.representation,
-                                    None,
-                                    PayloadEncoding::Binary,
-                                )
-                            })
-                            .into_iter()
-                            .collect(),
-                        availability: if result.payload.is_some() {
-                            ReadAvailability::Available
-                        } else {
-                            ReadAvailability::Unavailable {
-                                reason: "Result payload unavailable".into(),
-                            }
-                        },
-                    })
-                    .collect();
                 let resources = self
                     .resources
                     .get(&operation.operation_ref)
@@ -729,8 +746,7 @@ impl Index<'_> {
                         })
                         .into_iter()
                         .collect(),
-                    results,
-                    results_cursor: None,
+                    result_representations: vec![],
                     resources,
                     resources_cursor: None,
                 }

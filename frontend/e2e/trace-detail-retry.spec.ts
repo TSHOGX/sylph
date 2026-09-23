@@ -13,6 +13,7 @@ import {
   payload,
   tracePage,
   traceView,
+  resultCatalogue,
 } from "./fixtures/trace";
 
 for (const family of ["parts", "relations", "results"] as const) {
@@ -52,8 +53,7 @@ for (const family of ["parts", "relations", "results"] as const) {
                   name: "fixture-tool",
                 },
                 input: [],
-                results: [],
-                resultsCursor: "page-one",
+                resultRepresentations: resultCatalogue(["caller_result"]),
                 resources: [],
                 resourcesCursor: null,
               }
@@ -79,9 +79,11 @@ for (const family of ["parts", "relations", "results"] as const) {
         async (route) => {
           const url = new URL(route.request().url());
           requests.push(url.href);
-          const cursor = url.searchParams.get("after");
+          const cursor =
+            url.searchParams.get("after") ??
+            (family === "results" ? "page-one" : null);
           const attempt = requests.filter(
-            (request) => new URL(request).searchParams.get("after") === cursor,
+            (request) => request === url.href,
           ).length;
           if (cursor === failCursor && attempt === 1)
             return route.fulfill({
@@ -141,9 +143,9 @@ for (const family of ["parts", "relations", "results"] as const) {
               ? /^More message parts/
               : family === "relations"
                 ? /^More results · relations$/
-                : /^More result occurrences$/,
+                : /^Next page$/,
         });
-        await more.click();
+        if (family !== "results") await more.click();
         if (failure === "later") {
           await expect(page.getByText(/Loaded page one/).first()).toBeVisible();
           await more.click();
@@ -165,7 +167,9 @@ for (const family of ["parts", "relations", "results"] as const) {
         const retried = new URL(requests.at(-1)!);
         expect(retried.searchParams.get("at_snapshot")).toBe(view.token);
         expect(retried.searchParams.get("selection")).toBe(selection);
-        expect(retried.searchParams.get("after")).toBe(failCursor);
+        expect(retried.searchParams.get("after")).toBe(
+          family === "results" && failure === "first" ? null : failCursor,
+        );
         await expect(more).toBeDisabled();
         if (failure === "later")
           await expect(page.getByText(/Loaded page one/).first()).toBeVisible();

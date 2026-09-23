@@ -407,10 +407,19 @@ export interface HistoryChoice {
 export interface ResultOccurrence {
   reference: TraceAddress;
   disposition: "progress" | "yield" | "final_return" | "refusal" | "unknown";
-  representation: Representation;
+  representation: ResultRepresentation;
   label: string;
   payloads: PayloadAccess[];
   availability: Availability;
+}
+export type ResultRepresentation = "runtime" | "caller_result" | "conversation";
+export interface ResultRepresentationEntry {
+  representation: ResultRepresentation;
+  state:
+    | { kind: "available" }
+    | { kind: "unavailable"; reason: string }
+    | { kind: "unobserved" }
+    | { kind: "pending"; phase: "payload" | "occurrence"; cursor: string };
 }
 export interface TraceRelation {
   target: TraceAddress;
@@ -451,8 +460,7 @@ export type ObjectContent =
       kind: "operation";
       category: OperationCategory;
       input: PayloadAccess[];
-      results: ResultOccurrence[];
-      resultsCursor: string | null;
+      resultRepresentations: ResultRepresentationEntry[];
       resources: TraceRelation[];
       resourcesCursor: string | null;
     }

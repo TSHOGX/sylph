@@ -43,6 +43,7 @@ type Result<T> = std::result::Result<T, TraceError>;
 mod transfer;
 mod evidence;
 mod directory;
+mod results;
 #[cfg(test)]
 mod visibility_tests;
 fn invalid(message: impl Into<String>) -> TraceError {
@@ -741,6 +742,8 @@ pub struct ReadQuery {
     relation: Option<String>,
     direction: Option<String>,
     count_only: Option<bool>,
+    representation: Option<String>,
+    result_phase: Option<ReadResultProbePhase>,
 }
 
 fn agent(value: &str) -> Result<AgentRef> {
@@ -1834,25 +1837,14 @@ async fn object(
     object.relations_cursor = relations.after_cursor;
     match &mut object.content {
         ReadObjectContent::Operation {
-            results,
-            results_cursor,
+            result_representations,
             resources,
             resources_cursor,
             ..
         } => {
-            let page: ReadPage<ReadResultOccurrence> = page(
-                &state,
-                &subject.0,
-                &lease,
-                reference.scope(),
-                selected.as_ref(),
-                &format!("object-results:{}", reference.encode()),
-                &window,
-                false,
-            )
-            .await?;
-            *results = page.items;
-            *results_cursor = page.after_cursor;
+            *result_representations =
+                results::catalogue(&state, &subject.0, &lease, &reference, selected.as_ref())
+                    .await?;
             let page: ReadPage<ReadRelation> = self::page(
                 &state,
                 &subject.0,
@@ -1937,18 +1929,50 @@ async fn object_relations(
 ) -> Result<Response> {
     let reference = reference(&encoded)?;
     observe(&state, &subject.0, reference.scope()).await?;
+    if query.kind.as_deref() == Some("result_representations") && query.at_snapshot.is_none() {
+        return Err(invalid("Result availability reads require a retained view"));
+    }
     let lease = lease(&state, &subject.0, query.at_snapshot.as_deref()).await?;
     let selected = selection(&query)?;
     check_selected_object(&state, &subject.0, &lease, selected.as_ref(), &reference).await?;
     let kind = query.kind.as_deref().unwrap_or("relations");
     if !matches!(
         kind,
-        "relations" | "results" | "resources" | "memberships" | "observations" | "payloads"
+        "relations"
+            | "results"
+            | "result_representations"
+            | "resources"
+            | "memberships"
+            | "observations"
+            | "payloads"
     ) {
         return Err(invalid("Unknown relation collection"));
     }
-    let scope = format!("object-{kind}:{}", reference.encode());
+    if matches!(kind, "results" | "result_representations") {
+        results::authorize_operation(&state, &subject.0, &lease, &reference).await?;
+    }
+    let scope = if kind == "results" {
+        crate::trace::reading_store::result_collection(
+            &reference,
+            results::representation(&query)?,
+            false,
+        )
+    } else {
+        format!("object-{kind}:{}", reference.encode())
+    };
     let response: Result<Response> = match kind {
+        "result_representations" => Ok(Json(
+            results::continue_probe(
+                &state,
+                &subject.0,
+                &lease,
+                &reference,
+                selected.as_ref(),
+                &query,
+            )
+            .await?,
+        )
+        .into_response()),
         "results" => Ok(Json(
             page::<ReadResultOccurrence>(
                 &state,

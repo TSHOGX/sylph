@@ -1,7 +1,7 @@
 use super::*;
 use sylph_protocol::{
     trace::{
-        AttachmentAvailability, Capture, Fact, ObservationRef, PayloadRef, Representation,
+        AttachmentAvailability, Capture, Fact, ObservationRef, PayloadRef, ResultRepresentation,
         TraceObject, TransportKind,
     },
     SourceAttachmentEvent,
@@ -136,7 +136,7 @@ async fn assert_runtime_result(backend: &ConnectedBackend, payload: &PayloadRef)
             .unwrap();
         if page.claims.iter().any(|claim| matches!(&claim.fact,
             Fact::Declare { object: TraceObject::Result(result) }
-                if result.representation == Representation::Runtime && result.payload.as_ref() == Some(payload)
+                if result.representation == ResultRepresentation::Runtime && result.payload.as_ref() == Some(payload)
         )) {
             return;
         }

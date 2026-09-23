@@ -614,6 +614,23 @@ reference order organizes the catalogue without claiming execution chronology. I
 the ordinary snapshot, cursor, item/byte and authorization bounds. A history `selection`
 is refused: selecting readable content cannot redefine activation ownership.
 
+### Operation result representations
+
+An operation summary exposes a fixed-size catalogue of result representations. Its
+presence and payload-availability checks use the requesting Subject's current grants
+and the retained view's contributor epochs. Catalogue evidence is optional metadata;
+losing a result contributor does not revoke independently retained operation metadata.
+Direct availability probes require an explicit retained view. Checks have indexed scopes
+per operation, representation and availability class, with
+bounded work and private authenticated continuations. Exhausting work reports a pending check rather
+than an unavailable representation. No catalogue check reads result payload bytes.
+
+Result occurrence pages require a representation. Their cursors bind that representation
+as well as the operation, selection, view and authorization filters. A page cannot mix
+representations or reuse another representation's cursor. The reader fetches only the
+active representation's page, or the explicitly chosen comparison pages. It keeps one
+page per mounted representation and does not accumulate the whole result history.
+
 ### Reprojection jobs
 
 Reprojection admits at most one active product job. Concurrent submissions coalesce onto

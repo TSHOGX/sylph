@@ -7,6 +7,7 @@ import {
   payload,
   traceView,
   agentLink,
+  resultCatalogue,
 } from "./fixtures/trace";
 
 test("unknown authorship stays readable without becoming human input or an invented activation", async ({
@@ -42,7 +43,7 @@ test("equal text in separate deliveries keeps separate reading occurrences", asy
   await expect(page.locator("[data-trace-address]")).toHaveCount(2);
 });
 
-test("submitted and conversation representations are labelled separately in operation details", async ({
+test("runtime and caller results remain independently labelled and lazily read", async ({
   page,
 }) => {
   const row = message(0, "Inspect this operation");
@@ -66,25 +67,7 @@ test("submitted and conversation representations are labelled separately in oper
       kind: "operation",
       category: { kind: "tool", namespace: null, name: "shell" },
       input: [],
-      results: [
-        {
-          reference: "result-runtime",
-          disposition: "progress",
-          representation: "runtime",
-          label: "Runtime observation",
-          payloads: [runtime],
-          availability: { kind: "available" },
-        },
-        {
-          reference: "result-returned",
-          disposition: "final_return",
-          representation: "caller_result",
-          label: "Returned value",
-          payloads: [returned],
-          availability: { kind: "available" },
-        },
-      ],
-      resultsCursor: null,
+      resultRepresentations: resultCatalogue(["runtime", "caller_result"]),
       resources: [],
       resourcesCursor: null,
     },
@@ -92,6 +75,24 @@ test("submitted and conversation representations are labelled separately in oper
     relationsCursor: null,
     coverage: [],
   });
+  state.results.set(row.anchor, [
+    {
+      reference: "result-runtime",
+      disposition: "progress",
+      representation: "runtime",
+      label: "Runtime observation",
+      payloads: [runtime],
+      availability: { kind: "available" },
+    },
+    {
+      reference: "result-returned",
+      disposition: "final_return",
+      representation: "caller_result",
+      label: "Returned value",
+      payloads: [returned],
+      availability: { kind: "available" },
+    },
+  ]);
   state.bodies.set("runtime", "Complete runtime bytes");
   state.bodies.set("returned", "Shortened caller result");
   await openTrace(page);
