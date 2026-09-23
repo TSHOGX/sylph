@@ -642,11 +642,32 @@ fn merge_optional<T: Clone + PartialEq>(a: &Option<T>, b: &Option<T>) -> Option<
     }
 }
 
+// Absence can refine; symbolic handles still need their own binding evidence.
+// In particular, an unresolved handle is not a wildcard for a known actor.
+fn merge_owner(a: &OwnerRef, b: &OwnerRef) -> Option<OwnerRef> {
+    match (a, b) {
+        (OwnerRef::Unknown, b) => Some(b.clone()),
+        (a, OwnerRef::Unknown) => Some(a.clone()),
+        (a, b) if a == b => Some(a.clone()),
+        _ => None,
+    }
+}
+
+fn merge_optional_owner(a: &Option<OwnerRef>, b: &Option<OwnerRef>) -> Option<Option<OwnerRef>> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(Some(merge_owner(a, b)?)),
+        _ => merge_optional(a, b),
+    }
+}
+
 fn merge_author(a: &Author, b: &Author) -> Option<Author> {
     if a == b {
         return Some(a.clone());
     }
     match (a, b) {
+        (Author::Agent { agent: a }, Author::Agent { agent: b }) => Some(Author::Agent {
+            agent: merge_owner(a, b)?,
+        }),
         (Author::Unknown, b) => Some(b.clone()),
         (a, Author::Unknown) => Some(a.clone()),
         (Author::Human { subject: a }, Author::Human { subject: b }) => Some(Author::Human {
@@ -674,8 +695,8 @@ fn merge_production(
     b: &Option<ProductionScope>,
 ) -> Option<Option<ProductionScope>> {
     match (a, b) {
-        (Some(a), Some(b)) if a.owner == b.owner => Some(Some(ProductionScope {
-            owner: a.owner.clone(),
+        (Some(a), Some(b)) => Some(Some(ProductionScope {
+            owner: merge_owner(&a.owner, &b.owner)?,
             activation: merge_optional(&a.activation, &b.activation)?,
         })),
         _ => merge_optional(a, b),
@@ -699,6 +720,25 @@ fn refine_declaration(a: &TraceObject, b: &TraceObject) -> Option<TraceObject> {
                 model: merge_optional(&a.model, &b.model)?,
             }))
         }
+        (TraceObject::Activation(a), TraceObject::Activation(b))
+            if a.activation_ref == b.activation_ref =>
+        {
+            Some(TraceObject::Activation(Activation {
+                activation_ref: a.activation_ref.clone(),
+                owner: merge_owner(&a.owner, &b.owner)?,
+            }))
+        }
+        (TraceObject::ContextCheckpoint(a), TraceObject::ContextCheckpoint(b))
+            if a.checkpoint_ref == b.checkpoint_ref
+                && a.basis == b.basis
+                && a.content == b.content
+                && a.coverage == b.coverage =>
+        {
+            Some(TraceObject::ContextCheckpoint(ContextCheckpoint {
+                owner: merge_owner(&a.owner, &b.owner)?,
+                ..a.clone()
+            }))
+        }
         (TraceObject::Message(a), TraceObject::Message(b)) if a.message_ref == b.message_ref => {
             let purpose = match (a.purpose, b.purpose) {
                 (a, b) if a == b => a,
@@ -715,13 +755,11 @@ fn refine_declaration(a: &TraceObject, b: &TraceObject) -> Option<TraceObject> {
             }))
         }
         (TraceObject::Operation(a), TraceObject::Operation(b))
-            if a.operation_ref == b.operation_ref
-                && a.owner == b.owner
-                && a.category == b.category =>
+            if a.operation_ref == b.operation_ref && a.category == b.category =>
         {
             Some(TraceObject::Operation(Operation {
                 operation_ref: a.operation_ref.clone(),
-                owner: a.owner.clone(),
+                owner: merge_owner(&a.owner, &b.owner)?,
                 activation: merge_optional(&a.activation, &b.activation)?,
                 requester: merge_optional(&a.requester, &b.requester)?,
                 category: a.category.clone(),
@@ -741,7 +779,7 @@ fn refine_declaration(a: &TraceObject, b: &TraceObject) -> Option<TraceObject> {
             Some(TraceObject::Resource(Resource {
                 resource_ref: a.resource_ref.clone(),
                 creator: merge_optional(&a.creator, &b.creator)?,
-                host: merge_optional(&a.host, &b.host)?,
+                host: merge_optional_owner(&a.host, &b.host)?,
                 kind: a.kind.clone(),
             }))
         }
@@ -752,7 +790,7 @@ fn refine_declaration(a: &TraceObject, b: &TraceObject) -> Option<TraceObject> {
                 entry_ref: a.entry_ref.clone(),
                 containing_agent: a.containing_agent.clone(),
                 predecessor: merge_optional(&a.predecessor, &b.predecessor)?,
-                original_owner: merge_optional(&a.original_owner, &b.original_owner)?,
+                original_owner: merge_optional_owner(&a.original_owner, &b.original_owner)?,
             }))
         }
         _ => None,

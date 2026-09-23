@@ -7,7 +7,7 @@ use super::{
     identity::*,
 };
 
-/// An unresolved native owner does not create an agent or assign work to the root.
+/// Absent or unresolved ownership never creates an agent or assigns work to the root.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
@@ -15,6 +15,8 @@ use super::{
     rename_all_fields = "camelCase"
 )]
 pub enum OwnerRef {
+    /// The evidence did not name an owner; the object namespace is not an actor.
+    Unknown,
     Agent {
         agent: AgentRef,
     },

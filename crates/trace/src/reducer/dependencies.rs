@@ -44,6 +44,7 @@ impl Dependencies {
 
     fn owner(&mut self, owner: &OwnerRef) {
         match owner {
+            OwnerRef::Unknown => {}
             OwnerRef::Agent { agent } => self.add(AnyObjectRef::Agent(agent.clone())),
             OwnerRef::Unresolved {
                 scope,

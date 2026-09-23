@@ -2075,7 +2075,11 @@ pub(crate) fn payload_anchor_owner(object: &TraceObject) -> Option<&AgentRef> {
         TraceObject::MessageRevision(revision) => Some(revision.revision_ref.scope()),
         TraceObject::Operation(operation) => match &operation.owner {
             OwnerRef::Agent { agent } => Some(agent),
-            OwnerRef::Unresolved { .. } => None,
+            // Payload access names its retained namespace independently of who
+            // produced the operation. Keep this aligned with object_detail.
+            OwnerRef::Unknown | OwnerRef::Unresolved { .. } => {
+                Some(operation.operation_ref.scope())
+            }
         },
         TraceObject::Delivery(delivery) => match &delivery.recipient {
             Recipient::Agent {

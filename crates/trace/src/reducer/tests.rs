@@ -1,5 +1,7 @@
 use super::*;
 
+mod owners;
+
 fn agent(name: &str) -> AgentRef {
     AgentRef::Session(sylph_protocol::SessionId::decode(&format!("env7fk2:codex:{name}")).unwrap())
 }

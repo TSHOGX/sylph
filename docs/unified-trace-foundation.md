@@ -83,8 +83,8 @@ is still an operation unless actual evidence identifies an independently advanci
 
 ### Ownership, topology, interaction, and context
 
-Every Operation and Activation has exactly one owning AgentThread. An unresolved owner
-is a typed unresolved reference, never a default to the current root. Once established,
+Every Operation and Activation has exactly one producing AgentThread, whose identity may
+be unknown or a typed unresolved reference, never a default to the current root. Once established,
 ownership does not move because a result arrived during a later activation. A Message's
 author and original production scope are distinct from the agent whose history contains
 an entry referring to it. One message revision can be delivered more than once.
@@ -146,6 +146,15 @@ Native key tuples include the vendor's actual uniqueness scope. A Claude content
 may need native record UUID plus block index; a terminal handle needs its runtime
 incarnation; a tool call needs its caller's namespace. Timestamps, names, model labels,
 file paths, global block indices, and payload hashes are not object identities.
+
+An owner that was not observed is `Unknown`; this makes no actor claim. An
+`Unresolved` owner instead preserves a named native reference that still requires its
+own binding proof. For the same object identity, an unknown owner can be refined by a
+compatible observed owner or unresolved reference. Two different known owners, or two
+different unresolved references, remain conflicting unless an explicit correction or
+binding resolves them. A containing namespace is never a substitute for ownership.
+Independently retained input bytes remain readable in that namespace when ownership is
+unknown; this grants no execution, requester, or agent-activity attribution.
 
 Occurrence keys are deterministic addresses for things a source recorded without a
 native ID. They do not masquerade as vendor IDs. `local_slot` is a mapper-defined stable

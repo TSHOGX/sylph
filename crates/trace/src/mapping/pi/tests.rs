@@ -920,3 +920,104 @@ fn a_fork_tool_record_keeps_its_unresolved_production_without_naming_the_child_a
 }
 
 mod copies;
+
+#[test]
+fn historical_pi_entries_never_borrow_the_readers_identity_as_production_ownership() {
+    let entries = historical_owner_entries();
+    let output = run(
+        &[
+            state(),
+            serde_json::json!({"type":"response","command":"get_entries","success":true,"data":{"entries":entries,"leafId":"summary"}}),
+        ],
+        true,
+    );
+    let owned: Vec<_> = objects(&output).filter_map(production_owner).collect();
+    let projection = crate::reading::project(&reduce(&output), &Default::default(), 32);
+    for object in objects(&output).filter(|object| {
+        production_owner(object).is_some() || matches!(object, TraceObject::MessageRevision(_))
+    }) {
+        assert!(
+            projection.objects[&object.object_ref()].owner.is_none(),
+            "reader assigned a producer from the containing namespace"
+        );
+    }
+    assert!(projection.activations.values().all(Vec::is_empty));
+
+    assert!(owned.len() >= 4);
+    assert!(
+        owned.iter().all(|owner| matches!(owner, OwnerRef::Unknown)),
+        "an RPC history read attributed prior work to its reader"
+    );
+    assert!(
+        objects(&output)
+            .filter_map(|object| match object {
+                TraceObject::Operation(operation) => Some(operation),
+                _ => None,
+            })
+            .all(|operation| operation.requester.is_none())
+    );
+}
+
+fn historical_owner_entries() -> Vec<Value> {
+    vec![
+        serde_json::json!({"type":"message","id":"assistant","parentId":null,"message":{"role":"assistant","content":[{"type":"text","text":"Historical answer"},{"type":"toolCall","id":"call","name":"read","arguments":{"path":"recorded.txt"}}]}}),
+        serde_json::json!({"type":"message","id":"shell","parentId":"assistant","message":{"role":"bashExecution","command":"printf recorded","output":"recorded","exitCode":0}}),
+        serde_json::json!({"type":"branch_summary","id":"summary","parentId":"shell","summary":"Historical context"}),
+    ]
+}
+
+fn production_owner(object: &TraceObject) -> Option<&OwnerRef> {
+    match object {
+        TraceObject::Operation(operation) => Some(&operation.owner),
+        TraceObject::ContextCheckpoint(checkpoint) => Some(&checkpoint.owner),
+        TraceObject::Message(message) => message.production.as_ref().map(|scope| &scope.owner),
+        _ => None,
+    }
+}
+
+#[test]
+fn native_pi_ownership_refines_snapshots_in_either_order_without_resolving_fork_handles() {
+    for fork in [false, true] {
+        let mut native_header = header();
+        if fork {
+            native_header["parentSession"] = serde_json::json!("/retained/original.jsonl");
+        }
+        let native = run(
+            &[vec![native_header], historical_owner_entries()].concat(),
+            false,
+        );
+        let snapshot = run(
+            &[
+                state(),
+                serde_json::json!({"type":"response","command":"get_tree","success":true,"data":{"tree":historical_owner_entries().into_iter().map(|entry|serde_json::json!({"entry":entry,"children":[]})).collect::<Vec<_>>(),"leafId":"summary"}}),
+            ],
+            true,
+        );
+        for snapshot_first in [false, true] {
+            let output = if snapshot_first {
+                [snapshot.clone(), native.clone()].concat()
+            } else {
+                [native.clone(), snapshot.clone()].concat()
+            };
+            // reduce applies incremental batches and verifies redelivery stability.
+            let reduction = reduce(&output);
+            let expected: Vec<_> = objects(&native)
+                .filter(|object| production_owner(object).is_some())
+                .collect();
+            assert!(expected.len() >= 4);
+            for object in expected {
+                let resolved = reduction.objects[&object.object_ref()]
+                    .declaration
+                    .known()
+                    .expect("compatible ownership must not conflict");
+                assert_eq!(resolved, object);
+                let owner = production_owner(resolved).unwrap();
+                if fork {
+                    assert!(matches!(owner, OwnerRef::Unresolved { .. }));
+                } else {
+                    assert!(matches!(owner, OwnerRef::Agent { .. }));
+                }
+            }
+        }
+    }
+}

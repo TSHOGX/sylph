@@ -212,6 +212,16 @@ links. A separate held-continuation test verifies persisted matching indexes and
 restart recovery beyond one work budget. These establish positive native record copies,
 not the local-production status of unmatched entries or an ultimate actor for nested copies.
 
+Pi RPC entry/tree snapshots are also checked independently of native ownership in
+`crates/trace/src/mapping/pi/tests.rs`: assistant messages, operations, shell records and
+checkpoints make no producer claim from the reader identity. Native declarations refine
+that absence in either order while fork handles stay unresolved. Reducer regressions in
+`crates/trace/src/reducer/tests/owners.rs` preserve conflicts across known actors and
+native handles; absence cannot bridge incompatible claims. HTTP acceptance in
+`crates/server/src/trace/worker/tests/provenance/unknown_owners.rs` reads retained
+operation input bytes without inventing an owner or execution state. These focused
+fixtures establish the absence/refinement rules, not a new native/live identity join.
+
 Sanitization preserves equality relationships, key scope, missing-versus-empty values,
 ordering and branch structure. Replacing two distinct IDs with one placeholder would
 destroy the very property under test. Full payload fixtures use controlled substitute

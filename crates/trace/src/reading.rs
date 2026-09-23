@@ -594,23 +594,56 @@ impl Index<'_> {
 
     fn object_detail(&self, object: &TraceObject) -> ReadObjectDetail {
         let reference = object.object_ref();
-        let owning_agent = match object {
-            TraceObject::Operation(operation) => match &operation.owner {
-                OwnerRef::Agent { agent } => Some(agent),
-                _ => None,
-            },
-            TraceObject::Activation(activation) => match &activation.owner {
-                OwnerRef::Agent { agent } => Some(agent),
-                _ => None,
-            },
-            TraceObject::Resource(resource) => match &resource.host {
-                Some(OwnerRef::Agent { agent }) => Some(agent),
-                _ => None,
-            },
-            _ => Some(reference.scope()),
-        };
+        let owning_agent =
+            match object {
+                TraceObject::Operation(operation) => match &operation.owner {
+                    OwnerRef::Agent { agent } => Some(agent),
+                    _ => None,
+                },
+                TraceObject::Activation(activation) => match &activation.owner {
+                    OwnerRef::Agent { agent } => Some(agent),
+                    _ => None,
+                },
+                TraceObject::ContextCheckpoint(checkpoint) => match &checkpoint.owner {
+                    OwnerRef::Agent { agent } => Some(agent),
+                    _ => None,
+                },
+                TraceObject::Message(message) => {
+                    message
+                        .production
+                        .as_ref()
+                        .and_then(|production| match &production.owner {
+                            OwnerRef::Agent { agent } => Some(agent),
+                            _ => None,
+                        })
+                }
+                TraceObject::MessageRevision(revision) => {
+                    match self.object(&AnyObjectRef::Message(revision.message.clone())) {
+                        Some(TraceObject::Message(message)) => message
+                            .production
+                            .as_ref()
+                            .and_then(|production| match &production.owner {
+                                OwnerRef::Agent { agent } => Some(agent),
+                                _ => None,
+                            }),
+                        _ => None,
+                    }
+                }
+                TraceObject::Resource(resource) => match &resource.host {
+                    Some(OwnerRef::Agent { agent }) => Some(agent),
+                    _ => None,
+                },
+                _ => Some(reference.scope()),
+            };
         let scope = ReadingScope {
-            agent: owning_agent.unwrap_or(reference.scope()).clone(),
+            // A revision retains its own bytes independently of the producer
+            // named by its message. Producer labels cannot move payload access.
+            agent: if matches!(object, TraceObject::MessageRevision(_)) {
+                reference.scope()
+            } else {
+                owning_agent.unwrap_or(reference.scope())
+            }
+            .clone(),
             selection: None,
         };
         let mut relations = self.relations.get(&reference).cloned().unwrap_or_default();

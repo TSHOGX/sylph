@@ -185,6 +185,12 @@ RPC `get_entries` and `get_tree` responses establish historical observations and
 provided, selected membership. They do not themselves establish new admissions. Direct
 runtime message events and independently proved local native entries retain their own
 admission evidence; a historical read cannot borrow that meaning from its protocol role.
+The historical RPC response also does not establish who produced each retained entry.
+Messages, tool calls, shell records and checkpoints from that surface have unobserved
+production ownership until compatible native or execution evidence supplies it.
+The session named by `get_state` is the containing session, not an authorship certificate
+for copied history. Known native ownership can refine this absence without discarding
+the independently observed snapshot content; unresolved fork ownership stays unresolved.
 
 The exact server submission, RPC payload, accepted command response, native admitted
 message, and model request are separate representations and delivery stages. RPC

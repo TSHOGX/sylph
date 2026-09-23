@@ -77,7 +77,7 @@ struct LiveMessage {
 
 impl SemanticMapper for PiMapper {
     fn build(&self) -> &'static str {
-        "pi-9"
+        "pi-10"
     }
 
     fn map(&self, input: MapInput<'_>) -> MapOutput {
@@ -396,10 +396,21 @@ impl Context<'_, '_> {
         if parent != self.state.last_native_entry {
             self.state.current_pending.clear();
         }
-        let original = self.original_owner(owner, id);
-        let production = original.clone().unwrap_or_else(|| OwnerRef::Agent {
-            agent: owner.clone(),
-        });
+        // RPC history identifies the containing session, not the producer of
+        // copied work. Only native source evidence carries the fork descriptor.
+        let historical = self.input.capture.transport_kind != TransportKind::NativeJsonl;
+        let original = if historical {
+            None
+        } else {
+            self.original_owner(owner, id)
+        };
+        let production = if historical {
+            OwnerRef::Unknown
+        } else {
+            original.clone().unwrap_or_else(|| OwnerRef::Agent {
+                agent: owner.clone(),
+            })
+        };
         let mut content = match kind {
             "message" if text(&value["message"], "role") == Some("bashExecution") => self.bash(
                 owner,
