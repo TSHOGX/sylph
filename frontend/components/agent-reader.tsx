@@ -666,7 +666,7 @@ function TraceRow({
         <>
           <h2 className="mb-2 text-sm font-medium">
             {content.author.kind === "unknown"
-              ? "Input · source unknown"
+              ? t("trace.unknownAuthor")
               : content.author.label}
             {content.purpose === "task_input" && content.author.kind === "agent"
               ? ` · ${t("trace.taskInput")}`

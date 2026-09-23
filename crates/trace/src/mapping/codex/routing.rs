@@ -35,7 +35,7 @@ impl Context<'_, '_> {
                 };
             }
         }
-        if own_path {
+        if own_path && root.is_none() {
             return OwnerRef::Agent {
                 agent: containing.clone(),
             };

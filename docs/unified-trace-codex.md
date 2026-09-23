@@ -105,6 +105,11 @@ registers that thread at `/root`. This is sufficient routing identity evidence e
 when the root header omits `agent_path`; it does not move child-authored work to the
 root. A missing root identity cannot be replaced by the containing child when looking
 up another path. An explicit conflicting path binding remains unresolved.
+Each certificate binds its own target and evidence. Conflicting certificates remain
+independent declarations; they cannot replace another certificate's target, stop
+unrelated projection, or choose an author by arrival order. The reader retains agreed
+message content while leaving disputed metadata unresolved, and the original conflict
+and its evidence remain inspectable.
 Routed communication occurrences keep their address in the containing history while
 the author and recipient retain their own identities. A fresh mailbox admission is
 local history, even when its author is another agent; it has no copied-history original

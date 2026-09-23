@@ -59,7 +59,7 @@ export const zh: Dictionary = {
   "trace.loadingHistory": "正在读取保留的历史…",
   "trace.openConversation": "打开对话",
   "trace.evidenceDetails": "证据与详情",
-  "trace.unknownInput": "输入 · 来源未知",
+  "trace.unknownAuthor": "作者身份未明确",
   "trace.reasoning": "已公开的推理",
   "trace.unknownExecution": "执行状态不可用",
   "trace.working": "工作中",

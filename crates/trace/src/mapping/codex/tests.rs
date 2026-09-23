@@ -233,6 +233,7 @@ fn reverted_rollout_selection_stays_unknown_until_its_frozen_base_is_resolved() 
 fn run(values: &[Value], live: bool) -> Vec<MapOutput> {
     let mut state = MapperState::default();
     let mut outputs = vec![];
+    let mut archive = ArchiveContext::default();
     for (i, value) in values.iter().enumerate() {
         let capture = capture(i as u64 + 1, live);
         let raw = serde_json::to_vec(value).unwrap();
@@ -241,8 +242,33 @@ fn run(values: &[Value], live: bool) -> Vec<MapOutput> {
             canonical_observation: &capture.observation_ref,
             raw: &raw,
             state: &state,
-            archive: &ArchiveContext::default(),
+            archive: &archive,
         });
+        archive.observations.insert(capture.observation_ref.clone());
+        archive.claims.extend(
+            output
+                .claims
+                .iter()
+                .cloned()
+                .map(|claim| (claim.claim_ref.clone(), claim)),
+        );
+        for (key, reference) in &output.correlations {
+            archive.correlations.insert(key.clone(), reference.clone());
+            if !output.corroborating_correlations.contains(key) {
+                archive.correlation_proofs.remove(key);
+            }
+            archive.retain_correlation_evidence(
+                key.clone(),
+                output
+                    .correlation_evidence
+                    .get(key)
+                    .cloned()
+                    .unwrap_or_else(|| vec![capture.observation_ref.clone()]),
+            );
+        }
+        for plan in &output.routing_plans {
+            super::routing::retain_plan(&mut archive.routing_plans, plan.clone());
+        }
         state = output.state.clone();
         outputs.push(output);
     }

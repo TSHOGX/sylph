@@ -1,6 +1,6 @@
 //! Indexed late certificates refine immutable declarations in bounded continuations.
 use super::*;
-use crate::mapping::CorrelationProofs;
+use crate::mapping::{CorrelationProof, CorrelationProofs};
 use std::ops::Bound::{Excluded, Included, Unbounded};
 
 /// A plan stores no source checkpoint or body. Its base is an immutable claim.
@@ -26,8 +26,8 @@ pub fn retain_plan(index: &mut PlanIndex, plan: Plan) {
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 struct Variant {
     mask: u8,
-    author: Option<Vec<ObservationRef>>,
-    recipient: Option<Vec<ObservationRef>>,
+    author: Option<CorrelationProof>,
+    recipient: Option<CorrelationProof>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Cursor {
@@ -96,16 +96,15 @@ pub(crate) fn refine(input: &MapInput<'_>, output: &mut MapOutput) {
         .cloned()
         .map(|claim| (claim.claim_ref.clone(), claim))
         .collect();
-    let mut correlations = input.archive.correlations.clone();
     let mut proofs = input.archive.correlation_proofs.clone();
     let mut keys = cursor
         .as_ref()
         .map_or_else(Vec::new, |cursor| cursor.sources.clone());
     for (key, reference) in &output.correlations {
-        correlations.insert(key.clone(), reference.clone());
         crate::mapping::retain_correlation_proof(
             &mut proofs,
             key.clone(),
+            reference.clone(),
             output
                 .correlation_evidence
                 .get(key)
@@ -144,15 +143,7 @@ pub(crate) fn refine(input: &MapInput<'_>, output: &mut MapOutput) {
                 .get(reference)
                 .or_else(|| input.archive.claims.get(reference));
             let (done, last) = if let Some(base) = base {
-                variants(
-                    plan,
-                    base,
-                    &correlations,
-                    &proofs,
-                    after,
-                    &mut budget,
-                    &mut output.claims,
-                )
+                variants(plan, base, &proofs, after, &mut budget, &mut output.claims)
             } else {
                 output.diagnostics.push(MappingDiagnostic {
                     evidence: vec![input.canonical_observation.clone()],
@@ -185,33 +176,27 @@ pub(crate) fn refine(input: &MapInput<'_>, output: &mut MapOutput) {
     }
 }
 
-type Certificates = imbl::OrdSet<Vec<ObservationRef>>;
-fn endpoint<'a>(
-    key: Option<&String>,
-    correlations: &'a imbl::OrdMap<String, AnyObjectRef>,
-    proofs: &'a CorrelationProofs,
-) -> Option<(OwnerRef, &'a Certificates)> {
-    let key = key?;
-    let AnyObjectRef::Agent(agent) = correlations.get(key)? else {
-        return None;
+type Certificates = imbl::OrdSet<CorrelationProof>;
+fn endpoint<'a>(key: Option<&String>, proofs: &'a CorrelationProofs) -> Option<&'a Certificates> {
+    proofs.get(key?).filter(|proofs| !proofs.is_empty())
+}
+fn owner(proof: &CorrelationProof) -> OwnerRef {
+    let AnyObjectRef::Agent(agent) = &proof.reference else {
+        unreachable!("agent-path certificates name agents")
     };
-    let proofs = proofs.get(key).filter(|proofs| !proofs.is_empty())?;
-    Some((
-        OwnerRef::Agent {
-            agent: agent.clone(),
-        },
-        proofs,
-    ))
+    OwnerRef::Agent {
+        agent: agent.clone(),
+    }
 }
 fn alternatives<'a>(
-    endpoint: Option<&(OwnerRef, &'a Certificates)>,
+    endpoint: Option<&'a Certificates>,
     required: bool,
-    lower: Option<&Vec<ObservationRef>>,
-) -> Box<dyn Iterator<Item = Option<&'a Vec<ObservationRef>>> + 'a> {
+    lower: Option<&CorrelationProof>,
+) -> Box<dyn Iterator<Item = Option<&'a CorrelationProof>> + 'a> {
     if !required {
         return Box::new(std::iter::once(None));
     }
-    let proofs = endpoint.expect("mask requires an evidenced endpoint").1;
+    let proofs = endpoint.expect("mask requires an evidenced endpoint");
     Box::new(
         proofs
             .range((lower.cloned().map_or(Unbounded, Included), Unbounded))
@@ -222,14 +207,13 @@ fn alternatives<'a>(
 fn variants(
     plan: &Plan,
     base: &Claim,
-    correlations: &imbl::OrdMap<String, AnyObjectRef>,
     proofs: &CorrelationProofs,
     after: Option<&Variant>,
     budget: &mut usize,
     output: &mut Vec<Claim>,
 ) -> (bool, Variant) {
-    let author = endpoint(plan.author.as_ref(), correlations, proofs);
-    let recipient = endpoint(plan.recipient.as_ref(), correlations, proofs);
+    let author = endpoint(plan.author.as_ref(), proofs);
+    let recipient = endpoint(plan.recipient.as_ref(), proofs);
     let known = u8::from(author.is_some()) | (u8::from(recipient.is_some()) << 1);
     let mut last = after.cloned().unwrap_or_default();
     for mask in 1..=3u8 {
@@ -238,13 +222,13 @@ fn variants(
         }
         let same_mask = after.filter(|after| mask == after.mask);
         for sender in alternatives(
-            author.as_ref(),
+            author,
             mask & 1 != 0,
             same_mask.and_then(|after| after.author.as_ref()),
         ) {
             let same_sender = same_mask.filter(|after| after.author.as_ref() == sender);
             for target in alternatives(
-                recipient.as_ref(),
+                recipient,
                 mask & 2 != 0,
                 same_sender.and_then(|after| after.recipient.as_ref()),
             ) {
@@ -283,9 +267,12 @@ fn variants(
                         },
                     ));
                 }
-                refined
-                    .evidence
-                    .extend(sender.into_iter().chain(target).flatten().cloned());
+                refined.evidence.extend(
+                    sender
+                        .into_iter()
+                        .chain(target)
+                        .flat_map(|proof| proof.evidence.iter().cloned()),
+                );
                 refined.evidence.sort();
                 refined.evidence.dedup();
                 match &mut refined.fact {
@@ -293,20 +280,20 @@ fn variants(
                         object: TraceObject::Message(value),
                     } => {
                         value.author = Author::Agent {
-                            agent: author.as_ref().unwrap().0.clone(),
+                            agent: owner(sender.unwrap()),
                         };
                     }
                     Fact::Declare {
                         object: TraceObject::Delivery(value),
                     } => {
-                        if sender.is_some() {
+                        if let Some(sender) = sender {
                             value.sender = Author::Agent {
-                                agent: author.as_ref().unwrap().0.clone(),
+                                agent: owner(sender),
                             };
                         }
-                        if target.is_some() {
+                        if let Some(target) = target {
                             value.recipient = Recipient::Agent {
-                                agent: recipient.as_ref().unwrap().0.clone(),
+                                agent: owner(target),
                             };
                         }
                     }

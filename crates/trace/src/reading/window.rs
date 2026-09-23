@@ -164,9 +164,7 @@ impl super::Index<'_> {
                     } else {
                         revision
                     };
-                    let Some(TraceObject::Message(message)) =
-                        self.object(&AnyObjectRef::Message(revision.message.clone()))
-                    else {
+                    let Some(message) = self.message_metadata(&revision.message) else {
                         units.push(self.unknown(
                             address,
                             anchor.clone(),
@@ -181,7 +179,7 @@ impl super::Index<'_> {
                             address,
                             anchor.clone(),
                             order_basis,
-                            message,
+                            &message,
                             revision,
                             None,
                             Some(entry),
@@ -205,8 +203,7 @@ impl super::Index<'_> {
                                 ));
                                 continue;
                             };
-                            let Some(TraceObject::Message(delivered_message)) =
-                                self.object(&AnyObjectRef::Message(delivered.message.clone()))
+                            let Some(delivered_message) = self.message_metadata(&delivered.message)
                             else {
                                 continue;
                             };
@@ -215,7 +212,7 @@ impl super::Index<'_> {
                                 address,
                                 anchor.clone(),
                                 order_basis,
-                                delivered_message,
+                                &delivered_message,
                                 delivered,
                                 Some(value),
                                 Some(entry),
@@ -349,9 +346,7 @@ impl super::Index<'_> {
                 ));
                 continue;
             };
-            let Some(TraceObject::Message(message)) =
-                self.object(&AnyObjectRef::Message(revision.message.clone()))
-            else {
+            let Some(message) = self.message_metadata(&revision.message) else {
                 continue;
             };
             units.push(self.message_unit(
@@ -359,7 +354,7 @@ impl super::Index<'_> {
                 TraceAddress::of(&anchor).as_str().into(),
                 anchor,
                 ReadOrderBasis::PresentationTiebreak,
-                message,
+                &message,
                 revision,
                 Some(delivery),
                 None,

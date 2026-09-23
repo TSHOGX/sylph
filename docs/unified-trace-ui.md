@@ -166,6 +166,11 @@ Human input uses a restrained surface and explicit author label. Other-agent inp
 uses a small routing label rather than borrowing the human bubble. Assistant prose
 stays on the canvas. Unknown authorship does not receive a human avatar. Dense metadata
 is secondary text with sufficient contrast; unknown content does not become faint.
+Disputed message metadata does not hide an independently resolved content revision.
+The reading projection keeps fields on which the retained alternatives agree, leaves
+disputed authorship and purpose unresolved, and does not attach a disputed production
+scope to an activation. The underlying declarations remain conflicted; presentation
+does not manufacture a replacement fact or select a competing author.
 
 An authored answer and its delivery notification are distinct recorded occurrences.
 The child reader shows the child's answer; the parent shows the result delivery it

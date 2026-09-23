@@ -820,6 +820,55 @@ impl Index<'_> {
         self.reduction.object(reference)?.declaration.known()
     }
 
+    /// A metadata conflict cannot erase an independently resolved content revision.
+    /// This is a reading projection of common fields, never a replacement claim.
+    fn message_metadata(&self, reference: &MessageRef) -> Option<std::borrow::Cow<'_, Message>> {
+        let resolved = &self
+            .reduction
+            .object(&AnyObjectRef::Message(reference.clone()))?
+            .declaration;
+        match resolved {
+            Resolved::Known {
+                value: TraceObject::Message(message),
+                ..
+            } => Some(std::borrow::Cow::Borrowed(message)),
+            Resolved::Conflicted { alternatives } => {
+                let (TraceObject::Message(first), _) = alternatives.first()? else {
+                    return None;
+                };
+                let mut common = Message {
+                    message_ref: first.message_ref.clone(),
+                    author: first.author.clone(),
+                    protocol_role: first.protocol_role,
+                    purpose: first.purpose,
+                    production: first.production.clone(),
+                };
+                for (value, _) in alternatives.iter().skip(1) {
+                    let TraceObject::Message(message) = value else {
+                        return None;
+                    };
+                    if message.message_ref != first.message_ref {
+                        return None;
+                    }
+                    if message.author != first.author {
+                        common.author = Author::Unknown;
+                    }
+                    if message.protocol_role != first.protocol_role {
+                        common.protocol_role = None;
+                    }
+                    if message.purpose != first.purpose {
+                        common.purpose = MessagePurpose::Unclassified;
+                    }
+                    if message.production != first.production {
+                        common.production = None;
+                    }
+                }
+                Some(std::borrow::Cow::Owned(common))
+            }
+            _ => None,
+        }
+    }
+
     fn agent_link(&self, agent: &AgentRef) -> AgentLink {
         let native = match agent {
             AgentRef::Session(session) => session.native_id.as_str(),

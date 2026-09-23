@@ -1,15 +1,37 @@
 //! Independent native headers may corroborate one route without replacing its proof.
 use super::*;
 
-async fn route_records(fixture: &Fixture, order: [usize; 4], store: &GenerationStore) {
+async fn route_records(
+    fixture: &Fixture,
+    order: [usize; 4],
+    store: &GenerationStore,
+    conflicting: bool,
+    local_path: bool,
+) {
     let header = b"{\"type\":\"session_meta\",\"ordinal\":0,\"payload\":{\"id\":\"observer\",\"session_id\":\"root\",\"agent_path\":\"/root/observer\"}}\n";
     let message = b"{\"type\":\"response_item\",\"ordinal\":1,\"payload\":{\"type\":\"agent_message\",\"id\":\"corroborated\",\"author\":\"/root/sender\",\"recipient\":\"/root\",\"content\":[{\"type\":\"input_text\",\"text\":\"independently proved sender\"}]}}\n";
     let peer = b"{\"type\":\"session_meta\",\"ordinal\":0,\"payload\":{\"id\":\"sender\",\"session_id\":\"root\",\"agent_path\":\"/root/sender\"}}\n";
+    let other = if conflicting {
+        String::from_utf8(peer.to_vec())
+            .unwrap()
+            .replace("\"id\":\"sender\"", "\"id\":\"other-sender\"")
+            .into_bytes()
+    } else {
+        peer.to_vec()
+    };
+    let header = if local_path {
+        String::from_utf8(header.to_vec())
+            .unwrap()
+            .replace("/root/observer", "/root/sender")
+            .into_bytes()
+    } else {
+        header.to_vec()
+    };
     let records = [
         ("observer", 1, 0, header.as_slice()),
         ("observer", 2, header.len() as u64, message.as_slice()),
         ("sender-proof-a", 1, 0, peer.as_slice()),
-        ("sender-proof-b", 1, 0, peer.as_slice()),
+        ("sender-proof-b", 1, 0, other.as_slice()),
     ];
     for index in order {
         let (source, sequence, offset, bytes) = records[index];
@@ -64,7 +86,7 @@ async fn corroborating_native_route_proofs_preserve_the_same_retained_claims_in_
     {
         let fixture = Fixture::new().await;
         let (store, _) = fixture.generation(&format!("corroborated-{index}")).await;
-        route_records(&fixture, order, &store).await;
+        route_records(&fixture, order, &store, false, false).await;
         let actual: BTreeMap<_, _> = claims(&store)
             .await
             .into_iter()
@@ -435,5 +457,214 @@ async fn repeated_goal_snapshots_keep_every_state_without_growing_the_identity_c
         bindings[0].proofs.len(),
         1,
         "repeated identity checkpoints grew with goal polling despite retaining all resource states separately"
+    );
+}
+
+#[tokio::test]
+async fn conflicting_route_certificates_keep_content_readable_without_selecting_an_author_or_stalling_replay()
+ {
+    use crate::trace::reading_store::read_scope;
+    for local_path in [false, true] {
+        let mut expected = None;
+        for (index, order) in [[0, 1, 2, 3], [0, 1, 3, 2], [2, 3, 0, 1], [3, 2, 0, 1]]
+            .into_iter()
+            .enumerate()
+        {
+            let fixture = Fixture::new().await;
+            let (store, _) = fixture
+                .generation(&format!("conflicting-route-{index}"))
+                .await;
+            route_records(&fixture, order, &store, true, local_path).await;
+            let retained = claims(&store).await;
+            let mut reducer = sylph_trace::reducer::Reducer::default();
+            reducer
+                .apply(
+                    &retained,
+                    &retained
+                        .iter()
+                        .flat_map(|claim| claim.evidence.iter().cloned())
+                        .collect(),
+                    retained.len(),
+                )
+                .unwrap();
+            let reduced = reducer.resolve();
+            let message = MessageRef::native(
+                owner("observer"),
+                "codex.message",
+                vec!["corroborated".into()],
+            )
+            .unwrap();
+            assert!(matches!(
+                reduced
+                    .object(&AnyObjectRef::Message(message.clone()))
+                    .unwrap()
+                    .declaration,
+                sylph_trace::reducer::Resolved::Conflicted { .. }
+            ));
+            let snapshot = store.checkpoint().await.unwrap().snapshot;
+            let page = store
+                .read_page(
+                    &snapshot,
+                    &read_scope(&owner("observer"), None, "history"),
+                    None,
+                    None,
+                    None,
+                    store.limits().max_items,
+                    false,
+                )
+                .await
+                .unwrap();
+            assert_eq!(page.rows.len(), 1);
+            let unit: ReadingUnit = serde_json::from_value(page.rows[0].body.clone()).unwrap();
+            let ReadingContent::Message { author, parts, .. } = unit.content else {
+                panic!("routing uncertainty hid retained message content")
+            };
+            assert!(matches!(
+                author,
+                ReadAuthor::Unknown | ReadAuthor::Agent { agent: None, .. }
+            ));
+            assert_eq!(parts[0].preview, "independently proved sender");
+            assert_eq!(
+                revision_bytes(&fixture, &store, &message).await,
+                vec![b"independently proved sender".to_vec()]
+            );
+            let actual: BTreeMap<_, _> = retained
+                .into_iter()
+                .map(|claim| (claim.claim_ref.clone(), claim))
+                .collect();
+            if let Some(expected) = &expected {
+                assert_eq!(&actual, expected);
+            } else {
+                expected = Some(actual);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn deleting_a_conflicting_certificate_resolves_current_routing_without_rewriting_an_older_snapshot()
+ {
+    use crate::trace::reading_store::read_scope;
+    let fixture = Fixture::new().await;
+    observer_history(&fixture, 1).await;
+    let mut epochs = vec![];
+    for name in ["route-a", "route-b"] {
+        let scope = IngestionScope::Inventory(InventoryRef {
+            environment: owner("sender").environment().clone(),
+            vendor: AgentName::parse("codex").unwrap(),
+            instance: name.into(),
+        });
+        let epoch = fixture.evidence.authorize_scope(&scope, &[]).await.unwrap();
+        epochs.push((scope, epoch));
+    }
+    let (store, _) = fixture.generation("routing-conflict-deletion").await;
+    capture_on(&fixture, "route-a", 0, 0, &header("sender"), &epochs[0].1).await;
+    fixture
+        .worker()
+        .catch_up(&store, 1, fixture.evidence.evidence_cut().await.unwrap())
+        .await
+        .unwrap();
+    let old = store.checkpoint().await.unwrap().snapshot;
+    let mut other: serde_json::Value = serde_json::from_slice(&header("sender")).unwrap();
+    other["payload"]["id"] = "other-sender".into();
+    let mut raw = serde_json::to_vec(&other).unwrap();
+    raw.push(b'\n');
+    capture_on(&fixture, "route-b", 0, 0, &raw, &epochs[1].1).await;
+    fixture
+        .worker()
+        .catch_up(&store, 1, fixture.evidence.evidence_cut().await.unwrap())
+        .await
+        .unwrap();
+    let current = store.checkpoint().await.unwrap().snapshot;
+    for (snapshot, conflicted) in [(&old, false), (&current, true)] {
+        let page = store
+            .read_page(
+                snapshot,
+                &read_scope(&owner("observer"), None, "history"),
+                None,
+                None,
+                None,
+                store.limits().max_items,
+                false,
+            )
+            .await
+            .unwrap();
+        let unit: ReadingUnit = serde_json::from_value(page.rows[0].body.clone()).unwrap();
+        let ReadingContent::Message { author, parts, .. } = unit.content else {
+            panic!("uncertain metadata hid content")
+        };
+        if conflicted {
+            assert!(matches!(author, ReadAuthor::Unknown));
+        } else {
+            assert!(
+                matches!(author, ReadAuthor::Agent { agent: Some(agent), .. } if agent.address.agent() == owner("sender"))
+            );
+        }
+        let access = &parts[0].payload;
+        let anchor = crate::trace::generation::PayloadAnchor {
+            via_ref: access.via_ref.object(),
+            containing_agent: access.containing_agent.agent(),
+            selection: access.selection.clone(),
+            payload_ref: access.payload_ref.clone(),
+            body_revision: access.body_revision.clone(),
+            representation: access.representation,
+            ranges: vec![],
+            dependency_epochs: Default::default(),
+        };
+        store
+            .authorize_payload(snapshot, &anchor, 0, b"retained routed body 0".len() as u64)
+            .await
+            .unwrap();
+    }
+    let message = AnyObjectRef::Message(
+        MessageRef::native(owner("observer"), "codex.message", vec!["routed-0".into()]).unwrap(),
+    );
+    let page = store
+        .claims_for(
+            &current,
+            &message,
+            Some(TraceFactKind::Declaration),
+            None,
+            store.limits().max_items,
+        )
+        .await
+        .unwrap();
+    let mut witnesses = BTreeSet::new();
+    for summary in page.claims {
+        let claim = store.claim(&current, &summary.claim_ref).await.unwrap();
+        witnesses.extend(
+            claim
+                .evidence
+                .into_iter()
+                .map(|evidence| evidence.producer_id),
+        );
+    }
+    assert!(witnesses.contains("route-a") && witnesses.contains("route-b"));
+    fixture.evidence.delete_scope(&epochs[1].0).await.unwrap();
+    let (rebuilt, _) = fixture.generation("routing-conflict-removed").await;
+    fixture
+        .worker()
+        .catch_up(&rebuilt, 1, fixture.evidence.evidence_cut().await.unwrap())
+        .await
+        .unwrap();
+    let messages = resolved_messages(&claims(&rebuilt).await);
+    assert_eq!(messages.len(), 1);
+    assert_eq!(
+        messages[0].author,
+        Author::Agent {
+            agent: OwnerRef::Agent {
+                agent: owner("sender")
+            }
+        }
+    );
+    assert_eq!(
+        revision_bytes(
+            &fixture,
+            &rebuilt,
+            &MessageRef::native(owner("observer"), "codex.message", vec!["routed-0".into()])
+                .unwrap()
+        )
+        .await,
+        vec![b"retained routed body 0".to_vec()]
     );
 }

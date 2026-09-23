@@ -18,7 +18,7 @@ test("unknown authorship stays readable without becoming human input or an inven
   await installTraceFixture(page, [row]);
   await openTrace(page);
   await expect(
-    page.getByRole("heading", { name: "Input · source unknown" }),
+    page.getByRole("heading", { name: "Authorship unresolved" }),
   ).toBeVisible();
   await expect(
     page.getByText("Source did not identify this author", { exact: true }),

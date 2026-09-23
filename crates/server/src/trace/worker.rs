@@ -139,8 +139,7 @@ impl MembershipWork {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct CorrelationBinding {
-    reference: AnyObjectRef,
-    proofs: imbl::OrdSet<Vec<ObservationRef>>,
+    proofs: imbl::OrdSet<mapping::CorrelationProof>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1043,7 +1042,11 @@ impl ProjectionWorker {
                     .insert(key.into(), Arc::new(serde_json::from_value(value)?));
             } else if let Some(key) = key.strip_prefix("correlation:") {
                 let binding: CorrelationBinding = serde_json::from_value(value)?;
-                state.correlations.insert(key.into(), binding.reference);
+                mapping::refresh_correlation_reference(
+                    &mut state.correlations,
+                    key.into(),
+                    &binding.proofs,
+                );
                 state.correlation_proofs.insert(key.into(), binding.proofs);
             } else if key.starts_with("routing:") {
                 mapping::codex::routing::retain_plan(
@@ -1346,11 +1349,12 @@ impl ProjectionWorker {
             unit.next.source_owners.insert(index_key, ownership.owner);
         }
         for (key, reference) in output.correlations {
-            if unit
-                .next
-                .correlations
-                .get(&key)
-                .is_some_and(|prior| prior != &reference)
+            if !output.corroborating_correlations.contains(&key)
+                && unit
+                    .next
+                    .correlations
+                    .get(&key)
+                    .is_some_and(|prior| prior != &reference)
             {
                 return Err(WorkerError::CorrelationConflict);
             }
@@ -1369,10 +1373,10 @@ impl ProjectionWorker {
             mapping::retain_correlation_proof(
                 &mut unit.next.correlation_proofs,
                 key.clone(),
+                reference,
                 evidence,
             );
             let binding = CorrelationBinding {
-                reference,
                 proofs: unit.next.correlation_proofs.get(&key).cloned().ok_or(
                     WorkerError::Reduction(sylph_trace::reducer::ReductionError::MissingEvidence),
                 )?,
@@ -1381,9 +1385,11 @@ impl ProjectionWorker {
                 format!("correlation:{key}"),
                 serde_json::to_value(&binding)?,
             );
-            unit.next
-                .correlations
-                .insert(key.clone(), binding.reference);
+            mapping::refresh_correlation_reference(
+                &mut unit.next.correlations,
+                key,
+                &binding.proofs,
+            );
         }
         let id = admitted.canonical_observation.encode();
         if output.requests.is_empty() {

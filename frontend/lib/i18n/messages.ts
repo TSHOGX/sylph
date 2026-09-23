@@ -85,7 +85,7 @@ export const en = {
   "trace.loadingHistory": "Reading retained history…",
   "trace.openConversation": "Open conversation",
   "trace.evidenceDetails": "Evidence and details",
-  "trace.unknownInput": "Input · source unknown",
+  "trace.unknownAuthor": "Authorship unresolved",
   "trace.reasoning": "Disclosed reasoning",
   "trace.unknownExecution": "Execution status unavailable",
   "trace.working": "Working",

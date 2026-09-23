@@ -15,7 +15,7 @@ pub mod history;
 
 pub struct CodexMapper;
 impl CodexMapper {
-    const BUILD: &'static str = "codex-9";
+    const BUILD: &'static str = "codex-10";
 }
 mod accounting;
 mod collaboration;

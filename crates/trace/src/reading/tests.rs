@@ -1268,3 +1268,123 @@ fn append_revision_detail_keeps_its_exact_segment_and_explicit_predecessor() {
         "a revision inspector shows the retained segment, not a composed/latest body"
     );
 }
+
+#[test]
+fn conflicting_message_metadata_keeps_content_without_selecting_disputed_fields() {
+    let message = MessageRef::native(agent(), "message", vec!["metadata-conflict".into()]).unwrap();
+    let revision =
+        MessageRevisionRef::native(agent(), "revision", vec!["metadata-conflict".into()]).unwrap();
+    let entry = EntryRef::native(agent(), "entry", vec!["metadata-conflict".into()]).unwrap();
+    let activation = ActivationRef::native(agent(), "activation", vec!["disputed".into()]).unwrap();
+    let payload = PayloadRef::bytes("a".repeat(64)).unwrap();
+    let mut previews = PayloadPreviews::new();
+    previews.insert(
+        payload.clone(),
+        Arc::new(PayloadPreview {
+            preview: "Agreed retained content".into(),
+            total_bytes: Some("Agreed retained content".len() as u64),
+            ranges: vec![PayloadRange {
+                start: 0,
+                end_exclusive: "Agreed retained content".len() as u64,
+            }],
+            availability: Some(ReadAvailability::Available),
+            ..Default::default()
+        }),
+    );
+    for same_purpose in [true, false] {
+        let original = Message {
+            message_ref: message.clone(),
+            author: Author::Human {
+                subject: Some("a".into()),
+            },
+            protocol_role: Some(ProtocolRole::User),
+            purpose: MessagePurpose::TaskInput,
+            production: Some(ProductionScope {
+                owner: OwnerRef::Agent { agent: agent() },
+                activation: Some(activation.clone()),
+            }),
+        };
+        let alternate = Message {
+            author: Author::Human {
+                subject: Some("b".into()),
+            },
+            protocol_role: None,
+            purpose: if same_purpose {
+                MessagePurpose::TaskInput
+            } else {
+                MessagePurpose::Context
+            },
+            production: Some(ProductionScope {
+                owner: OwnerRef::Agent { agent: agent() },
+                activation: Some(
+                    ActivationRef::native(agent(), "activation", vec!["other".into()]).unwrap(),
+                ),
+            }),
+            ..original.clone()
+        };
+        let mut facts: Vec<_> = [
+            declared_agent(agent()),
+            TraceObject::Message(original),
+            TraceObject::Message(alternate),
+            TraceObject::MessageRevision(MessageRevision {
+                revision_ref: revision.clone(),
+                message: message.clone(),
+                representation: Representation::Conversation,
+                form: RevisionForm::Complete,
+                parts: vec![ContentPart {
+                    part_ref: MessagePartRef::native(agent(), "part", vec!["one".into()]).unwrap(),
+                    kind: ContentKind::Text,
+                    payload: payload.clone(),
+                    media_type: Some("text/plain".into()),
+                    encoding: PayloadEncoding::Utf8,
+                }],
+            }),
+            TraceObject::HistoryEntry(HistoryEntry {
+                entry_ref: entry.clone(),
+                containing_agent: agent(),
+                predecessor: None,
+                original_owner: None,
+            }),
+        ]
+        .into_iter()
+        .map(|object| Fact::Declare { object })
+        .collect();
+        facts.push(Fact::HistoryContentObserved {
+            observation: HistoryContentObservation::complete(
+                entry.clone(),
+                capture(1).source_position,
+                "reader-test",
+                vec![HistoryContent::Message(revision.clone())],
+            ),
+        });
+        let projection = facts_projection(facts, &previews);
+        let units = &projection.windows[&ReadingScope {
+            agent: agent(),
+            selection: None,
+        }];
+        assert_eq!(units.len(), 1);
+        assert!(
+            units[0].activation.is_none(),
+            "a disputed production scope cannot supply execution"
+        );
+        let ReadingContent::Message {
+            author,
+            purpose,
+            parts,
+            ..
+        } = &units[0].content
+        else {
+            panic!("metadata conflict hid content")
+        };
+        assert!(matches!(author, ReadAuthor::Unknown));
+        assert_eq!(
+            *purpose,
+            if same_purpose {
+                MessagePurpose::TaskInput
+            } else {
+                MessagePurpose::Unclassified
+            }
+        );
+        assert_eq!(parts[0].preview, "Agreed retained content");
+    }
+}

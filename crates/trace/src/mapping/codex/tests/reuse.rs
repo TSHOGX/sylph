@@ -580,3 +580,63 @@ fn encrypted_communication_parts_are_known_opaque_values_and_missing_ciphertext_
         );
     }
 }
+
+#[test]
+fn a_known_local_path_cannot_bypass_conflicting_root_scoped_certificates() {
+    let initial = run(&[serde_json::json!({"type":"session_meta","ordinal":0,"payload":{"id":"sender","session_id":"root","agent_path":"/root/sender"}})], false).remove(0);
+    let mut archive = ArchiveContext::default();
+    let key = correlation_key(&agent("root"), "codex.agent-path", &["/root/sender".into()]);
+    for (name, sequence) in [("sender", 1), ("other", 8)] {
+        archive
+            .correlations
+            .insert(key.clone(), AnyObjectRef::Agent(agent(name)));
+        archive.retain_correlation_evidence(
+            key.clone(),
+            vec![capture(sequence, false).observation_ref],
+        );
+    }
+    let observation = capture(2, false);
+    let output = CodexMapper.map(MapInput { capture: &observation, canonical_observation: &observation.observation_ref,
+        raw: br#"{"type":"response_item","ordinal":1,"payload":{"type":"agent_message","id":"local-conflict","author":"/root/sender","recipient":"/root","content":[{"type":"input_text","text":"do not choose the containing agent"}]}}"#,
+        state: &initial.state, archive: &archive });
+    let reduced = reduce(&[initial, output]);
+    let reference = MessageRef::native(
+        agent("sender"),
+        "codex.message",
+        vec!["local-conflict".into()],
+    )
+    .unwrap();
+    assert!(matches!(
+        reduced.objects[&AnyObjectRef::Message(reference)].declaration,
+        crate::reducer::Resolved::Conflicted { .. }
+    ));
+}
+
+#[test]
+fn a_conflicting_path_checkpoint_offers_no_unique_reference_or_sufficient_single_proof() {
+    let mut archive = ArchiveContext::default();
+    let key = correlation_key(&agent("root"), "codex.agent-path", &["/root/shared".into()]);
+    for (id, sequence) in [("a", 1), ("b", 2)] {
+        archive
+            .correlations
+            .insert(key.clone(), AnyObjectRef::Agent(agent(id)));
+        archive.retain_correlation_evidence(
+            key.clone(),
+            vec![capture(sequence, false).observation_ref],
+        );
+    }
+    assert!(!archive.correlations.contains_key(&key));
+    assert!(archive.correlation_evidence(&key).is_none());
+    let targets: std::collections::BTreeSet<_> = archive.correlation_proofs[&key]
+        .iter()
+        .map(|proof| proof.reference.clone())
+        .collect();
+    assert_eq!(
+        targets,
+        [
+            AnyObjectRef::Agent(agent("a")),
+            AnyObjectRef::Agent(agent("b"))
+        ]
+        .into()
+    );
+}

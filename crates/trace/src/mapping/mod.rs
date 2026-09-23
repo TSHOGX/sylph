@@ -161,11 +161,28 @@ impl ArchiveContext {
     /// A single correlation lookup uses one deterministic sufficient proof. A
     /// reactive join enumerates the alternatives instead of conjoining them.
     pub fn correlation_evidence(&self, key: &str) -> Option<&Vec<ObservationRef>> {
-        self.correlation_proofs.get(key)?.iter().next()
+        let proofs = self.correlation_proofs.get(key)?;
+        unique_correlation_reference(proofs)?;
+        Some(&proofs.get_min()?.evidence)
     }
 
     pub fn retain_correlation_evidence(&mut self, key: String, evidence: Vec<ObservationRef>) {
-        retain_correlation_proof(&mut self.correlation_proofs, key, evidence);
+        let reference = self
+            .correlations
+            .get(&key)
+            .expect("a correlation proof names its target")
+            .clone();
+        retain_correlation_proof(
+            &mut self.correlation_proofs,
+            key.clone(),
+            reference,
+            evidence,
+        );
+        if let Some(proofs) = self.correlation_proofs.get(&key) {
+            refresh_correlation_reference(&mut self.correlations, key, proofs);
+        } else {
+            self.correlations.remove(&key);
+        }
     }
 
     pub fn extend_correlation_evidence(
@@ -216,18 +233,49 @@ impl ArchiveContext {
     }
 }
 
-/// Each vector is a conjunction; distinct vectors are independently sufficient.
-pub type CorrelationProofs = imbl::OrdMap<String, imbl::OrdSet<Vec<ObservationRef>>>;
+/// A certificate's target is immutable, including when another target conflicts.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct CorrelationProof {
+    pub reference: AnyObjectRef,
+    pub evidence: Vec<ObservationRef>,
+}
+/// Each evidence vector is a conjunction; certificates are independent alternatives.
+pub type CorrelationProofs = imbl::OrdMap<String, imbl::OrdSet<CorrelationProof>>;
+
+pub fn unique_correlation_reference(
+    proofs: &imbl::OrdSet<CorrelationProof>,
+) -> Option<&AnyObjectRef> {
+    let first = &proofs.get_min()?.reference;
+    // Certificates sort by target first. The extremes establish agreement without
+    // scanning every corroborating observation at each new header.
+    (first == &proofs.get_max()?.reference).then_some(first)
+}
+
+pub fn refresh_correlation_reference(
+    references: &mut imbl::OrdMap<String, AnyObjectRef>,
+    key: String,
+    proofs: &imbl::OrdSet<CorrelationProof>,
+) {
+    if let Some(reference) = unique_correlation_reference(proofs) {
+        references.insert(key, reference.clone());
+    } else {
+        references.remove(&key);
+    }
+}
 
 pub fn retain_correlation_proof(
     proofs: &mut CorrelationProofs,
     key: String,
+    reference: AnyObjectRef,
     mut evidence: Vec<ObservationRef>,
 ) {
     evidence.sort();
     evidence.dedup();
     if !evidence.is_empty() {
-        proofs.entry(key).or_default().insert(evidence);
+        proofs.entry(key).or_default().insert(CorrelationProof {
+            reference,
+            evidence,
+        });
     }
 }
 
