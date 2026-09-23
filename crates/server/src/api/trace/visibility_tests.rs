@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::BTreeSet;
 use crate::trace::{generation::ProjectionBatch, reading_store::ReadRowChange};
 use axum::{body::Body, http::Request};
 use serde_json::{Value, json};
@@ -43,7 +44,7 @@ fn header(agent: &AgentRef, name: &str, parent: Option<AgentLink>) -> AgentHeade
         coverage: vec![],
         descendant_count: ReadCount {
             value: Some(0),
-            scope: "direct spawned agents".into(),
+            scope: "spawn descendants".into(),
             complete: true,
         },
         continuing_resources: ReadCount {
@@ -63,6 +64,7 @@ fn header(agent: &AgentRef, name: &str, parent: Option<AgentLink>) -> AgentHeade
 fn header_row(header: AgentHeader, epoch: &IngestionEpoch) -> ReadRowChange {
     let agent = header.agent.address.agent();
     ReadRowChange {
+        directory: None,
         scope: read_scope(&agent, None, "header"),
         address: agent.encode(),
         anchor: Some(TraceAddress::of(&AnyObjectRef::Agent(agent.clone()))),
@@ -151,19 +153,67 @@ impl Fixture {
         }
         let parent_header = header(&parent, "Sensitive parent metadata", None);
         let child_header = header(&child, "Surviving child", Some(parent_header.agent.clone()));
-        let mut read_rows = vec![header_row(child_header, &epochs[1])];
-        if include_parent {
-            read_rows.push(header_row(parent_header, &epochs[0]));
-            read_rows.push(ReadRowChange {
-                scope: read_scope(&parent, None, "relations"),
-                address: child.encode(),
-                anchor: Some(TraceAddress::of(&AnyObjectRef::Agent(child.clone()))),
-                order_key: 1u64.to_be_bytes().to_vec(),
-                body: Some(json!({})),
-                scope_epoch: epochs[2].clone(),
-                required_environments: [parent.environment().as_str().to_owned()].into(),
-                dependency_epochs: [epochs[0].clone(), epochs[1].clone()].into(),
+        let node = |header: &AgentHeader,
+                    epoch: &IngestionEpoch,
+                    position: u64,
+                    end: u64,
+                    spawn_epochs: BTreeSet<IngestionEpoch>| {
+            let mut row = header_row(header.clone(), epoch);
+            let component = if include_parent {
+                parent.clone()
+            } else {
+                child.clone()
+            };
+            row.scope = read_scope(
+                &component,
+                None,
+                crate::trace::reading_store::DIRECTORY_COLLECTION,
+            );
+            row.order_key = position.to_be_bytes().to_vec();
+            row.directory = Some(crate::trace::reading_store::DirectoryMetadata {
+                component,
+                parent: header
+                    .parent
+                    .as_ref()
+                    .filter(|_| include_parent)
+                    .map(|link| link.address.agent()),
+                end_key: end.to_be_bytes().to_vec(),
+                spawn_epochs,
             });
+            row.body = Some(
+                serde_json::to_value(AgentDirectoryRow {
+                    agent: header.agent.clone(),
+                    relation: "spawn".into(),
+                    own_execution: header.own_execution.clone(),
+                    activations: ReadCount {
+                        value: None,
+                        scope: "own activations".into(),
+                        complete: false,
+                    },
+                    required_input: header.required_input.clone(),
+                    coverage: header.coverage.clone(),
+                })
+                .unwrap(),
+            );
+            row
+        };
+        let mut read_rows = vec![
+            header_row(child_header.clone(), &epochs[1]),
+            node(
+                &child_header,
+                &epochs[1],
+                2,
+                3,
+                if include_parent {
+                    [epochs[2].clone()].into()
+                } else {
+                    BTreeSet::new()
+                },
+            ),
+        ];
+        if include_parent {
+            read_rows.push(header_row(parent_header.clone(), &epochs[0]));
+            read_rows.push(node(&parent_header, &epochs[0], 1, 3, BTreeSet::new()));
         }
         let checkpoint = generation.checkpoint().await.unwrap();
         generation
@@ -344,7 +394,7 @@ async fn embedded_link_authorization_does_not_hydrate_the_target_header_body() {
         .bind(read_scope(&fixture.parent, None, "header")).bind(fixture.parent.encode())
         .execute(&mut connection).await.unwrap().rows_affected(), 1);
     assert_eq!(sqlx::query("UPDATE read_rows SET body_json='not JSON' WHERE scope_key=? AND address=? AND valid_to IS NULL")
-        .bind(read_scope(&fixture.parent, None, "relations")).bind(fixture.child.encode())
+        .bind(read_scope(&fixture.parent, None, crate::trace::reading_store::DIRECTORY_COLLECTION)).bind(fixture.child.encode())
         .execute(&mut connection).await.unwrap().rows_affected(), 1);
     let child = fixture.bootstrap(&fixture.child, None).await;
     assert_eq!(

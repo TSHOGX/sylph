@@ -42,6 +42,7 @@ type Result<T> = std::result::Result<T, TraceError>;
 
 mod transfer;
 mod evidence;
+mod directory;
 #[cfg(test)]
 mod visibility_tests;
 fn invalid(message: impl Into<String>) -> TraceError {
@@ -739,6 +740,7 @@ pub struct ReadQuery {
     filter: Option<String>,
     relation: Option<String>,
     direction: Option<String>,
+    count_only: Option<bool>,
 }
 
 fn agent(value: &str) -> Result<AgentRef> {
@@ -1143,25 +1145,25 @@ async fn authorized_value(
             // Endpoint visibility cannot authorize the relationship itself. Read
             // only its retained candidate metadata; binding this optional link to
             // the lease would unnecessarily expire the child's own surviving view.
-            let (scope, anchor) = if parent {
-                (
-                    read_scope(&target, None, "relations"),
-                    AnyObjectRef::Agent(agent.clone()),
-                )
+            let candidate = if parent {
+                generation
+                    .directory_parent_candidate(snapshot, &agent, &target)
+                    .await
             } else {
-                (
-                    read_scope(
-                        &agent,
-                        None,
-                        &format!("object-relations:{}", agent.encode()),
-                    ),
-                    AnyObjectRef::Agent(target),
-                )
+                let scope = read_scope(
+                    &agent,
+                    None,
+                    &format!("object-relations:{}", agent.encode()),
+                );
+                generation
+                    .read_candidate(
+                        snapshot,
+                        &scope,
+                        &TraceAddress::of(&AnyObjectRef::Agent(target)),
+                    )
+                    .await
             };
-            let readable = match generation
-                .read_candidate(snapshot, &scope, &TraceAddress::of(&anchor))
-                .await
-            {
+            let readable = match candidate {
                 Ok(candidate) => candidate_is_readable(state, subject, candidate)
                     .await
                     .map_err(storage)?,
@@ -1292,22 +1294,10 @@ pub async fn bootstrap(
         authorized_value(&state, &subject.0, &generation, &lease.snapshot, row.body).await?,
     )
     .map_err(internal)?;
-    let count_filter = ReadFilter {
-        allowed_environments: authorized_environments(&state, &subject.0).await?,
-        ..ReadFilter::default()
-    };
-    let count = generation
-        .read_authorized_count(
-            &lease.snapshot,
-            &read_scope(&agent, None, "relations"),
-            &count_filter,
-            |candidate| candidate_is_readable(&state, &subject.0, candidate),
-        )
-        .await
-        .map_err(storage)?;
+    let count = directory::descendants(&state, &subject.0, &lease, &agent).await?;
     header.descendant_count = ReadCount {
         value: count,
-        scope: "authorized direct spawned agents".into(),
+        scope: "authorized spawn descendants".into(),
         complete: count.is_some(),
     };
     if let AgentRef::Session(session_id) = &agent {
@@ -1430,41 +1420,10 @@ async fn page<T: serde::de::DeserializeOwned + Serialize>(
         .map(TraceAddress::parse)
         .transpose()
         .map_err(|error| invalid(error.to_string()))?;
-    let mut filter = if collection == "relations" {
-        if query.q.as_ref().is_some_and(|text| text.len() > 512) {
-            return Err(invalid("Directory search exceeds its limit"));
-        }
-        if query
-            .relation
-            .as_deref()
-            .is_some_and(|relation| relation != "spawn")
-            || query
-                .direction
-                .as_deref()
-                .is_some_and(|direction| direction != "outgoing")
-        {
-            return Err(invalid("Unknown directory relation scope"));
-        }
-        let state = query.filter.as_deref().unwrap_or("all");
-        if !matches!(
-            state,
-            "all" | "active" | "needs_input" | "completed" | "unknown" | "failed" | "cancelled"
-        ) {
-            return Err(invalid("Unknown directory filter"));
-        }
-        ReadFilter {
-            text: query.q.as_deref().unwrap_or("").trim().to_lowercase(),
-            state: if state == "all" {
-                String::new()
-            } else {
-                state.into()
-            },
-            ..ReadFilter::default()
-        }
-    } else {
-        ReadFilter::default()
+    let filter = ReadFilter {
+        allowed_environments: authorized_environments(state, subject).await?,
+        ..Default::default()
     };
-    filter.allowed_environments = authorized_environments(state, subject).await?;
     let scope = read_scope(agent, selection, collection);
     let before = open_cursor(
         state,
@@ -1520,12 +1479,7 @@ async fn page<T: serde::de::DeserializeOwned + Serialize>(
         has_after: rows.has_after,
         total: ReadCount {
             value: rows.total,
-            scope: if collection == "relations" {
-                "authorized direct spawned agents"
-            } else {
-                collection
-            }
-            .into(),
+            scope: collection.into(),
             complete: rows.total.is_some(),
         },
         state: if rows.work_exhausted {
@@ -1729,22 +1683,13 @@ async fn relations(
     State(state): State<AppState>,
     Extension(subject): Extension<SubjectId>,
     Path(encoded): Path<String>,
-    Query(query): Query<ReadQuery>,
+    query: std::result::Result<Query<ReadQuery>, axum::extract::rejection::QueryRejection>,
 ) -> Result<Json<ReadPage<AgentDirectoryRow>>> {
+    let Query(query) = query.map_err(|error| invalid(error.to_string()))?;
     let agent = agent(&encoded)?;
     observe(&state, &subject.0, &agent).await?;
     let lease = lease(&state, &subject.0, query.at_snapshot.as_deref()).await?;
-    let result = page(
-        &state,
-        &subject.0,
-        &lease,
-        &agent,
-        None,
-        "relations",
-        &query,
-        false,
-    )
-    .await?;
+    let result = directory::page(&state, &subject.0, &lease, &agent, &query).await?;
     lease.retain();
     Ok(Json(result))
 }

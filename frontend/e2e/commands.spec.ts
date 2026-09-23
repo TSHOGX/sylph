@@ -30,13 +30,13 @@ test("the slash menu still opens after a completed turn", async ({ page }) => {
   await expect(page.getByRole("listbox", { name: "Agent commands" })).toBeVisible();
   await expect(page.getByRole("option", { name: /verify/ })).toBeVisible();
 
-  await composer.fill("hello");
+  await composer.fill("echo Command menu follow-up");
   await page.getByRole("button", { name: "Send", exact: true }).click();
-  await expect(page.getByText("Hello from the E2E runner.")).toBeVisible();
+  await expect(page.getByText("Command menu follow-up", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeVisible();
 
-  // The assertion the reported bug would have failed. The fixture emits a per-turn
-  // capability update naming only `permissionMode`, exactly as `claude` does, so
-  // this drives the real path rather than a hypothetical one.
+  // Reopen the menu after this follow-up settles, without letting the setup
+  // greeting satisfy the completion wait.
   await composer.fill("/");
   await expect(page.getByRole("listbox", { name: "Agent commands" })).toBeVisible();
   await expect(page.getByRole("option", { name: /verify/ })).toBeVisible();

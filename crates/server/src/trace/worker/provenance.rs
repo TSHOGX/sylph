@@ -31,6 +31,19 @@ pub(super) struct SupportIndex {
 }
 
 impl SupportIndex {
+    #[cfg(test)]
+    pub(super) fn fixture_epochs(
+        values: impl IntoIterator<Item = (ClaimRef, IngestionEpoch)>,
+    ) -> Self {
+        Self {
+            claim_epochs: values
+                .into_iter()
+                .map(|(claim, epoch)| (claim, imbl::ordset![epoch]))
+                .collect(),
+            ..Default::default()
+        }
+    }
+
     pub(super) fn claim_dependencies(
         &self,
         claim: &ClaimRef,

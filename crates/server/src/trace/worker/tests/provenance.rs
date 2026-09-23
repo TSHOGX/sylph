@@ -18,6 +18,7 @@ struct ProvenanceFixture {
     generation: Arc<GenerationStore>,
     committed: WorkerState,
     sequence: u64,
+    _projection_guard: tokio::sync::OwnedMutexGuard<()>,
 }
 
 fn agent(environment: &str, native: &str) -> AgentRef {
@@ -61,6 +62,10 @@ impl ProvenanceFixture {
         let state = crate::AppState::build(crate::config::Config::from_resolved(&resolved))
             .await
             .unwrap();
+        // These tests publish normalized facts themselves. Hold the production
+        // projector's gate so its periodic pass cannot race fixture publication
+        // after a slow payload setup; same-cut safety must remain enforced.
+        let projection_guard = state.trace.hold_fixture_projection().await;
         let app = crate::router(state.clone());
         let (_, administrator) = register(&app, "provenance-administrator").await;
         let (cookie, subject) = register(&app, "provenance-reader").await;
@@ -98,6 +103,7 @@ impl ProvenanceFixture {
             generation,
             committed,
             sequence: 0,
+            _projection_guard: projection_guard,
         }
     }
 
@@ -748,3 +754,5 @@ mod resources;
 mod transfers;
 
 mod inspection;
+
+mod directory;

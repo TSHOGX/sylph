@@ -415,6 +415,7 @@ impl ProjectionWorker {
                                 || stored.scope_epoch != row.scope_epoch
                                 || stored.required_environments != row.required_environments
                                 || stored.dependency_epochs != row.dependency_epochs
+                                || stored.directory != row.directory
                         }) {
                             unit.batch.read_rows.push(row.clone());
                             next.rows.insert(key, Arc::new(row));
@@ -468,6 +469,7 @@ impl ProjectionWorker {
                     || old.scope_epoch != row.scope_epoch
                     || old.required_environments != row.required_environments
                     || old.dependency_epochs != row.dependency_epochs
+                    || old.directory != row.directory
             }) {
                 unit.batch.read_rows.push(row.as_ref().clone());
             }
@@ -604,6 +606,7 @@ fn rows(
             }
         }
         let row = ReadRowChange {
+            directory: None,
             scope: scope.clone(),
             address: address.clone(),
             anchor: anchor.clone(),
@@ -663,25 +666,26 @@ fn rows(
             )?;
         }
     }
-    for (agent, directory) in &projection.directories {
-        for (index, row) in directory.iter().enumerate() {
-            insert(
-                read_scope(agent, None, "relations"),
-                row.agent.address.as_str().into(),
-                Some(TraceAddress::of(&AnyObjectRef::Agent(
-                    row.agent.address.agent(),
-                ))),
-                index,
-                serde_json::to_value(row)?,
-                &AnyObjectRef::Agent(agent.clone()),
-                row.own_execution
-                    .reference
-                    .iter()
-                    .map(TraceAddress::object)
-                    .collect(),
-                true,
-            )?;
-        }
+    for (agent, entry) in &projection.directory {
+        let row = &entry.row;
+        insert(
+            read_scope(
+                &entry.component,
+                None,
+                crate::trace::reading_store::DIRECTORY_COLLECTION,
+            ),
+            row.agent.address.as_str().into(),
+            Some(TraceAddress::of(&AnyObjectRef::Agent(agent.clone()))),
+            entry.position,
+            serde_json::to_value(row)?,
+            &AnyObjectRef::Agent(agent.clone()),
+            row.own_execution
+                .reference
+                .iter()
+                .map(TraceAddress::object)
+                .collect(),
+            false,
+        )?;
     }
     for (agent, activations) in &projection.activations {
         for (index, row) in activations.iter().enumerate() {
@@ -921,6 +925,35 @@ fn rows(
     }
     for row in selected_rows {
         rows.insert((row.scope.clone(), row.address.clone()), row);
+    }
+    for entry in projection.directory.values() {
+        let key = (
+            read_scope(
+                &entry.component,
+                None,
+                crate::trace::reading_store::DIRECTORY_COLLECTION,
+            ),
+            entry.row.agent.address.as_str().to_owned(),
+        );
+        let row = rows.get_mut(&key).expect("directory row was materialized");
+        row.directory = Some(crate::trace::reading_store::DirectoryMetadata {
+            component: entry.component.clone(),
+            parent: entry.parent.clone(),
+            end_key: (entry.end_exclusive as u64 + 1).to_be_bytes().to_vec(),
+            spawn_epochs: entry
+                .spawn_claims
+                .iter()
+                .map(|claim| {
+                    support_index
+                        .claim_dependencies(claim)
+                        .cloned()
+                        .ok_or(sylph_trace::reducer::ReductionError::MissingEvidence)
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()?
+                .into_iter()
+                .flatten()
+                .collect(),
+        });
     }
     Ok(rows)
 }

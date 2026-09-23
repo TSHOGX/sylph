@@ -66,6 +66,18 @@ export const traceAPI = {
       `${base}/agents/${segment(agent)}/relations${query({ at_snapshot: view.token, relation: "spawn", direction: "outgoing", q: search, filter, after: cursor })}`,
       { signal },
     ),
+  directoryCount: (
+    agent: string,
+    view: TraceView,
+    search: string,
+    filter: string,
+    cursor: string | null,
+    signal?: AbortSignal,
+  ) =>
+    fetchAPI<TracePage<AgentDirectoryRow>>(
+      `${base}/agents/${segment(agent)}/relations${query({ at_snapshot: view.token, relation: "spawn", direction: "outgoing", q: search, filter, after: cursor, count_only: "true" })}`,
+      { signal },
+    ),
   histories: (
     agent: string,
     view: TraceView,

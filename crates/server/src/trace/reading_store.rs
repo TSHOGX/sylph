@@ -11,10 +11,20 @@ use super::generation::{GenerationError, GenerationStore, Snapshot};
 const READ_FORWARD_SQL: &str = "SELECT order_key,address,anchor_ref,valid_from,valid_to,present,body_bytes,scope_epoch,search_text,directory_state,needs_input,required_environments_json,dependency_epochs_json FROM read_rows WHERE scope_key=? AND (order_key,address,valid_from)>(?,?,?) ORDER BY order_key,address,valid_from LIMIT ?";
 const READ_BACKWARD_SQL: &str = "SELECT order_key,address,anchor_ref,valid_from,valid_to,present,body_bytes,scope_epoch,search_text,directory_state,needs_input,required_environments_json,dependency_epochs_json FROM read_rows WHERE scope_key=? AND (order_key,address,valid_from)<(?,?,?) ORDER BY order_key DESC,address DESC,valid_from DESC LIMIT ?";
 const READ_ANCHOR_SQL: &str = "SELECT order_key,address,valid_from,scope_epoch,required_environments_json,dependency_epochs_json,search_text,directory_state,needs_input FROM read_rows WHERE scope_key=? AND anchor_ref=? AND valid_from<=? AND (valid_to IS NULL OR valid_to>?) AND present=1 ORDER BY order_key,address,valid_from LIMIT 1";
-const READ_COUNT_SQL: &str = "SELECT valid_from,valid_to,present,scope_epoch,search_text,directory_state,needs_input,required_environments_json,dependency_epochs_json FROM read_rows WHERE scope_key=? ORDER BY order_key,address,valid_from LIMIT ?";
+
+pub const DIRECTORY_COLLECTION: &str = "spawn-directory";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectoryMetadata {
+    pub component: AgentRef,
+    pub parent: Option<AgentRef>,
+    pub end_key: Vec<u8>,
+    pub spawn_epochs: BTreeSet<IngestionEpoch>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReadRowChange {
+    pub directory: Option<DirectoryMetadata>,
     pub scope: String,
     pub address: String,
     pub anchor: Option<TraceAddress>,
@@ -222,8 +232,8 @@ pub(crate) async fn apply_rows(
         let present = i64::from(row.body.is_some());
         let (search_text, directory_state, needs_input) = directory_metadata(row.body.as_ref());
         let body = serde_json::to_string(&row.body)?;
-        sqlx::query("INSERT INTO read_rows(scope_key,address,anchor_ref,order_key,valid_from,valid_to,present,body_json,body_bytes,scope_epoch,search_text,directory_state,needs_input,required_environments_json,dependency_epochs_json) VALUES(?,?,?,?,?,NULL,?,?,?,?,?,?,?,?,?)")
-            .bind(&row.scope).bind(&row.address).bind(row.anchor.as_ref().map(TraceAddress::as_str)).bind(&row.order_key).bind(revision as i64).bind(present).bind(&body).bind(body.len() as i64).bind(row.scope_epoch.as_str()).bind(search_text).bind(directory_state).bind(needs_input).bind(serde_json::to_string(&row.required_environments)?).bind(serde_json::to_string(&row.dependency_epochs)?).execute(&mut *conn).await.map_err(super::generation::map_query_error)?;
+        sqlx::query("INSERT INTO read_rows(scope_key,address,anchor_ref,order_key,valid_from,valid_to,present,body_json,body_bytes,scope_epoch,search_text,directory_state,needs_input,required_environments_json,dependency_epochs_json,directory_end,directory_epochs_json,directory_parent) VALUES(?,?,?,?,?,NULL,?,?,?,?,?,?,?,?,?,?,?,?)")
+            .bind(&row.scope).bind(&row.address).bind(row.anchor.as_ref().map(TraceAddress::as_str)).bind(&row.order_key).bind(revision as i64).bind(present).bind(&body).bind(body.len() as i64).bind(row.scope_epoch.as_str()).bind(search_text).bind(directory_state).bind(needs_input).bind(serde_json::to_string(&row.required_environments)?).bind(serde_json::to_string(&row.dependency_epochs)?).bind(row.directory.as_ref().map(|value| value.end_key.as_slice())).bind(row.directory.as_ref().map(|value| serde_json::to_string(&value.spawn_epochs)).transpose()?).bind(row.directory.as_ref().and_then(|value| value.parent.as_ref()).map(AgentRef::encode)).execute(&mut *conn).await.map_err(super::generation::map_query_error)?;
         *changes.entry(row.scope.clone()).or_default() += present - prior.unwrap_or(0);
     }
     for (scope, delta) in changes {
@@ -570,41 +580,6 @@ impl GenerationStore {
             vm_steps: steps.load(std::sync::atomic::Ordering::Relaxed),
         })
     }
-
-    pub async fn read_authorized_count<F, Fut>(
-        &self,
-        snapshot: &Snapshot,
-        scope: &str,
-        filter: &ReadFilter,
-        mut authorize: F,
-    ) -> Result<Option<u64>, GenerationError>
-    where
-        F: FnMut(ReadCandidate) -> Fut,
-        Fut: Future<Output = Result<bool, GenerationError>>,
-    {
-        let (mut conn, _) = self.read_connection(snapshot).await?;
-        let rows = sqlx::query(READ_COUNT_SQL)
-            .bind(scope)
-            .bind((self.limits().max_candidates + 1) as i64)
-            .fetch_all(&mut *conn)
-            .await
-            .map_err(super::generation::map_query_error)?;
-        if rows.len() > self.limits().max_candidates {
-            return Ok(None);
-        }
-        let mut count = 0u64;
-        for row in rows {
-            let candidate = decode_candidate(&row)?;
-            if is_current(&row, snapshot)
-                && filter.matches(&row)
-                && filter.permits(&candidate)
-                && authorize(candidate).await?
-            {
-                count += 1;
-            }
-        }
-        Ok(Some(count))
-    }
 }
 
 fn is_current(row: &sqlx::sqlite::SqliteRow, snapshot: &Snapshot) -> bool {
@@ -646,3 +621,6 @@ fn decode(row: sqlx::sqlite::SqliteRow) -> Result<ReadRow, GenerationError> {
 
 #[cfg(test)]
 mod tests;
+
+mod directory;
+pub use directory::*;

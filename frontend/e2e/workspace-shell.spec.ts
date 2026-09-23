@@ -585,9 +585,9 @@ test("the add menu keeps the native agent fixed after session creation", async (
   await page.keyboard.press("Escape");
 
   const composer = page.getByLabel("Message", { exact: true });
-  await composer.fill("First turn");
+  await composer.fill("echo Agent identity follow-up");
   await page.getByRole("button", { name: "Send", exact: true }).click();
-  await expect(page.getByText("Hello from the E2E runner.")).toBeVisible();
+  await expect(page.getByText("Agent identity follow-up", { exact: true })).toBeVisible();
 
   // After a turn the agent is stated as fixed, not offered as a disabled control:
   // switching runner would hand an existing transcript to a different identity

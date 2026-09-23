@@ -514,7 +514,30 @@ function AgentDirectory({
   const result = useTraceResource(
     traceCacheKey(view, ["agents", address, query, filter, cursor]),
     (signal) => traceAPI.agents(address, view, query, filter, cursor, signal),
+    undefined,
+    false,
   );
+  const advanceEmpty = useEffectEvent(() => {
+    const page = result.data;
+    if (
+      !result.pending &&
+      !result.error &&
+      page?.state === "work_budget_exhausted" &&
+      page.items.length === 0 &&
+      page.hasAfter &&
+      page.afterCursor
+    ) {
+      onLocation({
+        ...location,
+        view: page.view,
+        cursor: page.afterCursor,
+        position: null,
+      });
+    }
+  });
+  useEffect(() => {
+    advanceEmpty();
+  }, [result.data, result.pending, result.error]);
   useLayoutEffect(() => {
     if (
       restored.current ||
@@ -540,12 +563,17 @@ function AgentDirectory({
     restored.current = true;
   }, [result.data, result.pending, location.position]);
   const update = (patch: Partial<DirectoryLocation>) =>
-    onLocation({ ...location, view, position: null, ...patch });
+    onLocation({
+      ...location,
+      view: result.data?.view ?? view,
+      position: null,
+      ...patch,
+    });
   const open = (agent: string, row: HTMLElement) => {
     const pane = scroller.current;
     onLocation({
       ...location,
-      view,
+      view: result.data?.view ?? view,
       position: pane
         ? {
             agent,
@@ -600,7 +628,22 @@ function AgentDirectory({
           agent: agentName(bootstrap.header.agent, t),
         })}{" "}
         {result.data &&
-          describeCount(result.data.total, t("trace.agentsNoun"), t)}
+          (result.data.total.complete ? (
+            describeCount(result.data.total, t("trace.agentsNoun"), t)
+          ) : (
+            <DirectoryCount
+              key={traceCacheKey(result.data.view, [
+                address,
+                query,
+                filter,
+                "count",
+              ])}
+              agent={address}
+              view={result.data.view}
+              query={query}
+              filter={filter}
+            />
+          ))}
       </p>
       {result.error && <p role="alert">{result.error.message}</p>}
       {result.pending && <p role="status">{t("trace.loadingAgents")}</p>}
@@ -618,8 +661,11 @@ function AgentDirectory({
               {agentName(row.agent, t)}
             </Link>
             <p className="mt-1 text-xs text-ink-muted">
-              {row.agent.vendor} · {row.relation} ·{" "}
-              {executionLabel(row.ownExecution, t)}
+              {row.agent.vendor} ·{" "}
+              {row.relation === "focus"
+                ? t("trace.focusedAgent")
+                : t("trace.spawnDescendant")}{" "}
+              · {executionLabel(row.ownExecution, t)}
             </p>
             <p className="mt-1 text-xs">
               {describeCount(row.activations, t("trace.activationsNoun"), t)} ·{" "}
@@ -649,12 +695,68 @@ function AgentDirectory({
           </li>
         ))}
       </ul>
-      <PageControls
-        page={result.data}
-        pending={result.pending}
-        setCursor={(cursor) => update({ cursor })}
-      />
+      <div className="mt-3 flex flex-wrap">
+        <button
+          className={button}
+          disabled={cursor === null || result.pending}
+          onClick={() => update({ cursor: null })}
+        >
+          {t("trace.firstPage")}
+        </button>
+        <button
+          className={button}
+          disabled={!result.data?.hasAfter || result.pending}
+          onClick={() => update({ cursor: result.data?.afterCursor ?? null })}
+        >
+          {t("trace.nextPage")}
+        </button>
+      </div>
     </div>
+  );
+}
+
+function DirectoryCount({
+  agent,
+  view,
+  query,
+  filter,
+}: {
+  agent: string;
+  view: TraceView;
+  query: string;
+  filter: string;
+}) {
+  const t = useT();
+  const result = useTraceResource(
+    traceCacheKey(view, ["directory-count", agent, query, filter]),
+    async (signal) => {
+      let cursor: string | null = null;
+      for (;;) {
+        const page = await traceAPI.directoryCount(
+          agent,
+          view,
+          query,
+          filter,
+          cursor,
+          signal,
+        );
+        if (!page.hasAfter || !page.afterCursor) return page;
+        cursor = page.afterCursor;
+      }
+    },
+    undefined,
+    false,
+  );
+  return (
+    <span role="status">
+      {result.data?.total.complete
+        ? describeCount(result.data.total, t("trace.agentsNoun"), t)
+        : t(
+            result.error
+              ? "trace.directoryCountUnavailable"
+              : "trace.directoryCounting",
+          )}
+    </span>
   );
 }
 

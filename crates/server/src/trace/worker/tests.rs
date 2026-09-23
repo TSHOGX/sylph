@@ -323,6 +323,9 @@ struct OracleRow {
     search_text: String,
     directory_state: String,
     needs_input: bool,
+    directory_end: Option<Vec<u8>>,
+    directory_parent: Option<String>,
+    directory_epochs: Option<BTreeSet<OracleEpoch>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -358,7 +361,11 @@ impl ReaderProjection {
         let epochs: BTreeSet<_> = self
             .rows
             .values()
-            .flat_map(|row| std::iter::once(&row.source_epoch).chain(&row.dependency_epochs))
+            .flat_map(|row| {
+                std::iter::once(&row.source_epoch)
+                    .chain(&row.dependency_epochs)
+                    .chain(row.directory_epochs.iter().flatten())
+            })
             .chain(
                 self.payloads
                     .values()
@@ -390,6 +397,10 @@ impl ReaderProjection {
         for row in self.rows.values_mut() {
             row.source_epoch = normalized(&row.source_epoch);
             row.dependency_epochs = row.dependency_epochs.iter().map(&normalized).collect();
+            row.directory_epochs = row
+                .directory_epochs
+                .as_ref()
+                .map(|epochs| epochs.iter().map(&normalized).collect());
         }
         for payload in self.payloads.values_mut() {
             payload.root_epochs = payload.root_epochs.iter().map(&normalized).collect();
@@ -409,7 +420,7 @@ async fn reader_projection(fixture: &Fixture, store: &GenerationStore) -> Reader
     conn.lock_handle().await.unwrap().remove_progress_handler();
     let revision = snapshot.view_revision as i64;
     let rows = sqlx::query(
-        "SELECT scope_key,address,body_json,order_key,anchor_ref,scope_epoch,dependency_epochs_json,required_environments_json,body_bytes,search_text,directory_state,needs_input FROM read_rows \
+        "SELECT scope_key,address,body_json,order_key,anchor_ref,scope_epoch,dependency_epochs_json,required_environments_json,body_bytes,search_text,directory_state,needs_input,directory_end,directory_parent,directory_epochs_json FROM read_rows \
          WHERE present=1 AND valid_from<=? AND (valid_to IS NULL OR valid_to>?) \
          ORDER BY scope_key,address",
     )
@@ -434,6 +445,9 @@ async fn reader_projection(fixture: &Fixture, store: &GenerationStore) -> Reader
                 search_text: row.get("search_text"),
                 directory_state: row.get("directory_state"),
                 needs_input: row.get("needs_input"),
+                directory_end: row.get("directory_end"),
+                directory_parent: row.get("directory_parent"),
+                directory_epochs: row.get::<Option<String>, _>("directory_epochs_json").map(|value| serde_json::from_str::<BTreeSet<IngestionEpoch>>(&value).unwrap().into_iter().map(OracleEpoch::Exact).collect()),
             },
         )
     })
@@ -644,12 +658,17 @@ async fn reader_oracle_detects_order_authorization_and_payload_anchor_changes_wi
     )
     .await
     .unwrap();
+    let directory_metadata: (Option<Vec<u8>>, Option<String>, Option<String>) = sqlx::query_as("SELECT directory_end,directory_parent,directory_epochs_json FROM read_rows WHERE scope_key=? AND address=? AND valid_to IS NULL")
+        .bind(&key.0).bind(&key.1).fetch_one(&mut connection).await.unwrap();
     for mutation in [
         "order_key=X'ff'",
         "anchor_ref=NULL",
         "scope_epoch='oracle-other-source'",
         "dependency_epochs_json='[\"oracle-other-target\"]'",
         "required_environments_json='[\"private\"]'",
+        "directory_end=X'ff'",
+        "directory_parent='different-parent'",
+        "directory_epochs_json='[\"different-proof\"]'",
     ] {
         let updated = sqlx::query(&format!(
             "UPDATE read_rows SET {mutation} WHERE scope_key=? AND address=? AND valid_to IS NULL"
@@ -663,9 +682,10 @@ async fn reader_oracle_detects_order_authorization_and_payload_anchor_changes_wi
         let changed = reader_projection(&fixture, &store).await;
         assert_eq!(changed.rows[key].body, original.body);
         assert_ne!(changed, baseline, "reader oracle omitted {mutation}");
-        sqlx::query("UPDATE read_rows SET order_key=?,anchor_ref=?,scope_epoch=?,dependency_epochs_json=?,required_environments_json=? WHERE scope_key=? AND address=? AND valid_to IS NULL")
+        sqlx::query("UPDATE read_rows SET order_key=?,anchor_ref=?,scope_epoch=?,dependency_epochs_json=?,required_environments_json=?,directory_end=?,directory_parent=?,directory_epochs_json=? WHERE scope_key=? AND address=? AND valid_to IS NULL")
             .bind(&original.order_key).bind(&original.anchor).bind(source_epoch.as_str())
             .bind(serde_json::to_string(&targets).unwrap()).bind(serde_json::to_string(&original.required_environments).unwrap())
+            .bind(&directory_metadata.0).bind(&directory_metadata.1).bind(&directory_metadata.2)
             .bind(&key.0).bind(&key.1).execute(&mut connection).await.unwrap();
     }
     let (anchor_key, anchor) = baseline

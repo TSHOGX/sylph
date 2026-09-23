@@ -12,6 +12,8 @@ mod append;
 mod content;
 mod inputs;
 mod resources;
+mod directory;
+pub use directory::DirectoryEntry;
 mod message_update;
 mod window;
 pub use append::{project_independent_append, AppendIndex, AppendProjection, AppendWork};
@@ -44,7 +46,7 @@ pub struct ReadingProjection {
     pub composed_payloads: BTreeMap<PayloadRef, ComposedPayload>,
     pub headers: BTreeMap<AgentRef, AgentHeader>,
     pub windows: BTreeMap<ReadingScope, Vec<ReadingUnit>>,
-    pub directories: BTreeMap<AgentRef, Vec<AgentDirectoryRow>>,
+    pub directory: BTreeMap<AgentRef, DirectoryEntry>,
     pub activations: BTreeMap<AgentRef, Vec<ExecutionSummary>>,
     pub histories: BTreeMap<AgentRef, Vec<HistoryChoice>>,
     pub operations: BTreeMap<AnyObjectRef, Vec<AnyObjectRef>>,
@@ -66,7 +68,6 @@ struct Index<'a> {
     deliveries: BTreeMap<EntryRef, Vec<DeliveryRef>>,
     results: BTreeMap<OperationRef, Vec<ResultRef>>,
     resources: BTreeMap<OperationRef, BTreeSet<ResourceRef>>,
-    children: BTreeMap<AgentRef, BTreeSet<AgentRef>>,
     relations: BTreeMap<AnyObjectRef, Vec<ReadRelation>>,
     nested: BTreeMap<OperationRef, Vec<OperationRef>>,
     coverage_by_agent: BTreeMap<AgentRef, Vec<&'a Coverage>>,
@@ -97,7 +98,6 @@ pub fn project(
         deliveries: BTreeMap::new(),
         results: BTreeMap::new(),
         resources: BTreeMap::new(),
-        children: BTreeMap::new(),
         relations: BTreeMap::new(),
         nested: BTreeMap::new(),
         coverage_by_agent: BTreeMap::new(),
@@ -217,11 +217,6 @@ pub fn project(
             }
             Relation::Spawn { parent, child, .. } => {
                 if index.agents.contains_key(child) {
-                    index
-                        .children
-                        .entry(parent.clone())
-                        .or_default()
-                        .insert(child.clone());
                     index.parents.insert(child.clone(), parent.clone());
                 }
             }
@@ -257,12 +252,14 @@ pub fn project(
     index.index_submitted_presentations();
     let mut result = ReadingProjection {
         composed_payloads,
+        directory: directory::project(&index),
         ..ReadingProjection::default()
     };
     for (agent, declaration) in &index.agents {
-        result
-            .headers
-            .insert(agent.clone(), index.header(declaration));
+        result.headers.insert(
+            agent.clone(),
+            index.header(declaration, &result.directory[agent]),
+        );
         // Catalogue membership comes from proven ownership, independently of
         // which activation happens to be represented in selected history.
         result.activations.insert(
@@ -275,24 +272,6 @@ pub fn project(
                 .map(|reference| index.execution(&AnyObjectRef::Activation(reference.clone())))
                 .collect(),
         );
-        let directory = index
-            .children
-            .get(agent)
-            .into_iter()
-            .flatten()
-            .map(|child| AgentDirectoryRow {
-                agent: index.agent_link(child),
-                relation: "spawn".into(),
-                own_execution: index.agent_execution(child),
-                activations: count(
-                    index.activation_agents.get(child).map_or(0, Vec::len),
-                    "own activations",
-                ),
-                required_input: unknown_count("required input"),
-                coverage: index.coverage(child),
-            })
-            .collect();
-        result.directories.insert(agent.clone(), directory);
         let scope = ReadingScope {
             agent: agent.clone(),
             selection: None,
@@ -1108,7 +1087,7 @@ impl Index<'_> {
         }).collect()
     }
 
-    fn header(&self, agent: &AgentThread) -> AgentHeader {
+    fn header(&self, agent: &AgentThread, directory: &DirectoryEntry) -> AgentHeader {
         let history = self.reduction.histories.get(&agent.agent_ref);
         let selection = history
             .and_then(|history| history.selection.known())
@@ -1147,8 +1126,8 @@ impl Index<'_> {
             origin: None,
             coverage: self.coverage(&agent.agent_ref),
             descendant_count: count(
-                self.children.get(&agent.agent_ref).map_or(0, BTreeSet::len),
-                "direct children",
+                directory.end_exclusive - directory.position - 1,
+                "spawn descendants",
             ),
             continuing_resources: unknown_count("independent resources"),
             required_input: unknown_count("required input"),

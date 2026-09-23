@@ -1741,6 +1741,25 @@ impl GenerationStore {
                     "reading authorization metadata bytes",
                 ));
             }
+            if let Some(directory) = &row.directory {
+                if row.scope
+                    != super::reading_store::read_scope(
+                        &directory.component,
+                        None,
+                        super::reading_store::DIRECTORY_COLLECTION,
+                    )
+                    || directory.end_key <= row.order_key
+                {
+                    return Err(GenerationError::Invalid(
+                        "directory interval is inconsistent".into(),
+                    ));
+                }
+                if serde_json::to_vec(&directory.spawn_epochs)?.len() > self.limits.max_key_bytes {
+                    return Err(GenerationError::Limit(
+                        "directory authorization metadata bytes",
+                    ));
+                }
+            }
             for environment in &row.required_environments {
                 sylph_protocol::EnvironmentId::parse(environment)
                     .map_err(|error| GenerationError::Invalid(error.to_string()))?;
@@ -1867,7 +1886,17 @@ async fn reader_pool(path: &Path) -> Result<SqlitePool> {
         .max_connections(4)
         .after_connect(|conn, _| {
             Box::pin(async move {
-                sqlx::query("PRAGMA query_only = ON").execute(conn).await?;
+                sqlx::query("PRAGMA query_only = ON")
+                    .execute(&mut *conn)
+                    .await?;
+                // SQLite lazily loads sqlite_schema when preparing the first
+                // table read. Initialize that fixed schema here, before a query
+                // installs its progress budget; pool expansion must not look like
+                // history-dependent scan work. Snapshot validation still runs
+                // inside every query's own budget in read_connection.
+                sqlx::query("SELECT view_revision FROM projection_state WHERE singleton=1")
+                    .fetch_one(&mut *conn)
+                    .await?;
                 Ok(())
             })
         })

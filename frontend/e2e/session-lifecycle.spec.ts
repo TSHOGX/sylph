@@ -46,9 +46,8 @@ test("a new session accepts a turn and streams the reply", async ({ page }) => {
   await composer.fill("Hello from Playwright");
   await page.getByRole("button", { name: "Send", exact: true }).click();
 
-  // The mock runner streams a thinking block, then deltas, then a completed
-  // reply. Asserting the final text covers the whole delta-accumulation path.
-  await expect(page.getByText("Hello from the E2E runner.", { exact: true }).first()).toBeVisible();
+  // The fixture captures an assistant delta followed by the completed item.
+  await expect(page.getByText("Hello from the E2E runner.", { exact: true })).toBeVisible();
 
   await expect(page).toHaveURL(/\/agents\//);
   await expect(page.locator("[data-trace-address]").filter({ hasText: "Hello from Playwright" }).first()).toBeVisible();
@@ -79,24 +78,23 @@ test("a created session is offered for resumption on the start screen", async ({
   await expect(page.getByLabel("Message", { exact: true })).toBeVisible();
 });
 
-test("reloading mid-conversation replays the journal", async ({ page }) => {
+test("reloading a conversation preserves its retained messages", async ({ page }) => {
   await createSession(page);
 
   const composer = page.getByLabel("Message", { exact: true });
-  await composer.fill("Persist this");
+  await composer.fill("echo Persist this");
   await page.getByRole("button", { name: "Send", exact: true }).click();
-  await expect(page.getByText("Hello from the E2E runner.", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("Persist this", { exact: true })).toBeVisible();
 
-  // A reload drops the SSE connection entirely, so what survives is what the
-  // journal holds. Ephemeral deltas are expected to be gone; the completed reply
-  // is not.
+  // A reload drops the observation connection and client caches. The follow-up
+  // must remain readable from retained evidence, independently of the setup reply.
   await page.reload();
 
-  await expect(page.getByText("Hello from the E2E runner.", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("Persist this", { exact: true })).toBeVisible();
   // The fixture's promotion turn intentionally owns the session title.  Reloading
   // must preserve the later user message as a turn, not replace the title with a
   // subsequent prompt.
-  await expect(page.locator("[data-trace-address]").filter({ hasText: "Persist this" }).first()).toBeVisible();
+  await expect(page.locator("[data-trace-address]").filter({ hasText: "echo Persist this" }).first()).toBeVisible();
 });
 
 /** The session a run creates must show up under its workspace in the sidebar. */

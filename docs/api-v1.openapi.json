@@ -2477,7 +2477,7 @@
     },
     "/api/v1/trace/agents/{agent}/relations": {
       "get": {
-        "summary": "GET /api/v1/trace/agents/{agent}/relations",
+        "summary": "Page the focused agent and all recorded spawn descendants at a retained snapshot",
         "parameters": [
           {
             "name": "agent",
@@ -2495,21 +2495,7 @@
             }
           },
           {
-            "name": "before",
-            "in": "query",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
             "name": "after",
-            "in": "query",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "around",
             "in": "query",
             "schema": {
               "type": "string"
@@ -2522,11 +2508,63 @@
               "type": "integer",
               "minimum": 1
             }
+          },
+          {
+            "name": "relation",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "spawn"
+              ]
+            }
+          },
+          {
+            "name": "direction",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "outgoing"
+              ]
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "maxLength": 512
+            }
+          },
+          {
+            "name": "filter",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "all",
+                "active",
+                "needs_input",
+                "completed",
+                "unknown",
+                "failed",
+                "cancelled"
+              ]
+            }
+          },
+          {
+            "name": "count_only",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
           }
         ],
         "responses": {
           "200": {
-            "description": "Successful result",
+            "description": "A bounded forward page, or a metadata-only count pass. Private continuations bind the view, subject, filters, mode and deletion visibility. A replacement window lease retains the same snapshot. Returning without a cursor starts at the first page.",
             "content": {
               "application/json": {
                 "schema": {

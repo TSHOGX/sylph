@@ -1,5 +1,5 @@
 use super::*;
-use crate::trace::reading_store::read_scope;
+use crate::trace::reading_store::{read_scope, DIRECTORY_COLLECTION};
 use serde_json::json;
 
 fn participant(name: &str) -> AgentRef {
@@ -175,17 +175,21 @@ async fn replay(child_first: bool) -> (Vec<Claim>, Reduction, ReaderProjection) 
     };
     assert_eq!(author.address.agent(), child);
     assert_eq!(parts[0].preview, "Child-owned evidence");
-    let parent_directory = read_scope(&parent, None, "relations");
+    let parent_directory = read_scope(&parent, None, DIRECTORY_COLLECTION);
     let directory: Vec<_> = reader
         .rows
         .iter()
         .filter(|((scope, _), _)| scope == &parent_directory)
         .collect();
-    assert_eq!(directory.len(), 1);
-    assert_eq!(
-        directory[0].1.source_epoch,
-        OracleEpoch::Exact(epochs[&parent].clone())
-    );
+    assert_eq!(directory.len(), 2);
+    for owner in [&parent, &child] {
+        let row = directory
+            .iter()
+            .find(|((_, address), _)| address == &owner.encode())
+            .unwrap()
+            .1;
+        assert_eq!(row.source_epoch, OracleEpoch::Exact(epochs[owner].clone()));
+    }
     (
         retained,
         reduction,

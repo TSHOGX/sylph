@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "./fixtures/test";
 import { createSession, gotoReady } from "./fixtures/session";
+import { requestFixture, openRequest } from "./fixtures/trace-requests";
 
 /**
  * The phone layout.
@@ -215,9 +216,9 @@ test("the document does not scroll, so the shell cannot be dragged off screen", 
 }) => {
   await createSession(page);
   const composer = page.getByLabel("Message", { exact: true });
-  await composer.fill("Say something");
+  await composer.fill("echo Mobile scrolling follow-up");
   await page.getByRole("button", { name: "Send", exact: true }).click();
-  await expect(page.getByText("Hello from the E2E runner.")).toBeVisible();
+  await expect(page.getByText("Mobile scrolling follow-up", { exact: true })).toBeVisible();
 
   // The reported bug: "scrolling drags the whole screen up and reveals blank space".
   // Three causes, all closed together — `100vh` measuring as if the browser's
@@ -385,7 +386,6 @@ test("a long catalogue is a filterable sheet that does not grab focus", async ({
  * roomy.
  */
 test("a request form fits the viewport and is answerable by tapping", async ({ page }) => {
-  const { requestFixture, openRequest } = await import("./fixtures/trace-requests");
   const state = await requestFixture(page); const panel = await openRequest(page);
   await expect(panel).toBeVisible(); expect(await overflowingElements(page)).toEqual([]);
   await panel.getByRole("radio", { name: "Tabs" }).tap(); await panel.getByRole("checkbox", { name: "ESLint" }).tap();

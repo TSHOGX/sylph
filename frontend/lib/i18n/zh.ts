@@ -15,7 +15,11 @@ import type { Dictionary } from "./messages";
 
 export const zh: Dictionary = {
   "trace.work": "工作",
-  "trace.scopeAgents": "{agent}的已记录派生后代。",
+  "trace.focusedAgent": "当前主视图智能体",
+  "trace.spawnDescendant": "派生后代",
+  "trace.directoryCounting": "正在统计可见智能体…",
+  "trace.directoryCountUnavailable": "可见数量暂不可用",
+  "trace.scopeAgents": "{agent} 及其派生后代",
   "trace.all": "全部",
   "trace.observedActive": "观测为活跃",
   "trace.needsMe": "需要我处理",
@@ -126,6 +130,7 @@ export const zh: Dictionary = {
   "trace.retry": "重试",
   "trace.searchHistory": "搜索保留的历史",
   "trace.searching": "正在搜索…",
+  "trace.firstPage": "首页",
   "trace.previousPage": "上一页",
   "trace.nextPage": "下一页",
   "trace.coverage": "记录覆盖情况",

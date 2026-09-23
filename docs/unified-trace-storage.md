@@ -583,7 +583,7 @@ origin and preserve environment-grant checks.
 | --- | --- |
 | `GET /api/v1/trace/agents/{agent_ref}` | Bounded agent identity, known histories, current selection, coverage, cuts, own state, relations summary and authorized action target |
 | `GET /api/v1/trace/agents/{agent_ref}/history` | Keyset page of directly readable entries under an explicit history selection; optional around-object anchor |
-| `GET /api/v1/trace/agents/{agent_ref}/relations` | Direct related agents/interactions, paged by relation and direction; exact scope-labelled counts |
+| `GET /api/v1/trace/agents/{agent_ref}/relations` | Focused agent and recorded spawn descendants, searched and paged at the retained view; counts name that scope |
 | `GET /api/v1/trace/agents/{agent_ref}/activations` | Bounded own activation summaries; unknown associations stay outside invented containers |
 | `GET /api/v1/trace/objects/{object_ref}` | One typed summary, provenance and unresolved/conflicting fields; no eager body/tree |
 | `GET /api/v1/trace/objects/{object_ref}/relations` | Bounded operations/results/resources/deliveries/evidence relations, with a typed filter |
@@ -689,6 +689,36 @@ CPU work independently of compression ratio. These single-payload transfers do n
 substitute for full evidence export or paced playback.
 
 ### Snapshot pages and live changes
+
+The agent directory materializes one preorder row per proven agent and a half-open
+ordinal interval for its spawn subtree, within a coordinate scope owned by that tree
+root. An unrelated tree cannot renumber existing intervals. It does not duplicate a descendant under every
+ancestor. Only accepted spawn edges participate; forks, communication and unresolved
+identities cannot widen an interval. Topology corrections publish row positions and
+intervals atomically with the rest of the generation.
+
+Forward directory scanning checks each incoming spawn proof before entering its subtree;
+an unavailable proof skips that interval. An agent whose own metadata is unavailable
+does not supply a row, but cannot erase separately authorized descendants. Continuations
+carry the checked prefix and cumulative matching count under the exact view, query,
+Subject permission partition and current deletion-visibility revision. A changed grant
+partition or deletion revision requires restarting the scan. This preserves bounded
+work without traversing an ancestor graph for every returned row or caching authority
+independently of its current inputs. Reaching the interval end establishes the exact
+filtered count; an unfinished bounded scan reports count completeness explicitly.
+A `count_only=true` directory read advances the same bounded metadata scan without
+hydrating bodies. Its private continuation cannot be used as a visible-page cursor.
+This lets an open directory finish an exact filtered count without downloading all rows.
+A directory whose focused agent is unavailable reports an unavailable scope rather than
+an apparently complete empty catalogue.
+
+Directory pages move forward; returning to the start restarts from the first page.
+When a visible page would exceed the shared view's bound on retained scopes, the server
+issues a new window lease at exactly the same generation, evidence cut and view revision,
+rechecks and binds the displayed scopes there, and returns that view with its continuation.
+It does not release a view that may still belong to the main reader. The component that
+receives the new view owns its lifetime; the scope bound and subject lease limit still
+apply.
 
 An initial reader request obtains a bounded reusable ViewLease. Related header, history,
 operation, child and payload reads use `at_snapshot` to derive their query scope at the

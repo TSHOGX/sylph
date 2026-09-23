@@ -41,7 +41,11 @@
 
 export const en = {
   "trace.work": "Work",
-  "trace.scopeAgents": "Recorded spawn descendants of {agent}.",
+  "trace.focusedAgent": "Focused agent",
+  "trace.spawnDescendant": "Spawn descendant",
+  "trace.directoryCounting": "Counting authorized agents…",
+  "trace.directoryCountUnavailable": "Authorized count unavailable",
+  "trace.scopeAgents": "Focused agent and spawn descendants of {agent}",
   "trace.all": "All",
   "trace.observedActive": "Observed active",
   "trace.needsMe": "Needs me",
@@ -152,6 +156,7 @@ export const en = {
   "trace.retry": "Retry",
   "trace.searchHistory": "Search retained history",
   "trace.searching": "Searching…",
+  "trace.firstPage": "First page",
   "trace.previousPage": "Previous page",
   "trace.nextPage": "Next page",
   "trace.coverage": "Record coverage",

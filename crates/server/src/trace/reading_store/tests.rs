@@ -24,6 +24,7 @@ async fn store() -> (tempfile::TempDir, GenerationStore) {
 }
 fn row(address: &str, position: u64, text: &str) -> ReadRowChange {
     ReadRowChange {
+        directory: None,
         scope: "history".into(),
         address: address.into(),
         anchor: None,
@@ -499,16 +500,6 @@ async fn authorization_scans_use_covering_metadata_indexes_without_body_page_rea
                 .contains("USING COVERING INDEX read_window")
         }));
     }
-    let plan = sqlx::query(&format!("EXPLAIN QUERY PLAN {READ_COUNT_SQL}"))
-        .bind("history")
-        .bind(9i64)
-        .fetch_all(&mut *conn)
-        .await
-        .unwrap();
-    assert!(plan.iter().any(|row| {
-        row.get::<String, _>("detail")
-            .contains("USING COVERING INDEX read_window")
-    }));
     let plan = sqlx::query(&format!("EXPLAIN QUERY PLAN {READ_ANCHOR_SQL}"))
         .bind("history")
         .bind("anchor")
@@ -648,9 +639,22 @@ async fn hidden_candidates_resume_within_the_scan_budget_without_exposing_a_tota
     assert!(cursor.is_none());
     assert_eq!(
         store
-            .read_authorized_count(&snapshot, "history", &filter, |_| async { Ok(true) })
+            .read_authorized_page(
+                &snapshot,
+                "history",
+                ReadWindow {
+                    before: None,
+                    after: None,
+                    around: None,
+                    limit: 1,
+                    latest: false
+                },
+                &filter,
+                |_| async { Ok(true) }
+            )
             .await
-            .unwrap(),
+            .unwrap()
+            .total,
         None
     );
 }
@@ -711,18 +715,42 @@ async fn denied_environments_and_deleted_epochs_are_checked_before_body_hydratio
     assert_eq!(page.total, Some(1));
     assert_eq!(
         store
-            .read_authorized_count(&snapshot, "history", &filter, authorize)
+            .read_authorized_page(
+                &snapshot,
+                "history",
+                ReadWindow {
+                    before: None,
+                    after: None,
+                    around: None,
+                    limit: 1,
+                    latest: false
+                },
+                &filter,
+                authorize
+            )
             .await
-            .unwrap(),
+            .unwrap()
+            .total,
         Some(1)
     );
     assert_eq!(
         store
-            .read_authorized_count(&snapshot, "history", &visibility_filter(&[]), |_| async {
-                panic!("denied environments must skip the epoch guard")
-            })
+            .read_authorized_page(
+                &snapshot,
+                "history",
+                ReadWindow {
+                    before: None,
+                    after: None,
+                    around: None,
+                    limit: 1,
+                    latest: false
+                },
+                &visibility_filter(&[]),
+                |_| async { panic!("denied environments must skip the epoch guard") }
+            )
             .await
-            .unwrap(),
+            .unwrap()
+            .total,
         Some(0)
     );
 }
@@ -752,16 +780,42 @@ async fn exact_visible_counts_require_every_target_grant_and_follow_snapshot_ver
     let both = visibility_filter(&["first", "second"]);
     assert_eq!(
         store
-            .read_authorized_count(&old, "history", &first_only, |_| async { Ok(true) })
+            .read_authorized_page(
+                &old,
+                "history",
+                ReadWindow {
+                    before: None,
+                    after: None,
+                    around: None,
+                    limit: 1,
+                    latest: false
+                },
+                &first_only,
+                |_| async { Ok(true) }
+            )
             .await
-            .unwrap(),
+            .unwrap()
+            .total,
         Some(1)
     );
     assert_eq!(
         store
-            .read_authorized_count(&old, "history", &both, |_| async { Ok(true) })
+            .read_authorized_page(
+                &old,
+                "history",
+                ReadWindow {
+                    before: None,
+                    after: None,
+                    around: None,
+                    limit: 1,
+                    latest: false
+                },
+                &both,
+                |_| async { Ok(true) }
+            )
             .await
-            .unwrap(),
+            .unwrap()
+            .total,
         Some(2)
     );
     joint.body = None;
@@ -780,16 +834,42 @@ async fn exact_visible_counts_require_every_target_grant_and_follow_snapshot_ver
     let now = store.checkpoint().await.unwrap().snapshot;
     assert_eq!(
         store
-            .read_authorized_count(&old, "history", &both, |_| async { Ok(true) })
+            .read_authorized_page(
+                &old,
+                "history",
+                ReadWindow {
+                    before: None,
+                    after: None,
+                    around: None,
+                    limit: 1,
+                    latest: false
+                },
+                &both,
+                |_| async { Ok(true) }
+            )
             .await
-            .unwrap(),
+            .unwrap()
+            .total,
         Some(2)
     );
     assert_eq!(
         store
-            .read_authorized_count(&now, "history", &both, |_| async { Ok(true) })
+            .read_authorized_page(
+                &now,
+                "history",
+                ReadWindow {
+                    before: None,
+                    after: None,
+                    around: None,
+                    limit: 1,
+                    latest: false
+                },
+                &both,
+                |_| async { Ok(true) }
+            )
             .await
-            .unwrap(),
+            .unwrap()
+            .total,
         Some(1)
     );
     let latest = store
@@ -997,4 +1077,31 @@ async fn reader_pages_stay_bounded_as_history_and_superseded_density_grow_tenfol
             "a fixed page size must return the same body bytes at either history length"
         );
     }
+}
+
+mod directory;
+
+#[tokio::test]
+async fn reader_pool_initializes_schema_before_charging_snapshot_queries() {
+    let (_dir, store) = store().await;
+    let snapshot = store.checkpoint().await.unwrap().snapshot;
+    let mut work = vec![];
+    // Holding each checkout forces pool expansion rather than relying on release
+    // task timing. The second pass reuses those connections through the same API.
+    for _ in 0..2 {
+        let mut held = vec![];
+        for _ in 0..4 {
+            let (conn, steps) = store.read_connection(&snapshot).await.unwrap();
+            work.push(steps.load(std::sync::atomic::Ordering::Relaxed));
+            held.push(conn);
+        }
+    }
+    assert!(work[0] > 0);
+    // Cached statement reset/prepare can add a few steps; schema initialization
+    // is a separate multi-row scan and must not multiply the point-read work.
+    let warm = *work.iter().min().unwrap();
+    assert!(
+        work.iter().all(|steps| *steps <= warm * 2),
+        "connection setup entered the snapshot query budget: {work:?}"
+    );
 }

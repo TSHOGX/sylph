@@ -180,6 +180,10 @@ pub struct EvidenceCatalogue {
 }
 
 impl EvidenceCatalogue {
+    pub fn limits(&self) -> &CatalogueLimits {
+        &self.limits
+    }
+
     pub fn new(evidence: EvidenceStore, limits: CatalogueLimits) -> Result<Self> {
         if [
             limits.max_build_jobs,
@@ -234,6 +238,15 @@ impl EvidenceCatalogue {
 
     /// Evidence admission and visibility changes have independent clocks. A
     /// tombstone can require a new projection even when no new capture arrived.
+    pub async fn visibility_revision(&self) -> Result<u64> {
+        let revision: i64 = sqlx::query_scalar(
+            "SELECT visibility_revision FROM trace_catalogue_clock WHERE singleton=1",
+        )
+        .fetch_one(&self.evidence.readers)
+        .await?;
+        unsigned(revision)
+    }
+
     pub async fn active_visibility_is_current(&self) -> Result<bool> {
         Ok(sqlx::query_scalar("SELECT j.visibility_revision=c.visibility_revision FROM trace_active a JOIN trace_build_jobs j ON j.generation=a.generation CROSS JOIN trace_catalogue_clock c WHERE a.singleton=1 AND c.singleton=1")
             .fetch_optional(&self.evidence.readers).await?.unwrap_or(false))
@@ -753,9 +766,34 @@ impl EvidenceCatalogue {
         now_ms: i64,
         lifetime_ms: i64,
     ) -> Result<ViewLease> {
+        self.copy_lease(subject, token, now_ms, lifetime_ms, true)
+            .await
+    }
+
+    /// A new visible metadata window rebinds only the scopes it actually displays.
+    /// The original view may still belong to another reader and is not released.
+    pub async fn fork_window_lease(
+        &self,
+        subject: &str,
+        token: &str,
+        now_ms: i64,
+        lifetime_ms: i64,
+    ) -> Result<ViewLease> {
+        self.copy_lease(subject, token, now_ms, lifetime_ms, false)
+            .await
+    }
+
+    async fn copy_lease(
+        &self,
+        subject: &str,
+        token: &str,
+        now_ms: i64,
+        lifetime_ms: i64,
+        copy_scopes: bool,
+    ) -> Result<ViewLease> {
         if lifetime_ms <= 0 || lifetime_ms > self.limits.max_lease_lifetime_ms {
             return Err(CatalogueError::Invalid(
-                "transfer lease lifetime is invalid".into(),
+                "view lease lifetime is invalid".into(),
             ));
         }
         let expires = now_ms
@@ -767,7 +805,9 @@ impl EvidenceCatalogue {
         let fresh = uuid::Uuid::new_v4().to_string();
         sqlx::query("INSERT INTO trace_view_leases(lease_id,subject,generation,pending_nonce,state,visibility_revision,created_at_ms,expires_at_ms,evidence_cut,view_revision) SELECT ?,subject,generation,?,'active',visibility_revision,?,?,evidence_cut,view_revision FROM trace_view_leases WHERE lease_id=?")
             .bind(&fresh).bind(uuid::Uuid::new_v4().to_string()).bind(now_ms).bind(expires).bind(token).execute(&mut *tx).await?;
-        sqlx::query("INSERT INTO trace_lease_scopes SELECT ?,scope_ref,ingestion_epoch FROM trace_lease_scopes WHERE lease_id=?").bind(&fresh).bind(token).execute(&mut *tx).await?;
+        if copy_scopes {
+            sqlx::query("INSERT INTO trace_lease_scopes SELECT ?,scope_ref,ingestion_epoch FROM trace_lease_scopes WHERE lease_id=?").bind(&fresh).bind(token).execute(&mut *tx).await?;
+        }
         tx.commit().await?;
         Ok(ViewLease {
             token: fresh,

@@ -149,7 +149,7 @@ pub fn project_independent_append(
     // Tail rows have no activation and cannot change agent execution. Headers and
     // directories retain their committed values, including the complete history.
     projected.headers.clear();
-    projected.directories.clear();
+    projected.directory.clear();
     projected.activations.clear();
     projected
         .windows

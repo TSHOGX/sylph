@@ -60,6 +60,8 @@ pub struct TraceService {
     pub(crate) transfer_backpressure: Arc<Notify>,
     #[cfg(test)]
     pub(crate) evidence_read_pause: ReprojectionPause,
+    #[cfg(test)]
+    pub(crate) directory_read_pause: ReprojectionPause,
     recovery: Arc<RwLock<Option<String>>>,
     gc: TraceGarbageCollector,
     reprojection_wake: Arc<Notify>,
@@ -219,6 +221,8 @@ impl TraceService {
             transfer_backpressure: Arc::new(Notify::new()),
             #[cfg(test)]
             evidence_read_pause: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            directory_read_pause: Arc::new(Mutex::new(None)),
             search_queries: Arc::new(Semaphore::new(search_limits.max_concurrent_queries)),
             search_limits,
             recovery: Arc::new(RwLock::new(None)),
@@ -435,6 +439,11 @@ impl TraceService {
         });
     }
 
+    #[cfg(test)]
+    pub(crate) async fn hold_fixture_projection(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.projection.clone().lock_owned().await
+    }
+
     pub async fn project_pending(&self) -> anyhow::Result<()> {
         let _gate = self.projection.lock().await;
         if self.recovery.read().await.is_some() {
@@ -589,6 +598,20 @@ impl TraceService {
         })
     }
 
+    pub async fn window_lease(&self, subject: &str, token: &str) -> anyhow::Result<LeaseGuard> {
+        self.require_available().await?;
+        let view = self
+            .catalogue
+            .fork_window_lease(subject, token, crate::models::now_ms(), 120_000)
+            .await?;
+        let release = self.pending_release(subject, &view.token);
+        self.generation(&view.snapshot.generation).await?;
+        Ok(LeaseGuard {
+            view,
+            release: Some(release),
+        })
+    }
+
     pub async fn release_lease(&self, subject: &str, token: &str) -> anyhow::Result<()> {
         self.catalogue.expire_lease(subject, token).await?;
         Ok(())
@@ -650,7 +673,7 @@ impl TraceService {
     fn manifest(generation: String) -> GenerationManifest {
         GenerationManifest {
             generation: generation.clone(),
-            semantic_schema: "trace-7".into(),
+            semantic_schema: "trace-8".into(),
             mapper_builds: [
                 ("server", mapping::server::ServerMapper.build()),
                 ("codex", mapping::codex::CodexMapper.build()),

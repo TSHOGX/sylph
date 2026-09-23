@@ -446,20 +446,21 @@ pub(super) async fn assert_expected(
             !value.history.selection_known,
             "the capture has no selected-head observation"
         );
-        let relations = store
-            .read_page(
+        let directory = store
+            .directory_page(
                 &snapshot,
-                &read_scope(&agent, None, "relations"),
-                None,
-                None,
+                &agent,
                 None,
                 16,
-                false,
+                &crate::trace::reading_store::ReadFilter::default(),
+                |_| async { Ok(true) },
             )
             .await
             .unwrap();
-        assert!(relations.rows.is_empty() && !relations.has_after && !relations.work_exhausted);
-        assert_eq!(relations.total, Some(0));
+        assert_eq!(directory.rows.len(), 1);
+        assert_eq!(directory.rows[0].address, agent.encode());
+        assert!(!directory.has_more && !directory.work_exhausted);
+        assert_eq!(directory.total, Some(1));
         if agent == owner(PARENT) && through_line >= 87 {
             assert_eq!(
                 value.own_execution.reference,

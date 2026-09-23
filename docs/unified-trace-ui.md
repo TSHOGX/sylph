@@ -287,6 +287,13 @@ The default scope is the main reader's agent and its recorded spawn descendants.
 a companion reader preserves that directory scope; promoting a child to the main reader
 changes the default scope to that child. Parent navigation remains available through the
 recorded ancestor link. Counts distinguish the focused agent from descendant totals.
+The focused row is labeled separately from spawn descendants. Directory pages move
+forward, with an explicit `First page` action. Empty work-limited search pages continue
+automatically while preserving the scope; visible pages wait for navigation. If a count
+is not yet complete, a separately cancellable metadata-only scan finishes it without
+loading child bodies or blocking directory interaction. A changed query or closed
+directory cancels that scan. A replacement window lease preserves the exact snapshot,
+and Back restores the returned view and directory position.
 
 Each row exposes name or neutral fallback, vendor, recorded relation, own latest known
 execution state, and coverage when it affects opening. The default order is stable

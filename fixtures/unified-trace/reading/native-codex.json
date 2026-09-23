@@ -21,7 +21,7 @@
       "coverage": [],
       "descendantCount": {
         "complete": true,
-        "scope": "direct children",
+        "scope": "spawn descendants",
         "value": 0
       },
       "environment": "envfixture",

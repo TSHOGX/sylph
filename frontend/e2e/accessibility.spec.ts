@@ -191,17 +191,18 @@ test("the conversation canvas has no automated accessibility violations", async 
 }) => {
   await createSession(page);
 
-  // Audit with real content: tool calls, a diff, and a failed command are the
-  // parts with the most custom markup and the most colour.
-  await page.getByLabel("Message", { exact: true }).fill("exercise tools please");
+  // Setup already produces a greeting. A unique echoed answer proves this
+  // follow-up has rendered before the audit; the fixture emits conversation
+  // messages, while resource details have separate typed-fixture audits.
+  await page.getByLabel("Message", { exact: true }).fill("echo Canvas accessibility answer");
   await page.getByRole("button", { name: "Send", exact: true }).click();
-  await expect(page.getByText("Hello from the E2E runner.")).toBeVisible();
+  await expect(page.getByText("Canvas accessibility answer", { exact: true })).toBeVisible();
 
-  // Both sidebars open, so the tree and the panes are in scope too.
+  // Open the inspector so both workspace sidebars are included in the audit.
   await page.keyboard.press("ControlOrMeta+Backslash");
   await expect(page.getByRole("complementary", { name: "Trace inspector" })).toBeVisible();
 
-  await audit(page, "conversation canvas with tool calls");
+  await audit(page, "conversation canvas with a follow-up reply");
 });
 
 /**

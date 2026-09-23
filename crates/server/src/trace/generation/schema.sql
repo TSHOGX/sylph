@@ -192,11 +192,16 @@ CREATE TABLE read_rows (
   needs_input INTEGER NOT NULL,
   required_environments_json TEXT NOT NULL,
   dependency_epochs_json TEXT NOT NULL,
+  directory_end BLOB,
+  directory_epochs_json TEXT,
+  directory_parent TEXT,
   PRIMARY KEY(scope_key,address,valid_from)
 ) WITHOUT ROWID;
 -- Cover candidate selection so hidden or oversized body overflow pages are never
 -- touched before authorization. Body hydration uses the primary key separately.
 CREATE INDEX read_window ON read_rows(scope_key,order_key,address,valid_from,valid_to,present,body_bytes,scope_epoch,search_text,directory_state,needs_input,required_environments_json,dependency_epochs_json,anchor_ref);
+CREATE INDEX directory_window ON read_rows(scope_key,order_key,address,valid_from,valid_to,present,body_bytes,scope_epoch,search_text,directory_state,needs_input,required_environments_json,dependency_epochs_json,anchor_ref,directory_end,directory_epochs_json) WHERE directory_end IS NOT NULL;
+CREATE INDEX directory_anchor ON read_rows(address,valid_from DESC,present DESC,valid_to,scope_key,order_key,anchor_ref,body_bytes,scope_epoch,search_text,directory_state,needs_input,required_environments_json,dependency_epochs_json,directory_end,directory_epochs_json,directory_parent) WHERE directory_end IS NOT NULL;
 CREATE INDEX read_anchor ON read_rows(scope_key,anchor_ref,valid_from,order_key,address,valid_to,present,scope_epoch,search_text,directory_state,needs_input,required_environments_json,dependency_epochs_json);
 CREATE UNIQUE INDEX current_read_row ON read_rows(scope_key,address) WHERE valid_to IS NULL;
 CREATE TABLE read_counts(scope_key TEXT NOT NULL,valid_from INTEGER NOT NULL,count INTEGER NOT NULL CHECK(count>=0),PRIMARY KEY(scope_key,valid_from)) WITHOUT ROWID;

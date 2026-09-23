@@ -191,22 +191,30 @@ impl Fixture {
             reduction.diagnostics
         );
         let projection = sylph_trace::reading::project(&reduction, &Default::default(), 32);
-        assert_eq!(projection.directories[&parent].len(), hidden_count + 1);
+        assert_eq!(projection.directory.len(), hidden_count + 2);
         assert_eq!(
-            projection.directories[&parent]
-                .last()
+            projection
+                .directory
+                .values()
+                .max_by_key(|entry| entry.position)
                 .unwrap()
+                .row
                 .agent
                 .address
                 .agent(),
             visible
         );
+        let support_index = provenance::SupportIndex::fixture_epochs(claims.iter().map(|claim| {
+            (
+                claim.claim_ref.clone(),
+                epochs[&AnyObjectRef::Agent(claim.claim_ref.scope().clone())].clone(),
+            )
+        }));
         let provenance = normalized_provenance(&claims, &epochs);
-        let published_rows: Vec<_> =
-            rows(&projection, &provenance, &reduction, &Default::default())
-                .unwrap()
-                .into_values()
-                .collect();
+        let published_rows: Vec<_> = rows(&projection, &provenance, &reduction, &support_index)
+            .unwrap()
+            .into_values()
+            .collect();
         // Publish bounded production row batches. No vendor mapper is being
         // certified here: the fixture starts at the normalized facts boundary.
         for chunk in published_rows.chunks(generation.limits().max_batch_changes) {
@@ -490,17 +498,21 @@ fn assert_visible_count(value: &Value) {
 }
 
 #[tokio::test]
-async fn denied_direct_relations_do_not_fail_visible_pages_or_leak_identity_and_counts() {
+async fn denied_directory_targets_do_not_fail_visible_pages_or_leak_identity_and_counts() {
     let fixture = Fixture::new(Some(1)).await;
     let (status, directory) = fixture.get(&fixture.directory()).await;
     assert_eq!(status, StatusCode::OK, "{directory}");
     fixture.assert_private(&directory);
-    assert_eq!(directory["items"].as_array().unwrap().len(), 1);
+    assert_eq!(directory["items"].as_array().unwrap().len(), 2);
     assert_eq!(
         directory["items"][0]["agent"]["address"],
+        fixture.parent.encode()
+    );
+    assert_eq!(
+        directory["items"][1]["agent"]["address"],
         fixture.visible.encode()
     );
-    assert_visible_count(&directory["total"]);
+    assert_eq!(directory["total"]["value"], 2);
     let token = directory["view"]["token"].as_str().unwrap();
     let (status, bootstrap) = fixture
         .get(&format!(
@@ -546,7 +558,7 @@ async fn denied_first_candidates_advance_an_opaque_cursor_and_changed_grants_rej
         .limits()
         .max_candidates;
     assert_eq!(fixture.hidden.len(), budget + 1);
-    let path = format!("{}?limit=1", fixture.directory());
+    let path = format!("{}?limit=1&q=sibling", fixture.directory());
     let (status, first) = fixture.get(&path).await;
     assert_eq!(status, StatusCode::OK, "{first}");
     fixture.assert_private(&first);
@@ -624,12 +636,10 @@ async fn deleting_a_relation_target_hides_it_from_a_retained_parent_view() {
         let (status, page) = fixture.get(&path).await;
         assert_eq!(status, StatusCode::OK, "{page}");
         fixture.assert_private(&page);
-        assert!(page["items"].as_array().unwrap().is_empty());
+        let focused = usize::from(path.starts_with(&fixture.directory()));
+        assert_eq!(page["items"].as_array().unwrap().len(), focused);
         assert!(!page.to_string().contains(&fixture.visible.encode()));
-        assert!(
-            page["total"]["value"].is_null() || page["total"]["value"] == 0,
-            "{page}"
-        );
+        assert_eq!(page["total"]["value"], focused);
     }
 }
 
@@ -658,9 +668,10 @@ async fn deleting_a_directory_owner_removes_membership_from_an_unrelated_retaine
     let (status, page) = fixture
         .get(&format!("{}?at_snapshot={child_view}", fixture.directory()))
         .await;
-    assert_eq!(status, StatusCode::OK, "{page}");
-    assert!(page["items"].as_array().unwrap().is_empty(), "{page}");
-    assert_eq!(page["total"]["value"], 0);
+    // The focused agent now belongs to the directory scope itself. A deleted
+    // owner is an unavailable scope, not a complete empty descendant catalogue.
+    assert_eq!(status, StatusCode::NOT_FOUND, "{page}");
+
     let (status, gone) = fixture
         .get(&format!(
             "{}?at_snapshot={directory_view}",

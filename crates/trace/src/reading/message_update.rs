@@ -306,7 +306,7 @@ fn render_region(
 ) -> ReadingProjection {
     let mut projection = project(reduction, payloads, max_parts);
     projection.headers.clear();
-    projection.directories.clear();
+    projection.directory.clear();
     projection.activations.clear();
     projection.histories.clear();
     projection.operations.clear();

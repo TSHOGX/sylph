@@ -26,6 +26,14 @@ async function directory(page: import("@playwright/test").Page) {
     requiredInput: { value: 0, scope: "Agent", complete: true },
     coverage: [],
   }));
+  state.catalogue.unshift({
+    agent: state.mainHeader.agent,
+    relation: "focus",
+    ownExecution: unavailableExecution,
+    activations: { value: 0, scope: "own", complete: true },
+    requiredInput: { value: 0, scope: "own", complete: true },
+    coverage: [],
+  });
   state.mainHeader.ownExecution = {
     reference: "parent-activation",
     state: { kind: "terminated", outcome: "succeeded", reason: null },

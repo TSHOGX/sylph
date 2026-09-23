@@ -104,7 +104,7 @@ export function AgentReader({
       traceAPI.bootstrap(
         agent,
         history,
-        location.anchor,
+        location.following ? null : location.anchor,
         signal,
         refresh === 0 ? (initialView ?? navigationView) : null,
       ),
@@ -168,8 +168,8 @@ export function AgentReader({
       location.anchor = visible.dataset.traceAnchor ?? null;
       location.offset = visible.getBoundingClientRect().top - bounds.top;
     }
-    location.following =
-      pane.scrollHeight - pane.scrollTop - pane.clientHeight < 48;
+    // Scroll geometry also changes when the composer or measured rows resize.
+    // Only reading gestures and explicit navigation change following intent.
   }, [location]);
   const restore = useCallback(() => {
     const pane = scroller.current;
@@ -274,10 +274,11 @@ export function AgentReader({
             end: focused.selectionEnd,
           });
         remember();
+        location.following = false;
         setUpdate(t("trace.leaseExpired"));
         setRefresh((value) => value + 1);
       }),
-    [remember, t],
+    [location, remember, t],
   );
   useEffect(
     () => () => {
@@ -366,6 +367,7 @@ export function AgentReader({
   };
   const acceptUpdate = () => {
     remember();
+    location.following = false;
     setUpdate(null);
     setRefresh((value) => value + 1);
   };
@@ -453,19 +455,18 @@ export function AgentReader({
             <button className={traceButton} onClick={acceptUpdate}>
               {t("trace.refreshAround")}
             </button>
-            {bootstrap.error && (
-              <button
-                className={traceButton}
-                onClick={() => {
-                  location.anchor = null;
-                  location.offset = 0;
-                  location.following = true;
-                  setRefresh((value) => value + 1);
-                }}
-              >
-                {t("trace.latestHistory")}
-              </button>
-            )}
+            <button
+              className={traceButton}
+              onClick={() => {
+                location.anchor = null;
+                location.offset = 0;
+                location.following = true;
+                setUpdate(null);
+                setRefresh((value) => value + 1);
+              }}
+            >
+              {t("trace.latestHistory")}
+            </button>
           </div>
         )}
         <div
