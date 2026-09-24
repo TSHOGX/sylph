@@ -2369,6 +2369,15 @@
               "type": "integer",
               "minimum": 1
             }
+          },
+          {
+            "name": "archive",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            },
+            "description": "Explicit read-only archive inspection at the retained view; mutually exclusive with selection. Does not fall back to a current native selection."
           }
         ],
         "responses": {
@@ -3943,6 +3952,20 @@
               "type": "integer",
               "minimum": 1
             }
+          },
+          {
+            "name": "mode",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "authored",
+                "selected_context",
+                "retained_archive"
+              ],
+              "default": "retained_archive"
+            },
+            "description": "Authored requires proved local agent authorship and production. Selected context requires agent and selection; other modes reject selection."
           }
         ],
         "responses": {
@@ -3951,7 +3974,22 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ReadPage"
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/ReadPage"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "items": {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/components/schemas/ReadSearchHit"
+                          }
+                        }
+                      }
+                    }
+                  ]
                 }
               }
             }
@@ -5315,6 +5353,73 @@
           "limits"
         ]
       },
+      "HistoryLocation": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "archive": {
+            "type": "boolean",
+            "description": "Explicit retained archive inspection."
+          },
+          "selection": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "label": {
+            "type": "string"
+          },
+          "isCurrent": {
+            "type": "boolean"
+          },
+          "selectionKnown": {
+            "type": "boolean"
+          },
+          "availability": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "archive",
+          "selection",
+          "label",
+          "isCurrent",
+          "selectionKnown",
+          "availability"
+        ]
+      },
+      "ReadSearchHit": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "anchor": {
+            "type": "string"
+          },
+          "agent": {
+            "$ref": "#/components/schemas/TraceAgentLink"
+          },
+          "history": {
+            "$ref": "#/components/schemas/HistoryLocation"
+          },
+          "excerpt": {
+            "type": "string"
+          },
+          "payload": {
+            "type": [
+              "object",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "anchor",
+          "agent",
+          "history",
+          "excerpt",
+          "payload"
+        ]
+      },
       "ReaderBootstrap": {
         "type": "object",
         "properties": {
@@ -5323,7 +5428,11 @@
           },
           "header": {
             "type": "object",
-            "properties": {}
+            "properties": {
+              "history": {
+                "$ref": "#/components/schemas/HistoryLocation"
+              }
+            }
           },
           "window": {
             "allOf": [

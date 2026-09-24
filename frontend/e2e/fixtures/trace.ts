@@ -154,6 +154,7 @@ export function header(agent = MAIN_AGENT): AgentHeader {
     model: null,
     ownExecution: unavailableExecution,
     history: {
+      archive: false,
       selection: null,
       label: "Current history",
       isCurrent: true,
@@ -274,6 +275,28 @@ export async function installTraceFixture(page: Page, rows = [message(0)]) {
           : Math.max(0, source.length - traceLimits.maxItems);
       const result = bootstrap(id, [], view);
       result.header = id === MAIN_AGENT ? state.mainHeader : state.childHeader;
+      if (q.get("selection") === "historical-branch")
+        result.header = {
+          ...result.header,
+          history: {
+            ...result.header.history,
+            archive: false,
+            selection: "historical-branch",
+            isCurrent: false,
+            label: "Earlier branch",
+          },
+        };
+      if (q.get("archive") === "true")
+        result.header = {
+          ...result.header,
+          history: {
+            ...result.header.history,
+            archive: true,
+            selection: null,
+            isCurrent: false,
+            label: "Retained archive",
+          },
+        };
       result.window = tracePage(
         source.slice(start, start + traceLimits.maxItems),
         view,
@@ -450,7 +473,16 @@ export async function installTraceFixture(page: Page, rows = [message(0)]) {
             {
               anchor: `${MAIN_AGENT}-anchor-3`,
               agent: agentLink(),
-              history: state.mainHeader.history,
+              history: {
+                ...state.mainHeader.history,
+                archive: q.get("mode") !== "selected_context",
+                selection:
+                  q.get("mode") === "selected_context"
+                    ? q.get("selection")
+                    : null,
+                isCurrent: false,
+                label: "Search checkpoint",
+              },
               excerpt: "A retained hit outside the visible window",
               payload: null,
             },

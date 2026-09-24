@@ -100,6 +100,30 @@ erased and no production trace implementation is claimed complete by this design
 
 ### Foundation implementation
 
+Search no longer treats a missing or unresolved original owner as locally authored
+work. Authored scope requires a matching known agent author and production owner with
+no inherited/unresolved entry assertion; shared common-field resolution preserves agreed
+ownership across unrelated metadata conflicts. Retained search remains available for
+human, incoming, unknown and copied content. The unused guessed original-owner field is
+removed from disposable search documents, with no schema compatibility path.
+Agent search exposes explicit retained, selected-context and authored scopes, with query
+cursors and result views reset on a scope change. Ordinary search uses retained history.
+All retained named selections are indexed, including older branches; missing or unresolved
+selection membership is rejected before creating a search job and on resumption.
+Archive hits carry an explicit archive location and open that view at their search
+checkpoint; archive and explicit named-history readers offer return-to-current instead
+of a composer, including a selection that was current at the frozen checkpoint. Missing
+native selection evidence does not disable an authorized default live conversation.
+Exact navigation to superseded stream revisions remains an open search-reader
+case: their indexed composed body can differ from the conversation's current presentation.
+Scope, selection, archive, composer and cancellation regressions are falsified by
+independent faults. The full run also exposed normalized HTTP fixtures staging unrooted
+bytes beside the real collector; fixture captures now use the production upload tickets.
+Forced collection between staging and admission reproduces the old loss and validates
+the rooted path. Search still duplicates FTS text across selection memberships; separating
+membership from body identity is the next indexing-cost correction. The remaining
+inheritance and vendor/reader acceptance gates remain open.
+
 Claude SDK checkpoints now follow explicit session/host processing partitions inside
 the original physical source. A child whose identity certificate arrives late retains
 one blocked head and a bounded evidence-backed tail; parent frames can still supply that

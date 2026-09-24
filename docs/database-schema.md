@@ -66,6 +66,11 @@ expired or revoked Subject grant is reevaluated on each request and dispatch; it
 changes the environment's cached facet state. Connection epochs fence messages from
 superseded envagent sockets.
 
+Search generations are disposable. Their documents retain the containing agent, exact
+body revision and explicit history scope; no guessed original-owner field is stored.
+Locally authored membership follows retained author/production evidence as specified in
+`docs/unified-trace-storage.md` § Search consistency.
+
 ## Evidence and acquisition
 
 `environment_admissions` indexes the environment and admission sequence at capture commit,

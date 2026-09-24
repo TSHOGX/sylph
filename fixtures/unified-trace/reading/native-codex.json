@@ -28,6 +28,7 @@
       "environmentName": null,
       "fileContext": null,
       "history": {
+        "archive": false,
         "availability": {
           "kind": "partial",
           "reason": "The source has not established complete selected membership"

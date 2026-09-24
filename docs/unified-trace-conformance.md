@@ -325,6 +325,18 @@ from authorship; the Pi fork corpus preserves unresolved provenance across sourc
 restart and origin deletion. These checks do not certify a child-local suffix or an
 ultimate original actor.
 
+Search ownership and scope are verified independently of protocol role and containing
+identity. `crates/server/src/trace/service/search.rs` checks unknown, foreign and inherited
+metadata, missing production and agreed ownership under purpose conflicts. The normalized
+HTTP fixture in `crates/server/src/trace/worker/tests/provenance/search_scope.rs` checks
+retained versus authored/selected membership, older retained selections, missing/unresolved
+membership rejection, invalid combinations, cursor scope binding and explicit archive
+inspection at the result view. Browser cases in
+`frontend/e2e/trace-search-scope.spec.ts` cover scope transitions, request cancellation,
+archive navigation and read-only composition at desktop/mobile widths. Explicit selection
+inspection remains read-only even when its frozen header says current; unknown native
+membership in the default live reader does not override authorized control.
+
 ## Reproducible checks
 
 The vendor audit works entirely from retained sanitized artifacts by default:

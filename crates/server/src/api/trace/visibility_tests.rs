@@ -33,6 +33,7 @@ fn header(agent: &AgentRef, name: &str, parent: Option<AgentLink>) -> AgentHeade
             durations: vec![],
         },
         history: HistoryLocation {
+            archive: false,
             selection: None,
             label: "Retained history".into(),
             is_current: false,

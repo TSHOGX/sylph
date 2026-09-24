@@ -137,7 +137,7 @@ test("search reaches unloaded content and opens the retained search view", async
     }),
   ).toBeVisible();
   await page
-    .getByRole("link", { name: "Open Current history around this item" })
+    .getByRole("link", { name: "Open Search checkpoint around this item" })
     .click();
   await expect(page).toHaveURL(new RegExp(`${MAIN_AGENT}.*anchor=`));
   await expect

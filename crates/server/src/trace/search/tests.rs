@@ -19,7 +19,6 @@ fn document(key: &str, text: &str) -> SearchDocument {
     SearchDocument {
         key: key.into(),
         agent: agent(),
-        original_owner: agent(),
         anchor: AnyObjectRef::HistoryEntry(
             EntryRef::native(agent(), "entry", vec![key.into()]).unwrap(),
         ),

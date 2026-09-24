@@ -984,10 +984,22 @@ over large data can legitimately do linear work; ordinary object/page reads cann
 
 ### Search consistency
 
-Search documents refer to Message/Operation/Payload representation plus owner and
+Search documents refer to Message/Operation/Payload representation plus containing agent and
 history membership. One original message copied into child context does not become
-another child-authored search result. Query scope selects authored history, selected
-context, or retained branches explicitly. Tool output and nonhuman context can be
+another child-authored search result. Authored scope requires both a known matching
+agent author and production owner, and no inherited or unresolved entry-origin assertion.
+An assistant role, reference namespace or absent original-owner field cannot establish
+local production. The reader and search share the same common-field resolution for
+conflicted message metadata; an unrelated purpose conflict cannot erase agreed ownership.
+Query scope selects `authored`, `selected_context`, or `retained_archive` explicitly.
+Ordinary search defaults to retained archive so human input, unknown ownership and copied
+content remain discoverable. Selected-context search requires a named selection and its
+containing agent; other modes refuse a selection. Each retained named selection is
+indexed, not only the currently selected one. Its retained evidence is authorized before
+a search job is created and on resumption; unavailable membership is an error rather than
+a false empty result. Archive search links request explicit
+archive inspection at the result checkpoint instead of falling back to the native current
+selection. Archive inspection remains read-only. Tool output and nonhuman context can be
 searched without masquerading as human conversation.
 
 The search worker consumes committed projection changes and commits its document

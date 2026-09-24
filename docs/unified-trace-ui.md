@@ -452,8 +452,10 @@ selection. The UI does not call a selection newest/current merely because its fi
 modified last. When the source provides competing heads without proving a selected one,
 the reader says so and lets the user choose a view without rewriting native state.
 
-Selecting older history is read-only inspection. The composer becomes `Return to current
-conversation to send`; browsing an old head does not dispatch into it or perform a vendor
+Opening an explicit named history selection is read-only inspection, including a selection
+that was current at the retained checkpoint: its snapshot cannot establish the current
+live head. The composer becomes `Return to current conversation to send`; browsing an
+old head does not dispatch into it or perform a vendor
 revert. A real revert/fork command, if supported later, remains a distinct control action
 with its own accepted result. Sharing a history link retains the selection.
 
@@ -494,6 +496,9 @@ availability for the current Subject. Embedded readability is not proof of indep
 control. An unavailable control displays the server reason and preserves reading and
 draft editing where useful. Authorization is refreshed independently of cached trace
 facts. No client-side capability cache substitutes for the authorization check.
+Unknown native selected membership does not disable the default live reader's composer:
+it is trace uncertainty, independent of the server's control availability. Read-only
+inspection is established by explicit history-selection or archive navigation.
 
 Actions use the server's exact typed route and supported action/lease selection. A
 Session control target must address the focused agent; an embedded control route must
@@ -584,7 +589,12 @@ an operation subscribes only to the necessary visible summary/body revisions. Bo
 updates are coalesced and range-based where the source supports appends; replacements
 use a new immutable revision. No hidden resource downloads output on every update.
 
-Search runs on the server over the named authorized scope. `Find in this agent` does
+Search runs on the server over the named authorized scope. Agent search exposes retained
+history, selected context when known, and locally authored messages as explicit choices.
+Changing scope cancels the old request and clears its page cursor and search checkpoint.
+Unknown or inherited ownership remains searchable in retained history without being
+labeled locally authored. An archive result opens an explicit retained-history view with
+its frozen checkpoint and a return-to-current action; its composer cannot dispatch. `Find in this agent` does
 not search only loaded rows. Hits explain partial index coverage and can reach content
 beyond current windows through an around-object read. Browser Find still works on the
 mounted text; the product search is discoverable without hijacking browser-reserved

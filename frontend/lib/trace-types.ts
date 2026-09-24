@@ -84,6 +84,7 @@ export interface ExecutionSummary {
   }[];
 }
 export interface HistoryLocation {
+  archive: boolean;
   selection: string | null;
   label: string;
   isCurrent: boolean;
@@ -584,6 +585,14 @@ export function agentName(agent: AgentLink, t?: Translate): string {
       ? t("trace.unnamed", { suffix: agent.identitySuffix })
       : `Unnamed agent · ${agent.identitySuffix}`)
   );
+}
+export type SearchHistoryMode =
+  | "authored"
+  | "selected_context"
+  | "retained_archive";
+/** Archive is a reader location, never a native selection reference. */
+export function historyLocationKey(history: HistoryLocation): string | null {
+  return history.archive ? "archive" : history.selection;
 }
 export function agentUrl(
   agent: AgentAddress,

@@ -8,14 +8,20 @@ import { useWorkspaceUI } from "@/lib/workspace-ui";
 import { useTraceResource } from "@/lib/use-trace-resource";
 import { rememberTraceNavigation } from "@/lib/trace-cache";
 import { traceAPI } from "@/lib/trace-api";
-import { agentName, agentUrl, type TraceView } from "@/lib/trace-types";
+import {
+  agentName,
+  agentUrl,
+  historyLocationKey,
+  type TraceView,
+} from "@/lib/trace-types";
 import { sessionLabel } from "@/lib/format";
 import { Overlay } from "./overlay";
 
 /** Global search consumes normalized, snapshot-scoped hits, never vendor event sequences. */
 export function SearchOverlay() {
   const t = useT();
-  const { closeOverlay } = useWorkspaceUI();
+  const ui = useWorkspaceUI();
+  const { closeOverlay } = ui;
   const [text, setText] = useState("");
   const [query, setQuery] = useState("");
   const [cursor, setCursor] = useState<string | null>(null);
@@ -25,7 +31,7 @@ export function SearchOverlay() {
     query ? `global-search:${query}:${cursor ?? ""}` : null,
     (signal) =>
       traceAPI.globalSearch(query, cursor, signal, searchView).then((page) => {
-        setSearchView(page.view);
+        if (!signal.aborted) setSearchView(page.view);
         return page;
       }),
     0,
@@ -76,14 +82,16 @@ export function SearchOverlay() {
                     className="inline-block min-h-11 py-2 text-sm underline focus-ring"
                     href={agentUrl(
                       hit.agent.address,
-                      hit.history.selection,
+                      historyLocationKey(hit.history),
                       hit.anchor,
                     )}
                     onClick={() => {
+                      if (ui.isMobile) ui.closeDrawer();
+                      else ui.setRightOpen(false);
                       if (result.data)
                         rememberTraceNavigation(
                           hit.agent.address,
-                          hit.history.selection,
+                          historyLocationKey(hit.history),
                           hit.anchor,
                           result.data.view,
                         );

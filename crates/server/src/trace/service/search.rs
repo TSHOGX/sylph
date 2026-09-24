@@ -153,7 +153,6 @@ impl TraceService {
                     let document = SearchDocument {
                         key,
                         agent: source.agent.clone(),
-                        original_owner: source.original_owner.clone(),
                         anchor: AnyObjectRef::HistoryEntry(source.entry.clone()),
                         object: AnyObjectRef::Message(source.message.clone()),
                         selection,
@@ -200,7 +199,6 @@ fn known<'a>(reduction: &'a Reduction, reference: &AnyObjectRef) -> Option<&'a T
 #[derive(serde::Serialize)]
 pub(super) struct IndexSource {
     agent: AgentRef,
-    original_owner: AgentRef,
     entry: EntryRef,
     revision: MessageRevisionRef,
     message: MessageRef,
@@ -213,7 +211,6 @@ pub(super) struct IndexSource {
 
 struct IndexVariant {
     agent: AgentRef,
-    original_owner: AgentRef,
     entry: EntryRef,
     revision: MessageRevisionRef,
     message: MessageRef,
@@ -320,11 +317,52 @@ fn sources(reduction: &Reduction, provenance: &ProvenanceMap) -> anyhow::Result<
     .0)
 }
 
+fn locally_authored(
+    reduction: &Reduction,
+    entry: &HistoryEntry,
+    reference: &MessageRevisionRef,
+) -> bool {
+    if entry.original_owner.is_some() {
+        return false;
+    }
+    let Some(TraceObject::MessageRevision(revision)) =
+        known(reduction, &AnyObjectRef::MessageRevision(reference.clone()))
+    else {
+        return false;
+    };
+    let Some(message) = sylph_trace::reading::message_metadata(reduction, &revision.message) else {
+        return false;
+    };
+    matches!(
+        &message.author,
+        Author::Agent { agent: OwnerRef::Agent { agent } } if agent == &entry.containing_agent
+    ) && matches!(
+        &message.production,
+        Some(ProductionScope { owner: OwnerRef::Agent { agent }, .. })
+            if agent == &entry.containing_agent
+    )
+}
+
 fn source_variants(
     reduction: &Reduction,
     provenance: &ProvenanceMap,
 ) -> anyhow::Result<Vec<IndexVariant>> {
     let mut result = Vec::new();
+    let mut selections = BTreeMap::<AgentRef, Vec<(&SelectionRef, &Vec<EntryRef>)>>::new();
+    for (reference, membership) in &reduction.selection_memberships {
+        if let (Some(entries), Some(TraceObject::HistorySelection(selection))) = (
+            membership.as_ref(),
+            known(
+                reduction,
+                &AnyObjectRef::HistorySelection(reference.clone()),
+            ),
+        ) {
+            selections
+                .entry(selection.agent.clone())
+                .or_default()
+                .push((reference, entries));
+        }
+    }
     for (agent, history) in &reduction.histories {
         let mut variants = BTreeMap::<
             (EntryRef, MessageRevisionRef),
@@ -336,25 +374,18 @@ fn source_variants(
             else {
                 continue;
             };
-            let original_owner = match &entry.original_owner {
-                Some(OwnerRef::Agent { agent }) => agent.clone(),
-                _ => entry.containing_agent.clone(),
-            };
-            let mut scopes = vec![(SearchHistoryMode::RetainedArchive, None)];
-            if original_owner == entry.containing_agent {
-                scopes.push((SearchHistoryMode::Authored, None));
-            }
+
             for revision in bound_revisions(reduction, entry_ref, None) {
-                variants.insert((entry_ref.clone(), revision), scopes.clone());
+                let mut scopes = vec![(SearchHistoryMode::RetainedArchive, None)];
+                if locally_authored(reduction, entry, &revision) {
+                    scopes.push((SearchHistoryMode::Authored, None));
+                }
+                variants.insert((entry_ref.clone(), revision), scopes);
             }
         }
         // Entry membership cannot authorize every body observed for that identity.
         // Resolve the selected bindings independently; archive variants stay archived.
-        if let Some((selection, entries)) = history
-            .selection
-            .known()
-            .zip(history.selected_entries.as_ref())
-        {
+        for &(selection, entries) in selections.get(agent).into_iter().flatten() {
             let mut messages =
                 BTreeMap::<MessageRef, (EntryRef, BTreeSet<MessageRevisionRef>)>::new();
             for entry in entries {
@@ -381,7 +412,7 @@ fn source_variants(
             }
         }
         for ((entry_ref, revision_ref), scopes) in variants {
-            let Some(TraceObject::HistoryEntry(entry)) =
+            let Some(TraceObject::HistoryEntry(_)) =
                 known(reduction, &AnyObjectRef::HistoryEntry(entry_ref.clone()))
             else {
                 continue;
@@ -398,10 +429,7 @@ fn source_variants(
             let support = provenance
                 .get(&resolved_entry.reference)
                 .ok_or_else(|| anyhow::anyhow!("search entry lacks evidence provenance"))?;
-            let original_owner = match &entry.original_owner {
-                Some(OwnerRef::Agent { agent }) => agent.clone(),
-                _ => entry.containing_agent.clone(),
-            };
+
             let mut dependency_epochs: BTreeSet<_> =
                 support.dependency_epochs.iter().cloned().collect();
             // The entry binds a representation, while its bytes and authored
@@ -445,7 +473,6 @@ fn source_variants(
             }
             result.push(IndexVariant {
                 agent: agent.clone(),
-                original_owner,
                 entry: entry_ref,
                 revision: revision_ref,
                 message: revision.message.clone(),
@@ -495,7 +522,6 @@ fn compose_sources(
             {
                 sources.push(IndexSource {
                     agent: variant.agent.clone(),
-                    original_owner: variant.original_owner.clone(),
                     entry: variant.entry.clone(),
                     revision: variant.revision.clone(),
                     message: variant.message.clone(),
@@ -559,9 +585,16 @@ mod tests {
             .objects
             .iter()
             .filter_map(|(reference, object)| {
-                let Resolved::Known { claims, .. } = &object.declaration else {
-                    return None;
+                let mut claims: Vec<_> = match &object.declaration {
+                    Resolved::Known { claims, .. } => claims.clone(),
+                    Resolved::Conflicted { alternatives } => alternatives
+                        .iter()
+                        .flat_map(|(_, claims)| claims.iter().cloned())
+                        .collect(),
+                    _ => return None,
                 };
+                claims.sort();
+                claims.dedup();
                 Some((
                     reference.clone(),
                     Arc::new(ObjectProvenance {
@@ -787,6 +820,142 @@ mod tests {
     }
 
     #[test]
+    fn unknown_or_inherited_production_never_enters_locally_authored_search() {
+        let origin =
+            AgentRef::Session(sylph_protocol::SessionId::decode("private:codex:origin").unwrap());
+        let local_author = Author::Agent {
+            agent: OwnerRef::Agent { agent: agent() },
+        };
+        let local_production = Some(ProductionScope {
+            owner: OwnerRef::Agent { agent: agent() },
+            activation: None,
+        });
+        for (original, author, production) in [
+            (Some(OwnerRef::Unknown), Author::Unknown, None),
+            (
+                Some(OwnerRef::Unresolved {
+                    scope: agent(),
+                    namespace: "fork".into(),
+                    native_key: vec!["entry".into()],
+                    reason: "Unproved prefix".into(),
+                }),
+                Author::Unknown,
+                None,
+            ),
+            (None, Author::Human { subject: None }, None),
+            (
+                None,
+                Author::Agent {
+                    agent: OwnerRef::Agent { agent: origin },
+                },
+                None,
+            ),
+            (
+                None,
+                Author::Agent {
+                    agent: OwnerRef::Agent { agent: agent() },
+                },
+                None,
+            ),
+            (
+                Some(OwnerRef::Unknown),
+                local_author.clone(),
+                local_production.clone(),
+            ),
+            (
+                Some(OwnerRef::Agent { agent: agent() }),
+                local_author.clone(),
+                local_production.clone(),
+            ),
+            (None, Author::Unknown, local_production.clone()),
+            (
+                None,
+                local_author,
+                Some(ProductionScope {
+                    owner: OwnerRef::Unknown,
+                    activation: None,
+                }),
+            ),
+        ] {
+            let mut fixture = StreamFixture::new(2);
+            for claim in &mut fixture.claims {
+                match &mut claim.fact {
+                    Fact::Declare {
+                        object: TraceObject::HistoryEntry(entry),
+                    } => entry.original_owner = original.clone(),
+                    Fact::Declare {
+                        object: TraceObject::Message(message),
+                    } => {
+                        message.author = author.clone();
+                        message.production = production.clone();
+                    }
+                    _ => {}
+                }
+            }
+            let reduction = fixture.reduction();
+            let epochs = [IngestionEpoch::new("retained").unwrap()];
+            let variants =
+                source_variants(&reduction, &entry_provenance(&reduction, &epochs)).unwrap();
+            assert!(
+                !variants.is_empty(),
+                "unknown ownership cannot hide retained bytes"
+            );
+            assert!(
+                variants.iter().all(|row| !row
+                    .scopes
+                    .iter()
+                    .any(|(mode, _)| mode == &SearchHistoryMode::Authored)),
+                "containing identity became authored-search evidence"
+            );
+        }
+    }
+
+    #[test]
+    fn agreed_local_authorship_survives_unrelated_metadata_conflict() {
+        let mut fixture = StreamFixture::new(2);
+        let mut extra = None;
+        for claim in &mut fixture.claims {
+            if let Fact::Declare {
+                object: TraceObject::Message(message),
+            } = &mut claim.fact
+            {
+                message.author = Author::Agent {
+                    agent: OwnerRef::Agent { agent: agent() },
+                };
+                message.production = Some(ProductionScope {
+                    owner: OwnerRef::Agent { agent: agent() },
+                    activation: None,
+                });
+                message.purpose = MessagePurpose::Progress;
+                let mut other = claim.clone();
+                other.claim_ref = reference(999);
+                if let Fact::Declare {
+                    object: TraceObject::Message(message),
+                } = &mut other.fact
+                {
+                    message.purpose = MessagePurpose::Answer;
+                }
+                extra = Some(other);
+            }
+        }
+        fixture.claims.push(extra.unwrap());
+        let reduction = fixture.reduction();
+        assert!(reduction.objects.values().any(|object| matches!(
+            &object.declaration,
+            Resolved::Conflicted { alternatives }
+                if alternatives.iter().all(|(value, _)| matches!(value, TraceObject::Message(_)))
+        )));
+        let epochs = [IngestionEpoch::new("local").unwrap()];
+        let variants = source_variants(&reduction, &entry_provenance(&reduction, &epochs)).unwrap();
+        assert!(!variants.is_empty());
+        assert!(variants.iter().all(|row| {
+            row.scopes
+                .iter()
+                .any(|(mode, _)| mode == &SearchHistoryMode::Authored)
+        }));
+    }
+
+    #[test]
     fn copied_search_content_uses_recipient_support_without_origin_provenance() {
         let mut fixture = StreamFixture::new(2);
         let origin =
@@ -809,7 +978,6 @@ mod tests {
         assert_eq!(variants.len(), fixture.entries.len());
         for source in variants {
             assert_eq!(source.agent, agent());
-            assert_eq!(source.original_owner, origin);
             assert_eq!(source.epoch, epochs[0]);
             assert_eq!(source.dependency_epochs, BTreeSet::from(epochs.clone()));
             assert!(

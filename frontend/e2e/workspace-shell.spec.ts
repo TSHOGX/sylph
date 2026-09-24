@@ -164,12 +164,25 @@ test("global search finds a retained message and opens its addressed conversatio
   await expect(page).toHaveURL(new RegExp(`/agents/${MAIN_AGENT}.*anchor=`)); await expect(dialog).toHaveCount(0);
 });
 
-test("a global index hit keeps its retained excerpt and checkpoint visible", async ({ page }) => {
-  await installTraceFixture(page); await openTrace(page);
-  await page.keyboard.press("ControlOrMeta+k"); const dialog = page.getByRole("dialog");
-  await dialog.getByRole("textbox", { name: "Search retained conversations" }).fill("deadlock"); await dialog.getByRole("button", { name: "Search", exact: true }).click();
-  await expect(dialog.getByText("A retained hit outside the visible window", { exact: true })).toBeVisible();
-  await expect(dialog.getByText(/Matched Current history at retained view 1/)).toBeVisible();
+test("a global index hit keeps its retained excerpt and checkpoint visible", async ({
+  page,
+}) => {
+  await installTraceFixture(page);
+  await openTrace(page);
+  await page.keyboard.press("ControlOrMeta+k");
+  const dialog = page.getByRole("dialog");
+  await dialog
+    .getByRole("textbox", { name: "Search retained conversations" })
+    .fill("deadlock");
+  await dialog.getByRole("button", { name: "Search", exact: true }).click();
+  await expect(
+    dialog.getByText("A retained hit outside the visible window", {
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(
+    dialog.getByText(/Matched Search checkpoint at retained view 1/),
+  ).toBeVisible();
 });
 
 test("Escape closes an overlay and returns focus to its opener", async ({ page }) => {

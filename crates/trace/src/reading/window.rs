@@ -164,7 +164,8 @@ impl super::Index<'_> {
                     } else {
                         revision
                     };
-                    let Some(message) = self.message_metadata(&revision.message) else {
+                    let Some(message) = super::message_metadata(self.reduction, &revision.message)
+                    else {
                         units.push(self.unknown(
                             address,
                             anchor.clone(),
@@ -203,7 +204,8 @@ impl super::Index<'_> {
                                 ));
                                 continue;
                             };
-                            let Some(delivered_message) = self.message_metadata(&delivered.message)
+                            let Some(delivered_message) =
+                                super::message_metadata(self.reduction, &delivered.message)
                             else {
                                 continue;
                             };
@@ -358,7 +360,7 @@ impl super::Index<'_> {
                 ));
                 continue;
             };
-            let Some(message) = self.message_metadata(&revision.message) else {
+            let Some(message) = super::message_metadata(self.reduction, &revision.message) else {
                 continue;
             };
             units.push(self.message_unit(

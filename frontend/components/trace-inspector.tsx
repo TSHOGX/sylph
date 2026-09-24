@@ -25,6 +25,7 @@ import { useWorkspaceUI } from "@/lib/workspace-ui";
 import { useDialog } from "@/lib/use-dialog";
 import {
   agentName,
+  historyLocationKey,
   agentUrl,
   availabilityLabel,
   executionLabel,
@@ -38,6 +39,8 @@ import { TracePayload } from "./trace-payload";
 import { OperationResults } from "./trace-operation-results";
 import { TraceEvidence } from "./trace-evidence";
 import { OriginDirectory, type OriginLocation } from "./trace-origins";
+import { MenuButton } from "./ui/menu";
+import type { SearchHistoryMode } from "@/lib/trace-types";
 import { ArtifactsPane } from "./artifacts-pane";
 const Playback = dynamic(() =>
   import("./trace-playback").then((module) => module.TracePlayback),
@@ -241,7 +244,7 @@ export function TraceInspector({
         ? inspection.scope
         : {
             agent: bootstrap.header.agent.address,
-            history: bootstrap.header.history.selection,
+            history: historyLocationKey(bootstrap.header.history),
             view: bootstrap.view,
             changeCursor: bootstrap.changeCursor,
             maximumPayloadBytes: bootstrap.window.limits.maxPayloadBytes,
@@ -996,6 +999,21 @@ function ActivationDirectory({
 
 function AgentSearch({ bootstrap }: { bootstrap: ReaderBootstrap }) {
   const t = useT();
+  const ui = useWorkspaceUI();
+  const [mode, setMode] = useState<SearchHistoryMode>(
+    bootstrap.header.history.selection
+      ? "selected_context"
+      : "retained_archive",
+  );
+  const modes = [
+    { value: "retained_archive" as const, label: t("trace.searchRetained") },
+    {
+      value: "selected_context" as const,
+      label: t("trace.searchSelected"),
+      disabled: !bootstrap.header.history.selection,
+    },
+    { value: "authored" as const, label: t("trace.searchAuthored") },
+  ];
   const [input, setInput] = useState("");
   const [query, setQuery] = useState("");
   const [cursor, setCursor] = useState<string | null>(null);
@@ -1005,6 +1023,8 @@ function AgentSearch({ bootstrap }: { bootstrap: ReaderBootstrap }) {
       ? traceCacheKey(bootstrap.view, [
           "search",
           bootstrap.header.agent.address,
+          mode,
+          bootstrap.header.history.selection,
           query,
           cursor,
         ])
@@ -1014,18 +1034,42 @@ function AgentSearch({ bootstrap }: { bootstrap: ReaderBootstrap }) {
         .search(
           bootstrap.header.agent.address,
           bootstrap.header.history.selection,
+          mode,
           query,
           cursor,
           signal,
           searchView,
         )
         .then((page) => {
-          setSearchView(page.view);
+          if (!signal.aborted) setSearchView(page.view);
           return page;
         }),
   );
   return (
     <div>
+      <MenuButton
+        label={t("trace.searchScope")}
+        items={modes.map((item) => ({
+          label: item.label,
+          checked: mode === item.value,
+          disabled: item.disabled,
+          onSelect: () => {
+            setMode(item.value);
+            setCursor(null);
+            setSearchView(null);
+          },
+        }))}
+      >
+        {(trigger) => (
+          <button
+            {...trigger}
+            className={button}
+            aria-label={t("trace.searchScope")}
+          >
+            {modes.find((item) => item.value === mode)!.label}
+          </button>
+        )}
+      </MenuButton>
       <form
         onSubmit={(event) => {
           event.preventDefault();
@@ -1062,14 +1106,16 @@ function AgentSearch({ bootstrap }: { bootstrap: ReaderBootstrap }) {
               className={`${button} mt-2 inline-block underline`}
               href={agentUrl(
                 hit.agent.address,
-                hit.history.selection,
+                historyLocationKey(hit.history),
                 hit.anchor,
               )}
               onClick={() => {
+                if (ui.isMobile) ui.closeDrawer();
+                else ui.setRightOpen(false);
                 if (result.data)
                   rememberTraceNavigation(
                     hit.agent.address,
-                    hit.history.selection,
+                    historyLocationKey(hit.history),
                     hit.anchor,
                     result.data.view,
                   );

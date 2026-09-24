@@ -31,6 +31,7 @@ import { useTracePage } from "@/lib/use-trace-page";
 import { useWorkspaceUI } from "@/lib/workspace-ui";
 import {
   agentName,
+  historyLocationKey,
   agentUrl,
   executionLabel,
   type ReadingUnit,
@@ -354,7 +355,7 @@ export function AgentReader({
             ...next,
             scope: {
               agent: data.header.agent.address,
-              history: data.header.history.selection,
+              history: historyLocationKey(data.header.history),
               view: data.view,
               changeCursor: data.changeCursor,
               maximumPayloadBytes: data.window.limits.maxPayloadBytes,
@@ -638,6 +639,8 @@ export function AgentReader({
             </p>
           )}
         </div>
+        {/* Explicit history navigation is inspection. A retained header's
+            isCurrent field cannot establish live control availability. */}
         {data &&
           (companion ? (
             <Link
@@ -645,6 +648,13 @@ export function AgentReader({
               href={agentUrl(agent, history, location.anchor)}
             >
               {t("trace.openConversation")}
+            </Link>
+          ) : history !== null || data.header.history.archive ? (
+            <Link
+              className={`${traceButton} border-t border-line text-center`}
+              href={agentUrl(agent)}
+            >
+              {t("trace.returnCurrentToSend")}
             </Link>
           ) : (
             <TraceComposer

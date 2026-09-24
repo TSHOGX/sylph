@@ -246,6 +246,8 @@ pub struct ExecutionSummary {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HistoryLocation {
+    /// Explicit retained-archive inspection, independent of native head selection.
+    pub archive: bool,
     pub selection: Option<SelectionRef>,
     pub label: String,
     pub is_current: bool,

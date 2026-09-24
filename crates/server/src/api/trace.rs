@@ -288,6 +288,7 @@ fn reprojection_not_found() -> TraceError {
 
 #[derive(Deserialize)]
 struct SearchQuery {
+    mode: Option<crate::trace::search::SearchHistoryMode>,
     q: String,
     agent: Option<String>,
     selection: Option<String>,
@@ -391,13 +392,26 @@ async fn search_inner(
         .map(SelectionRef::decode)
         .transpose()
         .map_err(|error| invalid(error.to_string()))?;
+    let mode = query.mode.unwrap_or(SearchHistoryMode::RetainedArchive);
+    if mode == SearchHistoryMode::SelectedContext {
+        if agent.is_none() || selection.is_none() {
+            return Err(invalid(
+                "Selected-context search requires an agent and selection",
+            ));
+        }
+    } else if selection.is_some() {
+        return Err(invalid("Only selected-context search accepts a selection"));
+    }
+    if selection
+        .as_ref()
+        .zip(agent.as_ref())
+        .is_some_and(|(selection, agent)| selection.scope() != agent)
+    {
+        return Err(invalid("Search selection belongs to a different agent"));
+    }
     let scope = SearchScope {
         agent,
-        mode: if selection.is_some() {
-            SearchHistoryMode::SelectedContext
-        } else {
-            SearchHistoryMode::Authored
-        },
+        mode,
         selection,
         representation: None,
     };
@@ -436,6 +450,9 @@ async fn search_inner(
                 .await
                 .map_err(lease_error)?
         };
+        if let Some(selection) = &scope.selection {
+            check_search_selection(&state, &subject.0, &active, &lease, selection).await?;
+        }
         let result = index
             .start_query(
                 SearchQueryContext {
@@ -460,6 +477,9 @@ async fn search_inner(
         .generation(&result.view.generation)
         .await
         .map_err(internal)?;
+    if let Some(selection) = &scope.selection {
+        check_search_selection(&state, &subject.0, &generation, &lease, selection).await?;
+    }
     let mut hits = Vec::new();
     for hit in result.hits {
         observe(&state, &subject.0, &hit.agent).await?;
@@ -511,8 +531,14 @@ async fn search_inner(
             anchor: TraceAddress::of(&hit.anchor),
             agent: header.agent,
             history: HistoryLocation {
+                archive: hit.selection.is_none(),
                 selection: hit.selection,
-                label: "Search checkpoint".into(),
+                label: if scope.mode == SearchHistoryMode::SelectedContext {
+                    "Selected context at search checkpoint"
+                } else {
+                    "Retained archive at search checkpoint"
+                }
+                .into(),
                 is_current: false,
                 selection_known: true,
                 availability: ReadAvailability::Available,
@@ -547,6 +573,34 @@ async fn search_inner(
         },
         limits: state.trace.limits().clone(),
     }))
+}
+
+async fn check_search_selection(
+    state: &AppState,
+    subject: &str,
+    generation: &crate::trace::generation::GenerationStore,
+    lease: &ViewLease,
+    selection: &SelectionRef,
+) -> Result<()> {
+    let row = generation
+        .read_row(
+            &lease.snapshot,
+            &read_scope(selection.scope(), None, "histories"),
+            &selection.encode(),
+        )
+        .await
+        .map_err(storage)?;
+    check_row(state, subject, lease, &row).await?;
+    let choice: HistoryChoice = serde_json::from_value(row.body).map_err(internal)?;
+    if !matches!(choice.availability, ReadAvailability::Available) {
+        return Err(TraceError {
+            status: StatusCode::CONFLICT,
+            code: "history_unavailable",
+            message: "Selected history membership is unavailable".into(),
+            response: None,
+        });
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -749,6 +803,7 @@ async fn replay_change(
 
 #[derive(Default, Deserialize)]
 pub struct ReadQuery {
+    archive: Option<bool>,
     at_snapshot: Option<String>,
     selection: Option<String>,
     before: Option<String>,
@@ -1336,13 +1391,31 @@ pub async fn bootstrap(
             });
         }
     }
-    let selection = query
-        .selection
-        .as_deref()
-        .map(SelectionRef::decode)
-        .transpose()
-        .map_err(|error| invalid(error.to_string()))?
-        .or_else(|| header.history.selection.clone());
+    let archive = query.archive.unwrap_or(false);
+    if archive && query.selection.is_some() {
+        return Err(invalid("Archive inspection cannot select a native history"));
+    }
+    let selection = if archive {
+        None
+    } else {
+        query
+            .selection
+            .as_deref()
+            .map(SelectionRef::decode)
+            .transpose()
+            .map_err(|error| invalid(error.to_string()))?
+            .or_else(|| header.history.selection.clone())
+    };
+    if archive {
+        header.history = HistoryLocation {
+            archive: true,
+            selection: None,
+            label: "Retained archive".into(),
+            is_current: false,
+            selection_known: true,
+            availability: ReadAvailability::Available,
+        };
+    }
     if let Some(selected) = selection.as_ref() {
         if header.history.selection.as_ref() != Some(selected) {
             let row = generation
@@ -1356,6 +1429,7 @@ pub async fn bootstrap(
             check_row(&state, &subject.0, &lease, &row).await?;
             let choice: HistoryChoice = serde_json::from_value(row.body).map_err(internal)?;
             header.history = HistoryLocation {
+                archive: false,
                 selection: Some(choice.selection),
                 label: choice.label,
                 is_current: choice.is_current,

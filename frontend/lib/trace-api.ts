@@ -1,6 +1,7 @@
 import { ApiError, fetchAPI } from "./api";
 import type {
   AgentDirectoryRow,
+  SearchHistoryMode,
   OriginAssertion,
   ClaimSummary,
   ClaimDetail,
@@ -34,6 +35,9 @@ function query(values: Record<string, string | number | null | undefined>) {
     if (value != null) query.set(key, String(value));
   return query.size ? `?${query}` : "";
 }
+function nativeSelection(history: string | null | undefined) {
+  return history === "archive" ? null : history;
+}
 export const traceAPI = {
   bootstrap: (
     agent: string,
@@ -43,7 +47,7 @@ export const traceAPI = {
     view?: TraceView | null,
   ) =>
     fetchAPI<ReaderBootstrap>(
-      `${base}/agents/${segment(agent)}${query({ selection: history, around: anchor, at_snapshot: view?.token })}`,
+      `${base}/agents/${segment(agent)}${query({ selection: nativeSelection(history), archive: history === "archive" ? "true" : null, around: anchor, at_snapshot: view?.token })}`,
       { signal },
     ),
   history: (
@@ -55,7 +59,7 @@ export const traceAPI = {
     signal?: AbortSignal,
   ) =>
     fetchAPI<TracePage<ReadingUnit>>(
-      `${base}/agents/${segment(agent)}/history${query({ at_snapshot: view.token, selection: history, [direction]: cursor })}`,
+      `${base}/agents/${segment(agent)}/history${query({ at_snapshot: view.token, selection: nativeSelection(history), [direction]: cursor })}`,
       { signal },
     ),
   agents: (
@@ -109,7 +113,7 @@ export const traceAPI = {
     signal?: AbortSignal,
   ) =>
     fetchAPI<ObjectDetail>(
-      `${base}/objects/${segment(reference)}${query({ at_snapshot: view.token, selection: history })}`,
+      `${base}/objects/${segment(reference)}${query({ at_snapshot: view.token, selection: nativeSelection(history) })}`,
       { signal },
     ),
   evidence: (
@@ -121,7 +125,7 @@ export const traceAPI = {
     corrects?: string | null,
   ) =>
     fetchAPI<TracePage<ClaimSummary>>(
-      `${base}/objects/${segment(reference)}/evidence${query({ at_snapshot: view.token, selection: history, after: cursor, limit: 8, corrects })}`,
+      `${base}/objects/${segment(reference)}/evidence${query({ at_snapshot: view.token, selection: nativeSelection(history), after: cursor, limit: 8, corrects })}`,
       { signal, cache: "no-store" },
     ),
   claim: (
@@ -132,7 +136,7 @@ export const traceAPI = {
     signal?: AbortSignal,
   ) =>
     fetchAPI<ClaimDetail>(
-      `${base}/objects/${segment(reference)}/claims/${segment(claim)}${query({ at_snapshot: view.token, selection: history })}`,
+      `${base}/objects/${segment(reference)}/claims/${segment(claim)}${query({ at_snapshot: view.token, selection: nativeSelection(history) })}`,
       { signal, cache: "no-store" },
     ),
   evidenceSource: (
@@ -145,7 +149,7 @@ export const traceAPI = {
     signal?: AbortSignal,
   ) =>
     fetchAPI<EvidenceBytes>(
-      `${base}/objects/${segment(reference)}/claims/${segment(claim)}/sources/${segment(observation)}${query({ at_snapshot: view.token, selection: history, start })}`,
+      `${base}/objects/${segment(reference)}/claims/${segment(claim)}/sources/${segment(observation)}${query({ at_snapshot: view.token, selection: nativeSelection(history), start })}`,
       { signal, cache: "no-store" },
     ),
   parts: (
@@ -157,19 +161,20 @@ export const traceAPI = {
     signal?: AbortSignal,
   ) =>
     fetchAPI<TracePage<PartSummary>>(
-      `${base}/objects/${segment(reference)}/parts${query({ at_snapshot: view.token, after: cursor, via_ref: via, selection })}`,
+      `${base}/objects/${segment(reference)}/parts${query({ at_snapshot: view.token, after: cursor, via_ref: via, selection: nativeSelection(selection) })}`,
       { signal },
     ),
   search: (
     agent: string,
     selection: string | null,
+    mode: SearchHistoryMode,
     q: string,
     cursor?: string | null,
     signal?: AbortSignal,
     view?: TraceView | null,
   ) =>
     fetchAPI<TracePage<SearchHit>>(
-      `${base}/search${query({ agent, selection, at_snapshot: cursor ? view?.token : null, q, cursor })}`,
+      `${base}/search${query({ agent, mode, selection: mode === "selected_context" ? nativeSelection(selection) : null, at_snapshot: cursor ? view?.token : null, q, cursor })}`,
       { signal },
     ),
   globalSearch: (
@@ -179,7 +184,7 @@ export const traceAPI = {
     view?: TraceView | null,
   ) =>
     fetchAPI<TracePage<SearchHit>>(
-      `${base}/search${query({ q, cursor, at_snapshot: cursor ? view?.token : null })}`,
+      `${base}/search${query({ q, mode: "retained_archive", cursor, at_snapshot: cursor ? view?.token : null })}`,
       { signal },
     ),
   origins: (
@@ -203,7 +208,7 @@ export const traceAPI = {
     signal?: AbortSignal,
   ) =>
     fetchAPI<TracePage<ResultOccurrence>>(
-      `${base}/objects/${segment(reference)}/relations${query({ at_snapshot: view.token, selection: history, kind: "results", representation, limit: 16, [direction]: cursor })}`,
+      `${base}/objects/${segment(reference)}/relations${query({ at_snapshot: view.token, selection: nativeSelection(history), kind: "results", representation, limit: 16, [direction]: cursor })}`,
       { signal },
     ),
   resultRepresentation: (
@@ -216,7 +221,7 @@ export const traceAPI = {
     signal?: AbortSignal,
   ) =>
     fetchAPI<ResultRepresentationEntry>(
-      `${base}/objects/${segment(reference)}/relations${query({ at_snapshot: view.token, selection: history, kind: "result_representations", representation, result_phase: phase, after: cursor })}`,
+      `${base}/objects/${segment(reference)}/relations${query({ at_snapshot: view.token, selection: nativeSelection(history), kind: "result_representations", representation, result_phase: phase, after: cursor })}`,
       { signal },
     ),
   observations: (
@@ -228,7 +233,7 @@ export const traceAPI = {
     signal?: AbortSignal,
   ) =>
     fetchAPI<TracePage<ResourceObservation>>(
-      `${base}/objects/${segment(reference)}/relations${query({ at_snapshot: view.token, selection: history, kind: "observations", limit: 16, [direction]: cursor })}`,
+      `${base}/objects/${segment(reference)}/relations${query({ at_snapshot: view.token, selection: nativeSelection(history), kind: "observations", limit: 16, [direction]: cursor })}`,
       { signal },
     ),
   revisionPayloads: (
@@ -240,7 +245,7 @@ export const traceAPI = {
     signal?: AbortSignal,
   ) =>
     fetchAPI<TracePage<PayloadAccess>>(
-      `${base}/objects/${segment(reference)}/relations${query({ at_snapshot: view.token, selection: history, kind: "payloads", limit: 16, [direction]: cursor })}`,
+      `${base}/objects/${segment(reference)}/relations${query({ at_snapshot: view.token, selection: nativeSelection(history), kind: "payloads", limit: 16, [direction]: cursor })}`,
       { signal },
     ),
   relations: (
@@ -252,7 +257,7 @@ export const traceAPI = {
     signal?: AbortSignal,
   ) =>
     fetchAPI<TracePage<TraceRelation>>(
-      `${base}/objects/${segment(reference)}/relations${query({ at_snapshot: view.token, selection: history, kind, after: cursor })}`,
+      `${base}/objects/${segment(reference)}/relations${query({ at_snapshot: view.token, selection: nativeSelection(history), kind, after: cursor })}`,
       { signal },
     ),
   control: (agent: string, signal?: AbortSignal) =>

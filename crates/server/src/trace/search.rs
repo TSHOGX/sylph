@@ -111,7 +111,6 @@ pub enum SearchHistoryMode {
 pub struct SearchDocument {
     pub key: String,
     pub agent: AgentRef,
-    pub original_owner: AgentRef,
     pub anchor: AnyObjectRef,
     pub object: AnyObjectRef,
     pub selection: Option<SelectionRef>,
@@ -129,7 +128,6 @@ pub struct SearchDocument {
 #[serde(rename_all = "camelCase")]
 pub struct SearchHit {
     pub agent: AgentRef,
-    pub original_owner: AgentRef,
     pub anchor: AnyObjectRef,
     pub object: AnyObjectRef,
     pub selection: Option<SelectionRef>,
@@ -244,11 +242,11 @@ impl SearchStore {
                 .bind(&generation)
                 .execute(&mut *tx)
                 .await?;
-            sqlx::query("PRAGMA user_version=2")
+            sqlx::query("PRAGMA user_version=3")
                 .execute(&mut *tx)
                 .await?;
             tx.commit().await?;
-        } else if version != 2 {
+        } else if version != 3 {
             return Err(SearchError::Invalid("unsupported search schema".into()));
         }
         let stored: String =
@@ -366,7 +364,6 @@ impl SearchStore {
             }
             let json = serde_json::to_string(&SearchHit {
                 agent: document.agent.clone(),
-                original_owner: document.original_owner.clone(),
                 anchor: document.anchor.clone(),
                 object: document.object.clone(),
                 selection: document.selection.clone(),

@@ -148,23 +148,38 @@ impl ProvenanceFixture {
             transport_kind: TransportKind::SourceState,
             vendor_build: None,
             schema_fingerprint: None,
-            payload_ref: self
-                .state
-                .trace
-                .evidence()
-                .stage_payload(bytes)
-                .await
-                .unwrap(),
+            payload_ref: PayloadRef::bytes(blake3::hash(bytes).to_hex()).unwrap(),
             attachments: vec![],
             capture_diagnostics: vec![],
         };
-        self.state
-            .trace
-            .evidence()
-            .admit_batch(
+        // AppState runs the real collector. Use the production upload root so
+        // collection between staging and admission cannot consume fixture bytes.
+        let uploads = self.state.trace.uploads();
+        let crate::trace::upload::BeginCapture::Pending(ticket) = uploads
+            .begin(
                 &capture.observation_ref.issuer,
-                std::slice::from_ref(&capture),
+                capture.clone(),
+                vec![sylph_protocol::PayloadDeclaration::Bytes {
+                    reference: capture.payload_ref.clone(),
+                    length: bytes.len() as u64,
+                }],
             )
+            .await
+            .unwrap()
+        else {
+            panic!("a new fixture capture needs an upload ticket");
+        };
+        uploads
+            .put_chunk(
+                &capture.observation_ref.issuer,
+                &ticket,
+                &capture.payload_ref,
+                bytes,
+            )
+            .await
+            .unwrap();
+        uploads
+            .finish(&capture.observation_ref.issuer, &ticket)
             .await
             .unwrap();
         capture
@@ -789,3 +804,5 @@ mod result_representations;
 mod payload_formats;
 mod structure;
 mod export;
+
+mod search_scope;
