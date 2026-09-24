@@ -1,11 +1,33 @@
 use super::*;
 use crate::trace::evidence::catalogue::{PayloadPin, PinOwnerKind};
-use crate::trace::search::{SearchDocument, SearchHistoryMode, SearchIndexWork, SearchStore};
+use crate::trace::search::{SearchBody, SearchDocument, SearchMembership, SearchIndexWork, SearchStore};
 use crate::trace::worker::ProvenanceMap;
 use std::collections::BTreeSet;
 use sylph_trace::reducer::{Reduction, Resolved};
 
+#[cfg(test)]
+pub(crate) struct FixtureIndexer {
+    service: Arc<TraceService>,
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+}
+
+#[cfg(test)]
+impl FixtureIndexer {
+    pub(crate) async fn index_pending(&self) -> anyhow::Result<SearchIndexWork> {
+        self.service.index_pending_locked().await
+    }
+}
+
 impl TraceService {
+    /// Keep background indexing out of a fixture's publication/measurement window.
+    #[cfg(test)]
+    pub(crate) async fn fixture_indexer(self: &Arc<Self>) -> FixtureIndexer {
+        FixtureIndexer {
+            service: self.clone(),
+            _guard: self.search_gate.clone().lock_owned().await,
+        }
+    }
+
     pub async fn search_store(&self, generation: &str) -> anyhow::Result<Arc<SearchStore>> {
         if let Some(store) = self.searches.read().await.get(generation) {
             return Ok(store.clone());
@@ -47,6 +69,10 @@ impl TraceService {
 
     pub async fn index_pending(&self) -> anyhow::Result<SearchIndexWork> {
         let _guard = self.search_gate.lock().await;
+        self.index_pending_locked().await
+    }
+
+    async fn index_pending_locked(&self) -> anyhow::Result<SearchIndexWork> {
         self.require_available().await?;
         let now = crate::models::now_ms();
         let pending = self
@@ -90,7 +116,30 @@ impl TraceService {
             let source_key = blake3::hash(&serde_json::to_vec(&source)?)
                 .to_hex()
                 .to_string();
-            if index.prepare_source(&update, &source_key).await? {
+            let reused = index.prepare_source(&update, &source_key).await?;
+            let mut memberships = Vec::new();
+            let membership_base = serde_json::to_vec(&(&source_key, &memberships))?.len();
+            let mut membership_bytes = membership_base;
+            for membership in &source.scopes {
+                let size = serde_json::to_vec(membership)?.len() + 1;
+                if memberships.len() >= index.limits().max_documents_per_batch
+                    || (!memberships.is_empty()
+                        && membership_bytes + size > index.limits().max_batch_bytes)
+                {
+                    index
+                        .write_membership_batch(&update, &source_key, &memberships)
+                        .await?;
+                    memberships.clear();
+                    membership_bytes = membership_base;
+                }
+                membership_bytes += size;
+                memberships.push(membership.clone());
+            }
+            index
+                .write_membership_batch(&update, &source_key, &memberships)
+                .await?;
+            index.complete_memberships(&update, &source_key).await?;
+            if reused {
                 work.sources_reused += 1;
                 continue;
             }
@@ -141,51 +190,44 @@ impl TraceService {
                 if consumed == 0 {
                     return Err(anyhow::anyhow!("search text cannot advance UTF-8 range"));
                 }
-                for (mode, selection) in source.scopes.clone() {
-                    let key = blake3::hash(&serde_json::to_vec(&(
-                        &source_key,
-                        offset,
-                        &mode,
-                        &selection,
-                    ))?)
+                let key = blake3::hash(&serde_json::to_vec(&(&source_key, offset))?)
                     .to_hex()
                     .to_string();
-                    let document = SearchDocument {
-                        key,
+                let document = SearchDocument {
+                    key,
+                    body: SearchBody {
                         agent: source.agent.clone(),
                         anchor: AnyObjectRef::HistoryEntry(source.entry.clone()),
                         object: AnyObjectRef::Message(source.message.clone()),
-                        selection,
-                        mode,
                         payload: source.part.payload.clone(),
                         representation: source.representation,
                         body_revision: source.revision.encode(),
                         byte_start: offset,
-                        text: text.clone(),
                         ingestion_epoch: source.epoch.clone(),
                         dependency_epochs: source.dependency_epochs.clone(),
-                    };
-                    let size = serde_json::to_vec(&document)?.len() + 1;
-                    if documents.len() >= index.limits().max_documents_per_batch
-                        || (!documents.is_empty() && bytes + size > index.limits().max_batch_bytes)
-                    {
-                        index
-                            .write_source_batch(&update, &source_key, &documents)
-                            .await?;
-                        documents.clear();
-                        bytes = batch_base;
-                    }
-                    bytes += size;
-                    documents.push(document);
-                    work.documents_written += 1;
+                    },
+                    text,
+                };
+                let size = serde_json::to_vec(&document)?.len() + 1;
+                if documents.len() >= index.limits().max_documents_per_batch
+                    || (!documents.is_empty() && bytes + size > index.limits().max_batch_bytes)
+                {
+                    index
+                        .write_source_batch(&update, &source_key, &documents)
+                        .await?;
+                    documents.clear();
+                    bytes = batch_base;
                 }
+                bytes += size;
+                documents.push(document);
+                work.documents_written += 1;
                 offset += consumed as u64;
                 tokio::task::yield_now().await;
             }
             index
                 .write_source_batch(&update, &source_key, &documents)
                 .await?;
-            index.complete_source(&update, &source_key).await?;
+            index.complete_body(&update, &source_key).await?;
         }
         work.documents_removed = index.finish_update(&update).await?;
         Ok(work)
@@ -206,7 +248,10 @@ pub(super) struct IndexSource {
     part: ContentPart,
     epoch: IngestionEpoch,
     dependency_epochs: BTreeSet<IngestionEpoch>,
-    scopes: Vec<(SearchHistoryMode, Option<SelectionRef>)>,
+    // Membership changes have a separate publication path and cannot invalidate
+    // an unchanged body's durable text cache.
+    #[serde(skip)]
+    scopes: Vec<SearchMembership>,
 }
 
 struct IndexVariant {
@@ -217,7 +262,7 @@ struct IndexVariant {
     representation: Representation,
     epoch: IngestionEpoch,
     dependency_epochs: BTreeSet<IngestionEpoch>,
-    scopes: Vec<(SearchHistoryMode, Option<SelectionRef>)>,
+    scopes: Vec<SearchMembership>,
 }
 
 impl TraceService {
@@ -364,10 +409,7 @@ fn source_variants(
         }
     }
     for (agent, history) in &reduction.histories {
-        let mut variants = BTreeMap::<
-            (EntryRef, MessageRevisionRef),
-            Vec<(SearchHistoryMode, Option<SelectionRef>)>,
-        >::new();
+        let mut variants = BTreeMap::<(EntryRef, MessageRevisionRef), Vec<SearchMembership>>::new();
         for entry_ref in &history.archive_order {
             let Some(TraceObject::HistoryEntry(entry)) =
                 known(reduction, &AnyObjectRef::HistoryEntry(entry_ref.clone()))
@@ -376,9 +418,9 @@ fn source_variants(
             };
 
             for revision in bound_revisions(reduction, entry_ref, None) {
-                let mut scopes = vec![(SearchHistoryMode::RetainedArchive, None)];
+                let mut scopes = vec![SearchMembership::RetainedArchive];
                 if locally_authored(reduction, entry, &revision) {
-                    scopes.push((SearchHistoryMode::Authored, None));
+                    scopes.push(SearchMembership::Authored);
                 }
                 variants.insert((entry_ref.clone(), revision), scopes);
             }
@@ -407,7 +449,7 @@ fn source_variants(
                     variants
                         .entry((anchor, revision.clone()))
                         .or_default()
-                        .push((SearchHistoryMode::SelectedContext, Some(selection.clone())));
+                        .push(SearchMembership::SelectedContext(selection.clone()));
                 }
             }
         }
@@ -901,10 +943,9 @@ mod tests {
                 "unknown ownership cannot hide retained bytes"
             );
             assert!(
-                variants.iter().all(|row| !row
-                    .scopes
+                variants
                     .iter()
-                    .any(|(mode, _)| mode == &SearchHistoryMode::Authored)),
+                    .all(|row| !row.scopes.contains(&SearchMembership::Authored)),
                 "containing identity became authored-search evidence"
             );
         }
@@ -948,11 +989,11 @@ mod tests {
         let epochs = [IngestionEpoch::new("local").unwrap()];
         let variants = source_variants(&reduction, &entry_provenance(&reduction, &epochs)).unwrap();
         assert!(!variants.is_empty());
-        assert!(variants.iter().all(|row| {
-            row.scopes
+        assert!(
+            variants
                 .iter()
-                .any(|(mode, _)| mode == &SearchHistoryMode::Authored)
-        }));
+                .all(|row| { row.scopes.contains(&SearchMembership::Authored) })
+        );
     }
 
     #[test]
@@ -980,12 +1021,7 @@ mod tests {
             assert_eq!(source.agent, agent());
             assert_eq!(source.epoch, epochs[0]);
             assert_eq!(source.dependency_epochs, BTreeSet::from(epochs.clone()));
-            assert!(
-                !source
-                    .scopes
-                    .iter()
-                    .any(|(mode, _)| mode == &SearchHistoryMode::Authored)
-            );
+            assert!(!source.scopes.contains(&SearchMembership::Authored));
         }
     }
 
@@ -1007,9 +1043,7 @@ mod tests {
                     .iter()
                     .find(|source| {
                         source.revision == fixture.revisions[index]
-                            && source
-                                .scopes
-                                .contains(&(SearchHistoryMode::RetainedArchive, None))
+                            && source.scopes.contains(&SearchMembership::RetainedArchive)
                     })
                     .unwrap();
                 assert_eq!(source.entry, fixture.entries[index]);
@@ -1018,9 +1052,8 @@ mod tests {
             let selected_sources = sources
                 .iter()
                 .filter(|source| {
-                    source.scopes.contains(&(
-                        SearchHistoryMode::SelectedContext,
-                        Some(fixture.selection.clone()),
+                    source.scopes.contains(&SearchMembership::SelectedContext(
+                        fixture.selection.clone(),
                     ))
                 })
                 .collect::<Vec<_>>();
@@ -1056,7 +1089,7 @@ mod tests {
             source
                 .scopes
                 .iter()
-                .any(|(mode, _)| mode == &SearchHistoryMode::SelectedContext)
+                .any(|membership| matches!(membership, SearchMembership::SelectedContext(_)))
         }));
 
         let mut missing_predecessor = StreamFixture::new(2);
@@ -1279,12 +1312,7 @@ mod tests {
             .unwrap();
             let archived: BTreeSet<_> = sources
                 .iter()
-                .filter(|source| {
-                    source
-                        .scopes
-                        .iter()
-                        .any(|(mode, _)| mode == &SearchHistoryMode::RetainedArchive)
-                })
+                .filter(|source| source.scopes.contains(&SearchMembership::RetainedArchive))
                 .map(|source| source.revision.clone())
                 .collect();
             assert_eq!(archived, BTreeSet::from(revisions.clone()));
@@ -1293,7 +1321,7 @@ mod tests {
                 .filter(|source| {
                     source
                         .scopes
-                        .contains(&(SearchHistoryMode::SelectedContext, Some(selection.clone())))
+                        .contains(&SearchMembership::SelectedContext(selection.clone()))
                 })
                 .collect();
             if observations.is_empty() {

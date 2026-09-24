@@ -67,7 +67,9 @@ changes the environment's cached facet state. Connection epochs fence messages f
 superseded envagent sockets.
 
 Search generations are disposable. Their documents retain the containing agent, exact
-body revision and explicit history scope; no guessed original-owner field is stored.
+body revision and authorization support; no guessed original-owner field is stored.
+History scopes use separate source membership rows instead of duplicating FTS text.
+Body and membership completion are independently fenced before index publication.
 Locally authored membership follows retained author/production evidence as specified in
 `docs/unified-trace-storage.md` § Search consistency.
 

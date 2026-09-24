@@ -23,6 +23,7 @@ use sylph_protocol::trace::*;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchLimits {
     pub max_concurrent_queries: usize,
+    /// Maximum document or scope-membership items in one indexing batch.
     pub max_documents_per_batch: usize,
     pub max_document_bytes: usize,
     pub max_document_metadata_bytes: usize,
@@ -106,38 +107,58 @@ pub enum SearchHistoryMode {
     RetainedArchive,
 }
 
+/// Scope membership is independent of an immutable indexed body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", content = "selection", rename_all = "snake_case")]
+pub enum SearchMembership {
+    Authored,
+    SelectedContext(SelectionRef),
+    RetainedArchive,
+}
+impl SearchMembership {
+    fn key(&self) -> Result<String> {
+        Ok(blake3::hash(&serde_json::to_vec(self)?)
+            .to_hex()
+            .to_string())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SearchDocument {
-    pub key: String,
+pub struct SearchBody {
     pub agent: AgentRef,
     pub anchor: AnyObjectRef,
     pub object: AnyObjectRef,
-    pub selection: Option<SelectionRef>,
-    pub mode: SearchHistoryMode,
     pub payload: PayloadRef,
     pub representation: Representation,
     pub body_revision: String,
     pub byte_start: u64,
-    pub text: String,
     pub ingestion_epoch: IngestionEpoch,
     pub dependency_epochs: BTreeSet<IngestionEpoch>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SearchDocument {
+    pub key: String,
+    pub body: SearchBody,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SearchHit {
-    pub agent: AgentRef,
-    pub anchor: AnyObjectRef,
-    pub object: AnyObjectRef,
+    #[serde(flatten)]
+    pub body: SearchBody,
+    #[serde(flatten)]
+    pub context: SearchHitContext,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchHitContext {
     pub selection: Option<SelectionRef>,
-    pub payload: PayloadRef,
-    pub representation: Representation,
-    pub body_revision: String,
-    pub byte_start: u64,
     pub snippet: String,
-    pub ingestion_epoch: IngestionEpoch,
-    pub dependency_epochs: BTreeSet<IngestionEpoch>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,6 +168,21 @@ pub struct SearchScope {
     pub selection: Option<SelectionRef>,
     pub mode: SearchHistoryMode,
     pub representation: Option<Representation>,
+}
+
+impl SearchScope {
+    pub fn membership(&self) -> Result<SearchMembership> {
+        match (&self.mode, &self.selection) {
+            (SearchHistoryMode::Authored, None) => Ok(SearchMembership::Authored),
+            (SearchHistoryMode::RetainedArchive, None) => Ok(SearchMembership::RetainedArchive),
+            (SearchHistoryMode::SelectedContext, Some(selection))
+                if self.agent.as_ref() == Some(selection.scope()) =>
+                Ok(SearchMembership::SelectedContext(selection.clone())),
+            _ => Err(SearchError::InvalidQuery(
+                "Selected context requires its containing agent and selection; other modes refuse a selection".into()
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -242,11 +278,11 @@ impl SearchStore {
                 .bind(&generation)
                 .execute(&mut *tx)
                 .await?;
-            sqlx::query("PRAGMA user_version=3")
+            sqlx::query("PRAGMA user_version=4")
                 .execute(&mut *tx)
                 .await?;
             tx.commit().await?;
-        } else if version != 3 {
+        } else if version != 4 {
             return Err(SearchError::Invalid("unsupported search schema".into()));
         }
         let stored: String =
@@ -326,20 +362,22 @@ impl SearchStore {
     }
 
     /// Mark an immutable source as present, or discard its interrupted partial text.
-    /// The fingerprint includes body, scope, epoch and all result metadata.
+    /// The fingerprint covers body identity and authorization support, independently
+    /// of query membership. Both publication flags must be complete before reads.
     pub async fn prepare_source(&self, update: &SearchUpdate, key: &str) -> Result<bool> {
         if key.is_empty() || key.len() > self.limits.max_query_bytes {
             return Err(SearchError::Limit("source key bytes"));
         }
         let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
         self.require_update(&mut tx, update).await?;
-        let complete: i64 = sqlx::query_scalar("INSERT INTO search_sources VALUES(?,?,0) ON CONFLICT(source_key) DO UPDATE SET seen_update=excluded.seen_update RETURNING complete")
+        let body_complete: i64 = sqlx::query_scalar("INSERT INTO search_sources VALUES(?,?,0,0) ON CONFLICT(source_key) DO UPDATE SET seen_update=excluded.seen_update,memberships_complete=0 RETURNING body_complete")
             .bind(key).bind(update.serial).fetch_one(&mut *tx).await?;
         tx.commit().await?;
-        if complete == 0 {
+        if body_complete == 0 {
             self.remove_source_documents(update, key).await?;
         }
-        Ok(complete != 0)
+        self.remove_source_memberships(update, key).await?;
+        Ok(body_complete != 0)
     }
 
     pub async fn write_source_batch(
@@ -362,19 +400,7 @@ impl SearchStore {
             {
                 return Err(SearchError::Limit("document bytes"));
             }
-            let json = serde_json::to_string(&SearchHit {
-                agent: document.agent.clone(),
-                anchor: document.anchor.clone(),
-                object: document.object.clone(),
-                selection: document.selection.clone(),
-                payload: document.payload.clone(),
-                representation: document.representation,
-                body_revision: document.body_revision.clone(),
-                byte_start: document.byte_start,
-                snippet: String::new(),
-                ingestion_epoch: document.ingestion_epoch.clone(),
-                dependency_epochs: document.dependency_epochs.clone(),
-            })?;
+            let json = serde_json::to_string(&document.body)?;
             if json.len() > self.limits.max_document_metadata_bytes {
                 return Err(SearchError::Limit("document metadata bytes"));
             }
@@ -382,14 +408,14 @@ impl SearchStore {
         }
         let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
         self.require_update(&mut tx, update).await?;
-        let writable: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM search_sources WHERE source_key=? AND seen_update=? AND complete=0)")
+        let writable: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM search_sources WHERE source_key=? AND seen_update=? AND body_complete=0)")
             .bind(source).bind(update.serial).fetch_one(&mut *tx).await?;
         if !writable {
             return Err(SearchError::Indexing);
         }
         for (document, json) in prepared {
-            let id:i64=sqlx::query_scalar("INSERT INTO search_documents(document_key,source_key,environment,agent_ref,selection_ref,history_mode,representation,document_json) VALUES(?,?,?,?,?,?,?,?) RETURNING id")
-                .bind(&document.key).bind(source).bind(document.agent.environment().as_str()).bind(document.agent.encode()).bind(document.selection.as_ref().map(SelectionRef::encode)).bind(serde_json::to_string(&document.mode)?).bind(serde_json::to_string(&document.representation)?).bind(json).fetch_one(&mut *tx).await?;
+            let id:i64=sqlx::query_scalar("INSERT INTO search_documents(document_key,source_key,environment,agent_ref,representation,document_json) VALUES(?,?,?,?,?,?) RETURNING id")
+                .bind(&document.key).bind(source).bind(document.body.agent.environment().as_str()).bind(document.body.agent.encode()).bind(serde_json::to_string(&document.body.representation)?).bind(json).fetch_one(&mut *tx).await?;
             sqlx::query("INSERT INTO search_fts(rowid,text) VALUES(?,?)")
                 .bind(id)
                 .bind(&document.text)
@@ -400,11 +426,79 @@ impl SearchStore {
         Ok(())
     }
 
-    pub async fn complete_source(&self, update: &SearchUpdate, key: &str) -> Result<()> {
+    pub async fn write_membership_batch(
+        &self,
+        update: &SearchUpdate,
+        source: &str,
+        memberships: &[SearchMembership],
+    ) -> Result<()> {
+        if memberships.len() > self.limits.max_documents_per_batch {
+            return Err(SearchError::Limit("membership batch count"));
+        }
+        if serde_json::to_vec(&(source, memberships))?.len() > self.limits.max_batch_bytes {
+            return Err(SearchError::Limit("membership batch bytes"));
+        }
+        let keys = memberships
+            .iter()
+            .map(SearchMembership::key)
+            .collect::<Result<Vec<_>>>()?;
+        let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
+        self.require_update(&mut tx, update).await?;
+        let writable: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM search_sources WHERE source_key=? AND seen_update=? AND memberships_complete=0)"
+        ).bind(source).bind(update.serial).fetch_one(&mut *tx).await?;
+        if !writable {
+            return Err(SearchError::Indexing);
+        }
+        for key in keys {
+            sqlx::query("INSERT INTO search_memberships VALUES(?,?) ON CONFLICT DO NOTHING")
+                .bind(source)
+                .bind(key)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn complete_memberships(&self, update: &SearchUpdate, source: &str) -> Result<()> {
+        let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
+        self.require_update(&mut tx, update).await?;
+        let changed = sqlx::query(
+            "UPDATE search_sources SET memberships_complete=1 WHERE source_key=? AND seen_update=?",
+        )
+        .bind(source)
+        .bind(update.serial)
+        .execute(&mut *tx)
+        .await?;
+        if changed.rows_affected() != 1 {
+            return Err(SearchError::Indexing);
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn remove_source_memberships(&self, update: &SearchUpdate, source: &str) -> Result<()> {
+        loop {
+            let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
+            self.require_update(&mut tx, update).await?;
+            let removed = sqlx::query(
+                "DELETE FROM search_memberships WHERE source_key=? AND membership_key IN (SELECT membership_key FROM search_memberships WHERE source_key=? ORDER BY membership_key LIMIT ?)"
+            ).bind(source).bind(source).bind(self.limits.max_documents_per_batch as i64)
+                .execute(&mut *tx).await?.rows_affected();
+            tx.commit().await?;
+            if removed < self.limits.max_documents_per_batch as u64 {
+                return Ok(());
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
+    pub async fn complete_body(&self, update: &SearchUpdate, key: &str) -> Result<()> {
         let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
         self.require_update(&mut tx, update).await?;
         let result = sqlx::query(
-            "UPDATE search_sources SET complete=1 WHERE source_key=? AND seen_update=?",
+            "UPDATE search_sources SET body_complete=1 WHERE source_key=? AND seen_update=?",
         )
         .bind(key)
         .bind(update.serial)
@@ -460,6 +554,7 @@ impl SearchStore {
             if let Some(key) = stale {
                 tx.commit().await?;
                 removed += self.remove_source_documents(update, &key).await?;
+                self.remove_source_memberships(update, &key).await?;
                 let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
                 self.require_update(&mut tx, update).await?;
                 sqlx::query("DELETE FROM search_sources WHERE source_key=? AND seen_update<?")
@@ -472,7 +567,7 @@ impl SearchStore {
                 continue;
             }
             let incomplete: bool =
-                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM search_sources WHERE complete=0)")
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM search_sources WHERE body_complete=0 OR memberships_complete=0)")
                     .fetch_one(&mut *tx)
                     .await?;
             if incomplete {
@@ -508,6 +603,7 @@ impl SearchStore {
         {
             return Err(SearchError::Limit("query input"));
         }
+        let membership_key = scope.membership()?.key()?;
         if self.checkpoint().await?.as_ref() != Some(snapshot) {
             return Err(SearchError::Indexing);
         }
@@ -530,8 +626,8 @@ impl SearchStore {
             if current != Some((snapshot.view_revision as i64,snapshot.evidence_cut as i64)) { return Err(SearchError::Indexing); }
             // Candidates contain sizes and bounded excerpts only. Hydrate full
             // metadata under the same SQLite snapshot after the result byte gate.
-            let rows = sqlx::query("SELECT d.id,length(CAST(d.document_json AS BLOB)) AS metadata_bytes,substr(snippet(search_fts,0,'','',' … ',24),1,?) AS excerpt FROM search_fts JOIN search_documents d ON d.id=search_fts.rowid WHERE search_fts MATCH ? AND d.environment IN (SELECT value FROM json_each(?)) AND (? IS NULL OR d.agent_ref=?) AND (? IS NULL OR d.selection_ref=?) AND d.history_mode=? AND (? IS NULL OR d.representation=?) ORDER BY bm25(search_fts),d.id LIMIT ?")
-                .bind(self.limits.max_snippet_chars as i64).bind(query).bind(serde_json::to_string(allowed_environments)?).bind(scope.agent.as_ref().map(AgentRef::encode)).bind(scope.agent.as_ref().map(AgentRef::encode)).bind(scope.selection.as_ref().map(SelectionRef::encode)).bind(scope.selection.as_ref().map(SelectionRef::encode)).bind(serde_json::to_string(&scope.mode)?).bind(scope.representation.map(|v|serde_json::to_string(&v).unwrap())).bind(scope.representation.map(|v|serde_json::to_string(&v).unwrap())).bind((self.limits.max_results+1) as i64)
+            let rows = sqlx::query("SELECT d.id,length(CAST(d.document_json AS BLOB)) AS metadata_bytes,substr(snippet(search_fts,0,'','',' … ',24),1,?) AS excerpt FROM search_fts JOIN search_documents d ON d.id=search_fts.rowid WHERE search_fts MATCH ? AND d.environment IN (SELECT value FROM json_each(?)) AND (? IS NULL OR d.agent_ref=?) AND EXISTS(SELECT 1 FROM search_memberships m WHERE m.source_key=d.source_key AND m.membership_key=?) AND (? IS NULL OR d.representation=?) ORDER BY bm25(search_fts),d.id LIMIT ?")
+                .bind(self.limits.max_snippet_chars as i64).bind(query).bind(serde_json::to_string(allowed_environments)?).bind(scope.agent.as_ref().map(AgentRef::encode)).bind(scope.agent.as_ref().map(AgentRef::encode)).bind(&membership_key).bind(scope.representation.map(|v|serde_json::to_string(&v).unwrap())).bind(scope.representation.map(|v|serde_json::to_string(&v).unwrap())).bind((self.limits.max_results+1) as i64)
                 .fetch_all(&mut *tx).await.map_err(|error| search_sql_error(error, steps.load(Ordering::Relaxed)>=budget, query))?;
             let mut limited = rows.len() > self.limits.max_results;
             let mut hits = Vec::new();
@@ -539,14 +635,20 @@ impl SearchStore {
             for row in rows.into_iter().take(self.limits.max_results) {
                 let snippet: String = row.get("excerpt");
                 let metadata = usize::try_from(row.get::<i64,_>("metadata_bytes")).map_err(|_| SearchError::Limit("document metadata bytes"))?;
-                let excerpt_bytes = serde_json::to_vec(&snippet)?.len().saturating_sub(2);
-                let bytes = metadata.checked_add(excerpt_bytes).ok_or(SearchError::Limit("result bytes"))?;
+                let context = SearchHitContext { selection: scope.selection.clone(), snippet };
+                // Flattening the two nonempty objects replaces their adjacent
+                // closing/opening braces with one comma. Serialize the actual
+                // context type so later fields cannot escape this pre-hydration gate.
+                let extra = serde_json::to_vec(&context)?.len().saturating_sub(1);
+                let bytes = metadata.checked_add(extra).ok_or(SearchError::Limit("result bytes"))?;
                 if metadata > self.limits.max_document_metadata_bytes || bytes > self.limits.max_result_bytes.saturating_sub(returned_bytes) {
                     limited = true; break;
                 }
                 let json: String = sqlx::query_scalar("SELECT document_json FROM search_documents WHERE id=?").bind(row.get::<i64,_>("id")).fetch_one(&mut *tx).await?;
-                let mut hit: SearchHit = serde_json::from_str(&json)?;
-                hit.snippet = snippet;
+                let hit = SearchHit {
+                    body: serde_json::from_str(&json)?,
+                    context,
+                };
                 returned_bytes += bytes;
                 hits.push(hit);
             }

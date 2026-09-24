@@ -18,22 +18,22 @@ fn snapshot(revision: u64) -> Snapshot {
 fn document(key: &str, text: &str) -> SearchDocument {
     SearchDocument {
         key: key.into(),
-        agent: agent(),
-        anchor: AnyObjectRef::HistoryEntry(
-            EntryRef::native(agent(), "entry", vec![key.into()]).unwrap(),
-        ),
-        object: AnyObjectRef::Message(
-            MessageRef::native(agent(), "message", vec![key.into()]).unwrap(),
-        ),
-        selection: None,
-        mode: SearchHistoryMode::Authored,
-        payload: PayloadRef::bytes("a".repeat(64)).unwrap(),
-        representation: Representation::Conversation,
-        body_revision: key.into(),
-        byte_start: 0,
+        body: SearchBody {
+            agent: agent(),
+            anchor: AnyObjectRef::HistoryEntry(
+                EntryRef::native(agent(), "entry", vec![key.into()]).unwrap(),
+            ),
+            object: AnyObjectRef::Message(
+                MessageRef::native(agent(), "message", vec![key.into()]).unwrap(),
+            ),
+            payload: PayloadRef::bytes("a".repeat(64)).unwrap(),
+            representation: Representation::Conversation,
+            body_revision: key.into(),
+            byte_start: 0,
+            ingestion_epoch: IngestionEpoch::new("epoch").unwrap(),
+            dependency_epochs: BTreeSet::new(),
+        },
         text: text.into(),
-        ingestion_epoch: IngestionEpoch::new("epoch").unwrap(),
-        dependency_epochs: BTreeSet::new(),
     }
 }
 fn scope() -> SearchScope {
@@ -42,6 +42,18 @@ fn scope() -> SearchScope {
         selection: None,
         mode: SearchHistoryMode::Authored,
         representation: None,
+    }
+}
+
+impl SearchStore {
+    // Body-writer tests complete their independent membership phase up front,
+    // so an incomplete body cannot be hidden by a second incomplete flag.
+    async fn prepare_authored(&self, update: &SearchUpdate, key: &str) -> Result<bool> {
+        let reused = self.prepare_source(update, key).await?;
+        self.write_membership_batch(update, key, &[SearchMembership::Authored])
+            .await?;
+        self.complete_memberships(update, key).await?;
+        Ok(reused)
     }
 }
 
@@ -54,9 +66,9 @@ async fn publish(
     let key = blake3::hash(&serde_json::to_vec(documents)?)
         .to_hex()
         .to_string();
-    if !store.prepare_source(&update, &key).await? {
+    if !store.prepare_authored(&update, &key).await? {
         store.write_source_batch(&update, &key, documents).await?;
-        store.complete_source(&update, &key).await?;
+        store.complete_body(&update, &key).await?;
     }
     store.finish_update(&update).await.map(|_| ())
 }
@@ -121,7 +133,7 @@ async fn result_pages_keep_their_original_snippets_when_the_live_index_changes()
         .unwrap();
     assert_eq!(second.view, snapshot(1));
     assert_eq!(second.trace_lease, "old-view");
-    assert!(second.hits[0].snippet.contains("original"));
+    assert!(second.hits[0].context.snippet.contains("original"));
     assert!(matches!(
         store
             .start_query(
@@ -259,7 +271,7 @@ async fn search_batch_bounds_include_text_keys_and_per_document_metadata() {
     ));
     let update = store.begin_update(&snapshot(1)).await.unwrap();
     assert!(matches!(
-        store.prepare_source(&update, &"z".repeat(5000)).await,
+        store.prepare_authored(&update, &"z".repeat(5000)).await,
         Err(SearchError::Limit("source key bytes"))
     ));
     let (_dir, store) = open(SearchLimits {
@@ -472,11 +484,11 @@ async fn stage_source(
     key: &str,
     documents: &[SearchDocument],
 ) {
-    assert!(!store.prepare_source(update, key).await.unwrap());
+    assert!(!store.prepare_authored(update, key).await.unwrap());
     for batch in documents.chunks(store.limits().max_documents_per_batch) {
         store.write_source_batch(update, key, batch).await.unwrap();
     }
-    store.complete_source(update, key).await.unwrap();
+    store.complete_body(update, key).await.unwrap();
 }
 
 async fn query(store: &SearchStore, snapshot: &Snapshot, text: &str) -> Result<SearchPage> {
@@ -510,10 +522,12 @@ async fn interrupted_source_restarts_without_retaining_partial_documents_or_term
     .await;
     let target = snapshot(1);
     let update = store.begin_update(&target).await.unwrap();
-    assert!(!store
-        .prepare_source(&update, "interrupted-source")
-        .await
-        .unwrap());
+    assert!(
+        !store
+            .prepare_authored(&update, "interrupted-source")
+            .await
+            .unwrap()
+    );
     let count = store.limits().max_documents_per_batch * 3 + 1;
     let interrupted: Vec<_> = (0..count)
         .map(|index| document(&format!("part-{index}"), "unfinished token"))
@@ -541,10 +555,12 @@ async fn interrupted_source_restarts_without_retaining_partial_documents_or_term
         Err(SearchError::Indexing)
     ));
     let retry = restored.begin_update(&target).await.unwrap();
-    assert!(!restored
-        .prepare_source(&retry, "interrupted-source")
-        .await
-        .unwrap());
+    assert!(
+        !restored
+            .prepare_authored(&retry, "interrupted-source")
+            .await
+            .unwrap()
+    );
     assert!(stored_documents(&restored).await.is_empty());
     let remaining_terms: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM search_fts WHERE search_fts MATCH 'unfinished'")
@@ -562,7 +578,7 @@ async fn interrupted_source_restarts_without_retaining_partial_documents_or_term
         .await
         .unwrap();
     restored
-        .complete_source(&retry, "interrupted-source")
+        .complete_body(&retry, "interrupted-source")
         .await
         .unwrap();
     restored.finish_update(&retry).await.unwrap();
@@ -611,10 +627,12 @@ async fn complete_source_reuse_preserves_document_ids_text_and_fts_storage() {
         CREATE TRIGGER immutable_document_update BEFORE UPDATE ON search_documents BEGIN SELECT RAISE(ABORT,'rewrote retained document'); END;
         CREATE TRIGGER immutable_document_delete BEFORE DELETE ON search_documents BEGIN SELECT RAISE(ABORT,'rewrote retained document'); END;").execute(&store.writer).await.unwrap();
     let second = store.begin_update(&snapshot(2)).await.unwrap();
-    assert!(store
-        .prepare_source(&second, "immutable-source")
-        .await
-        .unwrap());
+    assert!(
+        store
+            .prepare_authored(&second, "immutable-source")
+            .await
+            .unwrap()
+    );
     store.finish_update(&second).await.unwrap();
     assert_eq!(stored_documents(&store).await, before);
     let fts_after: Vec<(i64, Vec<u8>)> =
@@ -659,7 +677,7 @@ async fn changed_and_vanished_sources_remove_every_document_across_removal_batch
     store.finish_update(&first).await.unwrap();
     assert_eq!(stored_documents(&store).await.len(), count * 2 + 1);
     let second = store.begin_update(&snapshot(2)).await.unwrap();
-    assert!(store.prepare_source(&second, "unchanged").await.unwrap());
+    assert!(store.prepare_authored(&second, "unchanged").await.unwrap());
     stage_source(
         &store,
         &second,
@@ -749,7 +767,7 @@ async fn replacement_and_invalidation_fence_every_operation_of_an_old_index_writ
         let (_directory, store) = open(SearchLimits::default()).await;
         let target = snapshot(1);
         let stale = store.begin_update(&target).await.unwrap();
-        assert!(!store.prepare_source(&stale, "old-source").await.unwrap());
+        assert!(!store.prepare_authored(&stale, "old-source").await.unwrap());
         store
             .write_source_batch(&stale, "old-source", &[document("old", "old text")])
             .await
@@ -764,7 +782,7 @@ async fn replacement_and_invalidation_fence_every_operation_of_an_old_index_writ
         };
         let before = stored_documents(&store).await;
         assert!(matches!(
-            store.prepare_source(&stale, "stale-source").await,
+            store.prepare_authored(&stale, "stale-source").await,
             Err(SearchError::Indexing)
         ));
         assert!(matches!(
@@ -774,7 +792,7 @@ async fn replacement_and_invalidation_fence_every_operation_of_an_old_index_writ
             Err(SearchError::Indexing)
         ));
         assert!(matches!(
-            store.complete_source(&stale, "old-source").await,
+            store.complete_body(&stale, "old-source").await,
             Err(SearchError::Indexing)
         ));
         assert!(matches!(
@@ -810,7 +828,7 @@ async fn an_incomplete_source_cannot_publish_even_after_its_document_batch_commi
     let (_directory, store) = open(SearchLimits::default()).await;
     let target = snapshot(1);
     let update = store.begin_update(&target).await.unwrap();
-    assert!(!store.prepare_source(&update, "unfinished").await.unwrap());
+    assert!(!store.prepare_authored(&update, "unfinished").await.unwrap());
     stage_source(
         &store,
         &update,
@@ -839,7 +857,7 @@ async fn an_incomplete_source_cannot_publish_even_after_its_document_batch_commi
             Err(SearchError::Indexing)
         ));
     }
-    store.complete_source(&update, "unfinished").await.unwrap();
+    store.complete_body(&update, "unfinished").await.unwrap();
     store.finish_update(&update).await.unwrap();
     assert_eq!(store.checkpoint().await.unwrap(), Some(target.clone()));
     assert_eq!(
@@ -851,3 +869,5 @@ async fn an_incomplete_source_cannot_publish_even_after_its_document_batch_commi
         1
     );
 }
+
+mod membership;

@@ -393,28 +393,13 @@ async fn search_inner(
         .transpose()
         .map_err(|error| invalid(error.to_string()))?;
     let mode = query.mode.unwrap_or(SearchHistoryMode::RetainedArchive);
-    if mode == SearchHistoryMode::SelectedContext {
-        if agent.is_none() || selection.is_none() {
-            return Err(invalid(
-                "Selected-context search requires an agent and selection",
-            ));
-        }
-    } else if selection.is_some() {
-        return Err(invalid("Only selected-context search accepts a selection"));
-    }
-    if selection
-        .as_ref()
-        .zip(agent.as_ref())
-        .is_some_and(|(selection, agent)| selection.scope() != agent)
-    {
-        return Err(invalid("Search selection belongs to a different agent"));
-    }
     let scope = SearchScope {
         agent,
         mode,
         selection,
         representation: None,
     };
+    scope.membership().map_err(error)?;
     let mut acquired_lease = None;
     let result = if let Some(cursor) = &query.cursor {
         index
@@ -482,12 +467,13 @@ async fn search_inner(
     }
     let mut hits = Vec::new();
     for hit in result.hits {
-        observe(&state, &subject.0, &hit.agent).await?;
+        let crate::trace::search::SearchHit { body, context } = hit;
+        observe(&state, &subject.0, &body.agent).await?;
         // Search metadata can contain a snippet before the containing header is
         // hydrated. Check every retained provenance dependency at this boundary;
         // a primary epoch alone cannot authorize a merged declaration or payload.
-        for epoch in std::iter::once(&hit.ingestion_epoch)
-            .chain(&hit.dependency_epochs)
+        for epoch in std::iter::once(&body.ingestion_epoch)
+            .chain(&body.dependency_epochs)
             .collect::<std::collections::BTreeSet<_>>()
         {
             let proof = state
@@ -520,19 +506,19 @@ async fn search_inner(
         let row = generation
             .read_row(
                 &lease.snapshot,
-                &read_scope(&hit.agent, None, "header"),
-                &hit.agent.encode(),
+                &read_scope(&body.agent, None, "header"),
+                &body.agent.encode(),
             )
             .await
             .map_err(storage)?;
         check_row(&state, &subject.0, &lease, &row).await?;
         let header: AgentHeader = serde_json::from_value(row.body).map_err(internal)?;
         hits.push(ReadSearchHit {
-            anchor: TraceAddress::of(&hit.anchor),
+            anchor: TraceAddress::of(&body.anchor),
             agent: header.agent,
             history: HistoryLocation {
-                archive: hit.selection.is_none(),
-                selection: hit.selection,
+                archive: context.selection.is_none(),
+                selection: context.selection,
                 label: if scope.mode == SearchHistoryMode::SelectedContext {
                     "Selected context at search checkpoint"
                 } else {
@@ -543,7 +529,7 @@ async fn search_inner(
                 selection_known: true,
                 availability: ReadAvailability::Available,
             },
-            excerpt: hit.snippet,
+            excerpt: context.snippet,
             payload: None,
         });
     }

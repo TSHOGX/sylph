@@ -806,3 +806,5 @@ mod structure;
 mod export;
 
 mod search_scope;
+
+mod search_membership;

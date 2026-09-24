@@ -337,6 +337,15 @@ archive navigation and read-only composition at desktop/mobile widths. Explicit 
 inspection remains read-only even when its frozen header says current; unknown native
 membership in the default live reader does not override authorized control.
 
+Search membership cost is checked through the production indexer by
+`crates/server/src/trace/worker/tests/provenance/search_membership.rs`. Retained selections
+span multiple configured batches while sharing one body that fits a document; adding a
+selection must preserve physical document IDs, JSON and FTS blocks and perform no payload
+range reads. The indexing gate stays held across fixture publication and measured passes.
+`crates/server/src/trace/search/tests/membership.rs` separately checks interrupted membership
+replacement and restart, immutable result jobs, count/byte admission and query-owned
+selection metadata in the pre-hydration result budget.
+
 ## Reproducible checks
 
 The vendor audit works entirely from retained sanitized artifacts by default:

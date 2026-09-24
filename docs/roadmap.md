@@ -100,6 +100,18 @@ erased and no production trace implementation is claimed complete by this design
 
 ### Foundation implementation
 
+Search scope membership now has a separate bounded publication path from immutable
+indexed body occurrences. Retaining another named selection reuses the body's document
+IDs and FTS storage without rereading payloads. Both body and membership completion gate
+publication; interrupted membership replacement restarts privately and old result jobs
+keep their original scope, snippets and view. Query-owned selection metadata participates
+in the result byte budget before indexed metadata is hydrated. Search schemas change in
+place, with the per-scope FTS rows removed. Production cost coverage spans multiple
+configured membership batches, inspects the actual FTS rows/blocks and holds the indexing
+gate across measurement so a background pass cannot make its work counters vacuous.
+Exact superseded-revision navigation and the remaining inheritance/vendor/reader gates
+remain open.
+
 Search no longer treats a missing or unresolved original owner as locally authored
 work. Authored scope requires a matching known agent author and production owner with
 no inherited/unresolved entry assertion; shared common-field resolution preserves agreed
@@ -120,9 +132,7 @@ Scope, selection, archive, composer and cancellation regressions are falsified b
 independent faults. The full run also exposed normalized HTTP fixtures staging unrooted
 bytes beside the real collector; fixture captures now use the production upload tickets.
 Forced collection between staging and admission reproduces the old loss and validates
-the rooted path. Search still duplicates FTS text across selection memberships; separating
-membership from body identity is the next indexing-cost correction. The remaining
-inheritance and vendor/reader acceptance gates remain open.
+the rooted path. The remaining inheritance and vendor/reader acceptance gates remain open.
 
 Claude SDK checkpoints now follow explicit session/host processing partitions inside
 the original physical source. A child whose identity certificate arrives late retains

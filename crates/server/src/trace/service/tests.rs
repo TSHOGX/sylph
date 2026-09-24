@@ -371,8 +371,10 @@ async fn search_reuse_pipeline(records: usize) {
         .await
         .unwrap();
     assert_eq!(result.hits.len(), 1);
-    assert_eq!(result.hits[0].snippet, text);
-    eprintln!("search scaling: records={records} cold_ms={cold_ms} cold={cold:?} warm_ms={warm_ms} warm={warm:?}");
+    assert_eq!(result.hits[0].context.snippet, text);
+    eprintln!(
+        "search scaling: records={records} cold_ms={cold_ms} cold={cold:?} warm_ms={warm_ms} warm={warm:?}"
+    );
     drop(index);
     drop(lease);
     close(service).await;
