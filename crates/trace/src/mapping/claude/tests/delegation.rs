@@ -105,6 +105,10 @@ fn explicit_sdk_origin_and_forwarded_input_keep_their_documented_authorship() {
         correlation_key(&owner("root"), "claude.parent-tool-use", &["host".into()]),
         AnyObjectRef::Agent(child),
     );
+    archive.retain_correlation_evidence(
+        correlation_key(&owner("root"), "claude.parent-tool-use", &["host".into()]),
+        vec![super::capture(90, false).observation_ref],
+    );
     let output = ClaudeMapper.map(MapInput { capture: &capture, canonical_observation: &capture.observation_ref, raw: br#"{"type":"user","session_id":"root","uuid":"forwarded","parent_tool_use_id":"host","message":{"role":"user","content":"delegated prompt"}}"#, state: &MapperState::default(), archive: &archive });
     let outputs = [output];
     let forwarded: Vec<_> = objects(&outputs)

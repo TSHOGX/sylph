@@ -94,7 +94,8 @@ fn records(order: SourceOrder) -> Vec<Record> {
     }
 }
 async fn expected(fixture: &Fixture, store: &GenerationStore) {
-    let reduced = reduction(&claims(store).await);
+    let retained = claims(store).await;
+    let reduced = reduction(&retained);
     let objects: Vec<_> = reduced
         .objects
         .values()
@@ -174,6 +175,110 @@ async fn expected(fixture: &Fixture, store: &GenerationStore) {
         let bodies = revision_bytes(fixture, store, &message).await;
         assert!(!bodies.is_empty());
         assert!(bodies.iter().all(|body| body == marker));
+    }
+    // These UUIDs and bytes are independently read from the retained SDK/native
+    // pair. Shared prompt IDs and original host tags never identify the author.
+    let prompt = MessageRef::native(
+        child(),
+        "claude.record",
+        vec!["99d0b3d3-1009-43df-8fd4-241943354537".into()],
+    )
+    .unwrap();
+    let coordinator = MessageRef::native(
+        child(),
+        "claude.record",
+        vec!["07469e5f-fb98-4237-91e1-a9f183159acd".into()],
+    )
+    .unwrap();
+    let notification = MessageRef::native(
+        root(),
+        "claude.record",
+        vec!["1f6e60b8-4739-4193-b7ce-ab9d8d0c3540".into()],
+    )
+    .unwrap();
+    for (reference, author, purpose, bytes) in [
+        (
+            prompt.clone(),
+            Author::Unknown,
+            MessagePurpose::Unclassified,
+            "Return the controlled marker; no tools or external actions.",
+        ),
+        (
+            coordinator.clone(),
+            Author::Harness {
+                identity: Some("claude".into()),
+            },
+            MessagePurpose::Context,
+            "The coordinator sent a message while you were working:\nReturn the controlled followup marker; no tools or external actions.\n\nAddress this before completing your current task.",
+        ),
+    ] {
+        let Some(TraceObject::Message(message)) = reduced
+            .object(&AnyObjectRef::Message(reference.clone()))
+            .and_then(|value| value.declaration.known())
+        else {
+            panic!("forwarded input disappeared or conflicted")
+        };
+        assert_eq!(message.author, author);
+        assert_eq!(message.purpose, purpose);
+        assert!(message.production.is_none());
+        let bodies = revision_bytes(fixture, store, &reference).await;
+        assert!(!bodies.is_empty());
+        assert!(bodies.iter().all(|body| body == bytes.as_bytes()));
+    }
+    let Some(TraceObject::Message(message)) = reduced
+        .object(&AnyObjectRef::Message(notification))
+        .and_then(|value| value.declaration.known())
+    else {
+        panic!("parent task notification missing")
+    };
+    assert_eq!(
+        message.author,
+        Author::Harness {
+            identity: Some("task-notification".into())
+        }
+    );
+    for (id, owner) in [
+        ("99d0b3d3-1009-43df-8fd4-241943354537", child()),
+        ("07469e5f-fb98-4237-91e1-a9f183159acd", child()),
+        ("1f6e60b8-4739-4193-b7ce-ab9d8d0c3540", root()),
+    ] {
+        let delivery =
+            DeliveryRef::native(owner.clone(), "claude.record-delivery", vec![id.into()]).unwrap();
+        let Some(TraceObject::Delivery(value)) = reduced
+            .object(&AnyObjectRef::Delivery(delivery.clone()))
+            .and_then(|value| value.declaration.known())
+        else {
+            panic!("recorded delivery missing")
+        };
+        assert_eq!(
+            value.recipient,
+            Recipient::Agent {
+                agent: OwnerRef::Agent {
+                    agent: owner.clone()
+                }
+            }
+        );
+        let stages = &reduced.delivery_stages[&delivery];
+        assert!(stages.iter().any(|(stage,_)|matches!(stage,DeliveryStage::Admitted{entry:Some(entry)} if entry.scope()==&owner)));
+        assert!(
+            !stages
+                .iter()
+                .any(|(stage, _)| matches!(stage, DeliveryStage::Included { .. }))
+        );
+    }
+    let forwarded:Vec<_>=retained.iter().filter(|claim| matches!(claim.claim_ref.address(),ObjectAddress::Occurrence{position,..} if position.source.instance=="sdk" && matches!(position.locator,SourceLocator::Frame{ordinal:8|26}))).collect();
+    assert!(!forwarded.is_empty());
+    for claim in forwarded {
+        assert_eq!(claim.claim_ref.scope(), &child());
+        assert!(
+            claim
+                .evidence
+                .iter()
+                .any(|evidence| evidence.producer_id != "sdk"
+                    || ![9, 27].contains(&evidence.producer_seq)),
+            "forwarded ownership lacks its retained routing certificate: {}",
+            claim.rule_id
+        );
     }
     let measurements: Vec<_> = objects
         .iter()

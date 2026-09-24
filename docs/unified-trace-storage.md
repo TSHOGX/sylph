@@ -650,6 +650,15 @@ expiration and restart discard the index without altering source evidence. Build
 reports progress; ready pages describe one validated source. Byte-range inspection
 remains available when structural exploration is unavailable.
 
+### Forwarded claim provenance
+
+Claude forwarding refinement stores normalized claim/binding templates in the disposable
+generation, indexed by the actual host-routing key. Each independent certificate produces
+its own immutable supported claim. A pass bounds template/certificate visits and carries
+an indexed continuation instead of rescanning earlier rows. Template admission retains
+the original semantic-expansion bound, and a continuation never replays vendor stream
+state. Routing certificates and the forwarded occurrence remain separate retention roots.
+
 ### Reading entry context
 
 Reading units carry nullable `entryContext` independently of their content variant.

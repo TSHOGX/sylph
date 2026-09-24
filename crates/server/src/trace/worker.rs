@@ -193,6 +193,7 @@ struct WorkerState {
     correlations: imbl::OrdMap<String, AnyObjectRef>,
     correlation_proofs: mapping::CorrelationProofs,
     owner_resolution_plans: mapping::owner_resolution::PlanIndex,
+    forwarding_plans: mapping::claude::forwarding::Plans,
     pi_copies: mapping::pi::copies::Index,
     pending: imbl::OrdMap<String, Arc<PendingMapping>>,
     source_replays: imbl::OrdMap<String, SourceReplayCursor>,
@@ -1049,6 +1050,11 @@ impl ProjectionWorker {
                     &binding.proofs,
                 );
                 state.correlation_proofs.insert(key.into(), binding.proofs);
+            } else if key.starts_with("forwarding_plan:") {
+                mapping::claude::forwarding::retain_plan(
+                    &mut state.forwarding_plans,
+                    serde_json::from_value(value)?,
+                );
             } else if key.starts_with("owner_resolution:") {
                 mapping::owner_resolution::retain_plan(
                     &mut state.owner_resolution_plans,
@@ -1167,7 +1173,9 @@ impl ProjectionWorker {
                 #[cfg(test)]
                 mapping_threads.lock().unwrap().push(std::thread::current().id());
                 let output=mapper.map(MapInput{capture:&input.capture,canonical_observation:&input.canonical_observation,raw:&raw,state:&source_state,archive:&archive});
-                if output.claims.len()>limits.max_claims_per_observation{return RecordMapping{output:MapOutput::default(),gap:Some((DiagnosticCode::ResourceLimit,"Semantic claim expansion exceeds its budget; source requires reprojection".into()))};}
+                // Deferred forwarding templates still consume the original expansion
+                // budget; moving claims behind a proof cannot bypass that bound.
+                if output.claims.len()>limits.max_claims_per_observation || output.forwarding_plans.len()>limits.max_claims_per_observation{return RecordMapping{output:MapOutput::default(),gap:Some((DiagnosticCode::ResourceLimit,"Semantic claim expansion exceeds its budget; source requires reprojection".into()))};}
                 RecordMapping{output,gap:None}
             }).await.map_err(|error|WorkerError::Task(error.to_string()))?;
             let mut resolved = false;
@@ -1298,6 +1306,13 @@ impl ProjectionWorker {
             self.limits.max_claims_per_observation,
         )?;
         unit.batch.claims.extend(output.claims);
+        for plan in output.forwarding_plans {
+            unit.batch.mapper_states.insert(
+                format!("forwarding_plan:{}", plan.id),
+                serde_json::to_value(&plan)?,
+            );
+            mapping::claude::forwarding::retain_plan(&mut unit.next.forwarding_plans, plan);
+        }
         for plan in output.owner_resolution_plans {
             unit.batch.mapper_states.insert(
                 format!("owner_resolution:{}", plan.base.encode()),
@@ -1844,6 +1859,7 @@ fn archive_context(state: &mut WorkerState) -> ArchiveContext {
         correlations: state.correlations.clone(),
         correlation_proofs: state.correlation_proofs.clone(),
         owner_resolution_plans: state.owner_resolution_plans.clone(),
+        forwarding_plans: state.forwarding_plans.clone(),
         pi_copies: state.pi_copies.clone(),
         claims: state.reducer.claim_snapshot(),
         ..ArchiveContext::default()
@@ -1928,7 +1944,7 @@ fn has_ready_continuations(
 fn requests_may_resolve(requests: &[ArchiveRequest], state: &WorkerState) -> bool {
     requests.iter().any(|request|match request {
         ArchiveRequest::CapturedPayload {parent,slot}=>state.captured_payloads.contains_key(&mapping::captured_payload_key(parent,slot)),
-        ArchiveRequest::ContinueHistory | ArchiveRequest::ContinueOwnerResolution | ArchiveRequest::ContinueCopies=>true,
+        ArchiveRequest::ContinueHistory | ArchiveRequest::ContinueOwnerResolution | ArchiveRequest::ContinueCopies | ArchiveRequest::ContinueForwarding=>true,
         ArchiveRequest::HistoryLocator {issuer,physical_id}=>state.source_definitions.values().any(|source|&source.definition.source.issuer==issuer&&mapping::codex::history::physical_id(&source.definition.locator)==Some(physical_id.as_str())),
         ArchiveRequest::HistorySource {source,generation}=>state.history_records.contains_key(&(source.clone(), *generation)),
         ArchiveRequest::AttachmentTarget {parent,slot,locator}=>state.correlations.contains_key(&mapping::attachment_key(parent,slot,locator)),

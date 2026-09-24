@@ -25,6 +25,7 @@ pub enum ArchiveRequest {
     ContinueHistory,
     ContinueOwnerResolution,
     ContinueCopies,
+    ContinueForwarding,
     HistoryLocator {
         issuer: Issuer,
         physical_id: String,
@@ -75,7 +76,10 @@ impl ArchiveRequest {
     pub fn is_continuation(&self) -> bool {
         matches!(
             self,
-            Self::ContinueHistory | Self::ContinueOwnerResolution | Self::ContinueCopies
+            Self::ContinueHistory
+                | Self::ContinueOwnerResolution
+                | Self::ContinueCopies
+                | Self::ContinueForwarding
         )
     }
 }
@@ -148,6 +152,7 @@ pub struct ArchiveContext {
     pub observations: imbl::OrdSet<ObservationRef>,
     pub correlation_proofs: CorrelationProofs,
     pub owner_resolution_plans: owner_resolution::PlanIndex,
+    pub forwarding_plans: claude::forwarding::Plans,
     pub pi_copies: pi::copies::Index,
     pub source_owners: imbl::OrdMap<(SourceRef, u64), SourceOwner>,
     pub observation_sources: imbl::OrdMap<ObservationRef, SourcePosition>,
@@ -343,6 +348,7 @@ pub struct MapOutput {
     /// correlations retain one current checkpoint witness, not a polling log.
     pub corroborating_correlations: std::collections::BTreeSet<String>,
     pub owner_resolution_plans: Vec<owner_resolution::Plan>,
+    pub forwarding_plans: Vec<claude::forwarding::Plan>,
     pub pi_copy_witnesses: Vec<pi::copies::Witness>,
     pub pi_copy_plans: Vec<pi::copies::Plan>,
     pub bound_agents: Vec<AgentRef>,
@@ -483,7 +489,8 @@ const REFINEMENT_REQUESTS: &str = "refinement-requests";
 pub(crate) fn resume_refinements(input: &MapInput<'_>) -> Option<MapOutput> {
     let owners = owner_resolution::has_continuation(input);
     let copies = pi::copies::has_continuation(input);
-    if !owners && !copies {
+    let forwarding = claude::forwarding::has_continuation(input);
+    if !owners && !copies && !forwarding {
         return None;
     }
     let mut output = MapOutput {
@@ -496,6 +503,9 @@ pub(crate) fn resume_refinements(input: &MapInput<'_>) -> Option<MapOutput> {
     }
     if copies {
         pi::copies::refine(input, &mut output);
+    }
+    if forwarding {
+        claude::forwarding::refine(input, &mut output);
     }
     finish_refinements(input, &mut output);
     Some(output)
@@ -524,7 +534,9 @@ pub(crate) fn finish_refinements(input: &MapInput<'_>, output: &mut MapOutput) {
     let auxiliary = |request: &ArchiveRequest| {
         matches!(
             request,
-            ArchiveRequest::ContinueOwnerResolution | ArchiveRequest::ContinueCopies
+            ArchiveRequest::ContinueOwnerResolution
+                | ArchiveRequest::ContinueCopies
+                | ArchiveRequest::ContinueForwarding
         )
     };
     deferred.extend(

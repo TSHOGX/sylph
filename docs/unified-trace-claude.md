@@ -215,7 +215,12 @@ then `SendMessage` to the returned child. The follow-up result explicitly names
 `resumedAgentId`; both native answers belong to the same `agentId`. The child's metadata
 continues to name the original `toolUseId`, and resumed SDK assistant output can still
 carry that original `parent_tool_use_id`. Neither field identifies the current task
-episode. The current provider schema has no `Agent.resume` parameter; that spelling
+episode. Every normalized claim and correlation produced from a forwarded frame retains
+both that frame's evidence and a sufficient host-to-child certificate. Independent
+certificates remain alternative immutable proofs; deleting one cannot withdraw another.
+Late certificates refine indexed normalized templates in bounded passes, including after
+restart, without advancing the source's stream state again. A routing hint alone never
+supplies a child's ownership. The current provider schema has no `Agent.resume` parameter; that spelling
 in an older vendor contract is not a substitute for the observed `SendMessage` route.
 
 The two observed `task_started` records reuse `task_id` but have different

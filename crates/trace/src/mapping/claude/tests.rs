@@ -56,25 +56,66 @@ fn run(values: &[Value], live: bool) -> Vec<MapOutput> {
     let mut outputs = vec![];
     for (i, value) in values.iter().enumerate() {
         let capture = capture(i as u64, live);
-        let output = ClaudeMapper.map(MapInput {
+        let raw = serde_json::to_vec(value).unwrap();
+        let mut output = ClaudeMapper.map(MapInput {
             capture: &capture,
             canonical_observation: &capture.observation_ref,
-            raw: &serde_json::to_vec(value).unwrap(),
+            raw: &raw,
             state: &state,
             archive: &archive,
         });
         state = serde_json::from_slice(&serde_json::to_vec(&output.state).unwrap()).unwrap();
-        for claim in &output.claims {
-            if let Fact::Declare { object: TraceObject::Operation(operation) } = &claim.fact {
-                archive.semantic_mut().operations.insert(operation.operation_ref.clone(), operation.clone());
+        loop {
+            retain_output(&mut archive, &capture, &output);
+            let next = output.continuation_state.clone();
+            let more = output.requests.iter().any(ArchiveRequest::is_continuation);
+            outputs.push(output);
+            if !more {
+                break;
             }
+            output = ClaudeMapper.map(MapInput {
+                capture: &capture,
+                canonical_observation: &capture.observation_ref,
+                raw: &raw,
+                state: &next.unwrap(),
+                archive: &archive,
+            });
         }
-        archive.correlations.extend(output.correlations.clone());
-        archive.extend_correlation_evidence(output.correlation_evidence.clone());
-        archive.observations.insert(capture.observation_ref);
-        outputs.push(output);
     }
     outputs
+}
+fn retain_output(archive: &mut ArchiveContext, capture: &Capture, output: &MapOutput) {
+    for claim in &output.claims {
+        if let Fact::Declare {
+            object: TraceObject::Operation(operation),
+        } = &claim.fact
+        {
+            archive
+                .semantic_mut()
+                .operations
+                .insert(operation.operation_ref.clone(), operation.clone());
+        }
+        if let Some(prior) = archive
+            .claims
+            .insert(claim.claim_ref.clone(), claim.clone())
+        {
+            assert_eq!(prior, *claim, "a retained claim changed");
+        }
+    }
+    for plan in &output.forwarding_plans {
+        crate::mapping::claude::forwarding::retain_plan(
+            &mut archive.forwarding_plans,
+            plan.clone(),
+        );
+    }
+    for (key, reference) in &output.correlations {
+        archive.correlations.insert(key.clone(), reference.clone());
+        if !output.corroborating_correlations.contains(key) {
+            archive.correlation_proofs.remove(key);
+        }
+        archive.retain_correlation_evidence(key.clone(), output.correlation_evidence[key].clone());
+    }
+    archive.observations.insert(capture.observation_ref.clone());
 }
 fn reduce(outputs: &[MapOutput]) -> Reduction {
     let claims: Vec<_> = outputs
@@ -1015,3 +1056,5 @@ fn native_fork_lineage_retains_each_origin_stamp_without_fabricating_a_checkpoin
         );
     }
 }
+
+mod forwarding;

@@ -16,6 +16,7 @@ pub struct ClaudeMapper;
 
 mod accounting;
 mod delegation;
+pub mod forwarding;
 mod schedule;
 mod task;
 mod workflow;
@@ -41,9 +42,12 @@ struct LiveStream {
 
 impl SemanticMapper for ClaudeMapper {
     fn build(&self) -> &'static str {
-        "claude-9"
+        "claude-10"
     }
     fn map(&self, input: MapInput<'_>) -> MapOutput {
+        if let Some(output) = super::resume_refinements(&input) {
+            return output;
+        }
         let mut output = MapOutput {
             state: input.state.clone(),
             ..MapOutput::default()
@@ -81,18 +85,22 @@ impl SemanticMapper for ClaudeMapper {
                 return output;
             }
         };
-        let mut context = Context {
-            input: &input,
-            output: &mut output,
-            state: &mut state,
+        let forwarded = {
+            let mut context = Context {
+                input: &input,
+                output: &mut output,
+                state: &mut state,
+                forwarded: None,
+            };
+            if input.capture.transport_kind == TransportKind::NativeSnapshot {
+                context.sidecar(&value);
+            } else if input.capture.transport_kind == TransportKind::NativeJsonl {
+                context.native(&value);
+            } else {
+                context.live(&value);
+            }
+            context.forwarded
         };
-        if input.capture.transport_kind == TransportKind::NativeSnapshot {
-            context.sidecar(&value);
-        } else if input.capture.transport_kind == TransportKind::NativeJsonl {
-            context.native(&value);
-        } else {
-            context.live(&value);
-        }
         output.state.values.insert(
             "claude".into(),
             serde_json::to_value(state).expect("typed Claude state serializes"),
@@ -103,6 +111,9 @@ impl SemanticMapper for ClaudeMapper {
                 .entry(key.clone())
                 .or_insert_with(|| vec![input.canonical_observation.clone()]);
         }
+        forwarding::prepare(&input, forwarded.as_ref(), &mut output);
+        forwarding::refine(&input, &mut output);
+        super::finish_refinements(&input, &mut output);
         output
     }
 }
@@ -111,6 +122,7 @@ struct Context<'a, 'b> {
     input: &'a MapInput<'b>,
     output: &'a mut MapOutput,
     state: &'a mut ClaudeState,
+    forwarded: Option<(String, AgentRef)>,
 }
 
 impl Context<'_, '_> {
@@ -1200,6 +1212,15 @@ impl Context<'_, '_> {
             }
         }
         for key in self.output.correlations.keys() {
+            if self
+                .input
+                .archive
+                .correlations
+                .get(key)
+                .is_none_or(|old| self.output.correlations.get(key) == Some(old))
+            {
+                self.output.corroborating_correlations.insert(key.clone());
+            }
             let mut evidence = provenance.evidence.clone();
             evidence.push(self.input.canonical_observation.clone());
             self.output
@@ -1220,12 +1241,12 @@ impl Context<'_, '_> {
         };
         self.output.state.governing_agent = Some(root.clone());
         let owner = if let Some(host) = text(value, "parent_tool_use_id") {
-            match self.input.archive.correlations.get(&correlation_key(
-                &root,
-                "claude.parent-tool-use",
-                &[host.into()],
-            )) {
-                Some(AnyObjectRef::Agent(agent)) => agent.clone(),
+            let route = correlation_key(&root, "claude.parent-tool-use", &[host.into()]);
+            match self.input.archive.correlations.get(&route) {
+                Some(AnyObjectRef::Agent(agent)) => {
+                    self.forwarded = Some((route, agent.clone()));
+                    agent.clone()
+                }
                 _ => {
                     self.request(&root, "claude.parent-tool-use", vec![host.into()]);
                     // A missing join describes this mapping attempt. Keeping it

@@ -98,6 +98,15 @@ The retained material is:
   `crates/server/src/trace/worker/tests/corpus/claude_delegation.rs` checks independent
   activity states, invocation outcomes, usage units, both exact child answers and one
   spawn across early metadata, source order, reread, restart and same-cut rebuild.
+  The same replay also checks the forwarded prompt's unknown author, coordinator
+  context, parent notification, exact bodies and separately recorded admissions. Every
+  SDK-forwarded claim cites a sufficient retained child-routing certificate. Protocol-derived
+  variations in `crates/server/src/trace/worker/tests/claude_forwarding.rs` retire
+  independently retained certificates and restart a committed bounded continuation.
+  `crates/trace/src/mapping/claude/tests/forwarding.rs` additionally checks bounded
+  refinement and transitive correlation certificates; template admission cannot bypass
+  the configured semantic-expansion limit. These variations do not claim another vendor
+  recording.
   Synthetic failures separately test unrelated agentId fields, failed resume results,
   overlapping starts, old notifications, transient missing invocation evidence and
   bounded completed-task checkpoints. No unobserved child SDK loop is fabricated.

@@ -159,6 +159,15 @@ impl Context<'_, '_> {
         // explicit returned child binding has its own proof and never changes the
         // original tool-to-child association to the currently active parent call.
         for key in bindings {
+            if self
+                .input
+                .archive
+                .correlations
+                .get(&key)
+                .is_none_or(|old| self.output.correlations.get(&key) == Some(old))
+            {
+                self.output.corroborating_correlations.insert(key.clone());
+            }
             self.output.correlation_evidence.insert(key, proof.clone());
         }
         interpreted(outcome, proof)
