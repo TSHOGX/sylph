@@ -171,6 +171,43 @@ export const en = {
   "trace.acceptedUpdating": "Accepted · history updating",
   "trace.loadingDetails": "Reading details…",
   "trace.input": "Input",
+  "trace.playback": "Recorded observation playback",
+  "trace.playbackScope":
+    "Playback covers every retained observation in {environment} through evidence cut {cut}, including other sessions and source inventories.",
+  "trace.playbackPacing":
+    "Server receipt timing · {speed}× · each wait capped at {gap} ms. Receipt gaps are not agent execution durations.",
+  "trace.playbackBytes": "Received {bytes} of evidence frames.",
+  "trace.playbackSpeed": "Playback speed",
+  "trace.playbackStart": "Play recorded observations",
+  "trace.playbackPause": "Pause playback",
+  "trace.playbackResume": "Resume playback",
+  "trace.playbackStop": "Stop playback",
+  "trace.playback_playing":
+    "Playing · {count} observations shown · previews are provisional.",
+  "trace.playback_paused":
+    "Paused · {count} observations shown · the lifetime continues.",
+  "trace.playback_stopped":
+    "Stopped · {count} observations shown · stream not verified.",
+  "trace.playback_completed":
+    "Playback verified and complete · {count} observations.",
+  "trace.playback_failed": "Playback failed; provisional previews cleared.",
+  "trace.playbackWindow":
+    "Playback cut {cut} · latest {count} observations; the display retains at most {maximum}.",
+  "trace.playbackRows": "Recorded observations",
+  "trace.playbackAdmission":
+    "Admission {number} · receipt {time} ms since Unix epoch",
+  "trace.playbackGap": "Recorded gap {delta} ms · playback wait {wait} ms",
+  "trace.playbackClamped": "Long receipt gap shortened for playback.",
+  "trace.playbackDiscontinuity":
+    "Receipt clock discontinuity; no wait inferred.",
+  "trace.playbackPreview":
+    "Raw preview · {bytes} of {total} observed bytes · {encoding}",
+  "trace.playbackMissingPrefix":
+    "A missing byte range stops this prefix preview.",
+  "trace.playbackObservation": "Observation reference (preview)",
+  "trace.playbackSource": "Source position (preview)",
+  "trace.playbackCapturedClock": "Capture clock",
+  "trace.playbackSourceClock": "Source clock",
   "trace.exportEvidence": "Export environment evidence",
   "trace.exportEnvironmentScope":
     "All retained observations in {environment} through evidence cut {cut}, including other sessions and source inventories. This is not a conversation transcript.",

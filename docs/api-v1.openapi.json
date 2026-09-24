@@ -4330,6 +4330,112 @@
           }
         }
       }
+    },
+    "/api/v1/trace/environments/{environment}/playback": {
+      "get": {
+        "summary": "Stream retained observations with explicit receipt-order pacing",
+        "description": "Environment-scoped retained evidence at one cut with separate playback budgets. The sylph-evidence-jsonl header declares receipt clock, speed and gap clamp; each timing frame precedes its exact capture and payload frames. Clients apply waits while consuming the stream, preserve remaining waits across pause, enforce the advertised lifetime and validate the completion digest.",
+        "parameters": [
+          {
+            "name": "environment",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "at_snapshot",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "duration_ms",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "description": "Optional shorter lifetime, never above the resolved playback limit."
+          },
+          {
+            "name": "max_bytes",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "description": "Optional lower output bound; cannot exceed the independent playback budget."
+          },
+          {
+            "name": "speed",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "enum": [
+                1,
+                2,
+                4,
+                10
+              ],
+              "default": 1
+            }
+          },
+          {
+            "name": "max_gap_ms",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2000,
+              "default": 2000
+            },
+            "description": "Upper bound on each requested playback wait after speed scaling; original receipt deltas remain explicit."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Bounded observation stream with explicit pacing frames and a verified completion footer.",
+            "headers": {
+              "x-sylph-export-limit": {
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "x-sylph-export-frame-limit": {
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "x-sylph-export-duration-ms": {
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            },
+            "content": {
+              "application/x-ndjson": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Authorization, retained-view, capacity or input error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {

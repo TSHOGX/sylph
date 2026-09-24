@@ -6,6 +6,7 @@ use crate::trace::{
         catalogue::{PayloadPin, PinOwnerKind},
     },
     service::LeaseGuard,
+    evidence_export::{Limits, Pacing},
 };
 use axum::body::{Body, Bytes};
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -26,6 +27,20 @@ pub(super) struct QueryExport {
     duration_ms: Option<u64>,
     max_bytes: Option<u64>,
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct QueryPlayback {
+    at_snapshot: String,
+    duration_ms: Option<u64>,
+    max_bytes: Option<u64>,
+    speed: Option<u8>,
+    max_gap_ms: Option<u64>,
+}
+struct Options {
+    query: QueryExport,
+    pacing: Option<Pacing>,
+    limits: Limits,
+}
 fn failure(status: StatusCode, code: &'static str, message: impl Into<String>) -> TraceError {
     TraceError {
         status,
@@ -43,6 +58,8 @@ struct Job {
     lease: LeaseGuard,
     ticket: ExportTicket,
     maximum: u64,
+    limits: Limits,
+    pacing: Option<Pacing>,
     manifest: crate::trace::generation::GenerationManifest,
 }
 impl Job {
@@ -131,7 +148,7 @@ impl Output<'_> {
     async fn frame(&mut self, value: serde_json::Value, hashed: bool) -> io::Result<()> {
         let mut bytes = serde_json::to_vec(&value).map_err(stream_error)?;
         bytes.push(b'\n');
-        if bytes.len() > self.job.state.trace.evidence_export_limits.frame_bytes {
+        if bytes.len() > self.job.limits.frame_bytes {
             return Err(stream_error("Evidence frame exceeds its metadata limit"));
         }
         let next = self
@@ -241,7 +258,7 @@ async fn payload(
     *source_bytes = source_bytes
         .checked_add(size)
         .ok_or_else(|| stream_error("Export source size overflow"))?;
-    if *source_bytes > job.state.trace.evidence_export_limits.max_source_bytes {
+    if *source_bytes > job.limits.max_source_bytes {
         return Err(stream_error(
             "Evidence export exceeded its source-byte budget",
         ));
@@ -253,9 +270,7 @@ async fn payload(
             job.authorized()
                 .await
                 .map_err(|error| stream_error(error.message))?;
-            let size = (range.end_exclusive - offset)
-                .min(job.state.trace.evidence_export_limits.chunk_bytes as u64)
-                as usize;
+            let size = (range.end_exclusive - offset).min(job.limits.chunk_bytes as u64) as usize;
             let bytes = job
                 .state
                 .trace
@@ -309,12 +324,13 @@ async fn produce(job: &Job, sender: &mpsc::Sender<Bytes>) -> io::Result<()> {
         frames: 0,
         hash: Sha256::new(),
     };
-    output.frame(serde_json::json!({"kind":"header","format":"sylph-evidence-jsonl","scope":"environment","environment":job.ticket.environment,"evidenceCut":job.ticket.evidence_cut,"projectionManifest":job.manifest,"snapshot":job.lease.snapshot,"visibilityRevision":job.ticket.visibility_revision,"selection":"currently retained admitted evidence; excludes tombstoned evidence and unadmitted staging","limits":job.state.trace.evidence_export_limits}),true).await?;
+    output.frame(serde_json::json!({"kind":"header","format":"sylph-evidence-jsonl","scope":"environment","environment":job.ticket.environment,"evidenceCut":job.ticket.evidence_cut,"projectionManifest":job.manifest,"snapshot":job.lease.snapshot,"visibilityRevision":job.ticket.visibility_revision,"selection":"currently retained admitted evidence; excludes tombstoned evidence and unadmitted staging","limits":job.limits,"pacing":job.pacing}),true).await?;
     #[cfg(test)]
     if let Some((entered, release)) = job.state.trace.evidence_export_pause.lock().await.take() {
         entered.notify_one();
         release.notified().await;
     }
+    let mut previous_receipt = None;
     let (mut after, mut candidates, mut observations, mut source_bytes) = (0, 0, 0u64, 0u64);
     loop {
         job.authorized()
@@ -328,15 +344,36 @@ async fn produce(job: &Job, sender: &mpsc::Sender<Bytes>) -> io::Result<()> {
             .await
             .map_err(stream_error)?;
         candidates += page.candidates;
-        if candidates > job.state.trace.evidence_export_limits.max_admissions {
+        if candidates > job.limits.max_admissions {
             return Err(stream_error(
                 "Evidence export exceeded its admission-work budget",
             ));
         }
         for capture in page.captures {
-            output
-                .frame(serde_json::json!({"kind":"capture","record":capture}), true)
-                .await?;
+            if let Some(pacing) = job.pacing {
+                let timing = pacing.timing(
+                    capture.admission_seq,
+                    previous_receipt,
+                    capture.admitted_at_ms,
+                );
+                let mut frame = serde_json::to_value(timing).map_err(stream_error)?;
+                frame["kind"] = "timing".into();
+                output.frame(frame, true).await?;
+            }
+            previous_receipt = Some(capture.admitted_at_ms);
+            let mut frame = serde_json::json!({"kind":"capture","record":capture});
+            if job.pacing.is_some() {
+                // JavaScript numbers cannot preserve all i64 clock ticks or u64
+                // producer sequences. Render metadata from these exact strings,
+                // never from a parse/stringify round trip through browser numbers.
+                frame["metadataText"] = serde_json::json!({
+                    "observationRef": serde_json::to_string(&capture.capture.observation_ref).map_err(stream_error)?,
+                    "sourcePosition": serde_json::to_string(&capture.capture.source_position).map_err(stream_error)?,
+                    "capturedAt": serde_json::to_string(&capture.capture.captured_at).map_err(stream_error)?,
+                    "sourceClock": serde_json::to_string(&capture.capture.source_clock).map_err(stream_error)?,
+                });
+            }
+            output.frame(frame, true).await?;
             let payloads: BTreeSet<_> = std::iter::once(&capture.capture.payload_ref)
                 .chain(
                     capture
@@ -366,16 +403,70 @@ pub(super) async fn export(
     Path(environment): Path<String>,
     Query(query): Query<QueryExport>,
 ) -> Result<Response> {
-    let duration = query
+    let limits = state.trace.evidence_export_limits.clone();
+    start(
+        state,
+        subject,
+        environment,
+        Options {
+            query,
+            pacing: None,
+            limits,
+        },
+    )
+    .await
+}
+
+pub(super) async fn playback(
+    State(state): State<AppState>,
+    Extension(subject): Extension<SubjectId>,
+    Path(environment): Path<String>,
+    Query(query): Query<QueryPlayback>,
+) -> Result<Response> {
+    let speed = query.speed.unwrap_or(1);
+    let max_gap_ms = query.max_gap_ms.unwrap_or(2000);
+    if ![1, 2, 4, 10].contains(&speed) || max_gap_ms == 0 || max_gap_ms > 2000 {
+        return Err(invalid(
+            "Playback speed or gap exceeds its supported bounds",
+        ));
+    }
+    let limits = state.trace.evidence_playback_limits.clone();
+    let options = Options {
+        query: QueryExport {
+            at_snapshot: query.at_snapshot,
+            buffered: Some(false),
+            duration_ms: query.duration_ms,
+            max_bytes: query.max_bytes,
+        },
+        pacing: Some(Pacing {
+            clock: "server_admission",
+            speed,
+            max_gap_ms,
+        }),
+        limits,
+    };
+    start(state, subject, environment, options).await
+}
+
+async fn start(
+    state: AppState,
+    subject: SubjectId,
+    environment: String,
+    options: Options,
+) -> Result<Response> {
+    let duration = options
+        .query
         .duration_ms
-        .unwrap_or(state.trace.evidence_export_limits.lifetime_ms as u64);
-    if duration == 0 || duration > state.trace.evidence_export_limits.lifetime_ms as u64 {
-        return Err(invalid("Export duration exceeds its configured lifetime"));
+        .unwrap_or(options.limits.lifetime_ms as u64);
+    if duration == 0 || duration > options.limits.lifetime_ms as u64 {
+        return Err(invalid(
+            "Evidence stream duration exceeds its configured lifetime",
+        ));
     }
     let deadline = tokio::time::Instant::now() + Duration::from_millis(duration);
     tokio::time::timeout_at(
         deadline,
-        prepare(state, subject, environment, query, deadline, duration),
+        prepare(state, subject, environment, options, deadline, duration),
     )
     .await
     .map_err(|_| {
@@ -391,15 +482,25 @@ async fn prepare(
     state: AppState,
     subject: SubjectId,
     environment: String,
-    query: QueryExport,
+    options: Options,
     deadline: tokio::time::Instant,
     duration: u64,
 ) -> Result<Response> {
-    let permit = state.trace.evidence_export_permit().ok_or_else(|| {
+    let Options {
+        query,
+        pacing,
+        limits,
+    } = options;
+    let available = if pacing.is_some() {
+        state.trace.evidence_playback_permit()
+    } else {
+        state.trace.evidence_export_permit()
+    };
+    let permit = available.ok_or_else(|| {
         failure(
             StatusCode::SERVICE_UNAVAILABLE,
             "export_capacity",
-            "Another evidence export is using the available capacity",
+            "Another evidence stream is using the available capacity",
         )
     })?;
     #[cfg(test)]
@@ -427,7 +528,6 @@ async fn prepare(
             "Environment evidence access is unavailable",
         ));
     }
-    let limits = state.trace.evidence_export_limits.clone();
     let capacity = if query.buffered.unwrap_or(false) {
         limits.max_buffered_bytes
     } else {
@@ -463,6 +563,8 @@ async fn prepare(
         manifest,
         ticket,
         maximum,
+        limits: limits.clone(),
+        pacing,
     };
     if let Err(error) = job.authorized().await {
         job.release().await;

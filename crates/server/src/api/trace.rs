@@ -124,6 +124,10 @@ pub fn router() -> Router<AppState> {
             "/api/v1/trace/environments/{environment}/export",
             get(archive::export),
         )
+        .route(
+            "/api/v1/trace/environments/{environment}/playback",
+            get(archive::playback),
+        )
         .route("/api/v1/trace/agents/{agent}/control", get(control))
         .route("/api/v1/trace/agents/{agent}/commands", get(command_list))
         .route("/api/v1/trace/objects/{object}", get(object))

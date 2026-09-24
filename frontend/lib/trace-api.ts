@@ -326,6 +326,26 @@ export const traceAPI = {
       () => {},
       () => {},
     ),
+  async evidencePlayback(
+    environment: string,
+    view: TraceView,
+    speed: number,
+    signal: AbortSignal,
+  ): Promise<Response> {
+    const response = await fetch(
+      `/api/v1${base}/environments/${segment(environment)}/playback${query({ at_snapshot: view.token, speed })}`,
+      { credentials: "include", cache: "no-store", signal },
+    );
+    if (!response.ok) {
+      const body = await response.json().catch(() => null);
+      throw new ApiError(
+        response.status,
+        "EVIDENCE_PLAYBACK",
+        body?.error?.message ?? `Evidence playback failed (${response.status})`,
+      );
+    }
+    return response;
+  },
   async evidenceExport(
     environment: string,
     view: TraceView,

@@ -39,6 +39,9 @@ import { OperationResults } from "./trace-operation-results";
 import { TraceEvidence } from "./trace-evidence";
 import { OriginDirectory, type OriginLocation } from "./trace-origins";
 import { ArtifactsPane } from "./artifacts-pane";
+const Playback = dynamic(() =>
+  import("./trace-playback").then((module) => module.TracePlayback),
+);
 const EvidenceExport = dynamic(() =>
   import("./trace-evidence-export").then(
     (module) => module.TraceEvidenceExport,
@@ -1141,6 +1144,12 @@ function Coverage({ bootstrap }: { bootstrap: ReaderBootstrap }) {
           </li>
         ))}
       </ul>
+      <Playback
+        key={bootstrap.header.environment}
+        environment={bootstrap.header.environment}
+        environmentName={bootstrap.header.environmentName}
+        view={bootstrap.view}
+      />
       <EvidenceExport
         environment={bootstrap.header.environment}
         environmentName={bootstrap.header.environmentName}

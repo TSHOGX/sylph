@@ -113,6 +113,7 @@ export function TraceEvidenceExport({
       if (!controller.signal.aborted)
         setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
+      controller.abort();
       release?.();
       active.current = null;
       setBytes(null);

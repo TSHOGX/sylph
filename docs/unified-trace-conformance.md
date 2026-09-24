@@ -282,6 +282,16 @@ a footer. `frontend/e2e/trace-evidence-export.spec.ts` checks explicit environme
 verified desktop/mobile downloads and transactional streaming-file failure. The exporter
 reads retained evidence, not current vendor files or reconstructed transcript values.
 
+Paced playback acceptance in
+`crates/server/src/trace/worker/tests/provenance/export/playback.rs` preserves receipt
+order, exact large-integer clock metadata and intermediate bytes at a fixed cut, including repeated equal revisions,
+backward clocks and clamped gaps. It checks independent playback capacity and retained
+views, policy bounds and revocation. `frontend/lib/trace-playback.test.ts` checks
+unspent waits across pause, bounded UTF-8/binary previews, sparse prefixes and expiry.
+`frontend/e2e/trace-playback.spec.ts` verifies desktop/mobile controls, bounded mounted
+rows, provisional-content clearing, focus restoration, stop and access loss. The common evidence-stream validator rejects unverified completion for both paths and
+keeps file-commit cancellation inside its lifecycle.
+
 ## Reproducible checks
 
 The vendor audit works entirely from retained sanitized artifacts by default:

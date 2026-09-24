@@ -113,7 +113,41 @@ it("cancellation aborts the transactional file instead of committing partial evi
       () => {},
       sink,
     ),
-  ).rejects.toThrow(/cancel/i);
+  ).rejects.toThrow(/abort|cancel/i);
   expect(sink.close).not.toHaveBeenCalled();
   expect(sink.abort).toHaveBeenCalled();
+});
+
+it("cancellation remains attached while a verified file is waiting to commit", async () => {
+  const controller = new AbortController();
+  let entered!: () => void, release!: () => void;
+  const closing = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const sink = {
+    write: vi.fn(async () => {}),
+    close: vi.fn(async () => {
+      entered();
+      await held;
+    }),
+    abort: vi.fn(async () => {}),
+  };
+  const result = receiveEvidenceExport(
+    response(archive()),
+    controller.signal,
+    () => {},
+    sink,
+  ).then(
+    () => false,
+    (error) => error instanceof DOMException && error.name === "AbortError",
+  );
+  await closing;
+  controller.abort();
+  const abortedBeforeCommit = sink.abort.mock.calls.length > 0;
+  release();
+  expect(await result).toBe(true);
+  expect(abortedBeforeCommit).toBe(true);
 });

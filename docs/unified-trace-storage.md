@@ -604,6 +604,7 @@ origin and preserve environment-grant checks.
 | `GET /api/v1/trace/structures/{job_id}` | Subject-owned progress or an indexed immediate-child page, with bounded lexical previews |
 | `DELETE /api/v1/trace/structures/{job_id}` | Cancel and release the Subject's disposable index and retained view |
 | `GET /api/v1/trace/environments/{environment}/export` | Explicit streaming export of all authorized retained admissions and payload ranges in one environment at a fixed view cut |
+| `GET /api/v1/trace/environments/{environment}/playback` | Separately budgeted receipt-order observation playback with explicit pacing and a fixed evidence cut |
 | `GET /api/v1/trace/changes` | SSE change invalidations from a bounded projection cursor, with reset/generation notices |
 | `GET /api/v1/trace/search` | Authorized generation/scoped search at a declared search checkpoint; paged snippets and object anchors |
 | `GET /api/v1/trace/reprojection` | Administrator-only active generation and bounded recent reprojection job status |
@@ -746,6 +747,33 @@ The same deadline covers preparation and production. Transport EOF and active wo
 capacity are released before deferred database pin cleanup, which remains recoverable.
 The reader displays the actual environment scope before export and commits a file only
 after the complete stream succeeds. Full export does not substitute for paced playback.
+
+### Paced observation playback
+
+Playback is an explicit environment-scoped stream at a retained cut. It visits the same
+admitted captures and exact payload ranges as evidence export, including repeated
+observations and intermediate source bytes. It never reconstructs past frames from a
+current message value. Its concurrency, source/output bytes, admission work and lifetime
+are bounded separately from archive downloads and ordinary history reads.
+
+The header declares server-admission timing, playback speed and the maximum wait per gap.
+A timing frame precedes each capture and names its admission sequence, recorded receipt
+delta and requested wait. The first capture has no preceding interval. Negative receipt
+clock movement and unrepresentable deltas are explicit zero-wait discontinuities; long
+gaps are explicitly clamped after speed scaling. Original capture and source clocks
+remain in the capture, without being substituted for receipt timing or execution duration.
+Playback capture frames also carry exact serialized metadata text for clocks and source/
+observation identities. Browser previews use that text so large integer ticks or producer
+sequences never round through JavaScript numbers.
+
+The browser applies these waits while consuming the bounded stream, so pause/resume needs
+no per-frame control request. Pausing preserves the remaining wait and stops consumption;
+it does not extend the job lifetime. Both transport and browser processing enforce that
+lifetime. Stop, access loss and unmount cancel consumption. No database transaction spans
+a playback wait. A bounded preview window may discard older displayed rows, but the
+stream retains every observation and the UI reports that window separately from progress.
+Completion requires the same verified framing digest as export; an incomplete or corrupt
+stream cannot become completed playback. Progressive previews are provisional until then.
 
 ### Evidence inspection
 

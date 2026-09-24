@@ -54,6 +54,8 @@ pub struct TraceService {
     search_queries: Arc<Semaphore>,
     transfers: Arc<Semaphore>,
     evidence_exports: Arc<Semaphore>,
+    evidence_playbacks: Arc<Semaphore>,
+    pub(crate) evidence_playback_limits: super::evidence_export::Limits,
     pub(crate) evidence_export_limits: super::evidence_export::Limits,
     transfer_limits: super::transfer::TransferLimits,
     pub(crate) structures: super::structure::Jobs,
@@ -215,6 +217,7 @@ impl TraceService {
         let gc = TraceGarbageCollector::new(catalogue.clone(), GcLimits::default())?;
         let transfer_limits = super::transfer::TransferLimits::default();
         let evidence_export_limits = super::evidence_export::Limits::default();
+        let evidence_playback_limits = super::evidence_export::Limits::playback();
         let service = Self {
             root: root.into(),
             _archive_lock: Arc::new(archive_lock),
@@ -237,6 +240,8 @@ impl TraceService {
             transfers: Arc::new(Semaphore::new(transfer_limits.max_jobs)),
             evidence_exports: Arc::new(Semaphore::new(evidence_export_limits.max_jobs)),
             evidence_export_limits,
+            evidence_playbacks: Arc::new(Semaphore::new(evidence_playback_limits.max_jobs)),
+            evidence_playback_limits,
             transfer_limits,
             structures: super::structure::Jobs::open(root).await?,
             #[cfg(test)]
@@ -621,6 +626,9 @@ impl TraceService {
     }
     pub(crate) fn evidence_export_permit(&self) -> Option<OwnedSemaphorePermit> {
         self.evidence_exports.clone().try_acquire_owned().ok()
+    }
+    pub(crate) fn evidence_playback_permit(&self) -> Option<OwnedSemaphorePermit> {
+        self.evidence_playbacks.clone().try_acquire_owned().ok()
     }
     pub async fn transfer_lease(
         &self,

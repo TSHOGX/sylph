@@ -708,6 +708,17 @@ or bounded buffered download. It freezes the displayed export scope during the j
 ordinary reader caches never contain the full archive. Interrupted or invalid streams
 leave the output uncommitted. This evidence archive is separate from paced playback.
 
+Details also offers `Play recorded observations`, naming the environment and retained cut.
+Playback displays raw observation previews in admission order, without assigning vendor
+roles or interpreting vendor payloads in the browser. Start is explicit; speed is selected
+before starting. Pause/resume preserves the remaining gap, Stop cancels immediately, and
+neither controls agent execution. The scope and pacing policy stay fixed during the run.
+The UI labels receipt timing, every clamped or discontinuous gap, source/capture clocks,
+preview truncation and its bounded visible window. Progress is announced without making
+individual frames a live region or stealing focus. Buffered bodies and older rows never
+enter ordinary reader caches. Failure or access loss clears provisional previews, and
+verified completion is distinct from a stopped or expired run.
+
 Required behavioral acceptance cases:
 
 | Scenario | Observable promise |
