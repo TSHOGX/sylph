@@ -36,13 +36,16 @@ impl TraceService {
         if let Some(store) = searches.get(generation) {
             return Ok(store.clone());
         }
+        let path = self.root.join(format!("search-{generation}.db"));
+        let name = generation.to_owned();
+        let limits = self.search_limits.clone();
+        // The SQLx schema-opening future cannot move between request workers.
+        // Cache hits remain asynchronous reads; only initialization crosses this boundary.
         let store = Arc::new(
-            SearchStore::open(
-                &self.root.join(format!("search-{generation}.db")),
-                generation.into(),
-                self.search_limits.clone(),
-            )
-            .await?,
+            tokio::task::spawn_blocking(move || {
+                tokio::runtime::Handle::current().block_on(SearchStore::open(&path, name, limits))
+            })
+            .await??,
         );
         searches.insert(generation.into(), store.clone());
         Ok(store)
@@ -196,6 +199,9 @@ impl TraceService {
                 let document = SearchDocument {
                     key,
                     body: SearchBody {
+                        media_type: source.part.media_type.clone(),
+                        encoding: source.part.encoding,
+                        total_bytes: length,
                         agent: source.agent.clone(),
                         anchor: AnyObjectRef::HistoryEntry(source.entry.clone()),
                         object: AnyObjectRef::Message(source.message.clone()),

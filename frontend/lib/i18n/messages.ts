@@ -156,6 +156,9 @@ export const en = {
   "trace.ownActivations": "Own activations",
   "trace.inspectActivation": "Inspect activation",
   "trace.retry": "Retry",
+  "trace.searchContextUnavailable":
+    "Surrounding history unavailable at this checkpoint",
+  "trace.matchedContent": "Matched content",
   "trace.searchScope": "Search scope",
   "trace.searchRetained": "Retained history",
   "trace.searchSelected": "Selected context",
@@ -284,7 +287,7 @@ export const en = {
   "trace.searchConversations": "Search retained conversations",
   "trace.search": "Search",
   "trace.searchingHistory": "Searching retained history…",
-  "trace.openResult": "Open this retained result",
+  "trace.openResult": "Open surrounding history",
   "trace.recent": "Recent conversations",
   "trace.moreSearch": "More results",
   "trace.pagedOn": "Paged reading on",

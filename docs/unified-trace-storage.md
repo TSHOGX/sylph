@@ -1026,6 +1026,18 @@ search retain revisioned membership/snippets at that checkpoint; detail links ei
 resolve the same revision or explicitly open current state. Never combine current FTS
 text with an earlier membership snapshot and call it a consistent result.
 
+A search result identifies one exact item in a subject-owned result job. Its payload
+access explicitly names that result as its authority, alongside the immutable native
+anchor, body revision, representation and history selection. Range reads and preparation
+of transfers or structured exploration require that complete tuple to match the retained
+result and view; they never fall back to a current projection anchor.
+Surrounding-history navigation uses the rendered entry at that view. Collapsed unassociated
+stream entries resolve through an indexed message lookup whose temporal validity is checked
+after selecting the latest prior row, so retired versions cannot reappear as context. Result-job expiry,
+wrong subjects, changed views and retired evidence refuse the read. Prepared derivative
+jobs own their own bounded lease and continue rechecking subject grants and evidence
+epochs, independently of the search UI's lifetime.
+
 The initial implementation may pin one short-lived read snapshot inside a materialized
 bounded search-result job, releasing SQL before returning pages. It must bound matches
 examined, result bytes, job lifetime, and concurrent work. A changing FTS table is not

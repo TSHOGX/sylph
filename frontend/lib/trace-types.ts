@@ -122,8 +122,15 @@ export type Author =
   | { kind: "tool"; operation: TraceAddress | null; label: string }
   | { kind: "unknown" };
 export type Representation =
-  "runtime" | "caller_result" | "conversation" | "submitted";
+  | "runtime"
+  | "caller_result"
+  | "conversation"
+  | "submitted";
+export type PayloadAuthority =
+  | { kind: "projection" }
+  | { kind: "search_result"; resultRef: string };
 export interface PayloadAccess {
+  authority: PayloadAuthority;
   payloadRef: string;
   bodyRevision: string;
   representation: Representation;
@@ -528,11 +535,12 @@ export interface ObjectDetail {
   coverage: TraceCoverage[];
 }
 export interface SearchHit {
-  anchor: TraceAddress;
+  anchor: TraceAddress | null;
   agent: AgentLink;
   history: HistoryLocation;
   excerpt: string;
-  payload: PayloadAccess | null;
+  byteStart: number;
+  payload: PayloadAccess;
 }
 export type TraceChange =
   | {

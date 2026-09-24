@@ -12,6 +12,8 @@ const READ_FORWARD_SQL: &str = "SELECT order_key,address,anchor_ref,valid_from,v
 const READ_BACKWARD_SQL: &str = "SELECT order_key,address,anchor_ref,valid_from,valid_to,present,body_bytes,scope_epoch,search_text,directory_state,needs_input,required_environments_json,dependency_epochs_json FROM read_rows WHERE scope_key=? AND (order_key,address,valid_from)<(?,?,?) ORDER BY order_key DESC,address DESC,valid_from DESC LIMIT ?";
 const READ_ANCHOR_SQL: &str = "SELECT order_key,address,valid_from,scope_epoch,required_environments_json,dependency_epochs_json,search_text,directory_state,needs_input FROM read_rows WHERE scope_key=? AND anchor_ref=? AND valid_from<=? AND (valid_to IS NULL OR valid_to>?) AND present=1 ORDER BY order_key,address,valid_from LIMIT 1";
 
+const READ_MESSAGE_CONTEXT_SQL: &str = "SELECT anchor_ref,valid_to,scope_epoch,required_environments_json,dependency_epochs_json FROM read_rows INDEXED BY read_message_context WHERE scope_key=? AND CASE WHEN json_valid(body_json) THEN json_extract(body_json,'$.content.messageRef') END=? AND valid_from<=? AND present=1 AND CASE WHEN json_valid(body_json) THEN json_extract(body_json,'$.content.kind') END='message' AND CASE WHEN json_valid(body_json) THEN json_extract(body_json,'$.content.delivery') END IS NULL ORDER BY valid_from DESC LIMIT 1";
+
 pub const DIRECTORY_COLLECTION: &str = "spawn-directory";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -306,6 +308,39 @@ impl GenerationStore {
             return Err(GenerationError::NotFound);
         }
         decode_candidate(&row)
+    }
+
+    /// Resolve a collapsed stream occurrence from the actual rendered message,
+    /// without replaying history or fetching protected body JSON before authorization.
+    pub async fn message_context(
+        &self,
+        snapshot: &Snapshot,
+        scope: &str,
+        message: &MessageRef,
+    ) -> Result<Option<(TraceAddress, ReadCandidate)>, GenerationError> {
+        let (mut conn, _) = self.read_connection(snapshot).await?;
+        let row = sqlx::query(READ_MESSAGE_CONTEXT_SQL)
+            .bind(scope)
+            .bind(message.encode())
+            .bind(snapshot.view_revision as i64)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(super::generation::map_query_error)?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        if row
+            .get::<Option<i64>, _>("valid_to")
+            .is_some_and(|end| end <= snapshot.view_revision as i64)
+        {
+            return Ok(None);
+        }
+        let Some(anchor) = row.get::<Option<String>, _>("anchor_ref") else {
+            return Ok(None);
+        };
+        let anchor = TraceAddress::parse(anchor)
+            .map_err(|error| GenerationError::Invalid(error.to_string()))?;
+        Ok(Some((anchor, decode_candidate(&row)?)))
     }
 
     pub async fn read_row(

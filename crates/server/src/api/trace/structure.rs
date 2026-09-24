@@ -1,7 +1,6 @@
 //! Explicit JSON indexing owns a view independently of ordinary reader requests.
 use super::*;
 use crate::trace::{
-    generation::PayloadAnchor,
     structure::{index, parser::Span, Job, State as JobState},
 };
 use std::{
@@ -17,6 +16,7 @@ use std::{
 #[serde(deny_unknown_fields)]
 pub(super) struct Create {
     via_ref: String,
+    search_result: Option<String>,
     at_snapshot: String,
     revision: String,
     representation: Representation,
@@ -64,40 +64,19 @@ pub(super) async fn create(
     Query(query): Query<Create>,
 ) -> Result<Response> {
     let payload = PayloadRef::parse(encoded).map_err(|error| invalid(error.to_string()))?;
-    let reference = reference(&query.via_ref)?;
-    observe(&state, &subject.0, reference.scope()).await?;
     let original = lease(&state, &subject.0, Some(&query.at_snapshot)).await?;
-    let generation = state
-        .trace
-        .generation(&original.snapshot.generation)
-        .await
-        .map_err(internal)?;
-    let row = generation
-        .read_row(
-            &original.snapshot,
-            &read_scope(reference.scope(), None, "objects"),
-            &reference.encode(),
-        )
-        .await
-        .map_err(storage)?;
-    check_row(&state, &subject.0, &original, &row).await?;
-    let detail = generation
-        .object(&original.snapshot, &reference)
-        .await
-        .map_err(storage)?;
-    let owner = crate::trace::generation::payload_anchor_owner(&detail.object)
-        .cloned()
-        .ok_or_else(|| invalid("Structured exploration requires a payload anchor"))?;
-    let anchor = PayloadAnchor {
-        via_ref: reference,
-        containing_agent: owner,
-        selection: query.selection,
-        payload_ref: payload.clone(),
-        body_revision: query.revision,
-        representation: query.representation,
-        ranges: vec![],
-        dependency_epochs: Default::default(),
-    };
+    let grant = payload_access::authorize(
+        &state,
+        &subject.0,
+        &original,
+        &query.via_ref,
+        query.selection,
+        payload.clone(),
+        query.revision,
+        query.representation,
+        query.search_result.as_deref(),
+    )
+    .await?;
     let total = state
         .trace
         .evidence()
@@ -129,11 +108,7 @@ pub(super) async fn create(
             ),
         ));
     }
-    let dependencies = generation
-        .authorize_payload(&original.snapshot, &anchor, 0, total)
-        .await
-        .map_err(storage)?;
-    check_epochs(&state, &subject.0, &original, &dependencies).await?;
+    grant.range(0, total)?;
     let permit = state.trace.structures.reserve().ok_or_else(|| {
         failure(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -146,8 +121,9 @@ pub(super) async fn create(
         .transfer_lease(&subject.0, &original.token, duration_ms as i64)
         .await
         .map_err(lease_error)?;
-    check_row(&state, &subject.0, &owned, &row).await?;
-    check_epochs(&state, &subject.0, &owned, &dependencies).await?;
+    grant.check(&state, &subject.0, &original).await?;
+    check_row(&state, &subject.0, &owned, &grant.row).await?;
+    check_epochs(&state, &subject.0, &owned, &grant.dependencies).await?;
     let expires_at_ms = owned.expires_at_ms;
     let remaining_ms = expires_at_ms.saturating_sub(crate::models::now_ms()).max(0) as u64;
     let deadline = Instant::now() + Duration::from_millis(remaining_ms);
@@ -155,9 +131,9 @@ pub(super) async fn create(
         id: uuid::Uuid::new_v4().to_string(),
         subject: subject.0,
         lease: owned,
-        row,
-        anchor,
-        dependencies,
+        row: grant.row,
+        anchor: grant.anchor,
+        dependencies: grant.dependencies,
         total,
         expires_at_ms,
         deadline,

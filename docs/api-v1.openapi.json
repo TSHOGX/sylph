@@ -3158,6 +3158,14 @@
               "type": "integer",
               "minimum": 0
             }
+          },
+          {
+            "name": "search_result",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Exact subject-owned search result authority. The retained view, native anchor, revision, representation and selection must match this result; no projection fallback is used."
           }
         ],
         "responses": {
@@ -3405,6 +3413,14 @@
               "minimum": 1
             },
             "description": "Optional shorter transfer deadline; cannot exceed the advertised server limit."
+          },
+          {
+            "name": "search_result",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Exact subject-owned search result authority. The retained view, native anchor, revision, representation and selection must match this result; no projection fallback is used."
           }
         ],
         "responses": {
@@ -4097,6 +4113,14 @@
               "type": "integer"
             },
             "description": "Optional shorter lifetime, never above the resolved structural job limit."
+          },
+          {
+            "name": "search_result",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Exact subject-owned search result authority. The retained view, native anchor, revision, representation and selection must match this result; no projection fallback is used."
           }
         ],
         "responses": {
@@ -5389,12 +5413,144 @@
           "availability"
         ]
       },
+      "PayloadAccess": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "authority": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "const": "projection"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "const": "search_result"
+                  },
+                  "resultRef": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "resultRef"
+                ]
+              }
+            ]
+          },
+          "payloadRef": {
+            "type": "string"
+          },
+          "bodyRevision": {
+            "type": "string"
+          },
+          "representation": {
+            "type": "string",
+            "enum": [
+              "runtime",
+              "caller_result",
+              "conversation",
+              "submitted"
+            ]
+          },
+          "viaRef": {
+            "type": "string"
+          },
+          "containingAgent": {
+            "type": "string"
+          },
+          "selection": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "mediaType": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "encoding": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "binary",
+              "utf8",
+              "base64",
+              null
+            ]
+          },
+          "totalBytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "availableRanges": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "start": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "endExclusive": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "start",
+                "endExclusive"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "availability": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "authority",
+          "payloadRef",
+          "bodyRevision",
+          "representation",
+          "viaRef",
+          "containingAgent",
+          "selection",
+          "mediaType",
+          "encoding",
+          "totalBytes",
+          "availableRanges",
+          "availability"
+        ]
+      },
       "ReadSearchHit": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
           "anchor": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Readable surrounding-history anchor at this checkpoint, or null when no such context is available."
           },
           "agent": {
             "$ref": "#/components/schemas/TraceAgentLink"
@@ -5406,10 +5562,12 @@
             "type": "string"
           },
           "payload": {
-            "type": [
-              "object",
-              "null"
-            ]
+            "$ref": "#/components/schemas/PayloadAccess"
+          },
+          "byteStart": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Start of the indexed body window containing this hit."
           }
         },
         "required": [
@@ -5417,7 +5575,8 @@
           "agent",
           "history",
           "excerpt",
-          "payload"
+          "payload",
+          "byteStart"
         ]
       },
       "ReaderBootstrap": {

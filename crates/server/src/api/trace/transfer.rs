@@ -24,6 +24,7 @@ pub(super) enum TransferKind {
 #[serde(deny_unknown_fields)]
 pub(super) struct TransferQuery {
     via_ref: String,
+    search_result: Option<String>,
     at_snapshot: String,
     revision: String,
     representation: Representation,
@@ -281,48 +282,21 @@ async fn prepare_transfer(
         )
     })?;
     let payload = PayloadRef::parse(encoded).map_err(|error| invalid(error.to_string()))?;
-    let reference = reference(&query.via_ref)?;
-    observe(&state, &subject.0, reference.scope()).await?;
-    // Resolve before copying: the original view cannot name another subject/cut.
+    // A derivative job takes its own lease only after resolving exact authority.
     let original = lease(&state, &subject.0, Some(&query.at_snapshot)).await?;
-    let generation = state
-        .trace
-        .generation(&original.snapshot.generation)
-        .await
-        .map_err(internal)?;
-    let row = generation
-        .read_row(
-            &original.snapshot,
-            &read_scope(reference.scope(), None, "objects"),
-            &reference.encode(),
-        )
-        .await
-        .map_err(storage)?;
-    check_row(&state, &subject.0, &original, &row).await?;
-    let detail = generation
-        .object(&original.snapshot, &reference)
-        .await
-        .map_err(storage)?;
-    let owner = crate::trace::generation::payload_anchor_owner(&detail.object)
-        .cloned()
-        .ok_or_else(|| invalid("Payload authorization needs a readable containing object"))?;
-    observe(&state, &subject.0, &owner).await?;
-    let anchor = PayloadAnchor {
-        via_ref: reference,
-        containing_agent: owner,
-        selection: query.selection,
-        payload_ref: payload.clone(),
-        body_revision: query.revision.clone(),
-        representation: query.representation,
-        ranges: vec![],
-        dependency_epochs: Default::default(),
-    };
-    let (ranges, dependencies) = generation
-        .payload_ranges(&original.snapshot, &anchor)
-        .await
-        .map_err(storage)?;
-    check_epochs(&state, &subject.0, &original, &dependencies).await?;
-    let mut ranges = normalize(ranges)?;
+    let grant = payload_access::authorize(
+        &state,
+        &subject.0,
+        &original,
+        &query.via_ref,
+        query.selection,
+        payload.clone(),
+        query.revision.clone(),
+        query.representation,
+        query.search_result.as_deref(),
+    )
+    .await?;
+    let mut ranges = normalize(grant.ranges.clone())?;
     let original_length = state
         .trace
         .evidence()
@@ -432,13 +406,14 @@ async fn prepare_transfer(
         .transfer_lease(&subject.0, &original.token, duration_ms as i64)
         .await
         .map_err(lease_error)?;
+    grant.check(&state, &subject.0, &original).await?;
     let job = Job {
         state,
         subject: subject.0,
         lease: owned,
-        row,
-        anchor,
-        dependencies,
+        row: grant.row,
+        anchor: grant.anchor,
+        dependencies: grant.dependencies,
         manifest,
     };
     job.authorized().await?;

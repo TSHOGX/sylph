@@ -346,6 +346,18 @@ range reads. The indexing gate stays held across fixture publication and measure
 replacement and restart, immutable result jobs, count/byte admission and query-owned
 selection metadata in the pre-hydration result budget.
 
+Exact search-body access is verified by
+`crates/server/src/trace/worker/tests/provenance/search_result.rs`: a superseded composed
+JSON body remains readable and transferable while its surrounding conversation shows a
+later revision. Wrong subjects, views, revisions and representations are rejected;
+prepared structured exploration outlives search invalidation but cannot outlive evidence
+access. The retained-contributor deletion test covers first access through a fresh lease.
+`crates/server/src/trace/search/tests/result.rs` covers item positions, expiry, invalidation,
+framing budgets and oversized corrupt result jobs. The reader-store context test checks
+old/current versions, retirement, delivery exclusion and measured lookup work under growing
+superseded density. `frontend/e2e/trace-search-body.spec.ts` checks later byte windows,
+desktop/mobile navigation and unchanged-query refresh after expiry.
+
 ## Reproducible checks
 
 The vendor audit works entirely from retained sanitized artifacts by default:

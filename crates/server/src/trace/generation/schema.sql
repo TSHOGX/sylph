@@ -205,3 +205,12 @@ CREATE INDEX directory_anchor ON read_rows(address,valid_from DESC,present DESC,
 CREATE INDEX read_anchor ON read_rows(scope_key,anchor_ref,valid_from,order_key,address,valid_to,present,scope_epoch,search_text,directory_state,needs_input,required_environments_json,dependency_epochs_json);
 CREATE UNIQUE INDEX current_read_row ON read_rows(scope_key,address) WHERE valid_to IS NULL;
 CREATE TABLE read_counts(scope_key TEXT NOT NULL,valid_from INTEGER NOT NULL,count INTEGER NOT NULL CHECK(count>=0),PRIMARY KEY(scope_key,valid_from)) WITHOUT ROWID;
+
+-- Unassociated message rows are unique per message in a reading scope. Keep the
+-- latest positive version indexed; validity still rejects a retired presentation.
+CREATE INDEX read_message_context ON read_rows(scope_key,
+  CASE WHEN json_valid(body_json) THEN json_extract(body_json,'$.content.messageRef') END,
+  valid_from DESC,valid_to,anchor_ref,scope_epoch,required_environments_json,dependency_epochs_json)
+WHERE present=1
+  AND CASE WHEN json_valid(body_json) THEN json_extract(body_json,'$.content.kind') END='message'
+  AND CASE WHEN json_valid(body_json) THEN json_extract(body_json,'$.content.delivery') END IS NULL;

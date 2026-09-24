@@ -70,6 +70,9 @@ Search generations are disposable. Their documents retain the containing agent, 
 body revision and authorization support; no guessed original-owner field is stored.
 History scopes use separate source membership rows instead of duplicating FTS text.
 Body and membership completion are independently fenced before index publication.
+Materialized result bodies retain format, byte length and revision metadata. A result
+reference names a bounded subject-owned job position; it authorizes that exact retained
+body use separately from the ordinary projection payload anchors.
 Locally authored membership follows retained author/production evidence as specified in
 `docs/unified-trace-storage.md` § Search consistency.
 

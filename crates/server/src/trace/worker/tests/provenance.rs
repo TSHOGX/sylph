@@ -757,6 +757,15 @@ async fn deleting_separately_retained_content_blocks_reader_payload_and_search_a
         .await
         .unwrap();
     let untouched_path = payload_path.replace(view, &untouched.token);
+    let hit = &search["items"][0]["payload"];
+    let result_path = format!(
+        "/api/v1/trace/payloads/{}?via_ref={}&at_snapshot={}&revision={}&representation=conversation&search_result={}",
+        hit["payloadRef"].as_str().unwrap(),
+        hit["viaRef"].as_str().unwrap(),
+        untouched.token,
+        hit["bodyRevision"].as_str().unwrap(),
+        hit["authority"]["resultRef"].as_str().unwrap()
+    );
     fixture
         .state
         .trace
@@ -764,6 +773,14 @@ async fn deleting_separately_retained_content_blocks_reader_payload_and_search_a
         .delete_scope(&IngestionScope::Agent(contributor))
         .await
         .unwrap();
+    assert!(
+        !fixture
+            .get_response(&result_path)
+            .await
+            .status()
+            .is_success(),
+        "a search-result authority must authorize its separately retained contributor on first access"
+    );
     let first_access = fixture.get_response(&untouched_path).await;
     assert_ne!(
         first_access.status(),
@@ -808,3 +825,5 @@ mod export;
 mod search_scope;
 
 mod search_membership;
+
+mod search_result;

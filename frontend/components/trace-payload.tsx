@@ -38,6 +38,7 @@ export function TracePayload({
   preview = "",
   truncated = true,
   label,
+  initialStart = 0,
 }: {
   access: PayloadAccess;
   view: TraceView;
@@ -45,11 +46,12 @@ export function TracePayload({
   preview?: string;
   truncated?: boolean;
   label?: string;
+  initialStart?: number;
 }) {
   const t = useT();
   const [open, setOpen] = useState(false);
   const [structureOpen, setStructureOpen] = useState(false);
-  const [requestedStart, setStart] = useState(0);
+  const [requestedStart, setStart] = useState(initialStart);
   const [loaded, setLoaded] = useState<{
     key: string;
     bytes: Uint8Array;
@@ -218,6 +220,7 @@ export function TracePayload({
         <StructuredContent
           key={traceCacheKey(view, [
             access.payloadRef,
+            access.authority,
             access.viaRef,
             access.bodyRevision,
             access.representation,

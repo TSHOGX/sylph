@@ -466,7 +466,7 @@ async fn search_inner(
         check_search_selection(&state, &subject.0, &generation, &lease, selection).await?;
     }
     let mut hits = Vec::new();
-    for hit in result.hits {
+    for (offset, hit) in result.hits.into_iter().enumerate() {
         let crate::trace::search::SearchHit { body, context } = hit;
         observe(&state, &subject.0, &body.agent).await?;
         // Search metadata can contain a snippet before the containing header is
@@ -513,8 +513,41 @@ async fn search_inner(
             .map_err(storage)?;
         check_row(&state, &subject.0, &lease, &row).await?;
         let header: AgentHeader = serde_json::from_value(row.body).map_err(internal)?;
+        let context_anchor = payload_access::context_anchor(
+            &state,
+            &subject.0,
+            &generation,
+            &lease,
+            &body,
+            context.selection.as_ref(),
+        )
+        .await?;
+        let authority = PayloadAuthority::SearchResult {
+            result_ref: crate::trace::search::SearchStore::result_reference(
+                &result.job_id,
+                result.offset + offset,
+            )
+            .map_err(internal)?,
+        };
+        let payload = PayloadAccess {
+            authority,
+            payload_ref: body.payload,
+            body_revision: body.body_revision,
+            representation: body.representation,
+            via_ref: TraceAddress::of(&body.anchor),
+            containing_agent: header.agent.address.clone(),
+            selection: context.selection.clone(),
+            media_type: body.media_type,
+            encoding: Some(body.encoding),
+            total_bytes: Some(body.total_bytes),
+            available_ranges: vec![PayloadRange {
+                start: 0,
+                end_exclusive: body.total_bytes,
+            }],
+            availability: ReadAvailability::Available,
+        };
         hits.push(ReadSearchHit {
-            anchor: TraceAddress::of(&body.anchor),
+            anchor: context_anchor,
             agent: header.agent,
             history: HistoryLocation {
                 archive: context.selection.is_none(),
@@ -530,7 +563,8 @@ async fn search_inner(
                 availability: ReadAvailability::Available,
             },
             excerpt: context.snippet,
-            payload: None,
+            byte_start: body.byte_start,
+            payload,
         });
     }
     if let Some(guard) = acquired_lease {
@@ -2147,6 +2181,7 @@ async fn object_relations(
 #[derive(Deserialize)]
 struct PayloadQuery {
     via_ref: String,
+    search_result: Option<String>,
     at_snapshot: String,
     revision: String,
     representation: Representation,
@@ -2161,55 +2196,19 @@ async fn payload(
     Query(query): Query<PayloadQuery>,
 ) -> Result<Response> {
     let payload = PayloadRef::parse(encoded).map_err(|error| invalid(error.to_string()))?;
-    let anchor = reference(&query.via_ref)?;
-    observe(&state, &subject.0, anchor.scope()).await?;
     let lease = lease(&state, &subject.0, Some(&query.at_snapshot)).await?;
-    let generation = state
-        .trace
-        .generation(&lease.snapshot.generation)
-        .await
-        .map_err(internal)?;
-    let row = generation
-        .read_row(
-            &lease.snapshot,
-            &read_scope(anchor.scope(), None, "objects"),
-            &anchor.encode(),
-        )
-        .await
-        .map_err(storage)?;
-    check_row(&state, &subject.0, &lease, &row).await?;
-    let detail = generation
-        .object(&lease.snapshot, &anchor)
-        .await
-        .map_err(storage)?;
-    let owner = crate::trace::generation::payload_anchor_owner(&detail.object)
-        .cloned()
-        .ok_or_else(|| invalid("Payload authorization needs a readable containing object"))?;
-    observe(&state, &subject.0, &owner).await?;
-    let requested = crate::trace::generation::PayloadAnchor {
-        via_ref: anchor,
-        containing_agent: owner,
-        selection: query.selection,
-        payload_ref: payload.clone(),
-        body_revision: query.revision,
-        representation: query.representation,
-        ranges: vec![],
-        dependency_epochs: Default::default(),
-    };
-    // Separately retained bytes carry their own contributor epochs. A lease that
-    // never read the contributor still has to authorize them on its first request,
-    // or deleting that scope would leave the body reachable through a fresh view.
-    let authorization_start = query.start.unwrap_or(0);
-    let dependencies = generation
-        .authorize_payload(
-            &lease.snapshot,
-            &requested,
-            authorization_start,
-            query.end.unwrap_or(authorization_start),
-        )
-        .await
-        .map_err(storage)?;
-    check_epochs(&state, &subject.0, &lease, &dependencies).await?;
+    let grant = payload_access::authorize(
+        &state,
+        &subject.0,
+        &lease,
+        &query.via_ref,
+        query.selection,
+        payload.clone(),
+        query.revision,
+        query.representation,
+        query.search_result.as_deref(),
+    )
+    .await?;
     let total = state
         .trace
         .evidence()
@@ -2225,10 +2224,7 @@ async fn payload(
     if end < start || end - start > state.trace.limits().max_payload_bytes as u64 {
         return Err(invalid("Payload range exceeds the configured limit"));
     }
-    generation
-        .authorize_payload(&lease.snapshot, &requested, start, end)
-        .await
-        .map_err(storage)?;
+    grant.range(start, end)?;
     let bytes = if end == start {
         vec![]
     } else {
@@ -2240,7 +2236,7 @@ async fn payload(
             .map_err(internal)?
             .bytes
     };
-    check_row(&state, &subject.0, &lease, &row).await?;
+    grant.check(&state, &subject.0, &lease).await?;
     // This is an exact byte-range transport. Format evidence belongs to the
     // authorized payload use in the reader, not whichever equal-digest derivation
     // happened to be inserted first. Never promote that unrelated MIME claim to
@@ -2268,3 +2264,5 @@ async fn payload(
     }
     Ok(response)
 }
+
+mod payload_access;

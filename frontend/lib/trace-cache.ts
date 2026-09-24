@@ -118,6 +118,7 @@ export function tracePayloadKey(
   return JSON.stringify([
     typeof location === "undefined" ? "" : location.origin,
     authorizationScope,
+    access.authority,
     access.containingAgent,
     access.selection,
     access.viaRef,

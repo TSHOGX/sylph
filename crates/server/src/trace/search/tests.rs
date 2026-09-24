@@ -19,6 +19,9 @@ fn document(key: &str, text: &str) -> SearchDocument {
     SearchDocument {
         key: key.into(),
         body: SearchBody {
+            media_type: Some("text/plain".into()),
+            encoding: PayloadEncoding::Utf8,
+            total_bytes: text.len() as u64,
             agent: agent(),
             anchor: AnyObjectRef::HistoryEntry(
                 EntryRef::native(agent(), "entry", vec![key.into()]).unwrap(),
@@ -871,3 +874,5 @@ async fn an_incomplete_source_cannot_publish_even_after_its_document_batch_commi
 }
 
 mod membership;
+
+mod result;

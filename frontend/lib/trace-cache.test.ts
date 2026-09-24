@@ -10,6 +10,7 @@ import {
 import type { PayloadAccess, TraceLimits } from "./trace-types";
 
 const access: PayloadAccess = {
+  authority: { kind: "projection" },
   payloadRef: "retained-payload",
   bodyRevision: "revision-one",
   representation: "caller_result",

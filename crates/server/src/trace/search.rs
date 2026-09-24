@@ -126,6 +126,9 @@ impl SearchMembership {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchBody {
+    pub media_type: Option<String>,
+    pub encoding: PayloadEncoding,
+    pub total_bytes: u64,
     pub agent: AgentRef,
     pub anchor: AnyObjectRef,
     pub object: AnyObjectRef,
@@ -189,12 +192,26 @@ impl SearchScope {
 #[serde(rename_all = "camelCase")]
 pub struct SearchPage {
     pub job_id: String,
+    pub offset: usize,
     pub view: Snapshot,
     pub trace_lease: String,
     pub hits: Vec<SearchHit>,
     pub next_cursor: Option<String>,
     pub has_more: bool,
     pub result_limit_reached: bool,
+    pub expires_at_ms: i64,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResultReference {
+    job_id: String,
+    offset: usize,
+}
+
+pub struct RetainedSearchResult {
+    pub view: Snapshot,
+    pub hit: SearchHit,
     pub expires_at_ms: i64,
 }
 
@@ -255,6 +272,7 @@ impl SearchStore {
         ]
         .contains(&0)
             || limits.max_vm_steps == 0
+            || limits.max_result_bytes < 2
             || limits.job_lifetime_ms <= 0
         {
             return Err(SearchError::Invalid("positive limits are required".into()));
@@ -278,11 +296,11 @@ impl SearchStore {
                 .bind(&generation)
                 .execute(&mut *tx)
                 .await?;
-            sqlx::query("PRAGMA user_version=4")
+            sqlx::query("PRAGMA user_version=5")
                 .execute(&mut *tx)
                 .await?;
             tx.commit().await?;
-        } else if version != 4 {
+        } else if version != 5 {
             return Err(SearchError::Invalid("unsupported search schema".into()));
         }
         let stored: String =
@@ -631,7 +649,7 @@ impl SearchStore {
                 .fetch_all(&mut *tx).await.map_err(|error| search_sql_error(error, steps.load(Ordering::Relaxed)>=budget, query))?;
             let mut limited = rows.len() > self.limits.max_results;
             let mut hits = Vec::new();
-            let mut returned_bytes = 0usize;
+            let mut returned_bytes = 2usize; // The materialized result array's brackets.
             for row in rows.into_iter().take(self.limits.max_results) {
                 let snippet: String = row.get("excerpt");
                 let metadata = usize::try_from(row.get::<i64,_>("metadata_bytes")).map_err(|_| SearchError::Limit("document metadata bytes"))?;
@@ -640,7 +658,7 @@ impl SearchStore {
                 // closing/opening braces with one comma. Serialize the actual
                 // context type so later fields cannot escape this pre-hydration gate.
                 let extra = serde_json::to_vec(&context)?.len().saturating_sub(1);
-                let bytes = metadata.checked_add(extra).ok_or(SearchError::Limit("result bytes"))?;
+                let bytes = metadata.checked_add(extra).and_then(|bytes| bytes.checked_add(usize::from(!hits.is_empty()))).ok_or(SearchError::Limit("result bytes"))?;
                 if metadata > self.limits.max_document_metadata_bytes || bytes > self.limits.max_result_bytes.saturating_sub(returned_bytes) {
                     limited = true; break;
                 }
@@ -692,6 +710,54 @@ impl SearchStore {
         self.page(subject, &id, None, now_ms, page_size).await
     }
 
+    pub fn result_reference(job_id: &str, offset: usize) -> Result<String> {
+        use base64::Engine;
+        Ok(
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(
+                &ResultReference {
+                    job_id: job_id.into(),
+                    offset,
+                },
+            )?),
+        )
+    }
+
+    pub async fn read_result(
+        &self,
+        subject: &str,
+        reference: &str,
+        now_ms: i64,
+    ) -> Result<RetainedSearchResult> {
+        use base64::Engine;
+        if reference.len() > self.limits.max_query_bytes {
+            return Err(SearchError::InvalidCursor);
+        }
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(reference)
+            .map_err(|_| SearchError::InvalidCursor)?;
+        let reference: ResultReference =
+            serde_json::from_slice(&bytes).map_err(|_| SearchError::InvalidCursor)?;
+        let page = self
+            .page(
+                subject,
+                &reference.job_id,
+                None,
+                now_ms,
+                self.limits.max_results,
+            )
+            .await?;
+        let hit = page
+            .hits
+            .get(reference.offset)
+            .cloned()
+            .ok_or(SearchError::InvalidCursor)?;
+        Ok(RetainedSearchResult {
+            view: page.view,
+            hit,
+            expires_at_ms: page.expires_at_ms,
+        })
+    }
+
     pub async fn page(
         &self,
         subject: &str,
@@ -704,7 +770,8 @@ impl SearchStore {
         if page_size == 0 || page_size > self.limits.max_results {
             return Err(SearchError::Limit("result page"));
         }
-        let row = sqlx::query("SELECT * FROM search_jobs WHERE id=? AND expires_at_ms>?")
+        let row = sqlx::query("SELECT subject,scope_hash,snapshot_json,trace_lease,expires_at_ms,limited,CASE WHEN length(CAST(hits_json AS BLOB))<=? THEN hits_json END AS hits_json FROM search_jobs WHERE id=? AND expires_at_ms>?")
+            .bind(self.limits.max_result_bytes as i64)
             .bind(job_id)
             .bind(now_ms)
             .fetch_optional(&self.readers)
@@ -734,7 +801,12 @@ impl SearchStore {
                 cursor.offset
             }
         };
-        let all: Vec<SearchHit> = serde_json::from_str(&row.get::<String, _>("hits_json"))?;
+        let json: Option<String> = row.get("hits_json");
+        let all: Vec<SearchHit> =
+            serde_json::from_str(&json.ok_or(SearchError::Limit("result job bytes"))?)?;
+        if all.len() > self.limits.max_results {
+            return Err(SearchError::Limit("result job items"));
+        }
         if offset > all.len() {
             return Err(SearchError::InvalidCursor);
         }
@@ -756,6 +828,7 @@ impl SearchStore {
         };
         Ok(SearchPage {
             job_id: job_id.into(),
+            offset,
             view: serde_json::from_str(&row.get::<String, _>("snapshot_json"))?,
             trace_lease: row.get("trace_lease"),
             hits: all[offset..end].to_vec(),

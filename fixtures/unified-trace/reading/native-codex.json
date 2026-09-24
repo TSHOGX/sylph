@@ -94,6 +94,9 @@
                 "kind": "text",
                 "partRef": "tr_000000000000000c6d6573736167655f7061727400000000000000b17b226b696e64223a226e6174697665222c2273636f7065223a7b226b696e64223a2273657373696f6e222c2276616c7565223a7b22656e7669726f6e6d656e74223a22656e7666697874757265222c226167656e74223a22636f646578222c226e61746976654964223a22726573706f6e73652d75736572227d7d2c226e616d657370616365223a22636f6465782e6d6573736167652d70617274222c226b6579223a5b2261736b2d31222c2230225d7d",
                 "payload": {
+                  "authority": {
+                    "kind": "projection"
+                  },
                   "availability": {
                     "kind": "available"
                   },
@@ -150,6 +153,9 @@
                 "kind": "text",
                 "partRef": "tr_000000000000000c6d6573736167655f7061727400000000000000b47b226b696e64223a226e6174697665222c2273636f7065223a7b226b696e64223a2273657373696f6e222c2276616c7565223a7b22656e7669726f6e6d656e74223a22656e7666697874757265222c226167656e74223a22636f646578222c226e61746976654964223a22726573706f6e73652d75736572227d7d2c226e616d657370616365223a22636f6465782e6d6573736167652d70617274222c226b6579223a5b22616e737765722d31222c2230225d7d",
                 "payload": {
+                  "authority": {
+                    "kind": "projection"
+                  },
                   "availability": {
                     "kind": "available"
                   },
@@ -196,7 +202,7 @@
         "maxSummaryBytes": 262144,
         "maxVisibleInterests": 16
       },
-      "returnedBytes": 11959,
+      "returnedBytes": 12027,
       "returnedItems": 2,
       "state": "complete",
       "total": {
@@ -344,6 +350,9 @@
         "kind": "revision",
         "payloads": [
           {
+            "authority": {
+              "kind": "projection"
+            },
             "availability": {
               "kind": "available"
             },
@@ -393,6 +402,9 @@
         "kind": "revision",
         "payloads": [
           {
+            "authority": {
+              "kind": "projection"
+            },
             "availability": {
               "kind": "available"
             },

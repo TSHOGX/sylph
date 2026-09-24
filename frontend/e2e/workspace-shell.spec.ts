@@ -159,9 +159,16 @@ test("global search finds a retained message and opens its addressed conversatio
   await page.keyboard.press("ControlOrMeta+k"); const dialog = page.getByRole("dialog");
   await dialog.getByRole("textbox", { name: "Search retained conversations" }).fill("needle");
   await dialog.getByRole("button", { name: "Search", exact: true }).click();
-  await expect(dialog.getByText("A retained hit outside the visible window", { exact: true })).toBeVisible();
-  await dialog.getByRole("link", { name: "Open this retained result", exact: true }).click();
-  await expect(page).toHaveURL(new RegExp(`/agents/${MAIN_AGENT}.*anchor=`)); await expect(dialog).toHaveCount(0);
+  await expect(
+    dialog.getByText("A retained hit outside the visible window", {
+      exact: true,
+    }),
+  ).toBeVisible();
+  await dialog
+    .getByRole("link", { name: "Open surrounding history", exact: true })
+    .click();
+  await expect(page).toHaveURL(new RegExp(`/agents/${MAIN_AGENT}.*anchor=`));
+  await expect(dialog).toHaveCount(0);
 });
 
 test("a global index hit keeps its retained excerpt and checkpoint visible", async ({

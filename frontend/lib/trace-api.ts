@@ -35,6 +35,11 @@ function query(values: Record<string, string | number | null | undefined>) {
     if (value != null) query.set(key, String(value));
   return query.size ? `?${query}` : "";
 }
+function searchResult(access: PayloadAccess) {
+  return access.authority.kind === "search_result"
+    ? access.authority.resultRef
+    : null;
+}
 function nativeSelection(history: string | null | undefined) {
   return history === "archive" ? null : history;
 }
@@ -291,7 +296,7 @@ export const traceAPI = {
     buffered: boolean,
     signal: AbortSignal,
   ): Promise<Response> {
-    const url = `/api/v1${base}/payloads/${segment(access.payloadRef)}/transfer${query({ at_snapshot: view.token, via_ref: access.viaRef, selection: access.selection, revision: access.bodyRevision, representation: access.representation, kind, buffered: String(buffered) })}`;
+    const url = `/api/v1${base}/payloads/${segment(access.payloadRef)}/transfer${query({ at_snapshot: view.token, via_ref: access.viaRef, search_result: searchResult(access), selection: access.selection, revision: access.bodyRevision, representation: access.representation, kind, buffered: String(buffered) })}`;
     const response = await fetch(url, {
       signal,
       credentials: "include",
@@ -309,7 +314,7 @@ export const traceAPI = {
   },
   createStructure: (access: PayloadAccess, view: TraceView) =>
     fetchAPI<StructureStatus>(
-      `${base}/payloads/${segment(access.payloadRef)}/structure${query({ at_snapshot: view.token, via_ref: access.viaRef, selection: access.selection, revision: access.bodyRevision, representation: access.representation })}`,
+      `${base}/payloads/${segment(access.payloadRef)}/structure${query({ at_snapshot: view.token, via_ref: access.viaRef, search_result: searchResult(access), selection: access.selection, revision: access.bodyRevision, representation: access.representation })}`,
       { method: "POST" },
     ),
   structure: (
@@ -383,7 +388,7 @@ export const traceAPI = {
     end: number;
     total: number | null;
   }> {
-    const url = `/api/v1${base}/payloads/${segment(access.payloadRef)}${query({ at_snapshot: view.token, via_ref: access.viaRef, selection: access.selection, revision: access.bodyRevision, representation: access.representation, start, end })}`;
+    const url = `/api/v1${base}/payloads/${segment(access.payloadRef)}${query({ at_snapshot: view.token, via_ref: access.viaRef, search_result: searchResult(access), selection: access.selection, revision: access.bodyRevision, representation: access.representation, start, end })}`;
     const response = await fetch(url, {
       signal,
       credentials: "include",

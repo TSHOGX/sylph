@@ -1285,6 +1285,7 @@ impl Index<'_> {
     ) -> PayloadAccess {
         let preview = self.payloads.get(payload);
         PayloadAccess {
+            authority: PayloadAuthority::Projection,
             payload_ref: payload.clone(),
             body_revision: revision.into(),
             representation,

@@ -1105,3 +1105,128 @@ async fn reader_pool_initializes_schema_before_charging_snapshot_queries() {
         "connection setup entered the snapshot query budget: {work:?}"
     );
 }
+
+#[tokio::test]
+async fn message_context_lookup_is_bounded_and_never_resurrects_retired_or_delivery_rows() {
+    let agent = AgentRef::Session(sylph_protocol::SessionId::decode("env:codex:context").unwrap());
+    let message = MessageRef::native(agent.clone(), "context", vec!["one".into()]).unwrap();
+    let anchor = TraceAddress::of(&AnyObjectRef::HistoryEntry(
+        EntryRef::native(agent, "context", vec!["one".into()]).unwrap(),
+    ));
+    let mut work = vec![];
+    for versions in [10, 1000] {
+        let (_dir, store) = store().await;
+        let mut first = None;
+        for version in 1..=versions {
+            let mut change = row("message", 0, "unused");
+            change.anchor = Some(anchor.clone());
+            change.scope_epoch = IngestionEpoch::new(format!("epoch-{version}")).unwrap();
+            change.body = Some(
+                serde_json::json!({"content":{"kind":"message","messageRef":message,"delivery":null}}),
+            );
+            store
+                .apply(
+                    1,
+                    &store.checkpoint().await.unwrap().snapshot,
+                    &ProjectionBatch {
+                        through_cut: version,
+                        read_rows: vec![change],
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            if version == 1 {
+                first = Some(store.checkpoint().await.unwrap().snapshot);
+            }
+        }
+        let snapshot = store.checkpoint().await.unwrap().snapshot;
+        let (mut conn, steps) = store.read_connection(&snapshot).await.unwrap();
+        let candidate = sqlx::query(READ_MESSAGE_CONTEXT_SQL)
+            .bind("history")
+            .bind(message.encode())
+            .bind(snapshot.view_revision as i64)
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+        work.push(steps.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(candidate.try_get::<String, _>("body_json").is_err());
+        drop(conn);
+        let (found, proof) = store
+            .message_context(&snapshot, "history", &message)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found, anchor);
+        assert_eq!(proof.epoch.as_str(), format!("epoch-{versions}"));
+        let (_, proof) = store
+            .message_context(first.as_ref().unwrap(), "history", &message)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(proof.epoch.as_str(), "epoch-1");
+        let mut delivery = row("delivery", 1, "unused");
+        delivery.anchor = Some(anchor.clone());
+        delivery.body = Some(
+            serde_json::json!({"content":{"kind":"message","messageRef":message,"delivery":{"reference":"different occurrence"}}}),
+        );
+        store
+            .apply(
+                1,
+                &snapshot,
+                &ProjectionBatch {
+                    through_cut: versions + 1,
+                    read_rows: vec![delivery],
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let next = store.checkpoint().await.unwrap().snapshot;
+        assert_eq!(
+            store
+                .message_context(&next, "history", &message)
+                .await
+                .unwrap()
+                .unwrap()
+                .1
+                .epoch
+                .as_str(),
+            format!("epoch-{versions}")
+        );
+        let mut removed = row("message", 0, "unused");
+        removed.body = None;
+        store
+            .apply(
+                1,
+                &next,
+                &ProjectionBatch {
+                    through_cut: versions + 2,
+                    read_rows: vec![removed],
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let current = store.checkpoint().await.unwrap().snapshot;
+        assert!(
+            store
+                .message_context(&current, "history", &message)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .message_context(&snapshot, "history", &message)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+    assert!(work[0] > 0);
+    assert!(
+        work[1] <= work[0] * 2,
+        "message context work grew with superseded density: {work:?}"
+    );
+}

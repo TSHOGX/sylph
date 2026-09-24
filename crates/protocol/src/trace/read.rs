@@ -310,8 +310,19 @@ pub enum ReadAuthor {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PayloadAuthority {
+    Projection,
+    SearchResult {
+        #[serde(rename = "resultRef")]
+        result_ref: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PayloadAccess {
+    pub authority: PayloadAuthority,
     pub payload_ref: PayloadRef,
     pub body_revision: String,
     pub representation: Representation,
@@ -780,11 +791,12 @@ pub struct ReadObjectDetail {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ReadSearchHit {
-    pub anchor: TraceAddress,
+    pub anchor: Option<TraceAddress>,
     pub agent: AgentLink,
     pub history: HistoryLocation,
     pub excerpt: String,
-    pub payload: Option<PayloadAccess>,
+    pub byte_start: u64,
+    pub payload: PayloadAccess,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

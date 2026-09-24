@@ -74,6 +74,7 @@ export function payload(
   agent = MAIN_AGENT,
 ): PayloadAccess {
   return {
+    authority: { kind: "projection" },
     payloadRef: reference,
     bodyRevision: "revision-1",
     representation: "conversation",
@@ -85,6 +86,20 @@ export function payload(
     totalBytes: null,
     availableRanges: [],
     availability: { kind: "available" },
+  };
+}
+export function searchPayload(
+  text: string,
+  reference: string,
+  viaRef: string,
+  agent = MAIN_AGENT,
+): PayloadAccess {
+  const length = new TextEncoder().encode(text).length;
+  return {
+    ...payload(reference, viaRef, agent),
+    authority: { kind: "search_result", resultRef: `result-${reference}` },
+    totalBytes: length,
+    availableRanges: [{ start: 0, endExclusive: length }],
   };
 }
 export function message(
@@ -466,7 +481,11 @@ export async function installTraceFixture(page: Page, rows = [message(0)]) {
       state.receipts.push(receipt);
       return route.fulfill({ status: 202, json: receipt });
     }
-    if (resource === "search")
+    if (resource === "search") {
+      state.bodies.set(
+        "search-body",
+        "A retained hit outside the visible window",
+      );
       return route.fulfill({
         json: tracePage(
           [
@@ -484,12 +503,18 @@ export async function installTraceFixture(page: Page, rows = [message(0)]) {
                 label: "Search checkpoint",
               },
               excerpt: "A retained hit outside the visible window",
-              payload: null,
+              byteStart: 0,
+              payload: searchPayload(
+                "A retained hit outside the visible window",
+                "search-body",
+                `${MAIN_AGENT}-anchor-3`,
+              ),
             },
           ],
           view,
         ),
       });
+    }
     return route.fulfill({
       status: 404,
       json: {

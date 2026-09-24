@@ -1016,6 +1016,7 @@ function AgentSearch({ bootstrap }: { bootstrap: ReaderBootstrap }) {
   ];
   const [input, setInput] = useState("");
   const [query, setQuery] = useState("");
+  const [refresh, setRefresh] = useState(0);
   const [cursor, setCursor] = useState<string | null>(null);
   const [searchView, setSearchView] = useState<TraceView | null>(null);
   const result = useTraceResource(
@@ -1044,6 +1045,7 @@ function AgentSearch({ bootstrap }: { bootstrap: ReaderBootstrap }) {
           if (!signal.aborted) setSearchView(page.view);
           return page;
         }),
+    refresh,
   );
   return (
     <div>
@@ -1074,6 +1076,7 @@ function AgentSearch({ bootstrap }: { bootstrap: ReaderBootstrap }) {
         onSubmit={(event) => {
           event.preventDefault();
           setQuery(input.trim());
+          setRefresh((value) => value + 1);
           setCursor(null);
           setSearchView(null);
         }}
@@ -1100,29 +1103,47 @@ function AgentSearch({ bootstrap }: { bootstrap: ReaderBootstrap }) {
       {result.pending && <p role="status">{t("trace.searching")}</p>}
       <ul className="space-y-3">
         {result.data?.items.map((hit) => (
-          <li key={hit.anchor} className="rounded border border-line p-3">
-            <p className="whitespace-pre-wrap text-sm">{hit.excerpt}</p>
-            <Link
-              className={`${button} mt-2 inline-block underline`}
-              href={agentUrl(
-                hit.agent.address,
-                historyLocationKey(hit.history),
-                hit.anchor,
-              )}
-              onClick={() => {
-                if (ui.isMobile) ui.closeDrawer();
-                else ui.setRightOpen(false);
-                if (result.data)
-                  rememberTraceNavigation(
-                    hit.agent.address,
-                    historyLocationKey(hit.history),
-                    hit.anchor,
-                    result.data.view,
-                  );
-              }}
-            >
-              {t("trace.resultLink", { history: hit.history.label })}
-            </Link>
+          <li
+            key={JSON.stringify(hit.payload.authority)}
+            className="rounded border border-line p-3"
+          >
+            <p className="whitespace-pre-wrap break-words text-sm">
+              {hit.excerpt}
+            </p>
+            <TracePayload
+              access={hit.payload}
+              view={result.data!.view}
+              maximum={result.data!.limits.maxPayloadBytes}
+              initialStart={hit.byteStart}
+              label={t("trace.matchedContent")}
+            />
+            {hit.anchor ? (
+              <Link
+                className={`${button} mt-2 inline-block underline`}
+                href={agentUrl(
+                  hit.agent.address,
+                  historyLocationKey(hit.history),
+                  hit.anchor,
+                )}
+                onClick={() => {
+                  if (ui.isMobile) ui.closeDrawer();
+                  else ui.setRightOpen(false);
+                  if (result.data && hit.anchor)
+                    rememberTraceNavigation(
+                      hit.agent.address,
+                      historyLocationKey(hit.history),
+                      hit.anchor,
+                      result.data.view,
+                    );
+                }}
+              >
+                {t("trace.resultLink", { history: hit.history.label })}
+              </Link>
+            ) : (
+              <p className="text-sm text-ink-muted">
+                {t("trace.searchContextUnavailable")}
+              </p>
+            )}
           </li>
         ))}
       </ul>

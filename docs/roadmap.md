@@ -100,6 +100,19 @@ erased and no production trace implementation is claimed complete by this design
 
 ### Foundation implementation
 
+Search hits now open their exact retained body revision through an explicit result
+job authority, including composed stream prefixes superseded by a different final body.
+Range reads, transfers and structured exploration share complete-tuple authorization;
+prepared derivative jobs own their lease and keep checking retained evidence and grants.
+Matched content starts at the indexed byte window. Surrounding-history navigation is
+separate and resolves collapsed stream entries through the actual reading projection;
+unavailable context does not hide independently retained matched bytes. Repeating an
+unchanged search obtains a fresh result job. Result lookups bound retained job JSON and
+include framing in the materialized-result byte budget. Coverage includes exact JSON,
+wrong subjects/views/revisions, invalidation, derivative lifetimes, historical context
+lookup and desktop/mobile navigation; independent faults were observed failing.
+Remaining vendor, inheritance and reader acceptance gates stay open.
+
 Search scope membership now has a separate bounded publication path from immutable
 indexed body occurrences. Retaining another named selection reuses the body's document
 IDs and FTS storage without rereading payloads. Both body and membership completion gate
@@ -109,8 +122,7 @@ in the result byte budget before indexed metadata is hydrated. Search schemas ch
 place, with the per-scope FTS rows removed. Production cost coverage spans multiple
 configured membership batches, inspects the actual FTS rows/blocks and holds the indexing
 gate across measurement so a background pass cannot make its work counters vacuous.
-Exact superseded-revision navigation and the remaining inheritance/vendor/reader gates
-remain open.
+The remaining inheritance/vendor/reader gates remain open.
 
 Search no longer treats a missing or unresolved original owner as locally authored
 work. Authored scope requires a matching known agent author and production owner with
@@ -126,8 +138,8 @@ Archive hits carry an explicit archive location and open that view at their sear
 checkpoint; archive and explicit named-history readers offer return-to-current instead
 of a composer, including a selection that was current at the frozen checkpoint. Missing
 native selection evidence does not disable an authorized default live conversation.
-Exact navigation to superseded stream revisions remains an open search-reader
-case: their indexed composed body can differ from the conversation's current presentation.
+Matched-body inspection is distinct from the conversation presentation, which may show a
+later revision at the same search checkpoint.
 Scope, selection, archive, composer and cancellation regressions are falsified by
 independent faults. The full run also exposed normalized HTTP fixtures staging unrooted
 bytes beside the real collector; fixture captures now use the production upload tickets.

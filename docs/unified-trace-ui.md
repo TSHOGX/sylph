@@ -604,6 +604,11 @@ the whole payload.
 Search pins its `(generation, view_revision, evidence_cut)` checkpoint with retained
 membership, snippets, and body revisions. Opening a hit uses that view or explicitly
 offers current state; it does not silently combine an old snippet with the newest body.
+Each hit offers explicit matched-content expansion at its indexed body window, with the
+same bounded reading, observed-content transfer and structured exploration controls as
+other payloads. Its surrounding-history link is separate: a conversation may present a
+later revision of that message at the same checkpoint. Repeating a search refreshes its
+result job even when the query text is unchanged.
 If storage pressure invalidates the index/result job, the result list shows indexing
 and reacquires its scope instead of retaining apparently working dead links.
 

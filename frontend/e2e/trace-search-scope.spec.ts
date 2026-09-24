@@ -4,6 +4,7 @@ import {
   installTraceFixture,
   MAIN_AGENT,
   message,
+  searchPayload,
   openTrace,
   tracePage,
   traceView,
@@ -52,7 +53,12 @@ for (const width of [1280, 390]) {
           availability: { kind: "available" },
         },
         excerpt: retained ? "Copied retained answer" : "Local scoped result",
-        payload: null,
+        byteStart: 0,
+        payload: searchPayload(
+          retained ? "Copied retained answer" : "Local scoped result",
+          `scope-${mode}`,
+          rows[retained ? 1 : 0].anchor,
+        ),
       };
       const result = tracePage([hit], view, 0, selected ? 2 : 1);
       if (selected && !url.searchParams.has("cursor")) {
@@ -161,7 +167,7 @@ for (const width of [1280, 390]) {
         .fill("needle");
       await search.getByRole("button", { name: "Search", exact: true }).click();
       await search
-        .getByRole("link", { name: "Open this retained result", exact: true })
+        .getByRole("link", { name: "Open surrounding history", exact: true })
         .click();
       await expect(
         page.getByRole("dialog", { name: "Trace inspector", exact: true }),
@@ -214,7 +220,12 @@ test("changing search scope cancels the pending request without mixing its resul
       },
       excerpt:
         mode === "authored" ? "New authored result" : "Stale retained result",
-      payload: null,
+      byteStart: 0,
+      payload: searchPayload(
+        mode === "authored" ? "New authored result" : "Stale retained result",
+        `cancel-${mode}`,
+        "anchor",
+      ),
     };
     await route
       .fulfill({

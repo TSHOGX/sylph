@@ -16,6 +16,7 @@ import {
 } from "@/lib/trace-types";
 import { sessionLabel } from "@/lib/format";
 import { Overlay } from "./overlay";
+import { TracePayload } from "./trace-payload";
 
 /** Global search consumes normalized, snapshot-scoped hits, never vendor event sequences. */
 export function SearchOverlay() {
@@ -24,6 +25,7 @@ export function SearchOverlay() {
   const { closeOverlay } = ui;
   const [text, setText] = useState("");
   const [query, setQuery] = useState("");
+  const [refresh, setRefresh] = useState(0);
   const [cursor, setCursor] = useState<string | null>(null);
   const [searchView, setSearchView] = useState<TraceView | null>(null);
   const recent = useQuery(liveSessionsQuery());
@@ -34,7 +36,7 @@ export function SearchOverlay() {
         if (!signal.aborted) setSearchView(page.view);
         return page;
       }),
-    0,
+    refresh,
     false,
   );
   return (
@@ -45,6 +47,7 @@ export function SearchOverlay() {
           setQuery(text.trim());
           setCursor(null);
           setSearchView(null);
+          setRefresh((value) => value + 1);
         }}
         className="flex gap-2 p-3"
       >
@@ -69,37 +72,50 @@ export function SearchOverlay() {
             <ul className="space-y-3">
               {result.data?.items.map((hit) => (
                 <li
-                  key={`${hit.agent.address}:${hit.anchor}`}
+                  key={JSON.stringify(hit.payload.authority)}
                   className="rounded border border-line p-3"
                 >
                   <h3 className="text-sm font-medium">
                     {agentName(hit.agent, t)}
                   </h3>
-                  <p className="my-2 whitespace-pre-wrap text-sm">
+                  <p className="my-2 whitespace-pre-wrap break-words text-sm">
                     {hit.excerpt}
                   </p>
-                  <Link
-                    className="inline-block min-h-11 py-2 text-sm underline focus-ring"
-                    href={agentUrl(
-                      hit.agent.address,
-                      historyLocationKey(hit.history),
-                      hit.anchor,
-                    )}
-                    onClick={() => {
-                      if (ui.isMobile) ui.closeDrawer();
-                      else ui.setRightOpen(false);
-                      if (result.data)
-                        rememberTraceNavigation(
-                          hit.agent.address,
-                          historyLocationKey(hit.history),
-                          hit.anchor,
-                          result.data.view,
-                        );
-                      closeOverlay();
-                    }}
-                  >
-                    {t("trace.openResult")}
-                  </Link>
+                  <TracePayload
+                    access={hit.payload}
+                    view={result.data!.view}
+                    maximum={result.data!.limits.maxPayloadBytes}
+                    initialStart={hit.byteStart}
+                    label={t("trace.matchedContent")}
+                  />
+                  {hit.anchor ? (
+                    <Link
+                      className="inline-block min-h-11 py-2 text-sm underline focus-ring"
+                      href={agentUrl(
+                        hit.agent.address,
+                        historyLocationKey(hit.history),
+                        hit.anchor,
+                      )}
+                      onClick={() => {
+                        if (ui.isMobile) ui.closeDrawer();
+                        else ui.setRightOpen(false);
+                        if (result.data && hit.anchor)
+                          rememberTraceNavigation(
+                            hit.agent.address,
+                            historyLocationKey(hit.history),
+                            hit.anchor,
+                            result.data.view,
+                          );
+                        closeOverlay();
+                      }}
+                    >
+                      {t("trace.openResult")}
+                    </Link>
+                  ) : (
+                    <p className="text-sm text-ink-muted">
+                      {t("trace.searchContextUnavailable")}
+                    </p>
+                  )}
                   <p className="text-xs text-ink-muted">
                     Matched {hit.history.label} at retained view{" "}
                     {result.data?.view.viewRevision}
