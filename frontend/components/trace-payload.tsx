@@ -1,5 +1,6 @@
 "use client";
 import { useT } from "@/lib/i18n";
+import dynamic from "next/dynamic";
 import { useEffect, useEffectEvent, useState } from "react";
 import { traceAPI } from "@/lib/trace-api";
 import {
@@ -7,6 +8,7 @@ import {
   invalidateTraceView,
   onTraceAccessCleared,
   tracePayloadKey,
+  traceCacheKey,
   tracePayloads,
 } from "@/lib/trace-cache";
 import { ApiError } from "@/lib/api";
@@ -20,6 +22,10 @@ import {
 } from "@/lib/trace-types";
 import { TraceTransfer } from "./trace-transfer";
 import { Markdown } from "./markdown";
+
+const StructuredContent = dynamic(() =>
+  import("./trace-structure").then((module) => module.TraceStructure),
+);
 
 const button =
   "min-h-11 rounded px-3 text-sm hover:bg-hover focus-ring disabled:opacity-50";
@@ -42,6 +48,7 @@ export function TracePayload({
 }) {
   const t = useT();
   const [open, setOpen] = useState(false);
+  const [structureOpen, setStructureOpen] = useState(false);
   const [requestedStart, setStart] = useState(0);
   const [loaded, setLoaded] = useState<{
     key: string;
@@ -198,6 +205,31 @@ export function TracePayload({
     current && range ? nextBodyStart(range, current.next, current.total) : null;
   return (
     <div className="min-w-0 space-y-2">
+      {access.mediaType?.includes("json") && access.encoding === "utf8" && (
+        <button
+          className={button}
+          aria-expanded={structureOpen}
+          onClick={() => setStructureOpen((value) => !value)}
+        >
+          {t("trace.structure")}
+        </button>
+      )}
+      {structureOpen && (
+        <StructuredContent
+          key={traceCacheKey(view, [
+            access.payloadRef,
+            access.viaRef,
+            access.bodyRevision,
+            access.representation,
+            access.selection,
+          ])}
+          access={access}
+          view={view}
+          maximum={maximum}
+          onClose={() => setStructureOpen(false)}
+        />
+      )}
+
       {preview && !open && <Markdown text={preview} />}
       {availability && (
         <p className="text-sm text-ink-muted">

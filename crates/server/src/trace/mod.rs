@@ -17,3 +17,4 @@ pub mod upload;
 pub mod worker;
 
 pub mod transfer;
+pub mod structure;

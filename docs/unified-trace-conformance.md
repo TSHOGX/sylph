@@ -253,6 +253,17 @@ retains its format. Synthetic browser coverage in `frontend/e2e/trace-payload-fo
 checks text, JSON and unclassified rendering at desktop and mobile widths; the fixture
 is not evidence for unobserved vendor formats.
 
+Structured exploration uses the pinned dependency in `Cargo.lock`; its skip-name and
+skip-value paths were inspected before adopting it. `crates/server/src/trace/structure/parser.rs`
+covers duplicate members, exact large-number spelling, UTF-8/escape validity, malformed
+suffixes, limits and large scalars/names. Index tests compare late-page VM work at tenfold
+sibling growth and reject node/depth/disk/deadline overruns. HTTP tests in
+`crates/server/src/trace/worker/tests/provenance/structure.rs` cover a 20 MiB scalar,
+independent retained views, Subject isolation, job capacity, cancellation, expiration
+and deletion while a page is prepared. `frontend/e2e/trace-structure.spec.ts` covers
+explicit admission, bounded navigation, duplicate labels and cleanup of late admission.
+The added parser runs only on the server; the browser component loads on explicit demand.
+
 ## Reproducible checks
 
 The vendor audit works entirely from retained sanitized artifacts by default:

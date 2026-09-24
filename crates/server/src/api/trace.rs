@@ -44,6 +44,7 @@ mod transfer;
 mod evidence;
 mod directory;
 mod results;
+mod structure;
 #[cfg(test)]
 mod visibility_tests;
 fn invalid(message: impl Into<String>) -> TraceError {
@@ -138,6 +139,14 @@ pub fn router() -> Router<AppState> {
         )
         .route("/api/v1/trace/objects/{object}/parts", get(parts))
         .route("/api/v1/trace/payloads/{payload}", get(payload))
+        .route(
+            "/api/v1/trace/payloads/{payload}/structure",
+            post(structure::create),
+        )
+        .route(
+            "/api/v1/trace/structures/{job}",
+            get(structure::read).delete(structure::remove),
+        )
         .route(
             "/api/v1/trace/payloads/{payload}/transfer",
             get(transfer::payload_transfer),

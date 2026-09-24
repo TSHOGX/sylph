@@ -3983,6 +3983,175 @@
           }
         }
       }
+    },
+    "/api/v1/trace/payloads/{payload}/structure": {
+      "post": {
+        "summary": "Build a disposable structured JSON index from authorized retained bytes",
+        "parameters": [
+          {
+            "name": "payload",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "via_ref",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "at_snapshot",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "revision",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "representation",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "selection",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "duration_ms",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Optional shorter lifetime, never above the resolved structural job limit."
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Bounded structural job status and optional ready child page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructureStatus"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request, authorization, capacity or retained-data error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/trace/structures/{job}": {
+      "get": {
+        "summary": "Read structural progress or one indexed page of immediate children",
+        "parameters": [
+          {
+            "name": "job",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "node",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Job-local node id; omitted selects the root."
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Sibling ordinal from this job and parent."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Bounded structural job status and optional ready child page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StructureStatus"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request, authorization, capacity or retained-data error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Cancel and release the calling Subject's structural job",
+        "parameters": [
+          {
+            "name": "job",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Job released or already absent"
+          },
+          "default": {
+            "description": "Request, authorization, capacity or retained-data error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -5007,6 +5176,234 @@
             ]
           }
         }
+      },
+      "StructurePreview": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string"
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "start": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "end": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "text",
+          "truncated",
+          "start",
+          "end"
+        ]
+      },
+      "StructureNode": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "parent": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "ordinal": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "object",
+              "array",
+              "string",
+              "number",
+              "boolean",
+              "null"
+            ]
+          },
+          "start": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "end": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "children": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "name": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/StructurePreview"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "preview": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/StructurePreview"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "parent",
+          "ordinal",
+          "kind",
+          "start",
+          "end",
+          "children",
+          "name",
+          "preview"
+        ]
+      },
+      "StructureLimits": {
+        "type": "object",
+        "properties": {
+          "maxJobs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "maxBytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "maxNodes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "maxDepth": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "maxIndexBytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "chunkBytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "pageItems": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "previewBytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "maxQuerySteps": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "lifetimeMs": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "maxJobs",
+          "maxBytes",
+          "maxNodes",
+          "maxDepth",
+          "maxIndexBytes",
+          "chunkBytes",
+          "pageItems",
+          "previewBytes",
+          "maxQuerySteps",
+          "lifetimeMs"
+        ]
+      },
+      "StructureStatus": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "view": {
+            "$ref": "#/components/schemas/ReadView"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "building",
+              "ready",
+              "failed"
+            ]
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "bytesRead": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "totalBytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "nodes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "expiresAtMs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limits": {
+            "$ref": "#/components/schemas/StructureLimits"
+          },
+          "node": {
+            "$ref": "#/components/schemas/StructureNode"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StructureNode"
+            }
+          },
+          "after": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          }
+        },
+        "required": [
+          "id",
+          "view",
+          "state",
+          "error",
+          "bytesRead",
+          "totalBytes",
+          "nodes",
+          "expiresAtMs",
+          "limits",
+          "after"
+        ]
       }
     }
   }

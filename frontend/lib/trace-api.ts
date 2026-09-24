@@ -22,6 +22,7 @@ import type {
   TracePage,
   TraceRelation,
   TraceView,
+  StructureStatus,
 } from "./trace-types";
 
 const base = "/trace";
@@ -289,6 +290,30 @@ export const traceAPI = {
     }
     return response;
   },
+  createStructure: (access: PayloadAccess, view: TraceView) =>
+    fetchAPI<StructureStatus>(
+      `${base}/payloads/${segment(access.payloadRef)}/structure${query({ at_snapshot: view.token, via_ref: access.viaRef, selection: access.selection, revision: access.bodyRevision, representation: access.representation })}`,
+      { method: "POST" },
+    ),
+  structure: (
+    id: string,
+    node: number,
+    after: number | null,
+    signal?: AbortSignal,
+  ) =>
+    fetchAPI<StructureStatus>(
+      `${base}/structures/${segment(id)}${query({ node, after })}`,
+      { signal },
+    ),
+  closeStructure: (id: string) =>
+    fetch(`/api/v1${base}/structures/${segment(id)}`, {
+      method: "DELETE",
+      credentials: "include",
+      keepalive: true,
+    }).then(
+      () => {},
+      () => {},
+    ),
   async payload(
     access: PayloadAccess,
     view: TraceView,

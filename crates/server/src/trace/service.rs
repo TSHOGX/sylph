@@ -54,6 +54,7 @@ pub struct TraceService {
     search_queries: Arc<Semaphore>,
     transfers: Arc<Semaphore>,
     transfer_limits: super::transfer::TransferLimits,
+    pub(crate) structures: super::structure::Jobs,
     #[cfg(test)]
     pub(crate) transfer_pause: ReprojectionPause,
     #[cfg(test)]
@@ -64,6 +65,10 @@ pub struct TraceService {
     pub(crate) directory_read_pause: ReprojectionPause,
     #[cfg(test)]
     pub(crate) result_catalogue_read_pause: ReprojectionPause,
+    #[cfg(test)]
+    pub(crate) structure_scan_pause: ReprojectionPause,
+    #[cfg(test)]
+    pub(crate) structure_page_pause: ReprojectionPause,
     recovery: Arc<RwLock<Option<String>>>,
     gc: TraceGarbageCollector,
     reprojection_wake: Arc<Notify>,
@@ -217,6 +222,7 @@ impl TraceService {
             search_gate: Arc::new(Mutex::new(())),
             transfers: Arc::new(Semaphore::new(transfer_limits.max_jobs)),
             transfer_limits,
+            structures: super::structure::Jobs::open(root).await?,
             #[cfg(test)]
             transfer_pause: Arc::new(Mutex::new(None)),
             #[cfg(test)]
@@ -227,6 +233,10 @@ impl TraceService {
             directory_read_pause: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             result_catalogue_read_pause: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            structure_scan_pause: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            structure_page_pause: Arc::new(Mutex::new(None)),
             search_queries: Arc::new(Semaphore::new(search_limits.max_concurrent_queries)),
             search_limits,
             recovery: Arc::new(RwLock::new(None)),

@@ -694,3 +694,46 @@ export interface EvidenceBytes {
   coverage: unknown;
   bytesBase64: string;
 }
+
+export interface StructurePreview {
+  text: string;
+  truncated: boolean;
+  start: number;
+  end: number;
+}
+export interface StructureNode {
+  id: number;
+  parent: number | null;
+  ordinal: number;
+  kind: "object" | "array" | "string" | "number" | "boolean" | "null";
+  start: number;
+  end: number;
+  children: number;
+  name: StructurePreview | null;
+  preview: StructurePreview | null;
+}
+export interface StructureStatus {
+  id: string;
+  view: TraceView;
+  state: "building" | "ready" | "failed";
+  error: string | null;
+  bytesRead: number;
+  totalBytes: number;
+  nodes: number;
+  expiresAtMs: number;
+  limits: {
+    maxJobs: number;
+    maxBytes: number;
+    maxNodes: number;
+    maxDepth: number;
+    maxIndexBytes: number;
+    chunkBytes: number;
+    pageItems: number;
+    previewBytes: number;
+    maxQuerySteps: number;
+    lifetimeMs: number;
+  };
+  node?: StructureNode;
+  items?: StructureNode[];
+  after?: number | null;
+}

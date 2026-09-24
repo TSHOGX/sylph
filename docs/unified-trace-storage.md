@@ -599,6 +599,9 @@ origin and preserve environment-grant checks.
 | `GET /api/v1/trace/objects/{object_ref}/claims/{claim_ref}` | One bounded authorized claim, its supporting observation references and explicit correction links |
 | `GET /api/v1/trace/objects/{object_ref}/claims/{claim_ref}/sources/{observation_ref}` | Bounded exact retained source range and its acquired metadata; membership in the named claim is required |
 | `GET /api/v1/trace/payloads/{payload_ref}` | An authorized object/snapshot-scoped manifest or bounded byte/part range; immutable revision required |
+| `POST /api/v1/trace/payloads/{payload_ref}/structure` | Explicit cancellable index admission for one authorized complete payload use; returns `202` with job bounds and progress |
+| `GET /api/v1/trace/structures/{job_id}` | Subject-owned progress or an indexed immediate-child page, with bounded lexical previews |
+| `DELETE /api/v1/trace/structures/{job_id}` | Cancel and release the Subject's disposable index and retained view |
 | `GET /api/v1/trace/changes` | SSE change invalidations from a bounded projection cursor, with reset/generation notices |
 | `GET /api/v1/trace/search` | Authorized generation/scoped search at a declared search checkpoint; paged snippets and object anchors |
 | `GET /api/v1/trace/reprojection` | Administrator-only active generation and bounded recent reprojection job status |
@@ -618,6 +621,31 @@ Payload range responses transport exact retained bytes as `application/octet-str
 The authorized reader payload use supplies semantic MIME and encoding; the HTTP endpoint
 does not choose another occurrence's derivation merely because its digest matches.
 Unobserved encoding stays absent in the read model; this does not erase retained bytes.
+
+### Structured payload exploration
+
+Structured exploration is an explicit workload over one authorized immutable payload
+use. It builds a disposable on-disk JSON index before exposing structural pages. The
+worker streams retained bytes with bounded buffers, node batches and nesting depth;
+it never builds an in-memory JSON value or fetches the complete body into the browser.
+A complete contiguous retained interval and known byte length are required. Gaps,
+malformed syntax, exceeded limits, cancellation and retired authorization remain
+explicit outcomes; none publishes a partial tree as a complete JSON document.
+
+Each node retains its value byte span, type, immediate parent and sibling ordinal.
+Object member names retain separate byte spans. Duplicate keys remain distinct members,
+number spelling and precision stay lexical, and long strings/names are skipped without
+allocating their whole value. Pages read an indexed parent/ordinal interval and bounded
+previews of the corresponding spans. Node identifiers belong to this disposable index,
+not the trace domain or a JSON Pointer that would merge duplicate member names.
+
+The job has independent source-byte, node, index-disk, depth, lifetime and concurrency
+bounds, returned to the caller. Its retained view and contributor authorization govern
+every scan chunk and read. Indices live under the trace root's disposable `structures` directory, never in vendor
+stores. Closing/cancelling releases the job's index and lease;
+expiration and restart discard the index without altering source evidence. Building
+reports progress; ready pages describe one validated source. Byte-range inspection
+remains available when structural exploration is unavailable.
 
 ### Operation result representations
 

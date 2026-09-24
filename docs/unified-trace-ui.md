@@ -408,7 +408,15 @@ path grows the reader's payload cache or stores the complete body in React state
 copy/download job per browser workspace runs at a time; ordinary reading remains usable.
 
 Text ranges preserve UTF-8 boundaries and document the returned range when adjusted.
-Structured values use paged object/array exploration. Binary content retains its media
+Structured values use paged object/array exploration. Opening it explicitly starts a
+cancellable index build with progress and resolved limits. Ready exploration shows one
+container's immediate children, bounded key/value previews, duplicate member occurrences
+and links into nested containers. Navigation moves focus to the explorer heading and names the current container.
+Back restores the preceding container/page; bounded
+history and page replacement keep navigation independent of total JSON size. Large
+scalar values remain exact-byte range reads. Malformed or incomplete JSON retains the
+ordinary byte view with an explicit structural-unavailability reason.
+Binary content retains its media
 type, dimensions/duration when known, and safe preview/download behavior. Filesystem
 paths resolve against the actual target environment and recorded working directory;
 they do not inherit the parent reader's file context.

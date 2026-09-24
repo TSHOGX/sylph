@@ -323,6 +323,82 @@ pub struct PayloadAccess {
     pub availability: ReadAvailability,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StructureLimits {
+    pub max_jobs: usize,
+    pub max_bytes: u64,
+    pub max_nodes: u64,
+    pub max_depth: u32,
+    pub max_index_bytes: u64,
+    pub chunk_bytes: usize,
+    pub page_items: usize,
+    pub preview_bytes: usize,
+    pub max_query_steps: u64,
+    pub lifetime_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StructureState {
+    Building,
+    Ready,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StructurePreview {
+    pub text: String,
+    pub truncated: bool,
+    pub start: u64,
+    pub end: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StructureKind {
+    Object,
+    Array,
+    String,
+    Number,
+    Boolean,
+    Null,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StructureNode {
+    pub id: u64,
+    pub parent: Option<u64>,
+    pub ordinal: u64,
+    pub kind: StructureKind,
+    pub start: u64,
+    pub end: u64,
+    pub children: u64,
+    pub name: Option<StructurePreview>,
+    pub preview: Option<StructurePreview>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StructureStatus {
+    pub id: String,
+    pub view: ReadView,
+    pub state: StructureState,
+    pub error: Option<String>,
+    pub bytes_read: u64,
+    pub total_bytes: u64,
+    pub nodes: u64,
+    pub expires_at_ms: i64,
+    pub limits: StructureLimits,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node: Option<StructureNode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub items: Option<Vec<StructureNode>>,
+    pub after: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PartSummary {
