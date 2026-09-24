@@ -42,6 +42,7 @@ import {
   type Inspection,
   type InspectionRequest,
   type ObjectInspectionTarget,
+  type OriginInspectionTarget,
 } from "./trace-inspector";
 import { TraceComposer } from "./trace-composer";
 
@@ -55,7 +56,12 @@ type AgentReaderProps = {
   initialView?: TraceView;
   anchorOffset?: number;
 } & (
-  | { companion: true; onInspect: (target: ObjectInspectionTarget) => void }
+  | {
+      companion: true;
+      onInspect: (
+        target: ObjectInspectionTarget | OriginInspectionTarget,
+      ) => void;
+    }
   | { companion?: false; onInspect?: never }
 );
 
@@ -357,7 +363,7 @@ export function AgentReader({
             },
           }
         : next;
-    if (companion && target.kind === "object") {
+    if (companion && (target.kind === "object" || target.kind === "origins")) {
       onInspect?.(target);
       return;
     }
@@ -404,6 +410,20 @@ export function AgentReader({
                     })}
                   </Link>
                 )}
+                <button
+                  className={traceButton}
+                  onClick={() =>
+                    inspect({
+                      kind: "origins",
+                      agent: data.header.agent.address,
+                      view: data.view,
+                      changeCursor: data.changeCursor,
+                      maximum: data.window.limits.maxPayloadBytes,
+                    })
+                  }
+                >
+                  {t("trace.origins")}
+                </button>
                 {data.header.origin && (
                   <Link
                     className={traceButton}

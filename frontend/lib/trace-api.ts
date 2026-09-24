@@ -1,6 +1,7 @@
 import { ApiError, fetchAPI } from "./api";
 import type {
   AgentDirectoryRow,
+  OriginAssertion,
   ClaimSummary,
   ClaimDetail,
   EvidenceBytes,
@@ -179,6 +180,17 @@ export const traceAPI = {
   ) =>
     fetchAPI<TracePage<SearchHit>>(
       `${base}/search${query({ q, cursor, at_snapshot: cursor ? view?.token : null })}`,
+      { signal },
+    ),
+  origins: (
+    agent: string,
+    view: TraceView,
+    cursor: string | null,
+    direction: "before" | "after",
+    signal?: AbortSignal,
+  ) =>
+    fetchAPI<TracePage<OriginAssertion>>(
+      `${base}/agents/${segment(agent)}/origins${query({ at_snapshot: view.token, [direction]: cursor })}`,
       { signal },
     ),
   results: (

@@ -218,6 +218,13 @@ export const zh: Dictionary = {
   "trace.findIn": "在{agent}中查找",
   "trace.parent": "父代理：{agent}",
   "trace.origin": "来源：{agent}",
+  "trace.origins": "来源",
+  "trace.originAssertions": "上下文来源",
+  "trace.originAssertionsNote":
+    "这些是留存的上下文谱系证据，不代表派生关系或作者身份。",
+  "trace.noOrigins": "此视图中没有可读取的来源证据。",
+  "trace.unresolvedOrigin": "来源不可用",
+  "trace.originProof": "查看来源证据",
   "trace.countUnknown": "{noun}数量未知",
   "trace.count": "{count} 个{noun}",
   "trace.countPartial": "{count} 个{noun} · 覆盖不完整",

@@ -982,6 +982,76 @@ fn rows(
                 .collect(),
         });
     }
+    if !projection.headers.is_empty() {
+        // Catalogue rows are assertions, not endpoint pairs. Combining pair support
+        // would make two independent proofs depend on each other's retention, while
+        // anchoring to the origin would hide the very unavailable state we must show.
+        let mut origins: Vec<_> = reduction
+            .relations
+            .iter()
+            .filter_map(|relation| match &relation.relation {
+                Relation::ContextLineage {
+                    recipient,
+                    original_owner,
+                    ..
+                } if projection.headers.contains_key(recipient) => {
+                    Some((&relation.claim, recipient, original_owner))
+                }
+                _ => None,
+            })
+            .collect();
+        origins.sort_by_key(|(claim, _, _)| (*claim).clone());
+        for (index, (claim, recipient, owner)) in origins.into_iter().enumerate() {
+            let subject = AnyObjectRef::Agent(recipient.clone());
+            let support = object_support(reduction, provenance, &subject)?;
+            let mut epochs: BTreeSet<_> = support.dependency_epochs.iter().cloned().collect();
+            let proof = support_index
+                .claim_dependencies(claim)
+                .ok_or_else(|| WorkerError::Task("Origin claim has no retained support".into()))?;
+            epochs.extend(proof.iter().cloned());
+            let origin = match owner {
+                OwnerRef::Agent { agent } => projection
+                    .headers
+                    .get(agent)
+                    .map(|header| header.agent.clone()),
+                _ => None,
+            };
+            let availability = if origin.is_some() {
+                ReadAvailability::Available
+            } else {
+                ReadAvailability::Unavailable {
+                    reason: match owner {
+                        OwnerRef::Agent { .. } => "Origin metadata is unavailable",
+                        _ => "The retained origin reference has not been resolved",
+                    }
+                    .into(),
+                }
+            };
+            let scope = read_scope(recipient, None, "origins");
+            let address = claim.encode();
+            rows.insert(
+                (scope.clone(), address.clone()),
+                ReadRowChange {
+                    directory: None,
+                    scope,
+                    address,
+                    anchor: None,
+                    order_key: (index as u64 + 1).to_be_bytes().to_vec(),
+                    body: Some(serde_json::to_value(ReadOrigin {
+                        claim: claim.clone(),
+                        origin,
+                        availability,
+                    })?),
+                    scope_epoch: support.primary_epoch.clone(),
+                    dependency_epochs: epochs,
+                    required_environments: std::iter::once(
+                        recipient.environment().as_str().to_owned(),
+                    )
+                    .collect(),
+                },
+            );
+        }
+    }
     Ok(rows)
 }
 

@@ -11,6 +11,7 @@ const button =
 const code =
   "max-h-80 overflow-auto whitespace-pre-wrap break-all rounded bg-sunken p-3 text-xs";
 type Props = {
+  initialClaim?: string;
   maximum: number;
   reference: string;
   history: string | null;
@@ -21,7 +22,7 @@ type Props = {
 /** Explicit inspection has its own one-page state and never hydrates source bodies automatically. */
 export function TraceEvidence(props: Props) {
   const t = useT();
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(Boolean(props.initialClaim));
   return (
     <section className="min-w-0">
       <button
@@ -39,7 +40,9 @@ function ClaimPage(props: Props) {
   const t = useT();
   const [cursor, setCursor] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(
+    props.initialClaim ?? null,
+  );
   const [corrects, setCorrects] = useState<string | null>(null);
   const result = useTraceResource(
     traceCacheKey(props.view, [

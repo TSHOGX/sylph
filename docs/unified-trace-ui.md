@@ -46,7 +46,11 @@ The reader header names the focused agent, its environment, and the selected his
 An optional nickname is display text; an unnamed child says `Unnamed agent` with a
 short identity suffix available for disambiguation. A root's title is not silently
 reused as a child's name. A breadcrumb describes recorded spawn ancestry, with a
-separate origin link for fork/context lineage. Long ancestry collapses into a bounded,
+separate origin link for fork/context lineage. An `Origins` inspection action pages the
+retained lineage assertions, including unresolved references and multiple origins.
+A row says when origin navigation is unavailable, offers it only for authorized target
+metadata, and links to its retained proof. It never chooses one of several assertions
+as the original actor or turns context lineage into spawn ancestry. Long ancestry collapses into a bounded,
 searchable navigation surface. It is never loaded recursively to open the reader.
 
 The header offers `Find in this agent`, `Agents`, and `History`. `Details` opens

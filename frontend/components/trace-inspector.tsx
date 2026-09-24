@@ -37,6 +37,7 @@ import { ResourceHistory, RevisionPayloads } from "./trace-resource-history";
 import { TracePayload } from "./trace-payload";
 import { OperationResults } from "./trace-operation-results";
 import { TraceEvidence } from "./trace-evidence";
+import { OriginDirectory, type OriginLocation } from "./trace-origins";
 import { ArtifactsPane } from "./artifacts-pane";
 const Companion = dynamic(() =>
   import("./agent-reader").then((module) => module.AgentReader),
@@ -52,7 +53,15 @@ export interface InspectionScope {
   anchor: string | null;
   offset: number;
 }
+export type OriginInspectionTarget = {
+  kind: "origins";
+  agent: string;
+  view: TraceView;
+  changeCursor: string;
+  maximum: number;
+};
 export type InspectionRequest =
+  | OriginInspectionTarget
   | { kind: "agents" | "find" | "history" | "coverage" | "files" }
   | { kind: "object"; reference: string; agent?: string }
   | {
@@ -94,6 +103,9 @@ export function TraceInspector({
   const [pinned, setPinned] = useState<
     Array<{ target: ObjectInspectionTarget; label: string }>
   >([]);
+  const [originPages, setOriginPages] = useState<
+    Record<string, OriginLocation>
+  >({});
   const [width, setWidth] = useState(480);
   const [directory, setDirectory] = useState<DirectoryLocation>({
     query: "",
@@ -116,7 +128,7 @@ export function TraceInspector({
       const view =
         target.kind === "object"
           ? target.scope.view
-          : target.kind === "agent"
+          : target.kind === "agent" || target.kind === "origins"
             ? target.view
             : null;
       if (view) views.set(view.token, view);
@@ -147,6 +159,17 @@ export function TraceInspector({
     if (!visible) return;
     const scopes = new Map<string, InspectionScope>();
     for (const target of [inspection, ...pinned.map((item) => item.target)]) {
+      if (target.kind === "origins") {
+        scopes.set(JSON.stringify([target.agent, target.view.token]), {
+          agent: target.agent,
+          history: null,
+          view: target.view,
+          changeCursor: target.changeCursor,
+          maximumPayloadBytes: target.maximum,
+          anchor: null,
+          offset: 0,
+        });
+      }
       if (target.kind === "object")
         scopes.set(
           JSON.stringify([target.scope.agent, target.scope.view.token]),
@@ -217,6 +240,16 @@ export function TraceInspector({
             anchor: null,
             offset: 0,
           };
+    if (inspection.kind === "origins") {
+      scope = {
+        ...scope,
+        agent: inspection.agent,
+        history: null,
+        view: inspection.view,
+        changeCursor: inspection.changeCursor,
+        maximumPayloadBytes: inspection.maximum,
+      };
+    }
     if (next.kind === "object" && next.agent && next.agent !== scope.agent) {
       scope = {
         ...scope,
@@ -457,6 +490,38 @@ export function TraceInspector({
           <div className="min-h-0 flex-1 overflow-auto p-3">
             {inspection.kind === "find" && (
               <AgentSearch bootstrap={bootstrap} />
+            )}
+            {inspection.kind === "origins" && (
+              <OriginDirectory
+                key={traceCacheKey(inspection.view, [
+                  inspection.agent,
+                  "origins",
+                ])}
+                {...inspection}
+                request={
+                  originPages[
+                    traceCacheKey(inspection.view, [inspection.agent])
+                  ] ?? { cursor: null, direction: "after", attempt: 0 }
+                }
+                setRequest={(value) =>
+                  setOriginPages((old) =>
+                    Object.fromEntries([
+                      ...Object.entries(old)
+                        .filter(
+                          ([key]) =>
+                            key !==
+                            traceCacheKey(inspection.view, [inspection.agent]),
+                        )
+                        .slice(-9),
+                      [
+                        traceCacheKey(inspection.view, [inspection.agent]),
+                        value,
+                      ],
+                    ]),
+                  )
+                }
+                onInspect={inspect}
+              />
             )}
             {inspection.kind === "history" && (
               <>

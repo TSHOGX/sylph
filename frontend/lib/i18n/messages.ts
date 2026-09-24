@@ -246,6 +246,14 @@ export const en = {
   "trace.findIn": "Find in {agent}",
   "trace.parent": "Parent: {agent}",
   "trace.origin": "Origin: {agent}",
+  "trace.origins": "Origins",
+  "trace.originAssertions": "Context origins",
+  "trace.originAssertionsNote":
+    "These are retained context-lineage assertions. They do not establish spawn ancestry or authorship.",
+  "trace.noOrigins":
+    "No authorized origin assertions are available in this view.",
+  "trace.unresolvedOrigin": "Origin unavailable",
+  "trace.originProof": "Inspect origin proof",
   "trace.countUnknown": "{noun} count unknown",
   "trace.count": "{count} {noun}",
   "trace.countPartial": "{count} {noun} · coverage incomplete",

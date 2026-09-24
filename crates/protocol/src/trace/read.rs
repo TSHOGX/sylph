@@ -642,6 +642,15 @@ pub struct ReadRelation {
     pub agent: Option<AgentLink>,
 }
 
+/// One retained lineage assertion; its target metadata is authorized independently.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReadOrigin {
+    pub claim: ClaimRef,
+    pub origin: Option<AgentLink>,
+    pub availability: ReadAvailability,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",

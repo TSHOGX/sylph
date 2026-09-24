@@ -592,6 +592,7 @@ origin and preserve environment-grant checks.
 | `GET /api/v1/trace/agents/{agent_ref}` | Bounded agent identity, known histories, current selection, coverage, cuts, own state, relations summary and authorized action target |
 | `GET /api/v1/trace/agents/{agent_ref}/history` | Keyset page of directly readable entries under an explicit history selection; optional around-object anchor |
 | `GET /api/v1/trace/agents/{agent_ref}/relations` | Focused agent and recorded spawn descendants, searched and paged at the retained view; counts name that scope |
+| `GET /api/v1/trace/agents/{agent_ref}/origins` | Bounded context-lineage assertions with independently authorized target navigation; unresolved and unavailable origins remain explicit |
 | `GET /api/v1/trace/agents/{agent_ref}/activations` | Bounded own activation summaries; unknown associations stay outside invented containers |
 | `GET /api/v1/trace/objects/{object_ref}` | One typed summary, provenance and unresolved/conflicting fields; no eager body/tree |
 | `GET /api/v1/trace/objects/{object_ref}/relations` | Bounded operations/results/resources/deliveries/evidence relations, with a typed filter |
@@ -646,6 +647,18 @@ stores. Closing/cancelling releases the job's index and lease;
 expiration and restart discard the index without altering source evidence. Building
 reports progress; ready pages describe one validated source. Byte-range inspection
 remains available when structural exploration is unavailable.
+
+### Context origin catalogue
+
+The origin catalogue pages retained `ContextLineage` assertions by their claim identity.
+Each row depends on the recipient and that assertion's evidence; it does not depend on
+another assertion naming the same endpoint or on the origin's independently retained
+metadata. Unresolved owners remain rows without invented navigation. Target metadata
+is checked separately against current grants and the target epoch retained in the view;
+unavailable targets keep a generic unavailable explanation without exposing their name
+or address. Every page uses the normal retained-view, item/byte and query-work bounds.
+The unique-origin header shortcut remains conservative and does not select an origin
+from multiple or unresolved assertions.
 
 ### Operation result representations
 

@@ -264,6 +264,14 @@ and deletion while a page is prepared. `frontend/e2e/trace-structure.spec.ts` co
 explicit admission, bounded navigation, duplicate labels and cleanup of late admission.
 The added parser runs only on the server; the browser component loads on explicit demand.
 
+Origin assertion acceptance in `crates/server/src/trace/worker/tests/provenance/lineage.rs`
+keeps unresolved/missing targets visible, authorizes each proof independently, and pages
+within the configured limits. It verifies that deleting one of two assertions naming the
+same endpoints leaves the other readable, that exact claim inspection remains available,
+and that target revocation neither leaks metadata nor expires the recipient's view.
+`frontend/e2e/trace-origins.spec.ts` covers lazy catalogue/proof reads, failed-page retry,
+independent origin navigation, bounded Back state and preserved drafts at both widths.
+
 ## Reproducible checks
 
 The vendor audit works entirely from retained sanitized artifacts by default:

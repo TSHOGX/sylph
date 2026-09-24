@@ -118,6 +118,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/trace/agents/{agent}/relations", get(relations))
         .route("/api/v1/trace/agents/{agent}/activations", get(activations))
         .route("/api/v1/trace/agents/{agent}/histories", get(histories))
+        .route("/api/v1/trace/agents/{agent}/origins", get(origins))
         .route("/api/v1/trace/agents/{agent}/control", get(control))
         .route("/api/v1/trace/agents/{agent}/commands", get(command_list))
         .route("/api/v1/trace/objects/{object}", get(object))
@@ -1733,6 +1734,36 @@ async fn activations(
     result.total.scope = "own activations".into();
     lease.retain();
     Ok(Json(result))
+}
+
+async fn origins(
+    State(state): State<AppState>,
+    Extension(subject): Extension<SubjectId>,
+    Path(encoded): Path<String>,
+    Query(query): Query<ReadQuery>,
+) -> Result<Json<ReadPage<ReadOrigin>>> {
+    if query.selection.is_some() {
+        return Err(invalid(
+            "Context origins are independent of history selection",
+        ));
+    }
+    let agent = agent(&encoded)?;
+    observe(&state, &subject.0, &agent).await?;
+    let lease = lease(&state, &subject.0, query.at_snapshot.as_deref()).await?;
+    let mut page: ReadPage<ReadOrigin> = page(
+        &state, &subject.0, &lease, &agent, None, "origins", &query, false,
+    )
+    .await?;
+    for row in &mut page.items {
+        if row.origin.is_none() && row.availability == ReadAvailability::Available {
+            row.availability = ReadAvailability::Unavailable {
+                reason: "Origin metadata is unavailable in this view".into(),
+            };
+        }
+    }
+    page.returned_bytes = serde_json::to_vec(&page.items).map_err(internal)?.len();
+    lease.retain();
+    Ok(Json(page))
 }
 
 async fn histories(

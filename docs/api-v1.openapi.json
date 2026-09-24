@@ -4152,6 +4152,95 @@
           }
         }
       }
+    },
+    "/api/v1/trace/agents/{agent}/origins": {
+      "get": {
+        "summary": "Page retained context-origin assertions independently of history selection",
+        "parameters": [
+          {
+            "name": "agent",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "at_snapshot",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "around",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/ReadPage"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "items": {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/components/schemas/ReadOrigin"
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request, authorization, state or storage error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "description": "One row per authorized lineage claim. Origin navigation requires independently authorized target metadata; unresolved and unavailable targets remain explicit."
+      }
     }
   },
   "components": {
@@ -5404,6 +5493,43 @@
           "limits",
           "after"
         ]
+      },
+      "ReadOrigin": {
+        "type": "object",
+        "required": [
+          "claim",
+          "origin",
+          "availability"
+        ],
+        "properties": {
+          "claim": {
+            "type": "string"
+          },
+          "origin": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Only currently authorized retained target metadata; absent when unresolved or unavailable."
+          },
+          "availability": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "available",
+                  "unavailable"
+                ]
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          }
+        }
       }
     }
   }

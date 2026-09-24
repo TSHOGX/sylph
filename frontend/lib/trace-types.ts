@@ -421,6 +421,11 @@ export interface ResultRepresentationEntry {
     | { kind: "unobserved" }
     | { kind: "pending"; phase: "payload" | "occurrence"; cursor: string };
 }
+export interface OriginAssertion {
+  claim: string;
+  origin: AgentLink | null;
+  availability: Availability;
+}
 export interface TraceRelation {
   target: TraceAddress;
   containingAgent: string;
