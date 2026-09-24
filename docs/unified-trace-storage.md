@@ -405,7 +405,20 @@ one pending slot per record. The replay index binds source, generation and inges
 contains canonical occurrences only, and seeks within the fixed evidence cut. Resolving
 the dependency resumes bounded pages from the last committed mapper state; a long blocked
 tail cannot prevent the projection from reaching the later attachment that releases it.
-Independent correlation joins do not impose this source-order barrier.
+Stateless correlation joins do not impose this source-order barrier. A multiplexed
+stateful SDK transport partitions its checkpoints by the vendor's explicit routing
+fields. A blocked child partition retains one head while parent frames in the same
+physical source can advance and supply its identity certificate. Tail replay filters
+physical source pages by that same pure partition classifier; skipped envelopes consume
+the replay's item and byte budgets. Partition keys hash the canonical routing tuple to
+keep checkpoint keys bounded. They are private processing coordinates, never synthetic
+agents or rewritten source positions. A malformed record whose partition
+cannot be established stops later frames in every partition of that physical source.
+Already retained prefixes may still finish when their missing certificates arrive;
+the gap cannot erase earlier observations. Dependency progress during tail replay commits
+one retry flag on newly ready pending mappings. Considering a retry consumes that flag even if its dependency is no longer ready, so
+an idle or restarted worker finishes the same evidence cut without a fresh capture or spinning on
+unchanged dependencies.
 
 Late owner and origin certificates share one vendor-independent refinement mechanism.
 Plans index the exact dependency keys and retain immutable base claim references,

@@ -144,6 +144,8 @@ struct CorrelationBinding {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PendingMapping {
+    /// A committed dependency advance schedules one further bounded retry.
+    ready: bool,
     admitted: AdmittedMapping,
     state: MapperState,
     requests: Vec<ArchiveRequest>,
@@ -154,6 +156,7 @@ struct PendingMapping {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SourceReplayCursor {
+    physical_key: String,
     source: SourceRef,
     generation: u64,
     epoch: IngestionEpoch,
@@ -167,6 +170,7 @@ struct AdmittedMapping {
     occurrence_id: u64,
     canonical_observation: ObservationRef,
     capture: Capture,
+    partition: Option<String>,
 }
 
 impl From<AdmittedCapture> for AdmittedMapping {
@@ -176,6 +180,7 @@ impl From<AdmittedCapture> for AdmittedMapping {
             occurrence_id: value.occurrence_id,
             canonical_observation: value.canonical_observation_ref,
             capture: value.capture,
+            partition: None,
         }
     }
 }
@@ -551,12 +556,13 @@ impl ProjectionWorker {
                         // bounds. Keep it and suspend this source instead of losing
                         // bytes or reusing potentially stale lifecycle state.
                         let mut limited = ProjectionUnit::new(&state, unit_cut);
-                        let admitted = AdmittedMapping::from(captures[0].clone());
+                        let mut admitted = AdmittedMapping::from(captures[0].clone());
                         let proof = self
                             .catalogue
                             .scope_proof(&admitted.capture.ingestion_authorization_epoch)
                             .await?;
                         let vendor = mapper_vendor(&admitted.capture, &proof.scope);
+                        self.partition(&mut admitted, vendor).await?;
                         let key = source_key(&admitted, mapper(vendor)?.build())?;
                         limited.gap(&key,&admitted,DiagnosticCode::ResourceLimit,format!("Projection expansion exceeds {reason}; this source requires reprojection"))?;
                         limited
@@ -599,6 +605,7 @@ impl ProjectionWorker {
         through: u64,
     ) -> Result<ProjectionUnit> {
         let mut unit = ProjectionUnit::new(state, through);
+        let mut dependency_progress = !captures.is_empty();
         unit.batch.continuation = through == state.cut();
         let mut processed = BTreeSet::new();
         for captured in captures {
@@ -623,7 +630,7 @@ impl ProjectionWorker {
                 captured.canonical_observation_ref.clone(),
                 captured.capture.source_position.clone(),
             );
-            let admitted = AdmittedMapping::from(captured.clone());
+            let mut admitted = AdmittedMapping::from(captured.clone());
             let proof = self
                 .catalogue
                 .scope_proof(&admitted.capture.ingestion_authorization_epoch)
@@ -639,14 +646,20 @@ impl ProjectionWorker {
             {
                 return Err(WorkerError::MapperBuild(vendor.into()));
             }
+            let partition_error = self.partition(&mut admitted, vendor).await?;
             let key = source_key(&admitted, build)?;
+            let physical = physical_source_key(&admitted, build)?;
             unit.scopes.push((
                 admitted.capture.ingestion_authorization_epoch.clone(),
                 admitted.admission_seq,
             ));
             // Only this source generation waits; raw admission and independent
             // attachment/inventory mappings continue under their existing bounds.
-            if let Some(cursor) = unit.next.source_replays.get_mut(&key) {
+            if let Some(code) = partition_error {
+                unit.gap(&physical,&admitted,code,"Source routing is invalid or exceeds its semantic budget; source requires reprojection".into())?;
+            } else if let Some(gap) = unit.next.gaps.get(&physical).cloned() {
+                unit.gap(&physical, &admitted, gap.code, gap.reason)?;
+            } else if let Some(cursor) = unit.next.source_replays.get_mut(&key) {
                 cursor.through = cursor.through.max(admitted.admission_seq);
                 unit.batch.mapper_states.insert(
                     format!("source_replay:{key}"),
@@ -701,15 +714,19 @@ impl ProjectionWorker {
             let mut pending_records = unit.next.pending.values().cloned().collect::<Vec<_>>();
             pending_records.sort_by_key(|pending| pending.admitted.admission_seq);
             for pending in pending_records {
+                if pending.source_order.is_some()
+                    && ordered_applied >= self.limits.max_unit_observations
+                {
+                    continue;
+                }
+                if pending.ready {
+                    // Readiness can go stale before the next attempt. Consume it
+                    // even when the current dependency probe cannot dispatch work.
+                    let mut consumed = pending.as_ref().clone();
+                    consumed.ready = false;
+                    self.save_pending(&mut unit, consumed)?;
+                }
                 if let Some(key) = &pending.source_order {
-                    if ordered_applied >= self.limits.max_unit_observations {
-                        continue;
-                    }
-                    if !pending.requests.is_empty()
-                        && !requests_may_resolve(&pending.requests, &unit.next)
-                    {
-                        continue;
-                    }
                     if let Some(gap) = unit.next.gaps.get(key).cloned() {
                         unit.gap(key, &pending.admitted, gap.code, gap.reason)?;
                         let id = pending.admitted.canonical_observation.encode();
@@ -717,6 +734,11 @@ impl ProjectionWorker {
                         unit.batch
                             .mapper_states
                             .insert(format!("pending:{id}"), serde_json::Value::Null);
+                        continue;
+                    }
+                    if !pending.requests.is_empty()
+                        && !requests_may_resolve(&pending.requests, &unit.next)
+                    {
                         continue;
                     }
                     ordered_applied += 1;
@@ -806,6 +828,7 @@ impl ProjectionWorker {
             if before == after {
                 break;
             }
+            dependency_progress = true;
             self.reduce_unit(&mut unit).await?;
             if pass + 1 == self.limits.max_resolution_passes
                 && unit.next.pending.values().any(|pending| {
@@ -817,7 +840,26 @@ impl ProjectionWorker {
                 return Err(WorkerError::Limit("pending dependency closure"));
             }
         }
-        self.replay_source_tails(&mut unit, through).await?;
+        dependency_progress |= self.replay_source_tails(&mut unit, through).await?;
+        if dependency_progress {
+            // Tail replay can produce an identity or object after the resolution
+            // loop ran. Persist one retry instead of requiring a future capture.
+            // apply_output consumes the flag; unchanged dependencies cannot spin.
+            let ready: Vec<_> = unit
+                .next
+                .pending
+                .values()
+                .filter(|pending| {
+                    !pending.ready && requests_may_resolve(&pending.requests, &unit.next)
+                })
+                .cloned()
+                .collect();
+            for pending in ready {
+                let mut pending = pending.as_ref().clone();
+                pending.ready = true;
+                self.save_pending(&mut unit, pending)?;
+            }
+        }
         if unit.next.reducer.len() > self.limits.max_reducer_claims {
             return Err(WorkerError::Limit("retained reducer claims"));
         }
@@ -1121,6 +1163,52 @@ impl ProjectionWorker {
             }
         }
         Ok(())
+    }
+
+    async fn partition(
+        &self,
+        admitted: &mut AdmittedMapping,
+        vendor: &str,
+    ) -> Result<Option<DiagnosticCode>> {
+        let Some(classify) = mapper(vendor)?.source_partitioner(&admitted.capture) else {
+            return Ok(None);
+        };
+        let raw = match self
+            .evidence
+            .payload_bytes(&admitted.capture.payload_ref, self.limits.max_decode_bytes)
+            .await
+        {
+            Ok(raw) => raw,
+            Err(EvidenceError::Limit(_)) => return Ok(Some(DiagnosticCode::ResourceLimit)),
+            Err(error) => return Err(error.into()),
+        };
+        let limits = self.limits.clone();
+        let permit = self
+            .cpu
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|error| WorkerError::Task(error.to_string()))?;
+        let partition = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            match budget::validate(&raw, &limits) {
+                Ok(()) => classify(&raw),
+                Err(budget::Failure::ResourceLimit) => Err(DiagnosticCode::ResourceLimit),
+                Err(budget::Failure::Malformed) => Err(DiagnosticCode::DecodeFailure),
+            }
+        })
+        .await
+        .map_err(|error| WorkerError::Task(error.to_string()))?;
+        match partition {
+            Ok(partition) => {
+                // A private processing key, never a source or AgentRef. Hash the
+                // canonical routing tuple so JSON escaping cannot multiply valid
+                // identity lengths past the generation's checkpoint-key budget.
+                admitted.partition = Some(blake3::hash(partition.as_bytes()).to_hex().to_string());
+                Ok(None)
+            }
+            Err(code) => Ok(Some(code)),
+        }
     }
 
     async fn map_record(
@@ -1450,6 +1538,7 @@ impl ProjectionWorker {
                 .insert(format!("pending:{id}"), serde_json::Value::Null);
         } else {
             let pending = PendingMapping {
+                ready: false,
                 admitted: admitted.clone(),
                 state: output
                     .continuation_state
@@ -1469,11 +1558,22 @@ impl ProjectionWorker {
                 },
             };
             if let Some(key) = &pending.source_order {
+                let physical = {
+                    let proof = self
+                        .catalogue
+                        .scope_proof(&admitted.capture.ingestion_authorization_epoch)
+                        .await?;
+                    physical_source_key(
+                        admitted,
+                        mapper(mapper_vendor(&admitted.capture, &proof.scope))?.build(),
+                    )?
+                };
                 let cursor = unit
                     .next
                     .source_replays
                     .entry(key.clone())
                     .or_insert_with(|| SourceReplayCursor {
+                        physical_key: physical,
                         source: admitted.capture.source_position.source.clone(),
                         generation: admitted.capture.source_position.generation,
                         epoch: admitted.capture.ingestion_authorization_epoch.clone(),
@@ -1523,7 +1623,7 @@ impl ProjectionWorker {
         Ok(())
     }
 
-    async fn replay_source_tails(&self, unit: &mut ProjectionUnit, through: u64) -> Result<()> {
+    async fn replay_source_tails(&self, unit: &mut ProjectionUnit, through: u64) -> Result<bool> {
         let keys: Vec<_> = unit.next.source_replays.keys().cloned().collect();
         let mut replayed = 0usize;
         let mut input_bytes = 0usize;
@@ -1536,6 +1636,8 @@ impl ProjectionWorker {
             {
                 continue;
             }
+            // A physical routing gap stops new admissions from extending lane
+            // cursors. Their already retained, earlier prefixes remain replayable.
             if unit.next.gaps.contains_key(&key) {
                 unit.next.source_replays.remove(&key);
                 unit.batch
@@ -1578,14 +1680,36 @@ impl ProjectionWorker {
                 {
                     break;
                 }
-                let admitted = AdmittedMapping::from(record);
+                let mut admitted = AdmittedMapping::from(record);
                 let proof = self
                     .catalogue
                     .scope_proof(&admitted.capture.ingestion_authorization_epoch)
                     .await?;
                 let vendor = mapper_vendor(&admitted.capture, &proof.scope);
-                if source_key(&admitted, mapper(vendor)?.build())? != key {
+                if let Some(code) = self.partition(&mut admitted, vendor).await? {
+                    unit.gap(&cursor.physical_key,&admitted,code,"Source routing is invalid or exceeds its semantic budget; source requires reprojection".into())?;
+                    unit.next.source_replays.remove(&key);
+                    unit.batch
+                        .mapper_states
+                        .insert(format!("source_replay:{key}"), serde_json::Value::Null);
+                    break;
+                }
+                let build = mapper(vendor)?.build();
+                if physical_source_key(&admitted, build)? != cursor.physical_key {
                     return Err(WorkerError::CorrelationConflict);
+                }
+                if source_key(&admitted, build)? != key {
+                    // Other lanes already advanced during ordinary admission. Seeking
+                    // the physical tail must neither replay them nor skip work credit.
+                    let cursor = unit.next.source_replays.get_mut(&key).unwrap();
+                    cursor.after = admitted.admission_seq;
+                    unit.batch.mapper_states.insert(
+                        format!("source_replay:{key}"),
+                        serde_json::to_value(cursor)?,
+                    );
+                    replayed += 1;
+                    input_bytes = input_bytes.saturating_add(length);
+                    continue;
                 }
                 let original = unit
                     .next
@@ -1640,7 +1764,7 @@ impl ProjectionWorker {
         if replayed > 0 {
             self.reduce_unit(unit).await?;
         }
-        Ok(())
+        Ok(replayed > 0)
     }
 
     async fn stage_derived(
@@ -1841,11 +1965,22 @@ fn mapper(vendor: &str) -> Result<Box<dyn SemanticMapper>> {
 }
 
 fn source_key(admitted: &AdmittedMapping, build: &str) -> Result<String> {
+    partition_source_key(admitted, build, admitted.partition.as_deref())
+}
+fn physical_source_key(admitted: &AdmittedMapping, build: &str) -> Result<String> {
+    partition_source_key(admitted, build, None)
+}
+fn partition_source_key(
+    admitted: &AdmittedMapping,
+    build: &str,
+    partition: Option<&str>,
+) -> Result<String> {
     Ok(serde_json::to_string(&(
         &admitted.capture.source_position.source,
         admitted.capture.source_position.generation,
         &admitted.capture.ingestion_authorization_epoch,
         build,
+        partition,
     ))?)
 }
 
@@ -1933,12 +2068,12 @@ fn has_ready_continuations(
     all: &imbl::OrdMap<String, Arc<PendingMapping>>,
     replays: &imbl::OrdMap<String, SourceReplayCursor>,
 ) -> bool {
-    all.values()
-        .any(|pending| pending.requests.iter().any(ArchiveRequest::is_continuation))
-        || replays.keys().any(|key| {
-            !all.values()
-                .any(|pending| pending.source_order.as_ref() == Some(key))
-        })
+    all.values().any(|pending| {
+        pending.ready || pending.requests.iter().any(ArchiveRequest::is_continuation)
+    }) || replays.keys().any(|key| {
+        !all.values()
+            .any(|pending| pending.source_order.as_ref() == Some(key))
+    })
 }
 
 fn requests_may_resolve(requests: &[ArchiveRequest], state: &WorkerState) -> bool {

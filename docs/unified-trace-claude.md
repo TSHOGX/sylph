@@ -121,6 +121,19 @@ with a decode diagnostic instead of keeping a plausible empty input. These conte
 boundaries do not establish tool execution or delivery admission. A message-stop final
 preserves part identities and all accumulated content without closing the SDK loop.
 
+The SDK's explicit `session_id` and `parent_tool_use_id` partition stateful processing
+within one captured source/generation/authorization epoch. A missing child certificate
+holds that partition's ordered tail; unrelated parent and child routes continue. A later
+certificate resumes from the last committed partition state, including after restart.
+A routing gap stops subsequent frames but does not erase a valid earlier prefix whose
+certificate arrives later. The host field remains a routing coordinate, never an agent
+identity. Captured `control_request`, `control_response`, `control_cancel_request` and
+`keep_alive` envelopes belong to the SDK transport-control union from the pinned
+declarations. They need no session ID and do not alter content-lane state or create
+execution facts; the control plane owns their effects. Frames keep their
+original source positions, and equivalent host bindings do not merge unproved stream
+continuity between different host routes.
+
 Per-source sequence and native history ancestry remain separate from server admission
 order. The same observed timestamp can label several blocks. Cross-source timestamps
 do not settle which child or operation caused a notification.

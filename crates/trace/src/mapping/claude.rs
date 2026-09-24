@@ -40,9 +40,51 @@ struct LiveStream {
     evidence: Vec<ObservationRef>,
 }
 
+fn transport_control(kind: &str) -> bool {
+    matches!(
+        kind,
+        "control_request" | "control_response" | "control_cancel_request" | "keep_alive"
+    )
+}
+
+fn source_partition(raw: &[u8]) -> Result<String, DiagnosticCode> {
+    #[derive(Deserialize)]
+    struct Routing<'a> {
+        #[serde(rename = "type", borrow)]
+        kind: std::borrow::Cow<'a, str>,
+        #[serde(borrow)]
+        session_id: Option<&'a serde_json::value::RawValue>,
+        #[serde(borrow)]
+        parent_tool_use_id: Option<&'a serde_json::value::RawValue>,
+    }
+    let route: Routing<'_> =
+        serde_json::from_slice(raw).map_err(|_| DiagnosticCode::DecodeFailure)?;
+    // The pinned SDK StdoutMessage union explicitly includes these sessionless
+    // transport envelopes. They neither own nor interrupt a model stream.
+    if transport_control(&route.kind) {
+        return Ok("claude-transport-control".into());
+    }
+    let session: String =
+        serde_json::from_str(route.session_id.ok_or(DiagnosticCode::MissingOwner)?.get())
+            .map_err(|_| DiagnosticCode::DecodeFailure)?;
+    if session.is_empty() {
+        return Err(DiagnosticCode::MissingOwner);
+    }
+    let host: Option<String> = route
+        .parent_tool_use_id
+        .map(|value| serde_json::from_str(value.get()))
+        .transpose()
+        .map_err(|_| DiagnosticCode::DecodeFailure)?
+        .flatten();
+    Ok(serde_json::to_string(&(session, host)).unwrap())
+}
+
 impl SemanticMapper for ClaudeMapper {
+    fn source_partitioner(&self, capture: &Capture) -> Option<super::SourcePartitioner> {
+        (capture.transport_kind == TransportKind::LiveStdout).then_some(source_partition)
+    }
     fn build(&self) -> &'static str {
-        "claude-10"
+        "claude-11"
     }
     fn map(&self, input: MapInput<'_>) -> MapOutput {
         if let Some(output) = super::resume_refinements(&input) {
@@ -68,6 +110,11 @@ impl SemanticMapper for ClaudeMapper {
                 return output;
             }
         };
+        if input.capture.transport_kind == TransportKind::LiveStdout
+            && text(&value, "type").is_some_and(transport_control)
+        {
+            return output;
+        }
         let mut state = match input
             .state
             .values
@@ -1248,6 +1295,7 @@ impl Context<'_, '_> {
                     agent.clone()
                 }
                 _ => {
+                    self.output.blocks_source = true;
                     self.request(&root, "claude.parent-tool-use", vec![host.into()]);
                     // A missing join describes this mapping attempt. Keeping it
                     // as an immutable failure would make source arrival order

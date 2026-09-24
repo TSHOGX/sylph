@@ -72,11 +72,13 @@ async fn candidate_state_clones_share_nonempty_roots_and_isolate_large_values_at
             committed.pending.insert(
                 key.clone(),
                 Arc::new(PendingMapping {
+                    ready: false,
                     admitted: AdmittedMapping {
                         admission_seq: 1,
                         occurrence_id: 1,
                         canonical_observation: capture.observation_ref.clone(),
                         capture: capture.clone(),
+                        partition: None,
                     },
                     state: state.as_ref().clone(),
                     requests: vec![ArchiveRequest::ContinueHistory],
@@ -86,6 +88,7 @@ async fn candidate_state_clones_share_nonempty_roots_and_isolate_large_values_at
             committed.source_replays.insert(
                 key.clone(),
                 SourceReplayCursor {
+                    physical_key: key.clone(),
                     source: capture.source_position.source.clone(),
                     generation: 0,
                     epoch: fixture.epoch.clone(),

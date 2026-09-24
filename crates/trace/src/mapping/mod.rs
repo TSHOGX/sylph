@@ -388,9 +388,15 @@ pub fn command_identity_key(issuer: &Issuer, command_id: &str) -> String {
 
 pub const DERIVED_PAYLOAD_CHUNK_BYTES: usize = 1024 * 1024;
 
+/// Optional pure classifier for independently ordered lanes in one vendor transport.
+pub type SourcePartitioner = fn(&[u8]) -> Result<String, DiagnosticCode>;
+
 /// Malformed/unsupported vendor data returns diagnostic claims rather than a silent
 /// empty parse. Envelope/storage failure remains the worker's separate admission error.
 pub trait SemanticMapper: Send + Sync {
+    fn source_partitioner(&self, _capture: &Capture) -> Option<SourcePartitioner> {
+        None
+    }
     fn build(&self) -> &'static str;
     fn map(&self, input: MapInput<'_>) -> MapOutput;
 }

@@ -221,3 +221,37 @@ fn correlations_from_forwarded_frames_keep_each_transitive_routing_certificate()
         );
     }
 }
+
+#[test]
+fn sdk_partitioning_preserves_escaped_identity_and_refuses_malformed_routing_fields() {
+    let capture = capture(0, true);
+    let classify = ClaudeMapper.source_partitioner(&capture).unwrap();
+    let plain =
+        classify(br#"{"type":"stream_event","session_id":"root","parent_tool_use_id":"host"}"#)
+            .unwrap();
+    assert_eq!(
+        plain,
+        classify(
+            br#"{"type":"stream_event","session_id":"r\u006fot","parent_tool_use_id":"ho\u0073t"}"#
+        )
+        .unwrap()
+    );
+    assert_ne!(
+        plain,
+        classify(br#"{"type":"stream_event","session_id":"root","parent_tool_use_id":null}"#)
+            .unwrap()
+    );
+    assert_ne!(
+        plain,
+        classify(
+            br#"{"type":"stream_event","session_id":"other-root","parent_tool_use_id":"host"}"#
+        )
+        .unwrap()
+    );
+    assert!(
+        classify(br#"{"type":"stream_event","session_id":"root","parent_tool_use_id":42}"#)
+            .is_err()
+    );
+    assert!(classify(br#"{"type":"stream_event","parent_tool_use_id":"host"}"#).is_err());
+    assert!(classify(br#"{"type":"stream_event","session_id":""}"#).is_err());
+}

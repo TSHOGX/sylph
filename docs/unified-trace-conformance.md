@@ -106,7 +106,18 @@ The retained material is:
   `crates/trace/src/mapping/claude/tests/forwarding.rs` additionally checks bounded
   refinement and transitive correlation certificates; template admission cannot bypass
   the configured semantic-expansion limit. These variations do not claim another vendor
-  recording.
+  recording. `crates/server/src/trace/worker/tests/claude_forwarding/streams.rs`
+  exercises protocol-derived interleaved SDK start/delta/final frames with late identity,
+  a certificate returned later on the same SDK source, restart, reread and cold rebuilding.
+  A long blocked lane retains one pending head while parent history advances; direct
+  continuation checks measure skipped-envelope item and byte credit against configured
+  bounds. Malformed routing fences the physical source across restart without creating
+  another root activation or stopping an independent source; its valid earlier prefixes
+  remain replayable when their route resolves. Sessionless control/keep-alive envelopes
+  from the pinned stdout union preserve content assembly without creating execution.
+  A nested late-route case commits and reopens ready grandchild work, then finishes at
+  the same evidence cut without requiring another capture. A stale ready flag returns
+  to a blocked wait instead of spinning at that cut.
   Synthetic failures separately test unrelated agentId fields, failed resume results,
   overlapping starts, old notifications, transient missing invocation evidence and
   bounded completed-task checkpoints. No unobserved child SDK loop is fabricated.

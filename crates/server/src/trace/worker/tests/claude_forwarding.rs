@@ -281,3 +281,5 @@ async fn deferred_forwarding_templates_cannot_bypass_the_semantic_expansion_limi
         raw
     );
 }
+
+mod streams;

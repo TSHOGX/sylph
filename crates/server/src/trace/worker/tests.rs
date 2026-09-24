@@ -1619,6 +1619,7 @@ mod workload;
 async fn zero_cut_continuation(fixture: &Fixture, name: &str) -> GenerationStore {
     let (generation, _) = fixture.generation(name).await;
     let replay = SourceReplayCursor {
+        physical_key: "empty-tail".into(),
         source: SourceRef {
             issuer: Issuer::Environment(EnvironmentId::parse("env7fk2").unwrap()),
             instance: "empty-tail".into(),
