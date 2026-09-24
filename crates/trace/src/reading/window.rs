@@ -244,6 +244,7 @@ impl super::Index<'_> {
                         anchor: TraceAddress::of(&anchor),
                         order_basis,
                         source_surface: source_label(entry_ref),
+                        entry_context: None,
                         activation: operation
                             .activation
                             .as_ref()
@@ -282,6 +283,7 @@ impl super::Index<'_> {
                     anchor: TraceAddress::of(&anchor),
                     order_basis,
                     source_surface: source_label(entry_ref),
+                    entry_context: None,
                     activation: None,
                     content: ReadingContent::ContextBoundary {
                         checkpoint: TraceAddress::of(&AnyObjectRef::ContextCheckpoint(
@@ -296,6 +298,7 @@ impl super::Index<'_> {
                     anchor: TraceAddress::of(&anchor),
                     order_basis,
                     source_surface: source_label(entry_ref),
+                    entry_context: None,
                     activation: None,
                     content: ReadingContent::Unknown {
                         label: "Retained content".into(),
@@ -312,6 +315,17 @@ impl super::Index<'_> {
                     },
                 }),
             }
+        }
+        // The entry owns this assertion. Origin metadata is an independently
+        // authorized link, so losing it must not erase inherited context.
+        let context = entry.original_owner.as_ref().map(|owner| match owner {
+            OwnerRef::Agent { agent } => ReadEntryContext::Inherited {
+                original_owner: Some(self.agent_link(agent)),
+            },
+            OwnerRef::Unresolved { .. } | OwnerRef::Unknown => ReadEntryContext::Unresolved,
+        });
+        for unit in &mut units {
+            unit.entry_context = context.clone();
         }
         units
     }
@@ -376,7 +390,10 @@ pub(super) fn group_work(units: impl IntoIterator<Item = ReadingUnit>) -> Vec<Re
             },
         ) = (grouped.last_mut(), &unit.content)
         {
-            if previous.activation == unit.activation && unit.activation.is_some() {
+            if previous.activation == unit.activation
+                && unit.activation.is_some()
+                && previous.entry_context == unit.entry_context
+            {
                 if let ReadingContent::Work {
                     owner: prior_owner,
                     operations: prior_operations,

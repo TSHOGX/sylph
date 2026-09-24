@@ -443,13 +443,18 @@ fn inherited_content_keeps_original_authorship_without_a_recipient_activation() 
             agent: Some(author),
             ..
         },
-        original_owner: Some(original),
         ..
     } = &units[0].content
     else {
         panic!("authorship and inherited provenance missing")
     };
     assert_eq!(author.address.agent(), agent());
+    let Some(ReadEntryContext::Inherited {
+        original_owner: Some(original),
+    }) = &units[0].entry_context
+    else {
+        panic!("inherited context missing");
+    };
     assert_eq!(original.address.agent(), agent());
 }
 
@@ -1665,3 +1670,5 @@ fn unclassified_payload_uses_can_borrow_only_their_own_immutable_manifest_format
         }
     }
 }
+
+mod entry_context;

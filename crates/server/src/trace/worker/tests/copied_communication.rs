@@ -206,10 +206,10 @@ async fn expected(
         .unwrap();
     assert_eq!(page.rows.len(), 1);
     let unit: ReadingUnit = serde_json::from_value(page.rows[0].body.clone()).unwrap();
-    let ReadingContent::Message {
+    assert!(matches!(unit.content, ReadingContent::Message { .. }));
+    let Some(ReadEntryContext::Inherited {
         original_owner: Some(original),
-        ..
-    } = unit.content
+    }) = unit.entry_context
     else {
         panic!("copied body lost its original history owner")
     };

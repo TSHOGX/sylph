@@ -224,7 +224,6 @@ async fn expected(fixture: &Fixture, store: &GenerationStore) {
         let unit: ReadingUnit = serde_json::from_value(row.body).unwrap();
         if let ReadingContent::Message {
             delivery: Some(_),
-            original_owner,
             author,
             ..
         } = unit.content
@@ -233,7 +232,7 @@ async fn expected(fixture: &Fixture, store: &GenerationStore) {
                 matches!(author, ReadAuthor::Agent { agent: Some(ref sender), .. } if sender.address.agent() == owner(ROOT))
             );
             assert!(
-                original_owner.is_none(),
+                unit.entry_context.is_none(),
                 "a fresh mailbox admission was rendered as inherited context"
             );
             received += 1;

@@ -101,6 +101,12 @@ async fn child_is_readable_without_admission(
         assert_ne!(&row.epoch, parent_epoch);
         assert!(!row.dependency_epochs.contains(parent_epoch));
         let unit: ReadingUnit = serde_json::from_value(row.body).unwrap();
+        assert_eq!(
+            unit.entry_context,
+            Some(ReadEntryContext::Unresolved),
+            "copy matching must not turn unresolved original ownership into local authorship"
+        );
+        assert!(unit.activation.is_none());
         if let ReadingContent::Message {
             parts, delivery, ..
         } = unit.content

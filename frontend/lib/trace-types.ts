@@ -302,7 +302,6 @@ export type ReadingContent =
       partsTotal: number;
       partsComplete: boolean;
       partsCursor: string | null;
-      originalOwner: AgentLink | null;
     }
   | {
       kind: "work";
@@ -334,11 +333,15 @@ export type ReadingContent =
       reason: string;
       payloads: PayloadAccess[];
     };
+export type EntryContext =
+  | { kind: "inherited"; originalOwner: AgentLink | null }
+  | { kind: "unresolved" };
 export interface ReadingUnit {
   address: string;
   anchor: TraceAddress;
   orderBasis: "native_predecessor" | "explicit_order" | "presentation_tiebreak";
   sourceSurface: string;
+  entryContext: EntryContext | null;
   activation: ExecutionSummary | null;
   content: ReadingContent;
 }

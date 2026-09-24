@@ -292,6 +292,19 @@ unspent waits across pause, bounded UTF-8/binary previews, sparse prefixes and e
 rows, provisional-content clearing, focus restoration, stop and access loss. The common evidence-stream validator rejects unverified completion for both paths and
 keeps file-commit cancellation inside its lifecycle.
 
+Entry-provenance presentation is verified independently of optional origin navigation.
+`crates/trace/src/reading/tests/entry_context.rs` covers messages, operations, checkpoints
+and opaque content, unresolved membership, foreign authors without inheritance, and
+work grouping across provenance changes. The origin-visibility regression in
+`crates/server/src/trace/worker/tests/provenance.rs` deletes/re-adopts or revokes the origin
+while preserving the inherited marker, copied bytes and recipient view. Browser coverage
+in `frontend/e2e/trace-entry-context.spec.ts` checks unavailable and unresolved states,
+retained-view origin inspection and recipient drafts at both widths. Existing retained
+Codex copy/communication and reusable-child replays now assert entry context separately
+from authorship; the Pi fork corpus preserves unresolved provenance across source orders,
+restart and origin deletion. These checks do not certify a child-local suffix or an
+ultimate original actor.
+
 ## Reproducible checks
 
 The vendor audit works entirely from retained sanitized artifacts by default:

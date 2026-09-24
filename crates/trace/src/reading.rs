@@ -1347,6 +1347,7 @@ impl Index<'_> {
             address,
             anchor: TraceAddress::of(&anchor),
             order_basis,
+            entry_context: None,
             source_surface: entry.map_or_else(
                 || "server control".into(),
                 |entry| source_label(&entry.entry_ref),
@@ -1384,12 +1385,7 @@ impl Index<'_> {
                 parts_total: self.content_parts(revision).len(),
                 parts_complete: self.content_parts(revision).len() <= self.max_parts,
                 parts_cursor: None,
-                original_owner: entry
-                    .and_then(|entry| entry.original_owner.as_ref())
-                    .and_then(|owner| match owner {
-                        OwnerRef::Agent { agent } => Some(self.agent_link(agent)),
-                        _ => None,
-                    }),
+
             },
         }
     }
@@ -1405,6 +1401,7 @@ impl Index<'_> {
             address,
             anchor: TraceAddress::of(&anchor),
             order_basis,
+            entry_context: None,
             source_surface: "retained".into(),
             activation: None,
             content: ReadingContent::Unknown {

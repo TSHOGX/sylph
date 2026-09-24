@@ -425,166 +425,187 @@ async fn later_agreeing_declarations_replace_authorization_metadata_even_when_th
 }
 
 #[tokio::test]
-async fn deleting_and_readopting_an_origin_hides_only_its_link_from_recipient_owned_copy() {
-    let mut fixture = ProvenanceFixture::new().await;
-    let recipient = agent("recipient", "reader");
-    let origin = agent("origin", "private-origin");
-    let origin_capture = fixture
-        .capture(&origin, "origin", b"private origin metadata")
-        .await;
-    let body = "Recipient-retained copied bytes";
-    let copied = fixture
-        .capture(&recipient, "recipient-copy", body.as_bytes())
-        .await;
-    let message = MessageRef::native(recipient.clone(), "copy", vec!["message".into()]).unwrap();
-    let revision =
-        MessageRevisionRef::native(recipient.clone(), "copy", vec!["revision".into()]).unwrap();
-    let entry = EntryRef::native(recipient.clone(), "copy", vec!["entry".into()]).unwrap();
-    let mut claims = vec![
-        claim(
+async fn origin_visibility_changes_preserve_inherited_context_and_copied_bytes() {
+    for revoke in [false, true] {
+        let mut fixture = ProvenanceFixture::new().await;
+        let recipient = agent("recipient", "reader");
+        let origin = agent("origin", "private-origin");
+        let origin_capture = fixture
+            .capture(&origin, "origin", b"private origin metadata")
+            .await;
+        let body = "Recipient-retained copied bytes";
+        let copied = fixture
+            .capture(&recipient, "recipient-copy", body.as_bytes())
+            .await;
+        let message =
+            MessageRef::native(recipient.clone(), "copy", vec!["message".into()]).unwrap();
+        let revision =
+            MessageRevisionRef::native(recipient.clone(), "copy", vec!["revision".into()]).unwrap();
+        let entry = EntryRef::native(recipient.clone(), "copy", vec!["entry".into()]).unwrap();
+        let mut claims = vec![
+            claim(
+                &recipient,
+                "recipient",
+                agent_object(&recipient, "Recipient"),
+                &[&copied],
+            ),
+            claim(
+                &origin,
+                "origin",
+                agent_object(&origin, "Private origin name"),
+                &[&origin_capture],
+            ),
+            claim(
+                &recipient,
+                "message",
+                TraceObject::Message(Message {
+                    message_ref: message.clone(),
+                    author: Author::Agent {
+                        agent: OwnerRef::Agent {
+                            agent: origin.clone(),
+                        },
+                    },
+                    protocol_role: Some(ProtocolRole::Assistant),
+                    purpose: MessagePurpose::Answer,
+                    production: None,
+                }),
+                &[&copied],
+            ),
+            claim(
+                &recipient,
+                "revision",
+                TraceObject::MessageRevision(MessageRevision {
+                    revision_ref: revision.clone(),
+                    message,
+                    representation: Representation::Conversation,
+                    form: RevisionForm::Complete,
+                    parts: vec![ContentPart {
+                        part_ref: MessagePartRef::native(
+                            recipient.clone(),
+                            "copy",
+                            vec!["part".into()],
+                        )
+                        .unwrap(),
+                        kind: ContentKind::Text,
+                        payload: copied.payload_ref.clone(),
+                        media_type: Some("text/plain".into()),
+                        encoding: PayloadEncoding::Utf8,
+                    }],
+                }),
+                &[&copied],
+            ),
+            claim(
+                &recipient,
+                "entry",
+                TraceObject::HistoryEntry(HistoryEntry {
+                    entry_ref: entry.clone(),
+                    containing_agent: recipient.clone(),
+                    predecessor: None,
+                    original_owner: Some(OwnerRef::Agent {
+                        agent: origin.clone(),
+                    }),
+                }),
+                &[&copied],
+            ),
+        ];
+        let mut contents = claim(
             &recipient,
-            "recipient",
+            "contents",
             agent_object(&recipient, "Recipient"),
             &[&copied],
-        ),
-        claim(
-            &origin,
-            "origin",
-            agent_object(&origin, "Private origin name"),
-            &[&origin_capture],
-        ),
-        claim(
-            &recipient,
-            "message",
-            TraceObject::Message(Message {
-                message_ref: message.clone(),
-                author: Author::Agent {
-                    agent: OwnerRef::Agent {
-                        agent: origin.clone(),
-                    },
-                },
-                protocol_role: Some(ProtocolRole::Assistant),
-                purpose: MessagePurpose::Answer,
-                production: None,
-            }),
-            &[&copied],
-        ),
-        claim(
-            &recipient,
-            "revision",
-            TraceObject::MessageRevision(MessageRevision {
-                revision_ref: revision.clone(),
-                message,
-                representation: Representation::Conversation,
-                form: RevisionForm::Complete,
-                parts: vec![ContentPart {
-                    part_ref: MessagePartRef::native(
-                        recipient.clone(),
-                        "copy",
-                        vec!["part".into()],
-                    )
-                    .unwrap(),
-                    kind: ContentKind::Text,
-                    payload: copied.payload_ref.clone(),
-                    media_type: Some("text/plain".into()),
-                    encoding: PayloadEncoding::Utf8,
+        );
+        contents.fact = Fact::HistoryContentObserved {
+            observation: HistoryContentObservation::complete(
+                entry,
+                copied.source_position.clone(),
+                "recipient-copy",
+                vec![HistoryContent::Message(revision)],
+            ),
+        };
+        claims.push(contents);
+        fixture.committed.previews.insert(
+            copied.payload_ref.clone(),
+            Arc::new(sylph_trace::reading::PayloadPreview {
+                preview: body.into(),
+                preview_limit: 2048,
+                total_bytes: Some(body.len() as u64),
+                ranges: vec![PayloadRange {
+                    start: 0,
+                    end_exclusive: body.len() as u64,
                 }],
+                availability: Some(ReadAvailability::Available),
+                ..Default::default()
             }),
-            &[&copied],
-        ),
-        claim(
-            &recipient,
-            "entry",
-            TraceObject::HistoryEntry(HistoryEntry {
-                entry_ref: entry.clone(),
-                containing_agent: recipient.clone(),
-                predecessor: None,
-                original_owner: Some(OwnerRef::Agent {
-                    agent: origin.clone(),
-                }),
-            }),
-            &[&copied],
-        ),
-    ];
-    let mut contents = claim(
-        &recipient,
-        "contents",
-        agent_object(&recipient, "Recipient"),
-        &[&copied],
-    );
-    contents.fact = Fact::HistoryContentObserved {
-        observation: HistoryContentObservation::complete(
-            entry,
-            copied.source_position.clone(),
-            "recipient-copy",
-            vec![HistoryContent::Message(revision)],
-        ),
-    };
-    claims.push(contents);
-    fixture.committed.previews.insert(
-        copied.payload_ref.clone(),
-        Arc::new(sylph_trace::reading::PayloadPreview {
-            preview: body.into(),
-            preview_limit: 2048,
-            total_bytes: Some(body.len() as u64),
-            ranges: vec![PayloadRange {
-                start: 0,
-                end_exclusive: body.len() as u64,
-            }],
-            availability: Some(ReadAvailability::Available),
-            ..Default::default()
-        }),
-    );
-    fixture.publish(claims, &[&origin_capture, &copied]).await;
-    let before = fixture.bootstrap(&recipient).await;
-    assert!(before.to_string().contains("Private origin name"));
-    let view = before["view"]["token"].as_str().unwrap();
-    let access = &before["window"]["items"][0]["content"]["parts"][0]["payload"];
-    fixture
-        .state
-        .trace
-        .evidence()
-        .delete_scope(&IngestionScope::Agent(origin.clone()))
-        .await
-        .unwrap();
-    fixture
-        .state
-        .trace
-        .evidence()
-        .readopt_scope(
-            &IngestionScope::Agent(origin.clone()),
-            std::slice::from_ref(&origin),
-        )
-        .await
-        .unwrap();
-    let (status, after) = fixture
-        .get(&format!(
-            "/api/v1/trace/agents/{}?at_snapshot={view}",
-            recipient.encode()
-        ))
-        .await;
-    assert_eq!(status, StatusCode::OK, "{after}");
-    assert!(after.to_string().contains(body));
-    assert!(!after.to_string().contains("Private origin name"));
-    assert!(!after.to_string().contains(&origin.encode()));
-    let path = format!(
-        "/api/v1/trace/payloads/{}?via_ref={}&at_snapshot={view}&revision={}&representation=conversation",
-        copied.payload_ref,
-        access["viaRef"].as_str().unwrap(),
-        access["bodyRevision"].as_str().unwrap(),
-    );
-    let response = fixture.get_response(&path).await;
-    let status = response.status();
-    let payload = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-        .await
-        .unwrap();
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "{}",
-        String::from_utf8_lossy(&payload)
-    );
-    assert_eq!(payload.as_ref(), body.as_bytes());
+        );
+        fixture.publish(claims, &[&origin_capture, &copied]).await;
+        let before = fixture.bootstrap(&recipient).await;
+        assert!(before.to_string().contains("Private origin name"));
+        assert_eq!(
+            before["window"]["items"][0]["entryContext"]["kind"],
+            "inherited"
+        );
+        let view = before["view"]["token"].as_str().unwrap();
+        let access = &before["window"]["items"][0]["content"]["parts"][0]["payload"];
+        if revoke {
+            fixture
+                .state
+                .store
+                .revoke_grant(&fixture.subject, "origin", "observe")
+                .await
+                .unwrap();
+        } else {
+            fixture
+                .state
+                .trace
+                .evidence()
+                .delete_scope(&IngestionScope::Agent(origin.clone()))
+                .await
+                .unwrap();
+            fixture
+                .state
+                .trace
+                .evidence()
+                .readopt_scope(
+                    &IngestionScope::Agent(origin.clone()),
+                    std::slice::from_ref(&origin),
+                )
+                .await
+                .unwrap();
+        }
+        let (status, after) = fixture
+            .get(&format!(
+                "/api/v1/trace/agents/{}?at_snapshot={view}",
+                recipient.encode()
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{after}");
+        assert!(after.to_string().contains(body));
+        assert!(!after.to_string().contains("Private origin name"));
+        assert_eq!(
+            after["window"]["items"][0]["entryContext"]["kind"],
+            "inherited"
+        );
+        assert!(after["window"]["items"][0]["entryContext"]["originalOwner"].is_null());
+        assert!(!after.to_string().contains(&origin.encode()));
+        let path = format!(
+            "/api/v1/trace/payloads/{}?via_ref={}&at_snapshot={view}&revision={}&representation=conversation",
+            copied.payload_ref,
+            access["viaRef"].as_str().unwrap(),
+            access["bodyRevision"].as_str().unwrap(),
+        );
+        let response = fixture.get_response(&path).await;
+        let status = response.status();
+        let payload = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&payload)
+        );
+        assert_eq!(payload.as_ref(), body.as_bytes());
+    }
 }
 
 #[tokio::test]

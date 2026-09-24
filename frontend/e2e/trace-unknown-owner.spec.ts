@@ -22,6 +22,7 @@ for (const width of [1280, 390]) {
       anchor: "retained-history-entry",
       orderBasis: "native_predecessor",
       sourceSurface: "Retained history",
+      entryContext: null,
       activation: null,
       content: {
         kind: "work",

@@ -2457,7 +2457,22 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ReadPage"
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/ReadPage"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "items": {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/components/schemas/ReadingUnit"
+                          }
+                        }
+                      }
+                    }
+                  ]
                 }
               }
             }
@@ -5104,6 +5119,136 @@
           "expiresAtMs"
         ]
       },
+      "TraceAgentLink": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "identitySuffix": {
+            "type": "string"
+          },
+          "vendor": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "address",
+          "name",
+          "identitySuffix",
+          "vendor"
+        ]
+      },
+      "ReadEntryContext": {
+        "description": "Retained entry provenance independent of authorship and optional origin navigation. Null makes no provenance assertion. Unresolved does not establish copied membership.",
+        "oneOf": [
+          {
+            "type": "null"
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "inherited"
+              },
+              "originalOwner": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/TraceAgentLink"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "originalOwner"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "unresolved"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          }
+        ]
+      },
+      "ReadingUnit": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "anchor": {
+            "type": "string"
+          },
+          "orderBasis": {
+            "type": "string",
+            "enum": [
+              "native_predecessor",
+              "explicit_order",
+              "presentation_tiebreak"
+            ]
+          },
+          "sourceSurface": {
+            "type": "string"
+          },
+          "entryContext": {
+            "$ref": "#/components/schemas/ReadEntryContext"
+          },
+          "activation": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "content": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "message",
+                  "work",
+                  "activation_boundary",
+                  "context_boundary",
+                  "history_boundary",
+                  "unknown"
+                ]
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          }
+        },
+        "required": [
+          "address",
+          "anchor",
+          "orderBasis",
+          "sourceSurface",
+          "entryContext",
+          "activation",
+          "content"
+        ]
+      },
       "ReadPage": {
         "type": "object",
         "properties": {
@@ -5181,7 +5326,22 @@
             "properties": {}
           },
           "window": {
-            "$ref": "#/components/schemas/ReadPage"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ReadPage"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/components/schemas/ReadingUnit"
+                    }
+                  }
+                }
+              }
+            ]
           },
           "changeCursor": {
             "type": "string"

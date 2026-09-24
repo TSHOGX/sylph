@@ -97,6 +97,7 @@ export function message(
     anchor: `${agent}-anchor-${index}`,
     orderBasis: "native_predecessor",
     sourceSurface: "Retained conversation",
+    entryContext: null,
     activation: null,
     content: {
       kind: "message",
@@ -121,7 +122,6 @@ export function message(
       partsTotal: 1,
       partsComplete: true,
       partsCursor: null,
-      originalOwner: null,
     },
   };
 }

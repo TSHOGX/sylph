@@ -426,6 +426,19 @@ pub enum ReadOrderBasis {
     PresentationTiebreak,
 }
 
+/// Recorded entry provenance is independent of optional origin navigation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum ReadEntryContext {
+    Inherited { original_owner: Option<AgentLink> },
+    Unresolved,
+}
+
 /// Unit addresses are presentation addresses anchored in actual objects, never
 /// new Session/Activation identity. The server keeps them stable across regrouping.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -435,6 +448,7 @@ pub struct ReadingUnit {
     pub anchor: TraceAddress,
     pub order_basis: ReadOrderBasis,
     pub source_surface: String,
+    pub entry_context: Option<ReadEntryContext>,
     pub activation: Option<ExecutionSummary>,
     pub content: ReadingContent,
 }
@@ -457,7 +471,6 @@ pub enum ReadingContent {
         parts_total: usize,
         parts_complete: bool,
         parts_cursor: Option<String>,
-        original_owner: Option<AgentLink>,
     },
     Work {
         owner: Option<AgentLink>,

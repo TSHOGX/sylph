@@ -650,6 +650,15 @@ expiration and restart discard the index without altering source evidence. Build
 reports progress; ready pages describe one validated source. Byte-range inspection
 remains available when structural exploration is unavailable.
 
+### Reading entry context
+
+Reading units carry nullable `entryContext` independently of their content variant.
+`inherited` names an optional authorized original-owner link; `unresolved` records an
+unresolved provenance assertion. A null value asserts neither local production nor inherited
+membership. The marker derives from retained entry evidence, while the link is redacted
+independently at read time. Redaction cannot erase the marker or add the origin's retention
+epoch to the copied body's view. Message authorship remains a separate fact.
+
 ### Context origin catalogue
 
 The origin catalogue pages retained `ContextLineage` assertions by their claim identity.

@@ -461,7 +461,14 @@ History and model context are separate destinations. History preserves recorded 
 including a discarded suffix when retained. Context shows checkpoints, included message
 references, replacement summaries, and known exclusions. Inherited content is attributed
 to its original owner and labeled `Inherited context`; it is not counted as the child's
-own execution. A child with only inherited context and no observed local work gets that
+own execution. Entry provenance is a separate field from authorship and optional origin
+navigation. It applies to messages, operations, checkpoints and opaque entry content.
+A known inherited entry keeps its label when the origin is absent, deleted or unreadable;
+the origin action alone becomes unavailable. An unresolved original-owner handle is
+shown as unresolved context provenance, not proof of inherited membership or local work.
+Adjacent work rows with different entry provenance are not grouped together. Origin
+inspection retains the reader's view and leaves its control target unchanged.
+A child with only inherited context and no observed local work gets that
 specific state, not an empty completed activation.
 
 Related-object links name the target's containing agent. Inspecting an object in another

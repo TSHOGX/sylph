@@ -693,17 +693,6 @@ function TraceRow({
               ? ` · ${t("trace.taskInput")}`
               : ""}
           </h2>
-          {content.originalOwner && (
-            <p className="mb-2 text-xs">
-              {t("trace.inherited")}{" "}
-              <Link
-                className="underline"
-                href={agentUrl(content.originalOwner.address)}
-              >
-                {agentName(content.originalOwner, t)}
-              </Link>
-            </p>
-          )}
           <div className="space-y-3">
             {content.parts.map((part) => (
               <div key={part.partRef}>
@@ -835,6 +824,46 @@ function TraceRow({
       data-trace-anchor={row.anchor}
       className={`mx-auto my-3 max-w-[78ch] break-words rounded px-3 py-3 ${content.kind === "message" && content.author.kind === "human" ? "border border-line bg-sunken" : ""}`}
     >
+      {row.entryContext && (
+        <div
+          className="mb-2 text-sm"
+          role="note"
+          aria-label={t("trace.entryContext")}
+        >
+          {row.entryContext.kind === "inherited" ? (
+            <>
+              <span>{t("trace.inheritedContext")}</span>
+              {" · "}
+              {row.entryContext.originalOwner ? (
+                <button
+                  className={`${traceButton} underline`}
+                  onClick={() => {
+                    if (
+                      row.entryContext?.kind !== "inherited" ||
+                      !row.entryContext.originalOwner
+                    )
+                      return;
+                    inspect({
+                      kind: "agent",
+                      agent: row.entryContext.originalOwner.address,
+                      history: null,
+                      view,
+                    });
+                  }}
+                >
+                  {t("trace.origin", {
+                    agent: agentName(row.entryContext.originalOwner, t),
+                  })}
+                </button>
+              ) : (
+                <span>{t("trace.unresolvedOrigin")}</span>
+              )}
+            </>
+          ) : (
+            <span>{t("trace.unresolvedEntryContext")}</span>
+          )}
+        </div>
+      )}
       {body}
       <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-ink-muted">
         <span>
