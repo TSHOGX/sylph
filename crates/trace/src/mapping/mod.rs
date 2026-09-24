@@ -93,6 +93,18 @@ pub struct DerivedPayload {
     pub manifest: Option<PayloadManifest>,
 }
 
+impl DerivedPayload {
+    pub fn use_ref(&self) -> PayloadUse {
+        PayloadUse {
+            reference: self.reference.clone(),
+            format: PayloadFormat {
+                media_type: Some(self.media_type.clone()),
+                encoding: Some(self.encoding),
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MapperState {
     /// State is isolated by source/generation and mapper build by the worker.

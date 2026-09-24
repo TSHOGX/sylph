@@ -70,7 +70,10 @@ fn recorded_retry_keeps_failed_inferences_and_one_episode_without_ending_the_out
         let body = output
             .iter()
             .flat_map(|out| &out.payloads)
-            .find(|payload| Some(&payload.reference) == attempt.payload.as_ref())
+            .find(|payload| {
+                Some(&payload.reference)
+                    == attempt.payload.as_ref().map(|payload| &payload.reference)
+            })
             .unwrap();
         attempts_values.push(
             serde_json::from_slice::<Value>(&body.bytes).unwrap()["delayMs"]

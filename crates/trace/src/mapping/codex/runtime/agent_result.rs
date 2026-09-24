@@ -94,7 +94,7 @@ impl Context<'_, '_> {
             )
             .unwrap(),
             kind: ContentKind::Text,
-            payload: body,
+            payload: body.reference,
             media_type: Some("text/plain".into()),
             encoding: PayloadEncoding::Utf8,
         }];
@@ -113,7 +113,7 @@ impl Context<'_, '_> {
                     )
                     .unwrap(),
                     kind: ContentKind::Structured,
-                    payload,
+                    payload: payload.reference,
                     media_type: Some("application/json".into()),
                     encoding: PayloadEncoding::Utf8,
                 });

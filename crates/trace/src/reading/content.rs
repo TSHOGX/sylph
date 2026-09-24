@@ -284,6 +284,10 @@ fn compose(
     let reference =
         PayloadRef::manifest(blake3::hash(&manifest.canonical_bytes().ok()?).to_hex()).ok()?;
     let metadata = PayloadPreview {
+        manifest_format: Some(PayloadFormat {
+            media_type: Some(manifest.media_type.clone()),
+            encoding: Some(manifest.encoding),
+        }),
         preview,
         preview_truncated: truncated,
         total_bytes: Some(length),

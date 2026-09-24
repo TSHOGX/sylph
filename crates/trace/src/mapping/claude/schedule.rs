@@ -257,7 +257,9 @@ impl Context<'_, '_> {
             &format!("{slot}/registered"),
             Fact::ResourceState {
                 resource: resource.clone(),
-                state: ResourceState::ScheduleRegistered { registration },
+                state: ResourceState::ScheduleRegistered {
+                    registration: registration.reference,
+                },
             },
         );
         self.schedule_use(owner, operation, resource, slot);

@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::{
-    capture::{PayloadEncoding, PayloadRef, TimeEvidence},
+    capture::{PayloadEncoding, PayloadRef, PayloadUse, TimeEvidence},
     identity::*,
 };
 
@@ -410,7 +410,7 @@ pub struct Operation {
     pub activation: Option<ActivationRef>,
     pub requester: Option<RequesterRef>,
     pub category: OperationCategory,
-    pub input_revision: Option<PayloadRef>,
+    pub input_revision: Option<PayloadUse>,
     pub argument_state: ArgumentState,
 }
 
@@ -433,7 +433,7 @@ pub struct ResultOccurrence {
     pub recipient: Option<Recipient>,
     pub disposition: ResultDisposition,
     pub representation: ResultRepresentation,
-    pub payload: Option<PayloadRef>,
+    pub payload: Option<PayloadUse>,
     pub delivery: Option<DeliveryRef>,
 }
 
@@ -875,8 +875,16 @@ impl TraceObject {
     pub fn payload_refs(&self) -> Vec<&PayloadRef> {
         match self {
             Self::MessageRevision(value) => value.parts.iter().map(|part| &part.payload).collect(),
-            Self::Operation(value) => value.input_revision.iter().collect(),
-            Self::Result(value) => value.payload.iter().collect(),
+            Self::Operation(value) => value
+                .input_revision
+                .iter()
+                .map(|payload| &payload.reference)
+                .collect(),
+            Self::Result(value) => value
+                .payload
+                .iter()
+                .map(|payload| &payload.reference)
+                .collect(),
             Self::ContextCheckpoint(value) => {
                 let mut refs = match &value.content {
                     ContextContent::Ordered { settings, .. } => settings.iter().collect(),

@@ -242,6 +242,17 @@ comparison, page replacement, explicit choices and continued availability checks
 fixtures establish query and interaction contracts; they do not establish vendor
 payload formats or replace the retained vendor result corpus.
 
+Payload-use format checks in `crates/trace/src/mapping/pi/tests.rs` preserve identical
+shell text and JSON argument bytes as different uses. Codex mapper tests assert the
+native argument and pinned runtime-writer format contracts without re-encoding lexical
+bytes. `crates/trace/src/reducer/tests/payload_formats.rs` covers absent-field refinement
+and known-format conflicts. `crates/server/src/trace/worker/tests/provenance/payload_formats.rs`
+restores the committed worker and reads equal-byte uses through HTTP while an unrelated,
+ungranted derivation claims HTML. The transport stays binary and each authorized use
+retains its format. Synthetic browser coverage in `frontend/e2e/trace-payload-formats.spec.ts`
+checks text, JSON and unclassified rendering at desktop and mobile widths; the fixture
+is not evidence for unobserved vendor formats.
+
 ## Reproducible checks
 
 The vendor audit works entirely from retained sanitized artifacts by default:

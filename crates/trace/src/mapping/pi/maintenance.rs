@@ -13,7 +13,7 @@ impl Context<'_, '_> {
         owner: &AgentRef,
         name: &str,
         category: OperationCategory,
-        input: Option<PayloadRef>,
+        input: Option<PayloadUse>,
     ) -> ObservedWork {
         let operation = OperationRef::occurrence(
             owner.clone(),
@@ -56,7 +56,7 @@ impl Context<'_, '_> {
         &mut self,
         owner: &AgentRef,
         work: &ObservedWork,
-        payload: PayloadRef,
+        payload: PayloadUse,
         outcome: TerminalOutcome,
         reason: Option<ExecutionCloseReason>,
         slot: &str,
@@ -89,7 +89,7 @@ impl Context<'_, '_> {
                 boundary: ExecutionBoundary::Outcome {
                     outcome,
                     reason,
-                    detail: Some(payload),
+                    detail: Some(payload.reference),
                 },
             },
         );
@@ -249,7 +249,7 @@ impl Context<'_, '_> {
                     self.object(owner, "pi/live-compaction-checkpoint", TraceObject::ContextCheckpoint(ContextCheckpoint {
                         checkpoint_ref: CheckpointRef::occurrence(owner.clone(), self.input.capture.source_position.clone(), vec!["compaction".into()]).unwrap(),
                         owner: OwnerRef::Agent { agent: owner.clone() }, basis: ContextBasis::Summary,
-                        content: ContextContent::OpaqueReplacement { payload },
+                        content: ContextContent::OpaqueReplacement { payload: payload.reference },
                         coverage: InclusionCoverage::Unknown { reason: "Live compaction result has no native checkpoint ID or complete context membership".into() },
                     }));
                 }

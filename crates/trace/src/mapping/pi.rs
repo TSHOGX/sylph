@@ -77,7 +77,7 @@ struct LiveMessage {
 
 impl SemanticMapper for PiMapper {
     fn build(&self) -> &'static str {
-        "pi-10"
+        "pi-11"
     }
 
     fn map(&self, input: MapInput<'_>) -> MapOutput {
@@ -226,7 +226,7 @@ impl Context<'_, '_> {
             });
         }
     }
-    fn payload(&mut self, bytes: Vec<u8>, selector: &str) -> PayloadRef {
+    fn payload(&mut self, bytes: Vec<u8>, selector: &str) -> PayloadUse {
         let body = derived_payload_with_media(
             self.input,
             bytes,
@@ -235,11 +235,11 @@ impl Context<'_, '_> {
             "text/plain",
             PayloadEncoding::Utf8,
         );
-        let reference = body.reference.clone();
+        let reference = body.use_ref();
         self.output.payloads.push(body);
         reference
     }
-    fn json(&mut self, value: &Value, selector: &str) -> PayloadRef {
+    fn json(&mut self, value: &Value, selector: &str) -> PayloadUse {
         let payload = derived_payload_with_media(
             self.input,
             serde_json::to_vec(value).expect("JSON serializes"),
@@ -248,7 +248,7 @@ impl Context<'_, '_> {
             "application/json",
             PayloadEncoding::Utf8,
         );
-        let reference = payload.reference.clone();
+        let reference = payload.use_ref();
         self.output.payloads.push(payload);
         reference
     }
@@ -468,7 +468,9 @@ impl Context<'_, '_> {
                         checkpoint_ref: checkpoint.clone(),
                         owner: production,
                         basis: ContextBasis::Summary,
-                        content: ContextContent::Summary { payload },
+                        content: ContextContent::Summary {
+                            payload: payload.reference,
+                        },
                         coverage: InclusionCoverage::Summary,
                     }),
                 );
@@ -495,12 +497,12 @@ impl Context<'_, '_> {
                 let metadata = self.json(value, &format!("{selector}/{id}"));
                 vec![
                     HistoryContent::Checkpoint(checkpoint),
-                    HistoryContent::Opaque(metadata),
+                    HistoryContent::Opaque(metadata.reference),
                 ]
             }
             "model_change" | "thinking_level_change" | "custom" | "label" | "session_info" => {
                 vec![HistoryContent::Opaque(
-                    self.json(value, &format!("{selector}/{id}")),
+                    self.json(value, &format!("{selector}/{id}")).reference,
                 )]
             }
             _ => {
@@ -511,7 +513,7 @@ impl Context<'_, '_> {
                     &format!("Unknown Pi native entry {kind:?} is retained"),
                 );
                 vec![HistoryContent::Opaque(
-                    self.json(value, &format!("{selector}/{id}")),
+                    self.json(value, &format!("{selector}/{id}")).reference,
                 )]
             }
         };
@@ -728,7 +730,7 @@ impl Context<'_, '_> {
                                     mime,
                                     PayloadEncoding::Binary,
                                 );
-                                let reference = body.reference.clone();
+                                let reference = body.use_ref();
                                 self.output.payloads.push(body);
                                 (ContentKind::Image, reference)
                             }
@@ -852,18 +854,15 @@ impl Context<'_, '_> {
                 )
                 .unwrap()
             };
-            let descriptor = self
-                .output
-                .payloads
-                .iter()
-                .find(|body| body.reference == payload)
-                .expect("part payload was just materialized");
             parts.push(ContentPart {
                 part_ref,
                 kind,
-                payload,
-                media_type: Some(descriptor.media_type.clone()),
-                encoding: descriptor.encoding,
+                payload: payload.reference,
+                media_type: payload.format.media_type,
+                encoding: payload
+                    .format
+                    .encoding
+                    .expect("derived parts declare their encoding"),
             });
         }
         self.object(
@@ -1248,14 +1247,14 @@ impl Context<'_, '_> {
         let metadata = self.json(value, slot);
         vec![
             HistoryContent::Operation(reference),
-            HistoryContent::Opaque(metadata),
+            HistoryContent::Opaque(metadata.reference),
         ]
     }
     fn result(
         &mut self,
         owner: &AgentRef,
         operation: OperationRef,
-        payload: PayloadRef,
+        payload: PayloadUse,
         representation: ResultRepresentation,
         disposition: ResultDisposition,
         slot: &str,
@@ -1542,7 +1541,7 @@ impl Context<'_, '_> {
                 )
                 .unwrap(),
                 kind: content_kind,
-                payload,
+                payload: payload.reference,
                 media_type: Some("text/plain".into()),
                 encoding: PayloadEncoding::Utf8,
             };

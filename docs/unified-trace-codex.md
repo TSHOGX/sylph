@@ -304,6 +304,12 @@ separate occurrences. A later `wait` operates on the cell. Known nested tool cal
 the cell as requester and the initiating agent/activation as owner. Completion of a
 wait or initial exec response does not close unrelated tools or the terminal resource.
 
+The pinned [payload writer](https://github.com/openai/codex/blob/968835997714baaff199cfed5f89a2c65d8ca77d/codex-rs/rollout-trace/src/writer.rs)
+writes every referenced raw payload through JSON serialization. Retained raw-payload
+uses therefore carry JSON/UTF-8 format without re-encoding their lexical bytes. Model
+function arguments retain their declared JSON format even when malformed; custom-tool
+input remains text. Decoded terminal chunks retain their explicit binary format.
+
 The richer
 [runtime trace model](https://github.com/openai/codex/blob/968835997714baaff199cfed5f89a2c65d8ca77d/codex-rs/rollout-trace/src/model/runtime.rs)
 exposes model call IDs, internal runtime invocation IDs, code-cell handles, terminal

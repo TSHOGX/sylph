@@ -212,7 +212,9 @@ fn one_sidecar_snapshot_can_supply_distinct_results_to_two_operations() {
         "a shared payload snapshot cannot merge different invocation results"
     );
     assert_ne!(results[0].operation, results[1].operation);
-    assert!(results
-        .iter()
-        .all(|result| result.payload.as_ref() == Some(&payload)));
+    assert!(
+        results.iter().all(
+            |result| result.payload.as_ref().map(|payload| &payload.reference) == Some(&payload)
+        )
+    );
 }

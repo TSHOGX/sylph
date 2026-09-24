@@ -130,7 +130,7 @@ export interface PayloadAccess {
   containingAgent: AgentAddress;
   selection: string | null;
   mediaType: string | null;
-  encoding: "binary" | "utf8" | "base64";
+  encoding: "binary" | "utf8" | "base64" | null;
   totalBytes: number | null;
   availableRanges: { start: number; endExclusive: number }[];
   availability: Availability;

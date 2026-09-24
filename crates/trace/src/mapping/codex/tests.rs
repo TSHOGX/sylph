@@ -950,3 +950,44 @@ fn explicit_fork_lineage_does_not_require_a_checkpoint_cutoff_or_spawn_parent() 
         )));
     }
 }
+
+#[test]
+fn native_argument_formats_follow_the_vendor_field_without_reencoding_identical_bytes() {
+    let output = run(
+        &[
+            header(),
+            serde_json::json!({"type":"response_item","payload":{"type":"function_call","call_id":"json","name":"inspect","arguments":"{}"}}),
+            serde_json::json!({"type":"response_item","payload":{"type":"custom_tool_call","call_id":"text","name":"inspect","input":"{}"}}),
+            serde_json::json!({"type":"response_item","payload":{"type":"function_call","call_id":"malformed","name":"inspect","arguments":"{ "}}),
+        ],
+        false,
+    );
+    for (index, expected, bytes) in [
+        (1, "application/json", b"{}".as_slice()),
+        (2, "text/plain", b"{}".as_slice()),
+        (3, "application/json", b"{ ".as_slice()),
+    ] {
+        let operation = output[index]
+            .claims
+            .iter()
+            .find_map(|claim| match &claim.fact {
+                Fact::Declare {
+                    object: TraceObject::Operation(operation),
+                } => Some(operation),
+                _ => None,
+            })
+            .unwrap();
+        let input = operation.input_revision.as_ref().unwrap();
+        assert_eq!(input.format.media_type.as_deref(), Some(expected));
+        assert_eq!(input.format.encoding, Some(PayloadEncoding::Utf8));
+        assert_eq!(
+            output[index]
+                .payloads
+                .iter()
+                .find(|payload| payload.reference == input.reference)
+                .unwrap()
+                .bytes,
+            bytes
+        );
+    }
+}

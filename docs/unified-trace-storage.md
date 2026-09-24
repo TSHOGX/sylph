@@ -614,6 +614,11 @@ reference order organizes the catalogue without claiming execution chronology. I
 the ordinary snapshot, cursor, item/byte and authorization bounds. A history `selection`
 is refused: selecting readable content cannot redefine activation ownership.
 
+Payload range responses transport exact retained bytes as `application/octet-stream`.
+The authorized reader payload use supplies semantic MIME and encoding; the HTTP endpoint
+does not choose another occurrence's derivation merely because its digest matches.
+Unobserved encoding stays absent in the read model; this does not erase retained bytes.
+
 ### Operation result representations
 
 An operation summary exposes a fixed-size catalogue of result representations. Its

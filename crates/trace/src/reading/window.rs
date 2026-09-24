@@ -307,7 +307,7 @@ impl super::Index<'_> {
                             payload,
                             Representation::Conversation,
                             None,
-                            PayloadEncoding::Binary,
+                            Some(PayloadEncoding::Binary),
                         )],
                     },
                 }),

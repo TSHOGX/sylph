@@ -5,7 +5,7 @@ use sylph_protocol::{trace::*, SourceAttachmentEvent};
 pub struct AttachmentMapper;
 impl SemanticMapper for AttachmentMapper {
     fn build(&self) -> &'static str {
-        "source-attachment-2"
+        "source-attachment-3"
     }
     fn map(&self, input: MapInput<'_>) -> MapOutput {
         let mut output = MapOutput {
@@ -136,7 +136,7 @@ impl SemanticMapper for AttachmentMapper {
                         recipient: None,
                         disposition: ResultDisposition::Unknown,
                         representation: ResultRepresentation::Runtime,
-                        payload: Some(payload),
+                        payload: Some(PayloadUse::unclassified(payload)),
                         delivery: None,
                     }),
                 },

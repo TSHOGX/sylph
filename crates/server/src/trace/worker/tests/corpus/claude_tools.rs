@@ -134,7 +134,10 @@ async fn expected(
             .objects
             .values()
             .filter_map(|object| match object.declaration.known() {
-                Some(TraceObject::Result(result)) if result.payload.as_ref() == sidecar_payload => {
+                Some(TraceObject::Result(result))
+                    if result.payload.as_ref().map(|payload| &payload.reference)
+                        == sidecar_payload =>
+                {
                     Some(result)
                 }
                 _ => None,
@@ -167,10 +170,10 @@ async fn expected(
     for result in results {
         let bytes = fixture
             .evidence
-            .payload_bytes(result.payload.as_ref().unwrap(), 256 * 1024)
+            .payload_bytes(&result.payload.as_ref().unwrap().reference, 256 * 1024)
             .await
             .unwrap();
-        if result.payload.as_ref() == sidecar_payload {
+        if result.payload.as_ref().map(|payload| &payload.reference) == sidecar_payload {
             assert_eq!(bytes, SIDECAR_BYTES);
             assert_eq!(result.representation, ResultRepresentation::Runtime);
             sidecars += 1;
@@ -296,7 +299,8 @@ async fn replay(
                     .filter_map(|object| match object.declaration.known() {
                         Some(TraceObject::Result(result))
                             if result.representation == ResultRepresentation::Runtime
-                                && result.payload.as_ref() != sidecar_payload.as_ref() =>
+                                && result.payload.as_ref().map(|payload| &payload.reference)
+                                    != sidecar_payload.as_ref() =>
                         {
                             Some(result)
                         }

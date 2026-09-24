@@ -861,3 +861,33 @@ fn agent_result_missing_native_identity_or_message_never_borrows_a_route_from_pr
         );
     }
 }
+
+#[test]
+fn referenced_runtime_payloads_keep_the_pinned_writers_json_format() {
+    let output = map(
+        1,
+        runtime("tool_call_ended", "result_payload"),
+        &MapperState::default(),
+        Some(("result_payload", json!({"unclassified_vendor_field":42}))),
+    );
+    let result = output
+        .claims
+        .iter()
+        .find_map(|claim| match &claim.fact {
+            Fact::Declare {
+                object: TraceObject::Result(result),
+            } => Some(result),
+            _ => None,
+        })
+        .unwrap();
+    let payload = result.payload.as_ref().unwrap();
+    assert_eq!(
+        payload.reference,
+        PayloadRef::bytes("b".repeat(64)).unwrap()
+    );
+    assert_eq!(
+        payload.format.media_type.as_deref(),
+        Some("application/json")
+    );
+    assert_eq!(payload.format.encoding, Some(PayloadEncoding::Utf8));
+}

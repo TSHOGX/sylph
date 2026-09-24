@@ -259,6 +259,40 @@ pub enum PayloadEncoding {
     Base64,
 }
 
+/// Format evidence belongs to a use of bytes, not their content digest.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PayloadFormat {
+    pub media_type: Option<String>,
+    pub encoding: Option<PayloadEncoding>,
+}
+
+impl From<&PayloadManifest> for PayloadFormat {
+    fn from(manifest: &PayloadManifest) -> Self {
+        Self {
+            media_type: Some(manifest.media_type.clone()),
+            encoding: Some(manifest.encoding),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PayloadUse {
+    pub reference: PayloadRef,
+    pub format: PayloadFormat,
+}
+
+impl PayloadUse {
+    /// Retain an address without inventing a format for unclassified bytes.
+    pub fn unclassified(reference: PayloadRef) -> Self {
+        Self {
+            reference,
+            format: PayloadFormat::default(),
+        }
+    }
+}
+
 /// Immutable provenance for a decoded field or other declared payload transformation.
 /// This survives projection restart; a retained raw observation is still the authority.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

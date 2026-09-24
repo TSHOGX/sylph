@@ -317,7 +317,7 @@ pub struct PayloadAccess {
     pub containing_agent: AgentAddress,
     pub selection: Option<SelectionRef>,
     pub media_type: Option<String>,
-    pub encoding: PayloadEncoding,
+    pub encoding: Option<PayloadEncoding>,
     pub total_bytes: Option<u64>,
     pub available_ranges: Vec<PayloadRange>,
     pub availability: ReadAvailability,

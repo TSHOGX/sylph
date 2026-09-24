@@ -134,7 +134,9 @@ async fn expected(fixture: &Fixture, store: &GenerationStore, body: &PayloadRef)
         .objects
         .values()
         .filter_map(|object| match object.declaration.known() {
-            Some(TraceObject::Result(result)) if result.payload.as_ref() == Some(body) => {
+            Some(TraceObject::Result(result))
+                if result.payload.as_ref().map(|payload| &payload.reference) == Some(body) =>
+            {
                 Some(result)
             }
             _ => None,

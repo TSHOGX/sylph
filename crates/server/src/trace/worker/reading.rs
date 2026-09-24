@@ -108,6 +108,7 @@ impl ProjectionWorker {
                 }
             }
             let preview = PayloadPreview {
+                manifest_format: payload.manifest.as_ref().map(PayloadFormat::from),
                 chunks: payload
                     .manifest
                     .as_ref()
@@ -201,6 +202,7 @@ impl ProjectionWorker {
                     ),
                 };
             let preview = PayloadPreview {
+                manifest_format: manifest.as_ref().map(PayloadFormat::from),
                 chunks: manifest.as_ref().map(|manifest| manifest.chunks.clone()),
                 preview_limit: generation.limits().max_preview_bytes,
                 total_bytes: length,

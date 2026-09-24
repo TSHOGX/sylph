@@ -23,6 +23,7 @@ pub use message_update::{project_message_update, MessageProjection};
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PayloadPreview {
     pub chunks: Option<Vec<PayloadChunk>>,
+    pub manifest_format: Option<PayloadFormat>,
     pub preview_limit: usize,
     pub preview: String,
     pub preview_truncated: bool,
@@ -598,6 +599,26 @@ impl Index<'_> {
         included
     }
 
+    fn payload_format(&self, payload: &PayloadUse) -> PayloadFormat {
+        // Only a manifest's own immutable metadata can supplement absent use
+        // fields. A raw digest cannot select among differently formatted uses.
+        let intrinsic = (payload.reference.kind() == PayloadKind::Manifest)
+            .then(|| self.payloads.get(&payload.reference))
+            .flatten()
+            .and_then(|preview| preview.manifest_format.as_ref());
+        PayloadFormat {
+            media_type: payload
+                .format
+                .media_type
+                .clone()
+                .or_else(|| intrinsic.and_then(|format| format.media_type.clone())),
+            encoding: payload
+                .format
+                .encoding
+                .or_else(|| intrinsic.and_then(|format| format.encoding)),
+        }
+    }
+
     fn operation_results(&self, operation: &Operation) -> Vec<ReadResultOccurrence> {
         let reference = AnyObjectRef::Operation(operation.operation_ref.clone());
         let scope = ReadingScope {
@@ -622,14 +643,15 @@ impl Index<'_> {
                     .payload
                     .as_ref()
                     .map(|payload| {
+                        let format = self.payload_format(payload);
                         self.access(
                             &scope,
                             &reference,
                             &result.result_ref.encode(),
-                            payload,
+                            &payload.reference,
                             result.representation.into(),
-                            None,
-                            PayloadEncoding::Binary,
+                            format.media_type,
+                            format.encoding,
                         )
                     })
                     .into_iter()
@@ -734,14 +756,15 @@ impl Index<'_> {
                         .input_revision
                         .as_ref()
                         .map(|payload| {
+                            let format = self.payload_format(payload);
                             self.access(
                                 &scope,
                                 &reference,
-                                &payload.to_string(),
-                                payload,
+                                &payload.reference.to_string(),
+                                &payload.reference,
                                 Representation::Runtime,
-                                Some("application/json".into()),
-                                PayloadEncoding::Utf8,
+                                format.media_type,
+                                format.encoding,
                             )
                         })
                         .into_iter()
@@ -787,7 +810,7 @@ impl Index<'_> {
                             &part.payload,
                             revision.representation,
                             part.media_type.clone(),
-                            part.encoding,
+                            Some(part.encoding),
                         )
                     })
                     .collect(),
@@ -1255,7 +1278,7 @@ impl Index<'_> {
         payload: &PayloadRef,
         representation: Representation,
         media_type: Option<String>,
-        encoding: PayloadEncoding,
+        encoding: Option<PayloadEncoding>,
     ) -> PayloadAccess {
         let preview = self.payloads.get(payload);
         PayloadAccess {
@@ -1292,7 +1315,7 @@ impl Index<'_> {
             &part.payload,
             revision.representation,
             part.media_type.clone(),
-            part.encoding,
+            Some(part.encoding),
         );
         if let Some(reason) = self.content_errors.get(&revision.revision_ref) {
             access.availability = ReadAvailability::Partial {

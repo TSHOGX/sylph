@@ -25,7 +25,9 @@ fn body<'a>(output: &'a [MapOutput], result: &ResultOccurrence) -> &'a [u8] {
     &output
         .iter()
         .flat_map(|out| &out.payloads)
-        .find(|payload| Some(&payload.reference) == result.payload.as_ref())
+        .find(|payload| {
+            Some(&payload.reference) == result.payload.as_ref().map(|payload| &payload.reference)
+        })
         .unwrap()
         .bytes
 }

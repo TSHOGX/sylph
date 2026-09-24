@@ -80,7 +80,7 @@ impl Index<'_> {
                                 payload,
                                 Representation::Runtime,
                                 Some("application/json".into()),
-                                PayloadEncoding::Utf8,
+                                Some(PayloadEncoding::Utf8),
                             )
                         })
                         .into_iter()

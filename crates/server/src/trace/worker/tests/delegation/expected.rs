@@ -323,7 +323,7 @@ pub(super) async fn assert_expected(
         assert_eq!(
             fixture
                 .evidence
-                .payload_bytes(operation.input_revision.as_ref().unwrap(), 1024)
+                .payload_bytes(&operation.input_revision.as_ref().unwrap().reference, 1024)
                 .await
                 .unwrap(),
             b"/bin/zsh -lc 'echo from-subagent'"
@@ -393,7 +393,7 @@ pub(super) async fn assert_expected(
             assert_eq!(
                 fixture
                     .evidence
-                    .payload_bytes(result.payload.as_ref().unwrap(), 1024)
+                    .payload_bytes(&result.payload.as_ref().unwrap().reference, 1024)
                     .await
                     .unwrap(),
                 b"from-subagent\n"

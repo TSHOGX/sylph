@@ -43,7 +43,7 @@ impl Context<'_, '_> {
         owner: &AgentRef,
         operation: &OperationRef,
         slot: &str,
-        payload: Option<PayloadRef>,
+        payload: Option<PayloadUse>,
         disposition: ResultDisposition,
         representation: ResultRepresentation,
     ) {
@@ -72,7 +72,7 @@ impl Context<'_, '_> {
         value: &Value,
         field: &str,
         subject: AnyObjectRef,
-    ) -> Option<PayloadRef> {
+    ) -> Option<PayloadUse> {
         if value.is_null() {
             return None;
         }
@@ -105,7 +105,15 @@ impl Context<'_, '_> {
             );
             return None;
         }
-        refs.into_iter().next()
+        // The pinned writer's write_json_payload uses write_json_file for
+        // every raw payload kind. This labels retained bytes without re-encoding.
+        refs.into_iter().next().map(|reference| PayloadUse {
+            reference,
+            format: PayloadFormat {
+                media_type: Some("application/json".into()),
+                encoding: Some(PayloadEncoding::Utf8),
+            },
+        })
     }
     fn raw_payload_value(&self, field: &str) -> Option<Value> {
         let key = super::super::captured_payload_key(
@@ -403,8 +411,11 @@ impl Context<'_, '_> {
                 let category = if let Some(invocation) = &invocation {
                     if let Some(text) = invocation
                         .pointer("/payload/arguments")
-                        .or_else(|| invocation.pointer("/payload/input"))
                         .and_then(Value::as_str)
+                    {
+                        input = Some(self.encoded_json(text, "/runtime-invocation/payload"));
+                    } else if let Some(text) =
+                        invocation.pointer("/payload/input").and_then(Value::as_str)
                     {
                         input = Some(
                             self.content(text.as_bytes().to_vec(), "/runtime-invocation/payload"),
@@ -949,7 +960,7 @@ impl Context<'_, '_> {
                     "application/octet-stream",
                     PayloadEncoding::Binary,
                 );
-                let body = payload.reference.clone();
+                let body = payload.use_ref();
                 self.output.payloads.push(payload);
                 self.runtime_result(
                     owner,

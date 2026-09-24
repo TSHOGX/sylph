@@ -24,7 +24,7 @@ fn source_issue(input: &MapInput<'_>, output: &mut MapOutput, code: DiagnosticCo
             input,
             scope,
             "server/source-diagnostic",
-            "sylph-control-3",
+            "sylph-control-4",
             diagnostic(scope, code, message),
         ));
     } else {
@@ -105,7 +105,7 @@ fn control_scope(
 
 impl SemanticMapper for ServerMapper {
     fn build(&self) -> &'static str {
-        "sylph-control-3"
+        "sylph-control-4"
     }
 
     fn map(&self, input: MapInput<'_>) -> MapOutput {
@@ -253,7 +253,7 @@ impl SemanticMapper for ServerMapper {
                     command.input.media_type.clone(),
                     submitted_encoding,
                 );
-                let payload = submitted.reference.clone();
+                let payload_use = submitted.use_ref();
                 output.payloads.push(submitted);
                 let correlation = correlation_key(
                     scope,
@@ -296,7 +296,7 @@ impl SemanticMapper for ServerMapper {
                                     }
                                     .into(),
                                 },
-                                input_revision: Some(payload),
+                                input_revision: Some(payload_use),
                                 argument_state: ArgumentState::Sealed,
                             }),
                         },

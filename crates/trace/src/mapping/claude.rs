@@ -41,7 +41,7 @@ struct LiveStream {
 
 impl SemanticMapper for ClaudeMapper {
     fn build(&self) -> &'static str {
-        "claude-8"
+        "claude-9"
     }
     fn map(&self, input: MapInput<'_>) -> MapOutput {
         let mut output = MapOutput {
@@ -150,7 +150,7 @@ impl Context<'_, '_> {
         selector: &str,
         media: &str,
         encoding: PayloadEncoding,
-    ) -> PayloadRef {
+    ) -> PayloadUse {
         let payload = derived_payload_with_media(
             self.input,
             bytes,
@@ -159,11 +159,11 @@ impl Context<'_, '_> {
             media,
             encoding,
         );
-        let reference = payload.reference.clone();
+        let reference = payload.use_ref();
         self.output.payloads.push(payload);
         reference
     }
-    fn json(&mut self, value: &Value, selector: &str) -> PayloadRef {
+    fn json(&mut self, value: &Value, selector: &str) -> PayloadUse {
         self.payload(
             serde_json::to_vec(value).expect("JSON serializes"),
             selector,
@@ -292,7 +292,12 @@ impl Context<'_, '_> {
                 );
                 if text(value, "uuid").is_some() {
                     let body = self.json(value, "/");
-                    self.history(&owner, value, vec![HistoryContent::Opaque(body)], None);
+                    self.history(
+                        &owner,
+                        value,
+                        vec![HistoryContent::Opaque(body.reference)],
+                        None,
+                    );
                 }
             }
         }
@@ -662,7 +667,7 @@ impl Context<'_, '_> {
             )
             .unwrap(),
             kind,
-            payload,
+            payload: payload.reference,
             media_type: Some(media),
             encoding,
         }
@@ -782,7 +787,7 @@ impl Context<'_, '_> {
                     )
                     .unwrap(),
                     kind: ContentKind::Structured,
-                    payload,
+                    payload: payload.reference,
                     media_type: Some("application/json".into()),
                     encoding: PayloadEncoding::Utf8,
                 }],
@@ -822,7 +827,9 @@ impl Context<'_, '_> {
                     agent: owner.clone(),
                 },
                 basis: ContextBasis::Summary,
-                content: ContextContent::OpaqueReplacement { payload },
+                content: ContextContent::OpaqueReplacement {
+                    payload: payload.reference,
+                },
                 coverage: InclusionCoverage::Unknown {
                     reason: "Compaction metadata does not expose the exact next model request"
                         .into(),
@@ -1030,7 +1037,7 @@ impl Context<'_, '_> {
                             self.result(
                                 owner,
                                 &operation,
-                                payload,
+                                PayloadUse::unclassified(payload),
                                 ResultRepresentation::Runtime,
                                 &format!("{slot}/{field}"),
                             );
@@ -1082,7 +1089,7 @@ impl Context<'_, '_> {
         &mut self,
         owner: &AgentRef,
         operation: &OperationRef,
-        payload: PayloadRef,
+        payload: PayloadUse,
         representation: ResultRepresentation,
         slot: &str,
     ) {
@@ -1298,7 +1305,7 @@ impl Context<'_, '_> {
                                     code: reason.into(),
                                 }
                             }),
-                            detail: Some(detail),
+                            detail: Some(detail.reference),
                         },
                     },
                 );
@@ -1389,7 +1396,7 @@ impl Context<'_, '_> {
                 ContentPart {
                     part_ref: Self::live_part_ref(owner, stream, *index, "content"),
                     kind: ContentKind::Opaque,
-                    payload: self.json(&incomplete, &selector),
+                    payload: self.json(&incomplete, &selector).reference,
                     media_type: Some("application/json".into()),
                     encoding: PayloadEncoding::Utf8,
                 }
@@ -1402,12 +1409,14 @@ impl Context<'_, '_> {
                 parts.push(ContentPart {
                     part_ref: Self::live_part_ref(owner, stream, *index, "signature"),
                     kind: ContentKind::Opaque,
-                    payload: self.payload(
-                        signature.as_bytes().to_vec(),
-                        &format!("{selector}/signature"),
-                        "text/plain",
-                        PayloadEncoding::Utf8,
-                    ),
+                    payload: self
+                        .payload(
+                            signature.as_bytes().to_vec(),
+                            &format!("{selector}/signature"),
+                            "text/plain",
+                            PayloadEncoding::Utf8,
+                        )
+                        .reference,
                     media_type: Some("text/plain".into()),
                     encoding: PayloadEncoding::Utf8,
                 });
@@ -1713,12 +1722,14 @@ impl Context<'_, '_> {
                             "thinking" => ContentKind::DisclosedReasoning,
                             _ => ContentKind::Opaque,
                         },
-                        payload: self.payload(
-                            segment.as_bytes().to_vec(),
-                            &format!("/event/delta/{field}"),
-                            "text/plain",
-                            PayloadEncoding::Utf8,
-                        ),
+                        payload: self
+                            .payload(
+                                segment.as_bytes().to_vec(),
+                                &format!("/event/delta/{field}"),
+                                "text/plain",
+                                PayloadEncoding::Utf8,
+                            )
+                            .reference,
                         media_type: Some("text/plain".into()),
                         encoding: PayloadEncoding::Utf8,
                     };

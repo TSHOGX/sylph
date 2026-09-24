@@ -660,6 +660,19 @@ fn merge_optional_owner(a: &Option<OwnerRef>, b: &Option<OwnerRef>) -> Option<Op
     }
 }
 
+fn merge_payload_use(a: &Option<PayloadUse>, b: &Option<PayloadUse>) -> Option<Option<PayloadUse>> {
+    match (a, b) {
+        (Some(a), Some(b)) if a.reference == b.reference => Some(Some(PayloadUse {
+            reference: a.reference.clone(),
+            format: PayloadFormat {
+                media_type: merge_optional(&a.format.media_type, &b.format.media_type)?,
+                encoding: merge_optional(&a.format.encoding, &b.format.encoding)?,
+            },
+        })),
+        _ => merge_optional(a, b),
+    }
+}
+
 fn merge_author(a: &Author, b: &Author) -> Option<Author> {
     if a == b {
         return Some(a.clone());
@@ -763,7 +776,7 @@ fn refine_declaration(a: &TraceObject, b: &TraceObject) -> Option<TraceObject> {
                 activation: merge_optional(&a.activation, &b.activation)?,
                 requester: merge_optional(&a.requester, &b.requester)?,
                 category: a.category.clone(),
-                input_revision: merge_optional(&a.input_revision, &b.input_revision)?,
+                input_revision: merge_payload_use(&a.input_revision, &b.input_revision)?,
                 argument_state: if a.argument_state == ArgumentState::Sealed
                     || b.argument_state == ArgumentState::Sealed
                 {
@@ -771,6 +784,21 @@ fn refine_declaration(a: &TraceObject, b: &TraceObject) -> Option<TraceObject> {
                 } else {
                     ArgumentState::Collecting
                 },
+            }))
+        }
+        (TraceObject::Result(a), TraceObject::Result(b))
+            if a.result_ref == b.result_ref
+                && a.operation == b.operation
+                && a.recipient == b.recipient
+                && a.disposition == b.disposition
+                && a.representation == b.representation
+                && a.delivery == b.delivery
+                && a.payload.as_ref().map(|payload| &payload.reference)
+                    == b.payload.as_ref().map(|payload| &payload.reference) =>
+        {
+            Some(TraceObject::Result(ResultOccurrence {
+                payload: merge_payload_use(&a.payload, &b.payload)?,
+                ..a.clone()
             }))
         }
         (TraceObject::Resource(a), TraceObject::Resource(b))

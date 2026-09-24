@@ -113,13 +113,18 @@ empty chooser. Inputs are labeled as inputs, and result availability follows pay
 evidence rather than the presence of a reference. Production HTTP and browser regressions cover these contracts; targeted mutations
 reproduce the corresponding authorization, pagination and selection failures.
 
-The representation audit also found a separate remaining payload-format boundary:
-result and operation-input references do not consistently carry their own evidenced
-media type and encoding into the reader. Results currently default to binary and inputs
-to JSON even when the retained derivation supplies a more precise format. Format
-metadata must remain specific to the payload use or scoped derivation; equal physical
-bytes cannot justify choosing another occurrence's format. This remains required work
-before result/payload acceptance, alongside structured exploration and export/playback.
+Operation inputs and result occurrences now retain a typed payload use with optional
+media type and encoding, independent of its physical byte digest. Vendor decoding
+helpers carry the format they actually produced; native Codex JSON argument strings
+retain exact lexical bytes, custom inputs remain text, and the pinned raw writer
+establishes JSON/UTF-8 for runtime bundles. Unclassified sidecars borrow format only
+from their own immutable manifest. Reader encoding remains absent when unobserved,
+and byte-range HTTP transport no longer selects an unrelated equal-digest derivation.
+Pi text inputs/results and JSON tool arguments with identical bytes retain different
+formats. Reducer refinement fills absent fields without overwriting known conflicts;
+worker restoration, HTTP and browser checks pin these meanings through the read path.
+Scoped format, manifest, conflict and HTTP-header mutations fail the new regressions.
+Structured exploration and complete evidence export/playback remain open.
 
 Observed operations with unknown or unresolved producers now remain Work rows with
 explicit unknown-owner labels and direct inspection targets. They retain their own

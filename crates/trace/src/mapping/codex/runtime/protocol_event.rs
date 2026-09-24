@@ -103,7 +103,7 @@ impl Context<'_, '_> {
                             },
                         ..
                     } => {
-                        *observed = detail.clone();
+                        *observed = detail.as_ref().map(|payload| payload.reference.clone());
                         *closed = Some(ExecutionCloseReason::Extension {
                             namespace: "codex.turn-abort".into(),
                             code: reason.into(),

@@ -160,7 +160,7 @@ impl Context<'_, '_> {
             &root,
             resource.clone(),
             text(value, "status"),
-            Some(payload),
+            Some(payload.reference),
             "claude/workflow/state",
         );
         self.workflow_started(
@@ -253,7 +253,7 @@ impl Context<'_, '_> {
                     &root,
                     activity.clone(),
                     text(item, "state"),
-                    Some(detail),
+                    Some(detail.reference),
                     &slot,
                 );
                 self.workflow_started(
@@ -589,7 +589,7 @@ impl Context<'_, '_> {
                     boundary: ExecutionBoundary::Outcome {
                         outcome: TerminalOutcome::Succeeded,
                         reason: Some(ExecutionCloseReason::VendorStop),
-                        detail: Some(payload),
+                        detail: Some(payload.reference),
                     },
                 },
             );

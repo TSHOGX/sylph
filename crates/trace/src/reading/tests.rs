@@ -1592,7 +1592,7 @@ fn a_result_address_does_not_upgrade_partial_or_unavailable_payload_evidence() {
                 recipient: None,
                 disposition: ResultDisposition::FinalReturn,
                 representation: ResultRepresentation::CallerResult,
-                payload: Some(payload.clone()),
+                payload: Some(PayloadUse::unclassified(payload.clone())),
                 delivery: None,
             }),
         ]
@@ -1603,5 +1603,65 @@ fn a_result_address_does_not_upgrade_partial_or_unavailable_payload_evidence() {
         let result = &projection.result_occurrences
             [&AnyObjectRef::Operation(operation.operation_ref.clone())][0];
         assert_eq!(result.availability, availability);
+    }
+}
+
+#[test]
+fn unclassified_payload_uses_can_borrow_only_their_own_immutable_manifest_format() {
+    for is_manifest in [false, true] {
+        let reference = if is_manifest {
+            PayloadRef::manifest("b".repeat(64))
+        } else {
+            PayloadRef::bytes("b".repeat(64))
+        }
+        .unwrap();
+        let intrinsic = PayloadFormat {
+            media_type: Some("application/json".into()),
+            encoding: Some(PayloadEncoding::Utf8),
+        };
+        let explicit = PayloadFormat {
+            media_type: Some("text/plain".into()),
+            encoding: Some(PayloadEncoding::Binary),
+        };
+        for format in [PayloadFormat::default(), explicit.clone()] {
+            let operation = Operation {
+                input_revision: Some(PayloadUse {
+                    reference: reference.clone(),
+                    format: format.clone(),
+                }),
+                ..declared_operation("manifest-format")
+            };
+            let facts = vec![
+                Fact::Declare {
+                    object: declared_agent(agent()),
+                },
+                Fact::Declare {
+                    object: TraceObject::Operation(operation.clone()),
+                },
+            ];
+            let mut previews = PayloadPreviews::new();
+            // Raw bytes intentionally have metadata with a format from elsewhere.
+            // The address kind, not the existence of metadata, admits this source.
+            previews.insert(
+                reference.clone(),
+                Arc::new(PayloadPreview {
+                    manifest_format: Some(intrinsic.clone()),
+                    ..Default::default()
+                }),
+            );
+            let projection = facts_projection(facts, &previews);
+            let ReadObjectContent::Operation { input, .. } =
+                &projection.objects[&AnyObjectRef::Operation(operation.operation_ref)].content
+            else {
+                panic!("operation")
+            };
+            let expected = if format == PayloadFormat::default() && is_manifest {
+                &intrinsic
+            } else {
+                &format
+            };
+            assert_eq!(input[0].media_type, expected.media_type);
+            assert_eq!(input[0].encoding, expected.encoding);
+        }
     }
 }

@@ -69,7 +69,7 @@ async fn operation_input_is_readable_in_its_namespace_without_asserting_an_actor
                     namespace: None,
                     name: "read".into(),
                 },
-                input_revision: Some(capture.payload_ref.clone()),
+                input_revision: Some(PayloadUse::unclassified(capture.payload_ref.clone())),
                 argument_state: ArgumentState::Sealed,
             }),
             &[&capture],

@@ -311,7 +311,7 @@ fn sidecar_ranges_remain_distinct_from_the_caller_result() {
         state: &MapperState::default(),
         archive: &ArchiveContext::default(),
     });
-    assert!(objects(std::slice::from_ref(&output)).any(|object|matches!(object,TraceObject::Result(ResultOccurrence{representation:ResultRepresentation::Runtime,payload:Some(reference),..})if reference==&payload)));
+    assert!(objects(std::slice::from_ref(&output)).any(|object|matches!(object,TraceObject::Result(ResultOccurrence{representation:ResultRepresentation::Runtime,payload:Some(reference),..})if reference.reference==payload)));
     assert!(output.claims.iter().any(|claim| matches!(
         claim.fact,
         Fact::Coverage {

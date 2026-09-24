@@ -241,7 +241,7 @@ async fn expected(fixture: &Fixture, store: &GenerationStore, failed: bool) {
         answers.push(
             fixture
                 .evidence
-                .payload_bytes(result.payload.as_ref().unwrap(), 1024)
+                .payload_bytes(&result.payload.as_ref().unwrap().reference, 1024)
                 .await
                 .unwrap(),
         );
@@ -490,7 +490,7 @@ async fn expected_failure(fixture: &Fixture, store: &GenerationStore) {
     for result in runtime {
         let bytes = fixture
             .evidence
-            .payload_bytes(result.payload.as_ref().unwrap(), 64 * 1024)
+            .payload_bytes(&result.payload.as_ref().unwrap().reference, 64 * 1024)
             .await
             .unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();

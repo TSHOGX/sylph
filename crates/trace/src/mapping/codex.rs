@@ -15,7 +15,7 @@ pub mod history;
 
 pub struct CodexMapper;
 impl CodexMapper {
-    const BUILD: &'static str = "codex-13";
+    const BUILD: &'static str = "codex-14";
 }
 mod accounting;
 mod collaboration;
@@ -270,7 +270,7 @@ impl Context<'_, '_> {
         )))
     }
 
-    fn content(&mut self, bytes: Vec<u8>, selector: &str) -> PayloadRef {
+    fn content(&mut self, bytes: Vec<u8>, selector: &str) -> PayloadUse {
         let payload = derived_payload_with_media(
             self.input,
             bytes,
@@ -279,12 +279,26 @@ impl Context<'_, '_> {
             "text/plain",
             PayloadEncoding::Utf8,
         );
-        let reference = payload.reference.clone();
+        let reference = payload.use_ref();
         self.output.payloads.push(payload);
         reference
     }
 
-    fn opaque(&mut self, value: &Value, selector: &str) -> PayloadRef {
+    fn encoded_json(&mut self, text: &str, selector: &str) -> PayloadUse {
+        let payload = derived_payload_with_media(
+            self.input,
+            text.as_bytes().to_vec(),
+            selector,
+            "codex/json-field-decoding",
+            "application/json",
+            PayloadEncoding::Utf8,
+        );
+        let reference = payload.use_ref();
+        self.output.payloads.push(payload);
+        reference
+    }
+
+    fn opaque(&mut self, value: &Value, selector: &str) -> PayloadUse {
         let payload = derived_payload_with_media(
             self.input,
             serde_json::to_vec(value).expect("retained JSON value serializes"),
@@ -293,7 +307,7 @@ impl Context<'_, '_> {
             "application/json",
             PayloadEncoding::Utf8,
         );
-        let reference = payload.reference.clone();
+        let reference = payload.use_ref();
         self.output.payloads.push(payload);
         reference
     }
@@ -1141,15 +1155,11 @@ impl Context<'_, '_> {
                     }
                 }
                 parts.push(ContentPart {
-                    media_type: Some(
-                        if kind == ContentKind::Text {
-                            "text/plain"
-                        } else {
-                            "application/json"
-                        }
-                        .into(),
-                    ),
-                    encoding: PayloadEncoding::Utf8,
+                    media_type: payload.format.media_type,
+                    encoding: payload
+                        .format
+                        .encoding
+                        .expect("derived parts declare their encoding"),
                     part_ref: if let Some(id) = string(value, "id") {
                         MessagePartRef::native(
                             owner.clone(),
@@ -1166,7 +1176,7 @@ impl Context<'_, '_> {
                         .unwrap()
                     },
                     kind,
-                    payload,
+                    payload: payload.reference,
                 });
             }
         } else {
@@ -1307,8 +1317,13 @@ impl Context<'_, '_> {
         } else {
             "arguments"
         };
-        let payload = string(value, key)
-            .map(|text| self.content(text.as_bytes().to_vec(), &format!("/payload/{key}")));
+        let payload = string(value, key).map(|text| {
+            if kind == "function_call" {
+                self.encoded_json(text, &format!("/payload/{key}"))
+            } else {
+                self.content(text.as_bytes().to_vec(), &format!("/payload/{key}"))
+            }
+        });
         if payload.is_none() {
             self.issue(
                 owner,
@@ -1452,7 +1467,7 @@ impl Context<'_, '_> {
                         } else {
                             ContentKind::Structured
                         },
-                        payload: payload.clone(),
+                        payload: payload.reference.clone(),
                     })
                     .into_iter()
                     .collect(),
@@ -1752,7 +1767,7 @@ impl Context<'_, '_> {
     fn reasoning(&mut self, owner: &AgentRef, value: &Value, selector: &str) {
         // Ciphertext/signatures and disclosed summaries retain distinct named fields.
         let body = self.opaque(value, selector);
-        self.history(owner, vec![HistoryContent::Opaque(body)], None);
+        self.history(owner, vec![HistoryContent::Opaque(body.reference)], None);
     }
 
     fn compaction(&mut self, owner: &AgentRef, value: &Value) {
@@ -1781,7 +1796,9 @@ impl Context<'_, '_> {
                     agent: owner.clone(),
                 },
                 basis: ContextBasis::NativeReplacement,
-                content: ContextContent::OpaqueReplacement { payload },
+                content: ContextContent::OpaqueReplacement {
+                    payload: payload.reference,
+                },
                 coverage: InclusionCoverage::Unknown {
                     reason: "Native replacement is retained; no exact model request was captured"
                         .into(),
@@ -1821,7 +1838,7 @@ impl Context<'_, '_> {
                 boundary: ExecutionBoundary::Outcome {
                     outcome,
                     reason: Some(ExecutionCloseReason::VendorStop),
-                    detail,
+                    detail: detail.map(|payload| payload.reference),
                 },
             },
         );

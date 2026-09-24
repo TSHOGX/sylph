@@ -68,6 +68,7 @@ pub(super) fn fixture() -> serde_json::Value {
             previews.insert(
                 payload.reference,
                 Arc::new(PayloadPreview {
+                    manifest_format: payload.manifest.as_ref().map(PayloadFormat::from),
                     chunks: payload
                         .manifest
                         .as_ref()

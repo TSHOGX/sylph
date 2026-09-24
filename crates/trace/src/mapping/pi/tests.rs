@@ -1021,3 +1021,48 @@ fn native_pi_ownership_refines_snapshots_in_either_order_without_resolving_fork_
         }
     }
 }
+
+#[test]
+fn identical_pi_input_and_result_bytes_keep_their_recorded_json_and_text_formats() {
+    let outputs = run(
+        &[
+            header(),
+            serde_json::json!({"type":"message","id":"shell-format","parentId":null,"message":{"role":"bashExecution","command":"{}","output":"{}","exitCode":0}}),
+            serde_json::json!({"type":"message","id":"call-format","parentId":"shell-format","message":{"role":"assistant","content":[{"type":"toolCall","id":"inspect","name":"inspect","arguments":{}}]}}),
+        ],
+        false,
+    );
+    let projection = crate::reading::project(&reduce(&outputs), &Default::default(), 32);
+    let mut formats = vec![];
+    let mut references = vec![];
+    for object in objects(&outputs) {
+        let TraceObject::Operation(operation) = object else {
+            continue;
+        };
+        let detail = &projection.objects[&object.object_ref()];
+        let ReadObjectContent::Operation { input, .. } = &detail.content else {
+            panic!("operation detail")
+        };
+        let expected = if matches!(operation.category, OperationCategory::TerminalIo { .. }) {
+            "text/plain"
+        } else {
+            "application/json"
+        };
+        assert_eq!(input[0].media_type.as_deref(), Some(expected));
+        assert_eq!(input[0].encoding, Some(PayloadEncoding::Utf8));
+        references.push(input[0].payload_ref.clone());
+        formats.push(expected);
+        if matches!(operation.category, OperationCategory::TerminalIo { .. }) {
+            let result = &projection.result_occurrences[&object.object_ref()][0];
+            assert_eq!(result.payloads[0].media_type.as_deref(), Some("text/plain"));
+            assert_eq!(result.payloads[0].encoding, Some(PayloadEncoding::Utf8));
+            references.push(result.payloads[0].payload_ref.clone());
+        }
+    }
+    assert_eq!(formats.len(), 2);
+    assert_eq!(references.len(), 3);
+    assert!(
+        references.iter().all(|value| value == &references[0]),
+        "format claims must not be inferred from byte identity"
+    );
+}

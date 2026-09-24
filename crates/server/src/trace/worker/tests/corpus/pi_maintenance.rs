@@ -100,7 +100,7 @@ async fn expected(corpus: &Corpus, fixture: &Fixture, store: &GenerationStore, r
         .unwrap();
     let bytes = fixture
         .evidence
-        .payload_bytes(final_result.payload.as_ref().unwrap(), 64 * 1024)
+        .payload_bytes(&final_result.payload.as_ref().unwrap().reference, 64 * 1024)
         .await
         .unwrap();
     let result: serde_json::Value = serde_json::from_slice(&bytes).unwrap();

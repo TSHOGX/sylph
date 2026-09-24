@@ -161,7 +161,11 @@ async fn run(delayed: bool, restart: bool) -> (Vec<TraceObject>, Vec<serde_json:
         .as_ref()
         .expect("launch input must be retained");
     assert_eq!(
-        fixture.evidence.payload_bytes(input, 4096).await.unwrap(),
+        fixture
+            .evidence
+            .payload_bytes(&input.reference, 4096)
+            .await
+            .unwrap(),
         serde_json::to_vec(&begin()).unwrap()
     );
     assert!(
@@ -390,7 +394,7 @@ async fn blocked_source_tail_cannot_hide_a_later_dependency_or_unrelated_capture
     assert_eq!(
         fixture
             .evidence
-            .payload_bytes(operation.input_revision.as_ref().unwrap(), 4096)
+            .payload_bytes(&operation.input_revision.as_ref().unwrap().reference, 4096)
             .await
             .unwrap(),
         serde_json::to_vec(&begin()).unwrap()

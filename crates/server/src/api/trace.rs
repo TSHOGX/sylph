@@ -2132,19 +2132,14 @@ async fn payload(
             .bytes
     };
     check_row(&state, &subject.0, &lease, &row).await?;
-    let derivations = generation
-        .payload_derivations(&lease.snapshot, &payload, 1)
-        .await
-        .map_err(storage)?;
-    let mime = derivations
-        .first()
-        .map_or("application/octet-stream", |value| {
-            value.media_type.as_str()
-        });
+    // This is an exact byte-range transport. Format evidence belongs to the
+    // authorized payload use in the reader, not whichever equal-digest derivation
+    // happened to be inserted first. Never promote that unrelated MIME claim to
+    // an HTTP content type (or let a browser execute source bytes as a document).
     let mut response = bytes.into_response();
     response.headers_mut().insert(
         header::CONTENT_TYPE,
-        axum::http::HeaderValue::from_str(mime).map_err(internal)?,
+        axum::http::HeaderValue::from_static("application/octet-stream"),
     );
     response.headers_mut().insert(
         header::CACHE_CONTROL,

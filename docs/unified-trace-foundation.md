@@ -327,6 +327,14 @@ content is not labelled included in model context without named inclusion eviden
 transformation evidence. Truncation in the caller's result cannot erase a retained
 runtime output; a full runtime output cannot silently replace what the caller saw.
 
+An operation input or result carries a payload use: its immutable byte reference and
+its evidenced media type and encoding. Unobserved format fields remain absent. Equal
+bytes can be used as JSON, text or unclassified data without sharing those format
+claims. A reader does not select a format from an unrelated derivation with the same
+byte digest. An immutable manifest may supply intrinsic format evidence when the use
+has no more specific claim; it does not license guessing from names, extensions or
+successful decoding alone.
+
 Payload manifests reference immutable byte chunks and ordered part/range mappings.
 They record media type, encoding, decoded byte length if known, and completeness:
 complete, known ranges, truncated, source-redacted, opaque, or unavailable with reason.
