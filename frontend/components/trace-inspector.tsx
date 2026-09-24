@@ -39,6 +39,11 @@ import { OperationResults } from "./trace-operation-results";
 import { TraceEvidence } from "./trace-evidence";
 import { OriginDirectory, type OriginLocation } from "./trace-origins";
 import { ArtifactsPane } from "./artifacts-pane";
+const EvidenceExport = dynamic(() =>
+  import("./trace-evidence-export").then(
+    (module) => module.TraceEvidenceExport,
+  ),
+);
 const Companion = dynamic(() =>
   import("./agent-reader").then((module) => module.AgentReader),
 );
@@ -1136,6 +1141,11 @@ function Coverage({ bootstrap }: { bootstrap: ReaderBootstrap }) {
           </li>
         ))}
       </ul>
+      <EvidenceExport
+        environment={bootstrap.header.environment}
+        environmentName={bootstrap.header.environmentName}
+        view={bootstrap.view}
+      />
       <dl className="grid grid-cols-2 gap-2 text-sm">
         <dt>{t("trace.connection")}</dt>
         <dd>

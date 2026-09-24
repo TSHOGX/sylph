@@ -171,6 +171,12 @@ export const en = {
   "trace.acceptedUpdating": "Accepted · history updating",
   "trace.loadingDetails": "Reading details…",
   "trace.input": "Input",
+  "trace.exportEvidence": "Export environment evidence",
+  "trace.exportEnvironmentScope":
+    "All retained observations in {environment} through evidence cut {cut}, including other sessions and source inventories. This is not a conversation transcript.",
+  "trace.exportDownload": "Download evidence archive",
+  "trace.exportProgress": "Exporting {bytes}…",
+  "trace.exportDone": "Evidence archive verified and saved.",
   "trace.structure": "Explore JSON",
   "trace.structureExpired":
     "Structured exploration expired. Close and reopen it to build another index.",

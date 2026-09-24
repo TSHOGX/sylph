@@ -145,6 +145,12 @@ export const zh: Dictionary = {
   "trace.acceptedUpdating": "已接受 · 历史正在更新",
   "trace.loadingDetails": "正在读取详情…",
   "trace.input": "输入",
+  "trace.exportEvidence": "导出环境证据",
+  "trace.exportEnvironmentScope":
+    "导出 {environment} 中截至证据位置 {cut} 的全部留存记录，包括其他会话和源清单。这不是单个会话的文本记录。",
+  "trace.exportDownload": "下载证据归档",
+  "trace.exportProgress": "正在导出 {bytes}…",
+  "trace.exportDone": "证据归档已验证并保存。",
   "trace.structure": "浏览 JSON",
   "trace.structureExpired": "结构浏览已过期。关闭后重新打开以重建索引。",
   "trace.structureTitle": "结构化内容",

@@ -1033,6 +1033,36 @@ impl EvidenceCatalogue {
         Ok(())
     }
 
+    pub(crate) async fn pin_export_payload(
+        &self,
+        ticket: &super::export::ExportTicket,
+        pin: PayloadPin,
+    ) -> Result<()> {
+        // A separate authorization read lets expiry retire the recovery ticket
+        // before this pin commits. Serialize validation and publication with GC.
+        let mut tx = self.evidence.writer.begin_with("BEGIN IMMEDIATE").await?;
+        if !super::export::export_is_current(&mut tx, ticket)
+            .await
+            .map_err(|error| CatalogueError::Invalid(error.to_string()))?
+        {
+            return Err(CatalogueError::Invalid(
+                "export is no longer current".into(),
+            ));
+        }
+        check_epoch(&mut tx, &pin.epoch).await?;
+        let json: String = sqlx::query_scalar("SELECT s.scope_json FROM ingestion_epochs e JOIN ingestion_scopes s ON s.scope_ref=e.scope_ref WHERE e.epoch=?")
+            .bind(pin.epoch.as_str()).fetch_one(&mut *tx).await?;
+        let scope: IngestionScope = serde_json::from_str(&json)?;
+        if scope.environment() != &ticket.environment {
+            return Err(CatalogueError::Invalid(
+                "export payload environment differs".into(),
+            ));
+        }
+        publish_payload_pin(&mut tx, PinOwnerKind::Export, &ticket.id, &pin).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     pub async fn pin_payloads(
         &self,
         kind: PinOwnerKind,
@@ -1045,24 +1075,7 @@ impl EvidenceCatalogue {
         let mut tx = self.evidence.writer.begin_with("BEGIN IMMEDIATE").await?;
         for pin in pins {
             check_epoch(&mut tx, &pin.epoch).await?;
-            reject_deleting(&mut tx, pin.payload.digest()).await?;
-            require_payload(&mut tx, &pin.payload).await?;
-            sqlx::query("INSERT INTO trace_payload_pins VALUES(?,?,?,?,?) ON CONFLICT DO NOTHING")
-                .bind(kind.as_str())
-                .bind(owner_id)
-                .bind(pin.payload.as_str())
-                .bind(pin.payload.digest())
-                .bind(pin.epoch.as_str())
-                .execute(&mut *tx)
-                .await?;
-            gc_store::add_payload_roots(
-                &mut tx,
-                "pin",
-                &gc_store::pin_id(kind, owner_id, &pin.payload)?,
-                pin.epoch.as_str(),
-                &pin.payload,
-            )
-            .await?;
+            publish_payload_pin(&mut tx, kind, owner_id, pin).await?;
         }
         tx.commit().await?;
         Ok(())
@@ -1222,8 +1235,11 @@ pub(super) async fn record_scope_deletion(
         .bind(epoch)
         .bind(tombstone_id)
         .bind(now_ms)
-        .execute(conn)
+        .execute(&mut *conn)
         .await?;
+    let scope = IngestionScope::decode(scope_ref).map_err(super::invalid)?;
+    sqlx::query("INSERT INTO trace_environment_visibility VALUES(?,?) ON CONFLICT(environment_ref) DO UPDATE SET revision=excluded.revision")
+        .bind(scope.environment().as_str()).bind(revision).execute(&mut *conn).await?;
     Ok(())
 }
 
@@ -1320,6 +1336,32 @@ async fn check_epoch(conn: &mut SqliteConnection, epoch: &IngestionEpoch) -> Res
         return Err(CatalogueError::DeletedScope);
     }
     Ok(())
+}
+
+async fn publish_payload_pin(
+    connection: &mut SqliteConnection,
+    kind: PinOwnerKind,
+    owner_id: &str,
+    pin: &PayloadPin,
+) -> Result<()> {
+    reject_deleting(connection, pin.payload.digest()).await?;
+    require_payload(connection, &pin.payload).await?;
+    sqlx::query("INSERT INTO trace_payload_pins VALUES(?,?,?,?,?) ON CONFLICT DO NOTHING")
+        .bind(kind.as_str())
+        .bind(owner_id)
+        .bind(pin.payload.as_str())
+        .bind(pin.payload.digest())
+        .bind(pin.epoch.as_str())
+        .execute(&mut *connection)
+        .await?;
+    gc_store::add_payload_roots(
+        connection,
+        "pin",
+        &gc_store::pin_id(kind, owner_id, &pin.payload)?,
+        pin.epoch.as_str(),
+        &pin.payload,
+    )
+    .await
 }
 
 async fn require_payload(conn: &mut SqliteConnection, payload: &PayloadRef) -> Result<()> {

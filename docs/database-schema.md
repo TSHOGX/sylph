@@ -68,6 +68,13 @@ superseded envagent sockets.
 
 ## Evidence and acquisition
 
+`environment_admissions` indexes the environment and admission sequence at capture commit,
+so full evidence exports do not scan unrelated observations. The export registry retains
+fixed cuts, environment visibility revisions and expirations. Temporary Export payload
+pins are released by completion or bounded expiry/startup recovery; each deletion updates
+its environment visibility in the same transaction as the tombstone. Private cursor keys
+and unadmitted staging are never archive rows.
+
 `evidence.db` holds immutable source occurrences, observations, durable producer
 receipts and contiguous prefixes, payload roots, admission epochs and permanent
 deletion tombstones. Capture admission deduplicates producer delivery independently

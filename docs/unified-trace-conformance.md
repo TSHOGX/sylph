@@ -272,6 +272,16 @@ and that target revocation neither leaks metadata nor expires the recipient's vi
 `frontend/e2e/trace-origins.spec.ts` covers lazy catalogue/proof reads, failed-page retry,
 independent origin navigation, bounded Back state and preserved drafts at both widths.
 
+Full environment export acceptance in
+`crates/server/src/trace/worker/tests/provenance/export.rs` verifies exact unknown vendor
+bytes, repeated admissions, fixed cuts, sparse attachment ranges, independent snapshot
+ownership, revocation/deletion and post-read authorization, output deadlines, crash-pin
+retirement, atomic ticket/pin publication and query work under unrelated archive growth. Client tests verify the complete
+framing digest before file commit, including equal-length corruption and clean EOF without
+a footer. `frontend/e2e/trace-evidence-export.spec.ts` checks explicit environment scope,
+verified desktop/mobile downloads and transactional streaming-file failure. The exporter
+reads retained evidence, not current vendor files or reconstructed transcript values.
+
 ## Reproducible checks
 
 The vendor audit works entirely from retained sanitized artifacts by default:

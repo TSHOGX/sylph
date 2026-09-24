@@ -603,6 +603,7 @@ origin and preserve environment-grant checks.
 | `POST /api/v1/trace/payloads/{payload_ref}/structure` | Explicit cancellable index admission for one authorized complete payload use; returns `202` with job bounds and progress |
 | `GET /api/v1/trace/structures/{job_id}` | Subject-owned progress or an indexed immediate-child page, with bounded lexical previews |
 | `DELETE /api/v1/trace/structures/{job_id}` | Cancel and release the Subject's disposable index and retained view |
+| `GET /api/v1/trace/environments/{environment}/export` | Explicit streaming export of all authorized retained admissions and payload ranges in one environment at a fixed view cut |
 | `GET /api/v1/trace/changes` | SSE change invalidations from a bounded projection cursor, with reset/generation notices |
 | `GET /api/v1/trace/search` | Authorized generation/scoped search at a declared search checkpoint; paged snippets and object anchors |
 | `GET /api/v1/trace/reprojection` | Administrator-only active generation and bounded recent reprojection job status |
@@ -711,6 +712,40 @@ Full evidence export and paced playback are explicit streaming jobs with separat
 work and cancellation budgets; they are not hidden implementation paths for an ordinary
 history page. Playback follows captured admission/source timing and states any pacing
 clamp. It is not reconstructed by reading only current object values.
+
+### Full environment evidence export
+
+A full evidence export names one environment and one retained evidence cut. Raw captures
+can contain several agents, pre-identity inventories or unresolved vendor records, so
+this is explicitly an environment archive, never a filtered conversation transcript.
+It includes every still-authorized admitted observation in that environment through the
+cut, including repeated observations of one occurrence, server control facts, native/live
+source bytes, attachment descriptors and available attachment ranges. Staged unadmitted
+bytes and tombstoned evidence are not exported. The archive states those scope rules.
+
+The stream is framed JSON Lines: a scope/limit header with the retained snapshot and
+projection build manifest, admission/capture records, payload
+metadata and exact base64 byte-range frames, followed by a completion footer. The footer
+names totals and a SHA-256 digest of the preceding frames. Missing completion means an incomplete
+archive, even if the last received line parses. Payload manifests and available ranges
+remain explicit; gaps are neither filled nor joined. Chunk slices outside an authorized
+logical payload are never exported merely because they share a physical CAS object.
+Duplicate observations retain their own identities and capture clocks; payload sharing
+is a storage fact, not an excuse to omit those observations.
+
+Admission pages seek an environment/admission index and use bounded metadata and candidate
+work. The export holds an independent retained view and explicit temporary payload pins;
+its concurrency, source/output bytes, frame bytes, admission work, duration and buffered
+browser output have separate bounds. Environment grants and that environment's deletion
+revision are rechecked before emitting each frame, including after backpressure. A scope
+retired during export invalidates completion; unrelated environments do not. Cancellation,
+disconnect, deadline and failure release the job; crash recovery retires abandoned pins.
+Pin publication validates the live export ticket and its environment in the same
+transaction that installs its physical roots; a retired ticket cannot acquire new pins.
+The same deadline covers preparation and production. Transport EOF and active worker
+capacity are released before deferred database pin cleanup, which remains recoverable.
+The reader displays the actual environment scope before export and commits a file only
+after the complete stream succeeds. Full export does not substitute for paced playback.
 
 ### Evidence inspection
 

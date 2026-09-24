@@ -212,3 +212,17 @@ CREATE TABLE trace_gc_cursor(singleton INTEGER PRIMARY KEY CHECK(singleton=1),ep
 INSERT INTO trace_gc_cursor VALUES(1,0);
 CREATE TABLE trace_gc_guard(singleton INTEGER PRIMARY KEY CHECK(singleton=1),guard_token TEXT);
 INSERT INTO trace_gc_guard VALUES(1,NULL);
+
+-- Full exports invalidate only when their environment's retained visibility changes.
+CREATE TABLE trace_environment_visibility (
+  environment_ref TEXT PRIMARY KEY,
+  revision INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE trace_evidence_exports (
+  export_id TEXT PRIMARY KEY,
+  environment_ref TEXT NOT NULL,
+  evidence_cut INTEGER NOT NULL,
+  visibility_revision INTEGER NOT NULL,
+  expires_at_ms INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE INDEX trace_evidence_exports_expiry ON trace_evidence_exports(expires_at_ms,export_id);

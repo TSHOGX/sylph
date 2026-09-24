@@ -326,6 +326,26 @@ export const traceAPI = {
       () => {},
       () => {},
     ),
+  async evidenceExport(
+    environment: string,
+    view: TraceView,
+    buffered: boolean,
+    signal: AbortSignal,
+  ): Promise<Response> {
+    const response = await fetch(
+      `/api/v1${base}/environments/${segment(environment)}/export${query({ at_snapshot: view.token, buffered: String(buffered) })}`,
+      { credentials: "include", cache: "no-store", signal },
+    );
+    if (!response.ok) {
+      const body = await response.json().catch(() => null);
+      throw new ApiError(
+        response.status,
+        "EVIDENCE_EXPORT",
+        body?.error?.message ?? `Evidence export failed (${response.status})`,
+      );
+    }
+    return response;
+  },
   async payload(
     access: PayloadAccess,
     view: TraceView,

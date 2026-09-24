@@ -7,6 +7,7 @@ pub mod cas;
 pub(crate) mod cursor;
 pub mod evidence;
 pub mod exporter;
+pub mod evidence_export;
 pub mod gc;
 pub mod generation;
 pub mod publication;

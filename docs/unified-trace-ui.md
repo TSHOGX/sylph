@@ -700,6 +700,13 @@ or resumable-work response, never a false empty page or complete count.
 The harness records returned bytes, request fan-out, active subscriptions, rows, heap
 after repeated navigation, main-thread tasks, and anchor displacement independently.
 Explicit full export is a separate streamed workload with cancellation and progress.
+Details offers `Export environment evidence` with the environment and retained cut shown
+before any bytes are requested. The scope includes other sessions and source inventories,
+since shared raw captures cannot be split into a lossless single-agent transcript. The
+browser validates the SHA-256 completion footer before committing a transactional file
+or bounded buffered download. It freezes the displayed export scope during the job;
+ordinary reader caches never contain the full archive. Interrupted or invalid streams
+leave the output uncommitted. This evidence archive is separate from paced playback.
 
 Required behavioral acceptance cases:
 

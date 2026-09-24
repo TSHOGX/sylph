@@ -45,6 +45,7 @@ mod evidence;
 mod directory;
 mod results;
 mod structure;
+mod archive;
 #[cfg(test)]
 mod visibility_tests;
 fn invalid(message: impl Into<String>) -> TraceError {
@@ -119,6 +120,10 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/trace/agents/{agent}/activations", get(activations))
         .route("/api/v1/trace/agents/{agent}/histories", get(histories))
         .route("/api/v1/trace/agents/{agent}/origins", get(origins))
+        .route(
+            "/api/v1/trace/environments/{environment}/export",
+            get(archive::export),
+        )
         .route("/api/v1/trace/agents/{agent}/control", get(control))
         .route("/api/v1/trace/agents/{agent}/commands", get(command_list))
         .route("/api/v1/trace/objects/{object}", get(object))

@@ -4241,6 +4241,95 @@
         },
         "description": "One row per authorized lineage claim. Origin navigation requires independently authorized target metadata; unresolved and unavailable targets remain explicit."
       }
+    },
+    "/api/v1/trace/environments/{environment}/export": {
+      "get": {
+        "summary": "Stream a complete retained environment evidence archive at a fixed cut",
+        "description": "Framed sylph-evidence-jsonl stream with exact base64 payload ranges. A completion footer verifies frame count, prefix bytes and SHA-256. Missing completion is a failed archive, including after HTTP headers were sent. The scope includes other sessions and source inventories in the authorized environment.",
+        "parameters": [
+          {
+            "name": "environment",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "at_snapshot",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "buffered",
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            },
+            "description": "Apply the separate bounded browser-buffer limit when no transactional file writer is available."
+          },
+          {
+            "name": "duration_ms",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "description": "Optional shorter lifetime, never above the resolved export limit."
+          },
+          {
+            "name": "max_bytes",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "description": "Optional lower output bound; cannot exceed the resolved streaming or buffered budget."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Streaming archive; verify its completion footer before committing a file.",
+            "headers": {
+              "x-sylph-export-limit": {
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "x-sylph-export-frame-limit": {
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "x-sylph-export-duration-ms": {
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            },
+            "content": {
+              "application/x-ndjson": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Authorization, retained-view, capacity or input error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {

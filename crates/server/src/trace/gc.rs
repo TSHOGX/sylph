@@ -26,6 +26,7 @@ pub struct GcProgress {
     pub collected: usize,
     pub collected_bytes: u64,
     pub released_roots: usize,
+    pub retired_exports: usize,
     pub pinned: usize,
 }
 
@@ -77,8 +78,13 @@ impl TraceGarbageCollector {
     }
 
     async fn run_guarded(&self, now_ms: i64) -> Result<GcProgress, CatalogueError> {
+        let retired_exports = self
+            .catalogue
+            .retire_exports(false, self.limits.max_epoch_checks)
+            .await?;
         let mut cursor = self.cursor.lock().await;
         let mut progress = GcProgress {
+            retired_exports,
             released_roots: self
                 .catalogue
                 .gc_release_deleted_roots(

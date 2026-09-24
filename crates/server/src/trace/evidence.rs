@@ -23,6 +23,7 @@ use sylph_protocol::trace::{
 use crate::trace::cas::BlobStore;
 
 pub mod catalogue;
+pub(crate) mod export;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdmissionLimits {
@@ -213,11 +214,11 @@ impl EvidenceStore {
                     .bind(key.as_slice())
                     .execute(&mut *tx)
                     .await?;
-                sqlx::query("PRAGMA user_version = 1")
+                sqlx::query("PRAGMA user_version = 2")
                     .execute(&mut *tx)
                     .await?;
             }
-            1 => {}
+            2 => {}
             _ => return Err(EvidenceError::Invalid("unsupported evidence schema".into())),
         }
         // Existing archives must retain their key. Regeneration would silently
@@ -226,6 +227,12 @@ impl EvidenceStore {
         tx.commit().await?;
         let readers = SqlitePoolOptions::new()
             .max_connections(4)
+            .after_release(|conn, _| {
+                Box::pin(async move {
+                    conn.lock_handle().await?.remove_progress_handler();
+                    Ok(true)
+                })
+            })
             .after_connect(|conn, _| {
                 Box::pin(async move {
                     sqlx::query("PRAGMA query_only = ON").execute(conn).await?;
@@ -749,6 +756,13 @@ impl EvidenceStore {
                 let envelope_bytes = envelope.len() as i64;
                 let admission_seq = sqlx::query("INSERT INTO observations (observation_ref, occurrence_id, primary_payload_ref, envelope_json, envelope_bytes, admitted_at_ms) VALUES (?, ?, ?, ?, ?, ?)")
                     .bind(&observation_key).bind(occurrence_id).bind(capture.payload_ref.as_str()).bind(envelope).bind(envelope_bytes).bind(now_ms()).execute(&mut *tx).await?.last_insert_rowid();
+                let scope_json: String = sqlx::query_scalar("SELECT s.scope_json FROM ingestion_epochs e JOIN ingestion_scopes s ON s.scope_ref=e.scope_ref WHERE e.epoch=?").bind(epoch).fetch_one(&mut *tx).await?;
+                let scope: IngestionScope = serde_json::from_str(&scope_json)?;
+                sqlx::query("INSERT INTO environment_admissions VALUES(?,?)")
+                    .bind(scope.environment().as_str())
+                    .bind(admission_seq)
+                    .execute(&mut *tx)
+                    .await?;
                 sqlx::query("INSERT INTO source_replay_records VALUES(?,?,?,?,?) ON CONFLICT(occurrence_id) DO NOTHING")
                     .bind(epoch).bind(&source_key).bind(generation).bind(admission_seq).bind(occurrence_id).execute(&mut *tx).await?;
                 for payload in capture_payload_refs(capture) {

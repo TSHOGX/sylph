@@ -53,6 +53,8 @@ pub struct TraceService {
     search_limits: SearchLimits,
     search_queries: Arc<Semaphore>,
     transfers: Arc<Semaphore>,
+    evidence_exports: Arc<Semaphore>,
+    pub(crate) evidence_export_limits: super::evidence_export::Limits,
     transfer_limits: super::transfer::TransferLimits,
     pub(crate) structures: super::structure::Jobs,
     #[cfg(test)]
@@ -67,6 +69,16 @@ pub struct TraceService {
     pub(crate) result_catalogue_read_pause: ReprojectionPause,
     #[cfg(test)]
     pub(crate) structure_scan_pause: ReprojectionPause,
+    #[cfg(test)]
+    pub(crate) evidence_export_pause: ReprojectionPause,
+    #[cfg(test)]
+    pub(crate) evidence_export_prepare_pause: ReprojectionPause,
+    #[cfg(test)]
+    pub(crate) evidence_export_cleanup_pause: ReprojectionPause,
+    #[cfg(test)]
+    pub(crate) evidence_export_payload_pause: ReprojectionPause,
+    #[cfg(test)]
+    pub(crate) evidence_export_backpressure: Arc<Notify>,
     #[cfg(test)]
     pub(crate) structure_page_pause: ReprojectionPause,
     recovery: Arc<RwLock<Option<String>>>,
@@ -174,6 +186,7 @@ impl TraceService {
             queries.max_key_bytes,
         )?);
         let catalogue = EvidenceCatalogue::new(evidence.clone(), CatalogueLimits::default())?;
+        while catalogue.retire_exports(true, 32).await? > 0 {}
         let uploads = CaptureUploads::new(catalogue.clone(), UploadLimits::default())?;
         let worker =
             ProjectionWorker::new(evidence.clone(), catalogue.clone(), WorkerLimits::default())?;
@@ -201,6 +214,7 @@ impl TraceService {
         let search_limits = SearchLimits::default();
         let gc = TraceGarbageCollector::new(catalogue.clone(), GcLimits::default())?;
         let transfer_limits = super::transfer::TransferLimits::default();
+        let evidence_export_limits = super::evidence_export::Limits::default();
         let service = Self {
             root: root.into(),
             _archive_lock: Arc::new(archive_lock),
@@ -221,6 +235,8 @@ impl TraceService {
             search_wake: Arc::new(Notify::new()),
             search_gate: Arc::new(Mutex::new(())),
             transfers: Arc::new(Semaphore::new(transfer_limits.max_jobs)),
+            evidence_exports: Arc::new(Semaphore::new(evidence_export_limits.max_jobs)),
+            evidence_export_limits,
             transfer_limits,
             structures: super::structure::Jobs::open(root).await?,
             #[cfg(test)]
@@ -235,6 +251,16 @@ impl TraceService {
             result_catalogue_read_pause: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             structure_scan_pause: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            evidence_export_pause: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            evidence_export_prepare_pause: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            evidence_export_cleanup_pause: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            evidence_export_payload_pause: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            evidence_export_backpressure: Arc::new(Notify::new()),
             #[cfg(test)]
             structure_page_pause: Arc::new(Mutex::new(None)),
             search_queries: Arc::new(Semaphore::new(search_limits.max_concurrent_queries)),
@@ -593,6 +619,9 @@ impl TraceService {
     pub fn transfer_permit(&self) -> Option<OwnedSemaphorePermit> {
         self.transfers.clone().try_acquire_owned().ok()
     }
+    pub(crate) fn evidence_export_permit(&self) -> Option<OwnedSemaphorePermit> {
+        self.evidence_exports.clone().try_acquire_owned().ok()
+    }
     pub async fn transfer_lease(
         &self,
         subject: &str,
@@ -603,6 +632,27 @@ impl TraceService {
         let view = self
             .catalogue
             .fork_lease(subject, token, crate::models::now_ms(), lifetime_ms)
+            .await?;
+        let release = self.pending_release(subject, &view.token);
+        self.generation(&view.snapshot.generation).await?;
+        Ok(LeaseGuard {
+            view,
+            release: Some(release),
+        })
+    }
+
+    pub(crate) async fn evidence_export_lease(
+        &self,
+        subject: &str,
+        token: &str,
+        lifetime_ms: i64,
+    ) -> anyhow::Result<LeaseGuard> {
+        self.require_available().await?;
+        // The export authorizes its environment, not whichever other metadata
+        // windows the initiating reader happened to bind to the same view.
+        let view = self
+            .catalogue
+            .fork_window_lease(subject, token, crate::models::now_ms(), lifetime_ms)
             .await?;
         let release = self.pending_release(subject, &view.token);
         self.generation(&view.snapshot.generation).await?;
@@ -687,7 +737,7 @@ impl TraceService {
     fn manifest(generation: String) -> GenerationManifest {
         GenerationManifest {
             generation: generation.clone(),
-            semantic_schema: "trace-17".into(),
+            semantic_schema: "trace-18".into(),
             mapper_builds: [
                 ("server", mapping::server::ServerMapper.build()),
                 ("codex", mapping::codex::CodexMapper.build()),

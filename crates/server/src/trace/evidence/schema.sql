@@ -97,6 +97,12 @@ CREATE TABLE observations (
   envelope_bytes INTEGER NOT NULL CHECK (envelope_bytes >= 0),
   admitted_at_ms INTEGER NOT NULL
 );
+CREATE TABLE environment_admissions (
+  environment_ref TEXT NOT NULL,
+  admission_seq INTEGER NOT NULL REFERENCES observations(admission_seq),
+  PRIMARY KEY(environment_ref, admission_seq)
+) WITHOUT ROWID;
+
 CREATE INDEX observations_by_occurrence ON observations(occurrence_id, admission_seq);
 -- Rereads may retain different manifest layouts for the same exact source bytes.
 -- Index their primary representations without scanning every receipt envelope.
