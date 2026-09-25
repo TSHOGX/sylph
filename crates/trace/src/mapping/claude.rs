@@ -1061,7 +1061,16 @@ impl Context<'_, '_> {
             ResultRepresentation::CallerResult,
             slot,
         );
-        if !self.state.invocations.contains(&operation.encode()) {
+        let retained_invocation = self.state.invocations.contains(&operation.encode())
+            || self
+                .input
+                .archive
+                .semantic
+                .operations
+                .contains_key(&operation);
+        let absent = Value::Null;
+        self.schedule_result(owner, &operation, part, structured.unwrap_or(&absent));
+        if !retained_invocation {
             self.issue(
                 Some(owner),
                 &format!("{slot}/orphan"),
@@ -1092,7 +1101,7 @@ impl Context<'_, '_> {
         }
         let absent = Value::Null;
         let structured = structured.unwrap_or(&absent);
-        self.schedule_result(owner, &operation, part, structured);
+
         if text(structured, "taskType") == Some("local_workflow") {
             self.workflow_launch(owner, root, &operation, structured, slot);
         }

@@ -53,7 +53,11 @@ async fn admit(fixture: &Fixture, row: &NativeRow, epoch: &IngestionEpoch) -> Ca
             },
         },
         ingestion_authorization_epoch: epoch.clone(),
-        declared_subject_refs: if row.source == "parent" { vec![owner(PARENT_ID)] } else { vec![] },
+        declared_subject_refs: if row.source == "parent" {
+            vec![owner(PARENT_ID)]
+        } else {
+            vec![]
+        },
         captured_at: TimeEvidence {
             domain: "fixture.wall".into(),
             value: 100,
@@ -97,15 +101,21 @@ async fn child_is_readable_without_admission(
         .await
         .unwrap();
     let mut text = vec![];
+    let mut proved = 0;
     for row in rows.rows {
         assert_ne!(&row.epoch, parent_epoch);
         assert!(!row.dependency_epochs.contains(parent_epoch));
         let unit: ReadingUnit = serde_json::from_value(row.body).unwrap();
-        assert_eq!(
+        if matches!(
             unit.entry_context,
-            Some(ReadEntryContext::Unresolved),
-            "copy matching must not turn unresolved original ownership into local authorship"
-        );
+            Some(ReadEntryContext::Inherited {
+                original_owner: Some(_)
+            })
+        ) {
+            proved += 1;
+        } else {
+            assert_eq!(unit.entry_context, Some(ReadEntryContext::Unresolved));
+        }
         assert!(unit.activation.is_none());
         if let ReadingContent::Message {
             parts, delivery, ..
@@ -126,6 +136,26 @@ async fn child_is_readable_without_admission(
         }
     }
     assert_eq!(text, ["Say one", "hello"]);
+    eprintln!(
+        "copy rows={} proved={} relations={}",
+        text.len(),
+        proved,
+        reduced.relations.len()
+    );
+    for relation in &reduced.relations {
+        if matches!(relation.relation, Relation::ContextCopy { .. }) {
+            eprintln!("copy relation {:?}", relation.relation);
+        }
+    }
+    let has_copy = reduced
+        .relations
+        .iter()
+        .any(|relation| matches!(relation.relation, Relation::ContextCopy { .. }));
+    assert_eq!(
+        proved > 0,
+        has_copy,
+        "copy reader context must follow retained provenance evidence"
+    );
 }
 
 async fn inventory(fixture: &Fixture, parent: &Capture) -> Capture {
@@ -185,8 +215,8 @@ async fn copy_links(store: &GenerationStore) -> Vec<(EntryRef, EntryRef)> {
 }
 
 #[tokio::test]
-async fn retained_pi_fork_copies_stay_readable_without_new_admissions_through_restart_reread_and_origin_deletion()
- {
+async fn retained_pi_fork_copies_stay_readable_without_new_admissions_through_restart_reread_and_origin_deletion(
+) {
     let mut expected = None;
     for (child_first, early_inventory) in
         [(false, false), (false, true), (true, false), (true, true)]
@@ -368,12 +398,11 @@ async fn pi_copy_witness_indexes_and_continuations_resume_from_committed_state()
         .prepare_unit(&store, &state, &captures, before + 1)
         .await
         .unwrap();
-    assert!(
-        unit.next
-            .pending
-            .values()
-            .any(|pending| pending.requests.contains(&ArchiveRequest::ContinueCopies))
-    );
+    assert!(unit
+        .next
+        .pending
+        .values()
+        .any(|pending| pending.requests.contains(&ArchiveRequest::ContinueCopies)));
     assert!(
         unit.batch
             .claims
