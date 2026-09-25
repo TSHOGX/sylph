@@ -245,7 +245,10 @@ Selected-version, terminal-owner, nested-edge and page-revalidation mutations fa
 own assertions. Deep-copy fixtures measure immediate proof storage at 100 and 1,000
 entries and require constant reader-label bytes rather than embedded ancestry paths.
 They do not establish the local-production status of unmatched entries or an ultimate actor
-for nested copies.
+for nested copies. A focused reader regression adds a suffix entry whose exact
+predecessor is a retained copied version and verifies the local suffix classification;
+removing that predecessor relation leaves the entry unresolved. This is positive edge
+evidence, not an unmatched-prefix inference.
 
 Pi RPC entry/tree snapshots are also checked independently of native ownership in
 `crates/trace/src/mapping/pi/tests.rs`: assistant messages, operations, shell records and

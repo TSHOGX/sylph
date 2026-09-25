@@ -35,6 +35,7 @@ pub(super) struct CopyIndex {
     resolutions: BTreeMap<CopyNodeKey, Option<Option<AgentRef>>>,
     copied: BTreeSet<EntryRef>,
     edges: BTreeSet<CopyNodeKey>,
+    local_suffix: BTreeSet<EntryRef>,
 }
 
 impl CopyIndex {
@@ -83,6 +84,23 @@ impl CopyIndex {
                 if relevant.contains(&node) && observation.complete {
                     observations.entry(node).or_default().push(claim.clone());
                 }
+            }
+        }
+        for object in reduction.objects.values() {
+            let Some(TraceObject::HistoryEntry(entry)) = object.declaration.known() else {
+                continue;
+            };
+            if index.copied.contains(&entry.entry_ref) {
+                continue;
+            }
+            let Some(predecessor) = &entry.predecessor else {
+                continue;
+            };
+            if edges
+                .keys()
+                .any(|node| node.entry == *predecessor && observations.contains_key(node))
+            {
+                index.local_suffix.insert(entry.entry_ref.clone());
             }
         }
         let mut terminals = BTreeMap::new();
@@ -171,6 +189,10 @@ impl CopyIndex {
             }
         }
         index
+    }
+
+    pub(super) fn is_local_suffix(&self, entry: &EntryRef) -> bool {
+        self.local_suffix.contains(entry)
     }
 
     pub(super) fn context(

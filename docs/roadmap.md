@@ -358,7 +358,9 @@ Targeted identity, content, source-generation, continuation, authorization and n
 faults were observed failing the regressions before restoration. Reader projection now
 also rejects exact-ID copy joins whose retained endpoint positions do not match, while
 preserving unresolved context. Positive source matching does not establish an unmatched
-child-local suffix or an actor absent from the retained lineage. Optional inline copy
+child-local suffix or an actor absent from the retained lineage. A copied predecessor
+now provides positive local-suffix evidence for the next exact native entry; entries
+without that edge remain unresolved. Optional inline copy
 metadata uses independently authorized proof nodes for each exact version and preserves
 agreeing witnesses as alternatives. The reader checks this graph within a bounded page
 budget without enrolling remote proof epochs in the copied body's lease; missing,

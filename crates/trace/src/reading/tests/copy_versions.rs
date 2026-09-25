@@ -188,3 +188,115 @@ fn deeply_nested_copy_proofs_keep_linear_storage_and_constant_reader_metadata() 
         "tenfold chain depth must not create quadratic proof storage: {measurements:?}"
     );
 }
+
+#[test]
+fn a_positive_copied_predecessor_proves_a_local_suffix_without_using_unmatched_absence() {
+    let source =
+        AgentRef::Session(sylph_protocol::SessionId::decode("env7:codex:source-suffix").unwrap());
+    let copied = EntryRef::native(agent(), "entry", vec!["copied".into()]).unwrap();
+    let suffix = EntryRef::native(agent(), "entry", vec!["suffix".into()]).unwrap();
+    let message = MessageRef::native(agent(), "message", vec!["suffix".into()]).unwrap();
+    let revision = MessageRevisionRef::native(agent(), "revision", vec!["suffix".into()]).unwrap();
+    let facts = vec![
+        Fact::Declare {
+            object: declared_agent(agent()),
+        },
+        Fact::Declare {
+            object: declared_agent(source.clone()),
+        },
+        Fact::Declare {
+            object: TraceObject::HistoryEntry(HistoryEntry {
+                entry_ref: EntryRef::native(source.clone(), "entry", vec!["original".into()])
+                    .unwrap(),
+                containing_agent: source.clone(),
+                predecessor: None,
+                original_owner: None,
+            }),
+        },
+        Fact::Declare {
+            object: TraceObject::HistoryEntry(HistoryEntry {
+                entry_ref: copied.clone(),
+                containing_agent: agent(),
+                predecessor: None,
+                original_owner: Some(OwnerRef::Agent {
+                    agent: source.clone(),
+                }),
+            }),
+        },
+        Fact::Declare {
+            object: TraceObject::HistoryEntry(HistoryEntry {
+                entry_ref: suffix.clone(),
+                containing_agent: agent(),
+                predecessor: Some(copied.clone()),
+                original_owner: Some(OwnerRef::Unresolved {
+                    scope: agent(),
+                    namespace: "pi.entry-origin".into(),
+                    native_key: vec!["fork".into()],
+                    reason: "No direct copy match".into(),
+                }),
+            }),
+        },
+        Fact::Declare {
+            object: TraceObject::Message(Message {
+                message_ref: message.clone(),
+                author: Author::Unknown,
+                protocol_role: Some(ProtocolRole::User),
+                purpose: MessagePurpose::Context,
+                production: None,
+            }),
+        },
+        Fact::Declare {
+            object: TraceObject::MessageRevision(MessageRevision {
+                revision_ref: revision.clone(),
+                message,
+                representation: Representation::Conversation,
+                form: RevisionForm::Complete,
+                parts: vec![],
+            }),
+        },
+        Fact::HistoryContentObserved {
+            observation: HistoryContentObservation::complete(
+                copied.clone(),
+                capture(1).source_position,
+                "copied",
+                vec![HistoryContent::Opaque(capture(1).payload_ref)],
+            ),
+        },
+        Fact::HistoryContentObserved {
+            observation: HistoryContentObservation::complete(
+                EntryRef::native(source.clone(), "entry", vec!["original".into()]).unwrap(),
+                capture(1).source_position,
+                "original",
+                vec![HistoryContent::Opaque(capture(1).payload_ref)],
+            ),
+        },
+        Fact::HistoryContentObserved {
+            observation: HistoryContentObservation::complete(
+                suffix.clone(),
+                capture(2).source_position,
+                "suffix",
+                vec![HistoryContent::Message(revision)],
+            ),
+        },
+        Fact::Relation {
+            relation: Relation::ContextCopy {
+                original: EntryRef::native(source, "entry", vec!["original".into()]).unwrap(),
+                copied,
+                original_position: capture(1).source_position,
+                copied_position: capture(1).source_position,
+            },
+        },
+    ];
+    let projection = facts_projection(facts, &PayloadPreviews::new());
+    let row = &projection.windows[&ReadingScope {
+        agent: agent(),
+        selection: None,
+    }]
+        .iter()
+        .find(|row| row.anchor.object() == AnyObjectRef::HistoryEntry(suffix.clone()))
+        .unwrap();
+    assert_eq!(
+        row.entry_context, None,
+        "a proved copied predecessor establishes a local suffix"
+    );
+}
