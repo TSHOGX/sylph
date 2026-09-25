@@ -27,6 +27,7 @@ struct ClaudeState {
     runs: BTreeMap<String, (ActivationRef, ObservationRef)>,
     tasks: BTreeMap<String, task::Episode>,
     invocation_evidence: BTreeMap<String, ObservationRef>,
+    invocations: std::collections::BTreeSet<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -470,16 +471,25 @@ impl Context<'_, '_> {
                 },
             }),
         );
-        let result_field = if live { "tool_use_result" } else { "toolUseResult" };
+        let result_field = if live {
+            "tool_use_result"
+        } else {
+            "toolUseResult"
+        };
         let structured = value.get(result_field);
-        let pairings = values.iter().filter(|part| text(part, "type") == Some("tool_result")).count();
+        let pairings = values
+            .iter()
+            .filter(|part| text(part, "type") == Some("tool_result"))
+            .count();
         // Envelope metadata has no general per-block join key. Sharing it across
         // several results would assign the same runtime bytes/child to each call.
         let structured = if structured.is_some() && pairings != 1 {
             self.issue(Some(&owner), "claude/structured-result-pairing", DiagnosticCode::MissingOwner,
                 "Structured tool metadata has no unique content-block pairing; the full envelope remains retained");
             None
-        } else { structured };
+        } else {
+            structured
+        };
         let mut content = vec![];
         for (index, part) in values.iter().enumerate() {
             content.push(self.part(
@@ -498,9 +508,24 @@ impl Context<'_, '_> {
                 );
             }
             if text(part, "type") == Some("tool_result") {
-                for field in ["persistedOutputPath","outputFile"] {if let Some(path)=structured.and_then(|value| text(value,field)) {
-                    if let Some(id)=text(part,"tool_use_id").filter(|id| !id.is_empty()) {let key=super::attachment_key(self.input.canonical_observation,&format!("/message/content/{index}"),path);self.output.correlations.insert(key.clone(),AnyObjectRef::Operation(operation(&owner,id)));self.output.correlation_evidence.insert(key,vec![self.input.canonical_observation.clone()]);}
-                }}
+                for field in ["persistedOutputPath", "outputFile"] {
+                    if let Some(path) = structured.and_then(|value| text(value, field)) {
+                        if let Some(id) = text(part, "tool_use_id").filter(|id| !id.is_empty()) {
+                            let key = super::attachment_key(
+                                self.input.canonical_observation,
+                                &format!("/message/content/{index}"),
+                                path,
+                            );
+                            self.output.correlations.insert(
+                                key.clone(),
+                                AnyObjectRef::Operation(operation(&owner, id)),
+                            );
+                            self.output
+                                .correlation_evidence
+                                .insert(key, vec![self.input.canonical_observation.clone()]);
+                        }
+                    }
+                }
                 self.tool_result(
                     &owner,
                     &root_of(containing),
@@ -968,6 +993,7 @@ impl Context<'_, '_> {
         };
         let operation = operation(owner, id);
         let input = self.json(&value["input"], &format!("{slot}/input"));
+        self.state.invocations.insert(operation.encode());
         let delegation = matches!(name, "Agent" | "Task");
         self.object(
             owner,
@@ -992,10 +1018,9 @@ impl Context<'_, '_> {
             }),
         );
         if delegation || name == "SendMessage" {
-            self.state.invocation_evidence.insert(
-                operation.encode(),
-                self.input.canonical_observation.clone(),
-            );
+            self.state
+                .invocation_evidence
+                .insert(operation.encode(), self.input.canonical_observation.clone());
         }
         if delegation && value["input"].get("resume").is_none() {
             self.output.correlations.insert(
@@ -1036,6 +1061,25 @@ impl Context<'_, '_> {
             ResultRepresentation::CallerResult,
             slot,
         );
+        if !self.state.invocations.contains(&operation.encode()) {
+            self.issue(
+                Some(owner),
+                &format!("{slot}/orphan"),
+                DiagnosticCode::MissingOwner,
+                "Claude tool result has no retained tool_use invocation; kept as an orphan result",
+            );
+            if let Some(structured) = structured {
+                let payload = self.json(structured, &format!("{slot}/structured"));
+                self.result(
+                    owner,
+                    &operation,
+                    payload,
+                    ResultRepresentation::Runtime,
+                    &format!("{slot}/structured"),
+                );
+            }
+            return;
+        }
         if let Some(structured) = structured {
             let payload = self.json(structured, &format!("{slot}/structured"));
             self.result(
@@ -1052,16 +1096,23 @@ impl Context<'_, '_> {
         if text(structured, "taskType") == Some("local_workflow") {
             self.workflow_launch(owner, root, &operation, structured, slot);
         }
-        let interpretation = self.delegation_result(owner, root, &operation, part, structured, slot);
+        let interpretation =
+            self.delegation_result(owner, root, &operation, part, structured, slot);
         let (outcome, evidence) = match interpretation {
             delegation::ResultInterpretation::AwaitingInvocation => (None, vec![]),
             delegation::ResultInterpretation::Unclassified => (
                 part.get("is_error").and_then(Value::as_bool).map(|error| {
-                    if error { TerminalOutcome::Failed } else { TerminalOutcome::Succeeded }
+                    if error {
+                        TerminalOutcome::Failed
+                    } else {
+                        TerminalOutcome::Succeeded
+                    }
                 }),
                 vec![],
             ),
-            delegation::ResultInterpretation::Outcome(outcome, evidence) => (Some(outcome), evidence),
+            delegation::ResultInterpretation::Outcome(outcome, evidence) => {
+                (Some(outcome), evidence)
+            }
         };
         if let Some(outcome) = outcome {
             self.add(

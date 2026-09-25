@@ -226,3 +226,37 @@ fn outbound_sdk_metadata_cannot_fabricate_vendor_results_admission_or_child_iden
     assert!(output.requests.is_empty());
     assert!(output.diagnostics.is_empty());
 }
+
+#[test]
+fn an_unmatched_tool_result_stays_a_caller_result_without_schedule_or_outcome() {
+    let output = run(&[envelope(false, None)], false);
+    let results: Vec<_> = objects(&output)
+        .filter_map(|object| match object {
+            TraceObject::Result(result) => Some(result),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results.len(), 1);
+    assert_eq!(
+        results[0].representation,
+        ResultRepresentation::CallerResult
+    );
+    assert!(output[0].claims.iter().any(|claim| matches!(
+        claim.fact,
+        Fact::Diagnostic {
+            diagnostic: TraceDiagnostic {
+                code: DiagnosticCode::MissingOwner,
+                ..
+            }
+        }
+    )));
+    assert!(!output
+        .iter()
+        .flat_map(|out| &out.claims)
+        .any(|claim| matches!(
+            claim.fact,
+            Fact::Declare {
+                object: TraceObject::Resource(_)
+            } | Fact::Execution { .. }
+        )));
+}
