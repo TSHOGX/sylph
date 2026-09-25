@@ -229,8 +229,11 @@ rebuild. The same replay now supplies native inventory and checks `ContextCopy` 
 exact original/copied source positions. Early/late inventory and parent/child ordering
 produce identical claims, while deleting the origin removes only the optional source
 links. A separate held-continuation test verifies persisted matching indexes and same-cut
-restart recovery beyond one work budget. These establish positive native record copies,
-not the local-production status of unmatched entries or an ultimate actor for nested copies.
+restart recovery beyond one work budget. These establish positive native record copies, and the reader now
+presents the original containing agent for one unambiguous `ContextCopy` chain while
+keeping copied bytes independently readable. Multiple/cyclic witnesses remain unresolved.
+They do not establish the local-production status of unmatched entries or an ultimate actor
+for nested copies.
 
 Pi RPC entry/tree snapshots are also checked independently of native ownership in
 `crates/trace/src/mapping/pi/tests.rs`: assistant messages, operations, shell records and

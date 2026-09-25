@@ -320,11 +320,13 @@ impl super::Index<'_> {
         }
         // The entry owns this assertion. Origin metadata is an independently
         // authorized link, so losing it must not erase inherited context.
-        let context = entry.original_owner.as_ref().map(|owner| match owner {
-            OwnerRef::Agent { agent } => ReadEntryContext::Inherited {
-                original_owner: Some(self.agent_link(agent)),
-            },
-            OwnerRef::Unresolved { .. } | OwnerRef::Unknown => ReadEntryContext::Unresolved,
+        let context = self.copy_contexts.get(entry_ref).cloned().or_else(|| {
+            entry.original_owner.as_ref().map(|owner| match owner {
+                OwnerRef::Agent { agent } => ReadEntryContext::Inherited {
+                    original_owner: Some(self.agent_link(agent)),
+                },
+                OwnerRef::Unresolved { .. } | OwnerRef::Unknown => ReadEntryContext::Unresolved,
+            })
         });
         for unit in &mut units {
             unit.entry_context = context.clone();

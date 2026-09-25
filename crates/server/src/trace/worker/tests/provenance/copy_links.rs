@@ -135,6 +135,14 @@ async fn copy_lineage_is_optional_authorized_metadata_and_never_owns_the_copied_
     fixture.publish(values, &[&local, &remote]).await;
     let before = fixture.bootstrap(&recipient).await;
     assert!(before.to_string().contains("Independent retained copy"));
+    assert_eq!(
+        before["window"]["items"][0]["entryContext"]["kind"],
+        "inherited"
+    );
+    assert_eq!(
+        before["window"]["items"][0]["entryContext"]["originalOwner"]["address"],
+        original.encode()
+    );
     let token = before["view"]["token"].as_str().unwrap();
     let access = &before["window"]["items"][0]["content"]["parts"][0]["payload"];
 
@@ -144,13 +152,11 @@ async fn copy_lineage_is_optional_authorized_metadata_and_never_owns_the_copied_
         .get(&format!("/api/v1/trace/objects/{}", copied.encode()))
         .await;
     assert_eq!(status, StatusCode::OK, "{detail}");
-    assert!(
-        detail["relations"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|row| row["target"] == source.encode() && row["label"] == "Copy lineage")
-    );
+    assert!(detail["relations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["target"] == source.encode() && row["label"] == "Copy lineage"));
     fixture
         .state
         .trace
@@ -183,11 +189,9 @@ async fn copy_lineage_is_optional_authorized_metadata_and_never_owns_the_copied_
         ))
         .await;
     assert_eq!(status, StatusCode::OK, "{hidden}");
-    assert!(
-        !hidden["relations"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|row| row["label"] == "Copy lineage")
-    );
+    assert!(!hidden["relations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["label"] == "Copy lineage"));
 }

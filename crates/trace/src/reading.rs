@@ -10,13 +10,13 @@ use std::sync::Arc;
 use sylph_protocol::trace::*;
 mod append;
 mod content;
+mod directory;
 mod inputs;
 mod resources;
-mod directory;
 pub use directory::DirectoryEntry;
+mod inheritance;
 mod message_update;
 mod window;
-mod inheritance;
 pub use append::{project_independent_append, AppendIndex, AppendProjection, AppendWork};
 pub use content::{compose_revisions, composition_payloads, ComposedPayload, ComposedRevisions};
 pub use message_update::{project_message_update, MessageProjection};
@@ -82,6 +82,7 @@ struct Index<'a> {
     parents: BTreeMap<AgentRef, AgentRef>,
     origins: BTreeMap<AgentRef, BTreeSet<Option<AgentRef>>>,
     inherited_context_sources: BTreeMap<AgentRef, Vec<AnyObjectRef>>,
+    copy_contexts: BTreeMap<EntryRef, ReadEntryContext>,
 }
 
 pub fn project(
@@ -114,6 +115,7 @@ pub fn project(
         parents: BTreeMap::new(),
         origins: BTreeMap::new(),
         inherited_context_sources: inheritance::sources(reduction),
+        copy_contexts: BTreeMap::new(),
     };
     for object in reduction
         .objects
@@ -205,6 +207,63 @@ pub fn project(
     // Build adjacency once. Detail materialization must not rescan the whole graph
     // for every object, and repeated evidence must not inflate relation counts.
     let mut relation_keys = BTreeMap::<AnyObjectRef, BTreeSet<(String, AnyObjectRef)>>::new();
+    let copy_edges: BTreeMap<EntryRef, BTreeSet<EntryRef>> = reduction
+        .relations
+        .iter()
+        .filter_map(|relation| match &relation.relation {
+            Relation::ContextCopy {
+                original, copied, ..
+            } => Some((copied.clone(), original.clone())),
+            _ => None,
+        })
+        .fold(BTreeMap::new(), |mut edges, (copied, original)| {
+            edges.entry(copied).or_default().insert(original);
+            edges
+        });
+    for copied in copy_edges.keys() {
+        let mut current = copied.clone();
+        let mut visited = BTreeSet::new();
+        let mut resolved = None;
+        let mut ambiguous = false;
+        loop {
+            if !visited.insert(current.clone()) {
+                ambiguous = true;
+                break;
+            }
+            let Some(origins) = copy_edges.get(&current) else {
+                resolved = reduction
+                    .object(&AnyObjectRef::HistoryEntry(current.clone()))
+                    .and_then(|object| object.declaration.known())
+                    .and_then(|object| match object {
+                        TraceObject::HistoryEntry(entry) => match &entry.original_owner {
+                            Some(OwnerRef::Agent { agent }) if agent != &entry.containing_agent => {
+                                Some(agent.clone())
+                            }
+                            _ => Some(entry.containing_agent.clone()),
+                        },
+                        _ => None,
+                    });
+                break;
+            };
+            if origins.len() != 1 {
+                ambiguous = true;
+                break;
+            }
+            current = origins.iter().next().unwrap().clone();
+        }
+        index.copy_contexts.insert(
+            copied.clone(),
+            if ambiguous {
+                ReadEntryContext::Unresolved
+            } else if let Some(agent) = resolved {
+                ReadEntryContext::Inherited {
+                    original_owner: Some(index.agent_link(&agent)),
+                }
+            } else {
+                ReadEntryContext::Unresolved
+            },
+        );
+    }
     for relation in &reduction.relations {
         let subjects = relation.relation.subject_refs();
         for subject in &subjects {
@@ -1095,11 +1154,15 @@ impl Index<'_> {
         // Losing live coverage is not a terminal boundary. When every other own
         // activation has terminated, retain the sole unclosed observation instead
         // of presenting a previous answer's completed run as the whole agent state.
-        let unclosed: Vec<_> = known.iter().filter(|summary| {
-            !matches!(summary.state, ReadExecutionState::Terminated { .. })
-        }).collect();
+        let unclosed: Vec<_> = known
+            .iter()
+            .filter(|summary| !matches!(summary.state, ReadExecutionState::Terminated { .. }))
+            .collect();
         if unclosed.len() == 1
-            && matches!(unclosed[0].state, ReadExecutionState::ObservationEnded { .. })
+            && matches!(
+                unclosed[0].state,
+                ReadExecutionState::ObservationEnded { .. }
+            )
         {
             return unclosed[0].clone();
         }

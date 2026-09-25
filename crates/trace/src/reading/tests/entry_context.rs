@@ -368,3 +368,106 @@ fn inherited_only_requires_positive_complete_history_and_no_local_work_in_any_br
             .inherited_context_only
     );
 }
+
+#[test]
+fn context_copy_proof_labels_copied_entries_and_follows_one_nested_origin_but_conflicts_stay_unresolved(
+) {
+    let root = AgentRef::Session(sylph_protocol::SessionId::decode("env7:codex:root").unwrap());
+    let middle = original();
+    let child = agent();
+    let entry = |owner: &AgentRef, key: &str| {
+        EntryRef::native(owner.clone(), "copy-entry", vec![key.into()]).unwrap()
+    };
+    let root_entry = entry(&root, "root");
+    let middle_entry = entry(&middle, "middle");
+    let child_entry = entry(&child, "child");
+    let objects = vec![
+        declared_agent(root.clone()),
+        declared_agent(middle.clone()),
+        declared_agent(child.clone()),
+        TraceObject::HistoryEntry(HistoryEntry {
+            entry_ref: root_entry.clone(),
+            containing_agent: root.clone(),
+            predecessor: None,
+            original_owner: None,
+        }),
+        TraceObject::HistoryEntry(HistoryEntry {
+            entry_ref: middle_entry.clone(),
+            containing_agent: middle.clone(),
+            predecessor: None,
+            original_owner: None,
+        }),
+        TraceObject::HistoryEntry(HistoryEntry {
+            entry_ref: child_entry.clone(),
+            containing_agent: child.clone(),
+            predecessor: None,
+            original_owner: None,
+        }),
+    ];
+    let observations = [
+        (&root, &root_entry, "root"),
+        (&middle, &middle_entry, "middle"),
+        (&child, &child_entry, "child"),
+    ]
+    .into_iter()
+    .map(|(owner, entry, key)| {
+        let _message = MessageRef::native(owner.clone(), "copy-message", vec![key.into()]).unwrap();
+        let revision =
+            MessageRevisionRef::native(owner.clone(), "copy-revision", vec![key.into()]).unwrap();
+        HistoryContentObservation::complete(
+            entry.clone(),
+            capture(1).source_position,
+            "copy",
+            vec![HistoryContent::Message(revision)],
+        )
+    })
+    .collect::<Vec<_>>();
+    let relations = vec![
+        Relation::ContextCopy {
+            original: root_entry.clone(),
+            copied: middle_entry.clone(),
+            original_position: capture(1).source_position.clone(),
+            copied_position: capture(2).source_position.clone(),
+        },
+        Relation::ContextCopy {
+            original: middle_entry.clone(),
+            copied: child_entry.clone(),
+            original_position: capture(2).source_position.clone(),
+            copied_position: capture(3).source_position.clone(),
+        },
+    ];
+    let projection = objects_projection(objects.clone(), relations, observations.clone());
+    let rows = &projection.windows[&ReadingScope {
+        agent: child.clone(),
+        selection: None,
+    }];
+    assert!(
+        matches!(&rows[0].entry_context, Some(ReadEntryContext::Inherited { original_owner: Some(link) }) if link.address.agent() == root)
+    );
+    let ambiguous = objects_projection(
+        objects,
+        vec![
+            Relation::ContextCopy {
+                original: root_entry,
+                copied: child_entry.clone(),
+                original_position: capture(1).source_position.clone(),
+                copied_position: capture(3).source_position.clone(),
+            },
+            Relation::ContextCopy {
+                original: middle_entry,
+                copied: child_entry,
+                original_position: capture(2).source_position,
+                copied_position: capture(3).source_position,
+            },
+        ],
+        observations,
+    );
+    assert_eq!(
+        ambiguous.windows[&ReadingScope {
+            agent: child,
+            selection: None
+        }][0]
+            .entry_context,
+        Some(ReadEntryContext::Unresolved)
+    );
+}

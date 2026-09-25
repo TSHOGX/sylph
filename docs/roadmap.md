@@ -111,9 +111,12 @@ contributing entries, while unavailable origin metadata does not own the child's
 The first local append to an entirely inherited history requires header reconciliation;
 after that transition ordinary independent appends keep their bounded path. Coverage spans
 pure classification, the incremental boundary, normalized HTTP snapshots, native Codex
-frozen-prefix replay/restart/rebuild and desktop/mobile live control. Pi copy-derived
-ultimate ownership and general child-local suffix proof remain open alongside the vendor
-and reader acceptance gates.
+frozen-prefix replay/restart/rebuild and desktop/mobile live control. Positive `ContextCopy`
+proofs now label copied entries with the original containing agent through one unambiguous
+nested chain; conflicting or cyclic witnesses remain unresolved and origin metadata never
+owns copied bytes. Pi copy-derived ultimate actor attribution for unmatched nested copies
+and general child-local suffix proof remain open alongside the vendor and reader acceptance
+gates.
 
 Search hits now open their exact retained body revision through an explicit result
 job authority, including composed stream prefixes superseded by a different final body.
