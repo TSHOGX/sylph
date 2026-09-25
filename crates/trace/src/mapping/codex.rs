@@ -19,9 +19,9 @@ impl CodexMapper {
 }
 mod accounting;
 mod collaboration;
+mod content_annotation;
 mod goal;
 mod input;
-mod content_annotation;
 pub mod routing;
 mod runtime;
 
@@ -42,6 +42,7 @@ struct CodexState {
     revision_by_message: BTreeMap<String, MessageRevisionRef>,
     entry_by_agent: BTreeMap<String, EntryRef>,
     rpc_requests: BTreeMap<String, (String, ObservationRef)>,
+    model_calls: BTreeMap<String, OperationRef>,
     runtime: runtime::RuntimeState,
 }
 
@@ -1367,6 +1368,9 @@ impl Context<'_, '_> {
             },
         };
         let activation = self.state.active_by_agent.get(&owner.encode()).cloned();
+        self.state
+            .model_calls
+            .insert(id.to_owned(), reference.clone());
         self.declare(
             owner,
             "codex/model-operation",
@@ -1404,6 +1408,37 @@ impl Context<'_, '_> {
                 self.opaque(value, "/payload/output")
             }
         });
+        if !self.state.model_calls.contains_key(id) {
+            self.issue(
+                owner,
+                "codex/orphan-model-result",
+                DiagnosticCode::MissingOwner,
+                "Model result has no retained invocation; kept as an orphan result",
+            );
+            self.declare(
+                owner,
+                "codex/orphan-caller-result",
+                TraceObject::Result(ResultOccurrence {
+                    result_ref: ResultRef::occurrence(
+                        owner.clone(),
+                        self.input.capture.source_position.clone(),
+                        vec!["orphan-result".into()],
+                    )
+                    .unwrap(),
+                    operation,
+                    recipient: Some(Recipient::Agent {
+                        agent: OwnerRef::Agent {
+                            agent: owner.clone(),
+                        },
+                    }),
+                    disposition: ResultDisposition::FinalReturn,
+                    representation: ResultRepresentation::CallerResult,
+                    payload,
+                    delivery: None,
+                }),
+            );
+            return;
+        }
         let revision = MessageRevisionRef::occurrence(
             owner.clone(),
             self.input.capture.source_position.clone(),

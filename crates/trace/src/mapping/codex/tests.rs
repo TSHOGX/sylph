@@ -991,3 +991,44 @@ fn native_argument_formats_follow_the_vendor_field_without_reencoding_identical_
         );
     }
 }
+
+#[test]
+fn an_unmatched_function_result_remains_an_orphan_without_an_invented_delivery() {
+    let header_capture = capture(1, false);
+    let header = CodexMapper.map(MapInput {
+        capture: &header_capture,
+        canonical_observation: &header_capture.observation_ref,
+        raw: br#"{"type":"session_meta","ordinal":0,"payload":{"id":"root","history_mode":"paginated"}}"#,
+        state: &MapperState::default(),
+        archive: &ArchiveContext::default(),
+    });
+    let capture = capture(2, false);
+    let output = CodexMapper.map(MapInput {
+        capture: &capture,
+        canonical_observation: &capture.observation_ref,
+        raw: br#"{"type":"response_item","payload":{"type":"function_call_output","call_id":"missing-call","output":{"status":"completed","value":"retained"}}}"#,
+        state: &header.state,
+        archive: &ArchiveContext::default(),
+    });
+    assert!(output.claims.iter().any(|claim| matches!(
+        &claim.fact,
+        Fact::Declare { object: TraceObject::Result(result) }
+            if result.delivery.is_none() && result.representation == ResultRepresentation::CallerResult
+    )));
+    assert!(!output.claims.iter().any(|claim| matches!(
+        claim.fact,
+        Fact::Declare {
+            object: TraceObject::Delivery(_)
+        } | Fact::DeliveryStage { .. }
+            | Fact::DeliveryRevisionObserved { .. }
+    )));
+    assert!(output.claims.iter().any(|claim| matches!(
+        claim.fact,
+        Fact::Diagnostic {
+            diagnostic: TraceDiagnostic {
+                code: DiagnosticCode::MissingOwner,
+                ..
+            }
+        }
+    )));
+}

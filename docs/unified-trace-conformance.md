@@ -373,6 +373,12 @@ checks native frozen-prefix mapping, local work outside its selection, restart a
 controls independent of this status at both desktop and mobile widths. These cases do not
 certify unresolved Pi copy ownership or an unobserved local suffix.
 
+Codex orphan-result semantics are falsified in
+`crates/trace/src/mapping/codex/tests.rs`: a retained `function_call_output` without its
+scoped call remains a caller-result representation with no Delivery or admitted stage,
+while a deliberate branch removal fails the test. This closes the orphan/result clause
+without claiming an exact invocation or model inclusion.
+
 ## Reproducible checks
 
 The vendor audit works entirely from retained sanitized artifacts by default:
