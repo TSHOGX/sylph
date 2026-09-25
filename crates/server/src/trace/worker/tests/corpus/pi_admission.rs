@@ -337,6 +337,128 @@ async fn retained_pi_fork_copies_stay_readable_without_new_admissions_through_re
 }
 
 #[tokio::test]
+async fn a_copied_predecessor_does_not_classify_an_unmatched_retained_pi_successor_as_local() {
+    for child_first in [false, true] {
+        let fixture = Fixture::for_vendor("pi").await;
+        let parent_scope = IngestionScope::Agent(owner(PARENT_ID));
+        let parent_epoch = fixture
+            .evidence
+            .authorize_scope(&parent_scope, &[owner(PARENT_ID)])
+            .await
+            .unwrap();
+        let parent = native_rows("parent", FORK_PARENT);
+        let child = native_rows("child", FORK_CHILD);
+        // Retain the child exactly, but delay the parent's corresponding final
+        // assistant record. Both copied and genuinely new entries can follow
+        // the same copied predecessor; the edge cannot distinguish them.
+        let early: Vec<_> = if child_first {
+            child.iter().chain(parent[..4].iter()).collect()
+        } else {
+            parent[..4].iter().chain(child.iter()).collect()
+        };
+        let mut parent_header = None;
+        for row in early {
+            let capture = admit(
+                &fixture,
+                row,
+                if row.source == "parent" {
+                    &parent_epoch
+                } else {
+                    &fixture.epoch
+                },
+            )
+            .await;
+            if row.source == "parent" && row.ordinal == 0 {
+                parent_header = Some(capture);
+            }
+        }
+        inventory(&fixture, &parent_header.unwrap()).await;
+        let cut = fixture.evidence.evidence_cut().await.unwrap();
+        let (store, _) = fixture.generation("pi-partial-copy").await;
+        fixture.worker().catch_up(&store, 1, cut).await.unwrap();
+        let snapshot = store.checkpoint().await.unwrap().snapshot;
+        let history = read_scope(&owner(CHILD_ID), None, "history");
+        let page = store
+            .read_page(&snapshot, &history, None, None, None, 16, false)
+            .await
+            .unwrap();
+        assert_eq!(copy_links(&store).await.len(), 3);
+        let row = page
+            .rows
+            .iter()
+            .find(|row| row.body.to_string().contains("hello"))
+            .unwrap();
+        let unit: ReadingUnit = serde_json::from_value(row.body.clone()).unwrap();
+        assert_eq!(
+            unit.entry_context,
+            Some(ReadEntryContext::Unresolved),
+            "a missing parent counterpart cannot establish child-local production"
+        );
+        assert!(matches!(
+            unit.content,
+            ReadingContent::Message { delivery: None, .. }
+        ));
+        assert!(!row.dependency_epochs.contains(&parent_epoch));
+        let store = reopened(store).await;
+        let (rebuilt, _) = fixture.generation("pi-partial-copy-rebuilt").await;
+        fixture.worker().catch_up(&rebuilt, 1, cut).await.unwrap();
+        assert_eq!(
+            projection(&fixture, &store).await,
+            projection(&fixture, &rebuilt).await
+        );
+
+        admit(&fixture, &parent[4], &parent_epoch).await;
+        let later_cut = fixture.evidence.evidence_cut().await.unwrap();
+        fixture
+            .worker()
+            .catch_up(&store, 1, later_cut)
+            .await
+            .unwrap();
+        let later = store.checkpoint().await.unwrap().snapshot;
+        let page = store
+            .read_page(&later, &history, None, None, None, 16, false)
+            .await
+            .unwrap();
+        let row = page
+            .rows
+            .iter()
+            .find(|row| row.body.to_string().contains("hello"))
+            .unwrap();
+        let unit: ReadingUnit = serde_json::from_value(row.body.clone()).unwrap();
+        assert!(
+            matches!(unit.entry_context, Some(ReadEntryContext::Inherited { original_owner: Some(origin) }) if origin.address.agent() == owner(PARENT_ID))
+        );
+        assert!(matches!(
+            unit.content,
+            ReadingContent::Message { delivery: None, .. }
+        ));
+        let old = store
+            .read_page(&snapshot, &history, None, None, None, 16, false)
+            .await
+            .unwrap();
+        let old = old
+            .rows
+            .iter()
+            .find(|row| row.body.to_string().contains("hello"))
+            .unwrap();
+        assert_eq!(
+            old.body["entryContext"]["kind"], "unresolved",
+            "a later copy proof cannot rewrite the held earlier history"
+        );
+        let (rebuilt, _) = fixture.generation("pi-complete-copy-rebuilt").await;
+        fixture
+            .worker()
+            .catch_up(&rebuilt, 1, later_cut)
+            .await
+            .unwrap();
+        assert_eq!(
+            projection(&fixture, &store).await,
+            projection(&fixture, &rebuilt).await
+        );
+    }
+}
+
+#[tokio::test]
 async fn pi_copy_witness_indexes_and_continuations_resume_from_committed_state() {
     use mapping::pi::copies::COPY_PAGE_WORK;
     let fixture = Fixture::for_vendor("pi").await;

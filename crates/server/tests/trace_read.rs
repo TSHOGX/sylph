@@ -90,12 +90,16 @@ async fn activation_pages_preserve_own_outcomes_and_snapshot_membership() {
             .filter(|_| page["hasAfter"] == true);
     }
     assert_eq!(references.len(), 3);
-    let retained = json_body(
-        backend
-            .get_authed(&format!("{path}?at_snapshot={token}&limit=1"))
-            .await,
-    )
-    .await;
+    let retained = backend
+        .get_authed(&format!("{path}?at_snapshot={token}&limit=1"))
+        .await;
+    let status = retained.status();
+    let retained = json_body(retained).await;
+    assert_eq!(
+        status, 200,
+        "held activation view failed: {retained}; view={}",
+        bootstrap["view"]
+    );
     assert_eq!(
         retained["items"], first["items"],
         "later activations cannot enter an old snapshot"
@@ -159,7 +163,12 @@ async fn reading_deliveries_keep_submitted_bytes_and_payload_access_is_snapshot_
     let token = bootstrap["view"]["token"].as_str().unwrap();
     let url=format!("/api/v1/trace/payloads/{}?via_ref={}&at_snapshot={token}&revision={}&representation=submitted&start=0&end=7",payload["payloadRef"].as_str().unwrap(),payload["viaRef"].as_str().unwrap(),payload["bodyRevision"].as_str().unwrap());
     let response = backend.get_authed(&url).await;
-    assert_eq!(response.status(), 200);
+    assert_eq!(
+        response.status(),
+        200,
+        "payload read refused: {}",
+        body_string(response).await
+    );
     assert_eq!(response.headers()["content-range"], "bytes 0-6/13");
     assert_eq!(body_string(response).await, "Fixture");
     let wrong = url.replace(
@@ -315,7 +324,12 @@ fn interest(bootstrap: &serde_json::Value) -> serde_json::Value {
 }
 async fn next_change(response: axum::response::Response) -> serde_json::Value {
     use futures::StreamExt;
-    assert_eq!(response.status(), 200);
+    assert_eq!(
+        response.status(),
+        200,
+        "change stream refused: {}",
+        body_string(response).await
+    );
     let mut body = response.into_body().into_data_stream();
     tokio::time::timeout(std::time::Duration::from_secs(3), async move {
         while let Some(data) = body.next().await {

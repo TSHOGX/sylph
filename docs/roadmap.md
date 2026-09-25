@@ -359,8 +359,10 @@ faults were observed failing the regressions before restoration. Reader projecti
 also rejects exact-ID copy joins whose retained endpoint positions do not match, while
 preserving unresolved context. Positive source matching does not establish an unmatched
 child-local suffix or an actor absent from the retained lineage. A copied predecessor
-now provides positive local-suffix evidence for the next exact native entry; entries
-without that edge remain unresolved. Optional inline copy
+does not establish local production of its successor: the original successor may simply
+be missing from the retained prefix. Partial-history replay keeps that successor
+unresolved until its own exact copy witness arrives, preserving older views across
+restart and rebuild. Optional inline copy
 metadata uses independently authorized proof nodes for each exact version and preserves
 agreeing witnesses as alternatives. The reader checks this graph within a bounded page
 budget without enrolling remote proof epochs in the copied body's lease; missing,
@@ -368,6 +370,14 @@ retired or inaccessible proof leaves unresolved context and readable local bytes
 Page assembly rechecks deletion visibility and grants before returning cached optional
 provenance. The projection schema advances in place; source evidence stays authoritative.
 Historical RPC snapshots preserve absent ownership as described above.
+
+The Pi clause audit also leaves a concrete snapshot-continuation gap:
+`crates/trace/src/mapping/pi.rs` scopes a history response to only the content observations
+returned in that response, while acquisition uses `get_entries(since)` for later polls.
+The retained request and verified baseline must establish cumulative content membership
+for that append window, including an empty response that changes no entries. A baseline
+cannot be borrowed from another source epoch or inferred from an unpaired response.
+This needs production replay coverage before the entry-snapshot clause closes.
 
 Pi historical reads and unresolved native fork records no longer create new delivery
 or admission claims from a user/tool-result protocol role. Direct runtime message events
@@ -905,6 +915,15 @@ bodies, and measures warm append/delta/final work at growing history sizes. Full
 reconciliation remains valid for uncommon topology or equivalence changes, provided it
 finishes privately within bounded writer units while the published snapshot stays readable.
 Universal constant-time graph updates are not a completion requirement.
+
+The successor-provenance validation observed two held-view failures in
+`crates/server/tests/trace_read.rs` after host suspension: activation paging returned an
+error response, and a post-rebuild change stream returned HTTP 410. The macOS power log
+records 737 seconds asleep immediately before the failed run resumed, exceeding the
+120-second lease lifetime while the test timer excluded suspended time. The integration
+file and the exact workspace-built binary both passed while awake. Assertions now report
+the error body and held-view metadata. Validation uses a process-scoped sleep assertion;
+product lease expiry remains unchanged.
 
 The milestone narratives below record earlier product delivery. Block-era implementation
 details are historical; the trace checkpoint above owns the replacement status.

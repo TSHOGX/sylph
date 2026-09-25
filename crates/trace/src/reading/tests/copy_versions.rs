@@ -190,7 +190,7 @@ fn deeply_nested_copy_proofs_keep_linear_storage_and_constant_reader_metadata() 
 }
 
 #[test]
-fn a_positive_copied_predecessor_proves_a_local_suffix_without_using_unmatched_absence() {
+fn a_copied_predecessor_cannot_prove_local_production_of_its_unmatched_successor() {
     let source =
         AgentRef::Session(sylph_protocol::SessionId::decode("env7:codex:source-suffix").unwrap());
     let copied = EntryRef::native(agent(), "entry", vec!["copied".into()]).unwrap();
@@ -296,7 +296,8 @@ fn a_positive_copied_predecessor_proves_a_local_suffix_without_using_unmatched_a
         .find(|row| row.anchor.object() == AnyObjectRef::HistoryEntry(suffix.clone()))
         .unwrap();
     assert_eq!(
-        row.entry_context, None,
-        "a proved copied predecessor establishes a local suffix"
+        row.entry_context,
+        Some(ReadEntryContext::Unresolved),
+        "a copied predecessor cannot distinguish a missing original record from locally produced content"
     );
 }

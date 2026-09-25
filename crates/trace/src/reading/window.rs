@@ -325,9 +325,6 @@ impl super::Index<'_> {
             .context(self.reduction, entry_ref, scope.selection.as_ref())
             .map(|proof| proof.context)
             .or_else(|| {
-                if self.copies.is_local_suffix(entry_ref) {
-                    return None;
-                }
                 entry.original_owner.as_ref().map(|owner| match owner {
                     OwnerRef::Agent { agent } => ReadEntryContext::Inherited {
                         original_owner: Some(self.agent_link(agent)),

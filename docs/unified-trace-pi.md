@@ -170,11 +170,10 @@ and endpoint observation, independently of authorization of the copied body.
 An unmatched entry remains unresolved: absence from a captured prefix cannot establish
 a child-local suffix. Copy relations do not rewrite the child's content or predecessor,
 and identifying a copied entry does not itself prove the original actor of nested copies.
-When a retained native entry names an exact predecessor that is itself a proved copied
-version, the predecessor edge is positive evidence that this entry is a local suffix.
-The reader may therefore leave its entry context unlabelled. An unmatched entry without
-that predecessor proof remains unresolved; source order or a missing match alone never
-creates the suffix classification.
+A copied predecessor establishes topology only. Its successor may be another copied
+record whose original has not been retained yet. Neither that edge nor absence of a
+matching original establishes local production. A local-suffix claim requires independent
+production evidence or a vendor-proved copy boundary, with the relevant source version.
 
 ## Messages, provenance, and delivery
 

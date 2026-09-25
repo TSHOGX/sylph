@@ -465,10 +465,12 @@ references, replacement summaries, and known exclusions. Inherited content is at
 to its original owner and labeled `Inherited context`; it is not counted as the child's
 own execution. Entry provenance is a separate field from authorship and optional origin
 navigation. It applies to messages, operations, checkpoints and opaque entry content.
-A positive `ContextCopy` proof also supplies the copied entry's original containing agent,
-following one unambiguous nested chain. Multiple, cyclic or incomplete copy witnesses stay
-unresolved. A known inherited entry keeps its label when the origin is absent, deleted or
-unreadable; the origin action alone becomes unavailable. An unresolved original-owner handle is
+A positive `ContextCopy` proof supplies inherited provenance through one unambiguous chain
+of exact source versions; an unknown terminal owner remains unnamed. Multiple, cyclic or
+incomplete copy witnesses stay unresolved. An inherited assertion retained with the entry
+keeps its label when optional origin metadata is absent, deleted or unreadable. A label
+derived from a separate copy witness requires that witness to remain authorized: losing
+all sufficient proofs changes it to unresolved while preserving the copied bytes. An unresolved original-owner handle is
 shown as unresolved context provenance, not proof of inherited membership or local work.
 Adjacent work rows with different entry provenance are not grouped together. Origin
 inspection retains the reader's view and leaves its control target unchanged.
