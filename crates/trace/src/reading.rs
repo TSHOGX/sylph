@@ -207,17 +207,57 @@ pub fn project(
     // Build adjacency once. Detail materialization must not rescan the whole graph
     // for every object, and repeated evidence must not inflate relation counts.
     let mut relation_keys = BTreeMap::<AnyObjectRef, BTreeSet<(String, AnyObjectRef)>>::new();
-    let copy_edges: BTreeMap<EntryRef, BTreeSet<EntryRef>> = reduction
+    // A native entry ID is only a join key inside the source version that was
+    // observed. Keep the exact positions with each edge and reject a relation
+    // whose endpoints were never observed at those positions. This prevents a
+    // stale ID from silently borrowing a newer body or predecessor chain.
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    struct CopyEdge {
+        original: EntryRef,
+        original_position: SourcePosition,
+        copied_position: SourcePosition,
+        valid: bool,
+    }
+    let observed_positions: BTreeMap<EntryRef, BTreeSet<SourcePosition>> = reduction
+        .history_contents
+        .iter()
+        .map(|(entry, observations)| {
+            (
+                entry.clone(),
+                observations
+                    .values()
+                    .map(|observation| observation.position.clone())
+                    .collect(),
+            )
+        })
+        .collect();
+    let copy_edges: BTreeMap<EntryRef, BTreeSet<CopyEdge>> = reduction
         .relations
         .iter()
         .filter_map(|relation| match &relation.relation {
             Relation::ContextCopy {
-                original, copied, ..
-            } => Some((copied.clone(), original.clone())),
+                original,
+                copied,
+                original_position,
+                copied_position,
+            } => Some((
+                copied.clone(),
+                CopyEdge {
+                    original: original.clone(),
+                    original_position: original_position.clone(),
+                    copied_position: copied_position.clone(),
+                    valid: observed_positions
+                        .get(original)
+                        .is_some_and(|positions| positions.contains(original_position))
+                        && observed_positions
+                            .get(copied)
+                            .is_some_and(|positions| positions.contains(copied_position)),
+                },
+            )),
             _ => None,
         })
-        .fold(BTreeMap::new(), |mut edges, (copied, original)| {
-            edges.entry(copied).or_default().insert(original);
+        .fold(BTreeMap::new(), |mut edges, (copied, edge)| {
+            edges.entry(copied).or_default().insert(edge);
             edges
         });
     for copied in copy_edges.keys() {
@@ -230,7 +270,7 @@ pub fn project(
                 ambiguous = true;
                 break;
             }
-            let Some(origins) = copy_edges.get(&current) else {
+            let Some(edges) = copy_edges.get(&current) else {
                 resolved = reduction
                     .object(&AnyObjectRef::HistoryEntry(current.clone()))
                     .and_then(|object| object.declaration.known())
@@ -239,17 +279,27 @@ pub fn project(
                             Some(OwnerRef::Agent { agent }) if agent != &entry.containing_agent => {
                                 Some(agent.clone())
                             }
-                            _ => Some(entry.containing_agent.clone()),
+                            // A valid copy edge terminating at a root entry names
+                            // that root's containing session. The containing agent
+                            // is not used when the entry itself has an unresolved
+                            // owner claim.
+                            None => Some(entry.containing_agent.clone()),
+                            _ => None,
                         },
                         _ => None,
                     });
                 break;
             };
-            if origins.len() != 1 {
+            if edges.len() != 1 {
                 ambiguous = true;
                 break;
             }
-            current = origins.iter().next().unwrap().clone();
+            let edge = edges.iter().next().unwrap();
+            if !edge.valid {
+                ambiguous = true;
+                break;
+            }
+            current = edge.original.clone();
         }
         index.copy_contexts.insert(
             copied.clone(),

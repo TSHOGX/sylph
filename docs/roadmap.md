@@ -355,9 +355,12 @@ rebuild. HTTP inspection treats copy links as optional metadata. Relation respon
 name the target agent scope, so cross-agent inspection retains the view without reusing
 a foreign history selection; Back preserves the preceding scope and draft.
 Targeted identity, content, source-generation, continuation, authorization and navigation
-faults were observed failing the regressions before restoration. Positive source matching
-does not establish an unmatched child-local suffix or ultimate
-actor attribution for nested copies. Those semantics and inherited-owner presentation
+faults were observed failing the regressions before restoration. Reader projection now
+also rejects exact-ID copy joins whose retained endpoint positions do not match, while
+preserving unresolved context. Positive source matching does not establish an unmatched
+child-local suffix or ultimate actor attribution for nested copies. Optional inline copy
+metadata still needs its own relation-proof authorization and redaction acceptance,
+which remains open alongside
 remain open; historical RPC snapshots now preserve absent ownership as described above.
 
 Pi historical reads and unresolved native fork records no longer create new delivery

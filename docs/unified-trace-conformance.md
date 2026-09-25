@@ -226,7 +226,9 @@ also run through `crates/server/src/trace/worker/tests/corpus/pi_admission.rs`: 
 inputs retain their admissions, copied child text stays byte-exact without creating
 child deliveries, and independent child retention survives original-scope deletion and
 rebuild. The same replay now supplies native inventory and checks `ContextCopy` matches at
-exact original/copied source positions. Early/late inventory and parent/child ordering
+exact original/copied source positions. The reader projection independently rejects a
+relation whose endpoint position was not retained for that entry, so a reused native ID
+cannot borrow a different version. Early/late inventory and parent/child ordering
 produce identical claims, while deleting the origin removes only the optional source
 links. A separate held-continuation test verifies persisted matching indexes and same-cut
 restart recovery beyond one work budget. These establish positive native record copies, and the reader now

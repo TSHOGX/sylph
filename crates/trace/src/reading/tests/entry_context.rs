@@ -405,18 +405,18 @@ fn context_copy_proof_labels_copied_entries_and_follows_one_nested_origin_but_co
         }),
     ];
     let observations = [
-        (&root, &root_entry, "root"),
-        (&middle, &middle_entry, "middle"),
-        (&child, &child_entry, "child"),
+        (&root, &root_entry, "root", 1),
+        (&middle, &middle_entry, "middle", 2),
+        (&child, &child_entry, "child", 3),
     ]
     .into_iter()
-    .map(|(owner, entry, key)| {
+    .map(|(owner, entry, key, capture_index)| {
         let _message = MessageRef::native(owner.clone(), "copy-message", vec![key.into()]).unwrap();
         let revision =
             MessageRevisionRef::native(owner.clone(), "copy-revision", vec![key.into()]).unwrap();
         HistoryContentObservation::complete(
             entry.clone(),
-            capture(1).source_position,
+            capture(capture_index).source_position,
             "copy",
             vec![HistoryContent::Message(revision)],
         )
@@ -445,29 +445,48 @@ fn context_copy_proof_labels_copied_entries_and_follows_one_nested_origin_but_co
         matches!(&rows[0].entry_context, Some(ReadEntryContext::Inherited { original_owner: Some(link) }) if link.address.agent() == root)
     );
     let ambiguous = objects_projection(
-        objects,
+        objects.clone(),
         vec![
             Relation::ContextCopy {
-                original: root_entry,
+                original: root_entry.clone(),
                 copied: child_entry.clone(),
                 original_position: capture(1).source_position.clone(),
                 copied_position: capture(3).source_position.clone(),
             },
             Relation::ContextCopy {
                 original: middle_entry,
-                copied: child_entry,
+                copied: child_entry.clone(),
                 original_position: capture(2).source_position,
                 copied_position: capture(3).source_position,
             },
         ],
-        observations,
+        observations.clone(),
     );
     assert_eq!(
         ambiguous.windows[&ReadingScope {
-            agent: child,
+            agent: child.clone(),
             selection: None
         }][0]
             .entry_context,
         Some(ReadEntryContext::Unresolved)
+    );
+    let mismatched = objects_projection(
+        objects,
+        vec![Relation::ContextCopy {
+            original: root_entry,
+            copied: child_entry,
+            original_position: capture(99).source_position,
+            copied_position: capture(3).source_position,
+        }],
+        observations,
+    );
+    assert_eq!(
+        mismatched.windows[&ReadingScope {
+            agent: child,
+            selection: None
+        }][0]
+            .entry_context,
+        Some(ReadEntryContext::Unresolved),
+        "a copy relation must not join an entry ID to a different source version"
     );
 }

@@ -158,8 +158,11 @@ A compact content fingerprint indexes this comparison; it is never an entry iden
 or a substitute for the source/ID proofs. Different IDs, sources, generations or content
 cannot match merely because some text is equal.
 Each independent witness produces a separately evidenced `ContextCopy` relation.
-Late records and locator certificates resolve through indexed bounded continuations,
-without rescanning unrelated histories or retaining another copy of the vendor body.
+The reader accepts that relation only when both endpoint positions are retained content
+observations for the named entries; a reused ID at another source generation remains
+unresolved. Late records and locator certificates resolve through indexed bounded
+continuations, without rescanning unrelated histories or retaining another copy of the
+vendor body.
 An unmatched entry remains unresolved: absence from a captured prefix cannot establish
 a child-local suffix. Copy relations do not rewrite the child's content or predecessor,
 and identifying a copied entry does not itself prove the original actor of nested copies.
