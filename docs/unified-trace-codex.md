@@ -294,7 +294,10 @@ roots distinguish `collaboration.spawn_agent` from `clock.sleep`; an unqualified
 alone cannot select a built-in semantic mapping over a different registered tool.
 
 For a direct call, matching scoped `call_id` relates its input and each returned
-result occurrence. A tool output without its call remains an orphan result. Multiple
+result occurrence. A tool output without its call remains an orphan result: preserve
+its scoped call reference without inventing an invocation or arguments. Its recorded
+conversation admission is independently established by the output record, so missing or
+late invocation evidence cannot suppress the delivery or change the result identity. Multiple
 observations of one result require identity evidence before reconciliation. A returned
 resource handle is a result, not proof that resource execution ended.
 

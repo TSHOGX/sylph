@@ -15,7 +15,7 @@ pub mod history;
 
 pub struct CodexMapper;
 impl CodexMapper {
-    const BUILD: &'static str = "codex-14";
+    const BUILD: &'static str = "codex-15";
 }
 mod accounting;
 mod collaboration;
@@ -42,7 +42,6 @@ struct CodexState {
     revision_by_message: BTreeMap<String, MessageRevisionRef>,
     entry_by_agent: BTreeMap<String, EntryRef>,
     rpc_requests: BTreeMap<String, (String, ObservationRef)>,
-    model_calls: BTreeMap<String, OperationRef>,
     runtime: runtime::RuntimeState,
 }
 
@@ -1368,9 +1367,6 @@ impl Context<'_, '_> {
             },
         };
         let activation = self.state.active_by_agent.get(&owner.encode()).cloned();
-        self.state
-            .model_calls
-            .insert(id.to_owned(), reference.clone());
         self.declare(
             owner,
             "codex/model-operation",
@@ -1408,37 +1404,10 @@ impl Context<'_, '_> {
                 self.opaque(value, "/payload/output")
             }
         });
-        if !self.state.model_calls.contains_key(id) {
-            self.issue(
-                owner,
-                "codex/orphan-model-result",
-                DiagnosticCode::MissingOwner,
-                "Model result has no retained invocation; kept as an orphan result",
-            );
-            self.declare(
-                owner,
-                "codex/orphan-caller-result",
-                TraceObject::Result(ResultOccurrence {
-                    result_ref: ResultRef::occurrence(
-                        owner.clone(),
-                        self.input.capture.source_position.clone(),
-                        vec!["orphan-result".into()],
-                    )
-                    .unwrap(),
-                    operation,
-                    recipient: Some(Recipient::Agent {
-                        agent: OwnerRef::Agent {
-                            agent: owner.clone(),
-                        },
-                    }),
-                    disposition: ResultDisposition::FinalReturn,
-                    representation: ResultRepresentation::CallerResult,
-                    payload,
-                    delivery: None,
-                }),
-            );
-            return;
-        }
+        // Native output records independently prove conversation admission. The
+        // scoped operation reference may remain orphaned until its invocation is
+        // retained; using mapper arrival state here loses history and changes the
+        // same result's identity across source orderings.
         let revision = MessageRevisionRef::occurrence(
             owner.clone(),
             self.input.capture.source_position.clone(),

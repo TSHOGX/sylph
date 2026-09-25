@@ -386,6 +386,12 @@ one from contradictory source sessions.
 The child-side copy is a context reference or copied representation, with the original
 authorship preserved. A missing cutoff is recorded as missing.
 
+Missing invocation evidence does not erase a result's explicit `is_error` outcome or
+its structured runtime bytes. A returned child identity whose meaning depends on a
+built-in invocation stays unresolved and requests that invocation from retained
+evidence; later arrival must resume the join. The call reference alone never supplies
+invocation arguments or promotes an unrelated tool's `agentId` field into a child.
+
 Operation results retain the native tool-result block, structured `toolUseResult`,
 persisted sidecar body, and forwarded live representation independently. A sidecar may
 contain more output than the formatted tool result; neither overwrites the other.

@@ -27,7 +27,6 @@ struct ClaudeState {
     runs: BTreeMap<String, (ActivationRef, ObservationRef)>,
     tasks: BTreeMap<String, task::Episode>,
     invocation_evidence: BTreeMap<String, ObservationRef>,
-    invocations: std::collections::BTreeSet<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -85,7 +84,7 @@ impl SemanticMapper for ClaudeMapper {
         (capture.transport_kind == TransportKind::LiveStdout).then_some(source_partition)
     }
     fn build(&self) -> &'static str {
-        "claude-11"
+        "claude-12"
     }
     fn map(&self, input: MapInput<'_>) -> MapOutput {
         if let Some(output) = super::resume_refinements(&input) {
@@ -993,7 +992,6 @@ impl Context<'_, '_> {
         };
         let operation = operation(owner, id);
         let input = self.json(&value["input"], &format!("{slot}/input"));
-        self.state.invocations.insert(operation.encode());
         let delegation = matches!(name, "Agent" | "Task");
         self.object(
             owner,
@@ -1061,15 +1059,6 @@ impl Context<'_, '_> {
             ResultRepresentation::CallerResult,
             slot,
         );
-        let retained_invocation = self.state.invocations.contains(&operation.encode())
-            || self
-                .input
-                .archive
-                .semantic
-                .operations
-                .contains_key(&operation);
-        let absent = Value::Null;
-        self.schedule_result(owner, &operation, part, structured.unwrap_or(&absent));
         if let Some(structured) = structured {
             let payload = self.json(structured, &format!("{slot}/structured"));
             self.result(
@@ -1080,58 +1069,51 @@ impl Context<'_, '_> {
                 &format!("{slot}/structured"),
             );
         }
-        let orphan = !retained_invocation;
-        if orphan {
-            self.issue(
-                Some(owner),
-                &format!("{slot}/orphan"),
-                DiagnosticCode::MissingOwner,
-                "Claude tool result has no retained tool_use invocation; kept as an orphan result",
-            );
-        }
+        // Each result has its own evidence. Delegation and schedule resolvers
+        // request a missing invocation when tool identity is required; a global
+        // invocation-presence guard would suppress those deferred joins as well
+        // as explicit failures and independently recorded runtime resources.
         let absent = Value::Null;
         let structured = structured.unwrap_or(&absent);
-
-        if !orphan {
-            if text(structured, "taskType") == Some("local_workflow") {
-                self.workflow_launch(owner, root, &operation, structured, slot);
+        self.schedule_result(owner, &operation, part, structured);
+        if text(structured, "taskType") == Some("local_workflow") {
+            self.workflow_launch(owner, root, &operation, structured, slot);
+        }
+        let interpretation =
+            self.delegation_result(owner, root, &operation, part, structured, slot);
+        let (outcome, evidence) = match interpretation {
+            delegation::ResultInterpretation::AwaitingInvocation => (None, vec![]),
+            delegation::ResultInterpretation::Unclassified => (
+                part.get("is_error").and_then(Value::as_bool).map(|error| {
+                    if error {
+                        TerminalOutcome::Failed
+                    } else {
+                        TerminalOutcome::Succeeded
+                    }
+                }),
+                vec![],
+            ),
+            delegation::ResultInterpretation::Outcome(outcome, evidence) => {
+                (Some(outcome), evidence)
             }
-            let interpretation =
-                self.delegation_result(owner, root, &operation, part, structured, slot);
-            let (outcome, evidence) = match interpretation {
-                delegation::ResultInterpretation::AwaitingInvocation => (None, vec![]),
-                delegation::ResultInterpretation::Unclassified => (
-                    part.get("is_error").and_then(Value::as_bool).map(|error| {
-                        if error {
-                            TerminalOutcome::Failed
-                        } else {
-                            TerminalOutcome::Succeeded
-                        }
-                    }),
-                    vec![],
-                ),
-                delegation::ResultInterpretation::Outcome(outcome, evidence) => {
-                    (Some(outcome), evidence)
-                }
-            };
-            if let Some(outcome) = outcome {
-                self.add(
-                    owner,
-                    &format!("{slot}/outcome"),
-                    Fact::Execution {
-                        execution: ExecutionRef::Operation(operation.clone()),
-                        boundary: ExecutionBoundary::Outcome {
-                            outcome,
-                            reason: None,
-                            detail: None,
-                        },
+        };
+        if let Some(outcome) = outcome {
+            self.add(
+                owner,
+                &format!("{slot}/outcome"),
+                Fact::Execution {
+                    execution: ExecutionRef::Operation(operation.clone()),
+                    boundary: ExecutionBoundary::Outcome {
+                        outcome,
+                        reason: None,
+                        detail: None,
                     },
-                );
-                let claim = self.output.claims.last_mut().unwrap();
-                claim.evidence.extend(evidence);
-                claim.evidence.sort();
-                claim.evidence.dedup();
-            }
+                },
+            );
+            let claim = self.output.claims.last_mut().unwrap();
+            claim.evidence.extend(evidence);
+            claim.evidence.sort();
+            claim.evidence.dedup();
         }
         for field in ["persistedOutputPath", "outputFile"] {
             if let Some(path) = text(structured, field) {

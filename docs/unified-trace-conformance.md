@@ -373,16 +373,24 @@ checks native frozen-prefix mapping, local work outside its selection, restart a
 controls independent of this status at both desktop and mobile widths. These cases do not
 certify unresolved Pi copy ownership or an unobserved local suffix.
 
-Claude orphan-result semantics are falsified in
-`crates/trace/src/mapping/claude/tests/tool_results.rs`: an unmatched `tool_result` remains
-caller-result bytes without schedule/resource/outcome claims; removing the invocation guard
-fails the regression.
+Claude orphan-result semantics are covered in
+`crates/trace/src/mapping/claude/tests/tool_results.rs`: explicit failures survive
+missing invocations, and an unresolved delegation result registers its retained-object
+dependency without inventing a child. The production late-invocation test in
+`crates/server/src/trace/worker/tests/semantic_acceptance.rs` requires a later call on
+another source to recover the child with both pieces of evidence, including on a fresh
+replay. The invocation guard fails these regressions; sidecar/runtime retention and
+unrelated-tool rejection remain independently tested.
 
-Codex orphan-result semantics are falsified in
-`crates/trace/src/mapping/codex/tests.rs`: a retained `function_call_output` without its
-scoped call remains a caller-result representation with no Delivery or admitted stage,
-while a deliberate branch removal fails the test. This closes the orphan/result clause
-without claiming an exact invocation or model inclusion.
+Codex orphan-result admission is covered by
+`crates/trace/src/mapping/codex/tests.rs`: function and custom outputs keep the same
+result identity and admitted delivery with or without a preceding invocation, while
+never declaring invocation arguments, execution outcomes or inference inclusion from
+the output. `crates/server/src/trace/worker/tests/semantic_acceptance.rs` exercises
+retained admission, readable orphan content, a late invocation on another source and
+fresh generation replay. Both regressions fail against the invocation-dependent
+admission guard. This establishes the admission distinction, not complete vendor
+conformance.
 
 ## Reproducible checks
 

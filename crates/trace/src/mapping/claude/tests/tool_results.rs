@@ -228,35 +228,54 @@ fn outbound_sdk_metadata_cannot_fabricate_vendor_results_admission_or_child_iden
 }
 
 #[test]
-fn an_unmatched_tool_result_stays_a_caller_result_without_schedule_or_outcome() {
-    let output = run(&[envelope(false, None)], false);
-    let results: Vec<_> = objects(&output)
-        .filter_map(|object| match object {
-            TraceObject::Result(result) => Some(result),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(results.len(), 1);
-    assert_eq!(
-        results[0].representation,
-        ResultRepresentation::CallerResult
-    );
-    assert!(output[0].claims.iter().any(|claim| matches!(
-        claim.fact,
-        Fact::Diagnostic {
-            diagnostic: TraceDiagnostic {
-                code: DiagnosticCode::MissingOwner,
+fn orphan_results_preserve_explicit_failure_without_inventing_invocation_arguments() {
+    for live in [false, true] {
+        let mut value = envelope(live, None);
+        value["message"]["content"][0]["is_error"] = true.into();
+        let output = run(&[value], live);
+        let result = objects(&output)
+            .find_map(|object| match object {
+                TraceObject::Result(result) => Some(result),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(result.representation, ResultRepresentation::CallerResult);
+        assert!(output[0].claims.iter().any(|claim| matches!(&claim.fact,
+            Fact::Execution { execution: ExecutionRef::Operation(reference), boundary: ExecutionBoundary::Outcome { outcome: TerminalOutcome::Failed, .. } } if reference == &result.operation
+        )), "explicit error evidence does not require observing invocation arguments");
+        assert!(
+            !objects(&output).any(|object| matches!(
+                object,
+                TraceObject::Operation(_) | TraceObject::Resource(_)
+            ))
+        );
+    }
+}
+
+#[test]
+fn orphan_delegation_results_request_the_missing_invocation_before_classifying_children() {
+    for live in [false, true] {
+        let value = envelope(
+            live,
+            Some(serde_json::json!({"agentId":"actual-child","status":"completed"})),
+        );
+        let output = run(&[value], live);
+        let reference = operation(&owner("root"), "call-a");
+        assert!(output[0].requests.iter().any(|request| matches!(request,
+            ArchiveRequest::Object { object_ref: AnyObjectRef::Operation(operation) } if operation == &reference
+        )), "missing invocation must stay a deferred dependency rather than discard the join");
+        assert!(!objects(&output).any(|object| matches!(
+            object,
+            TraceObject::Agent(AgentThread {
+                agent_ref: AgentRef::Embedded { .. },
                 ..
-            }
-        }
-    )));
-    assert!(!output
-        .iter()
-        .flat_map(|out| &out.claims)
-        .any(|claim| matches!(
-            claim.fact,
-            Fact::Declare {
-                object: TraceObject::Resource(_)
-            } | Fact::Execution { .. }
+            })
         )));
+        assert!(
+            !output[0]
+                .claims
+                .iter()
+                .any(|claim| matches!(claim.fact, Fact::Execution { .. }))
+        );
+    }
 }

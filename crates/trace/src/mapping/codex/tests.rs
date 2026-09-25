@@ -993,42 +993,82 @@ fn native_argument_formats_follow_the_vendor_field_without_reencoding_identical_
 }
 
 #[test]
-fn an_unmatched_function_result_remains_an_orphan_without_an_invented_delivery() {
-    let header_capture = capture(1, false);
-    let header = CodexMapper.map(MapInput {
-        capture: &header_capture,
-        canonical_observation: &header_capture.observation_ref,
-        raw: br#"{"type":"session_meta","ordinal":0,"payload":{"id":"root","history_mode":"paginated"}}"#,
-        state: &MapperState::default(),
-        archive: &ArchiveContext::default(),
-    });
-    let capture = capture(2, false);
-    let output = CodexMapper.map(MapInput {
-        capture: &capture,
-        canonical_observation: &capture.observation_ref,
-        raw: br#"{"type":"response_item","payload":{"type":"function_call_output","call_id":"missing-call","output":{"status":"completed","value":"retained"}}}"#,
-        state: &header.state,
-        archive: &ArchiveContext::default(),
-    });
-    assert!(output.claims.iter().any(|claim| matches!(
-        &claim.fact,
-        Fact::Declare { object: TraceObject::Result(result) }
-            if result.delivery.is_none() && result.representation == ResultRepresentation::CallerResult
-    )));
-    assert!(!output.claims.iter().any(|claim| matches!(
-        claim.fact,
-        Fact::Declare {
-            object: TraceObject::Delivery(_)
-        } | Fact::DeliveryStage { .. }
-            | Fact::DeliveryRevisionObserved { .. }
-    )));
-    assert!(output.claims.iter().any(|claim| matches!(
-        claim.fact,
-        Fact::Diagnostic {
-            diagnostic: TraceDiagnostic {
-                code: DiagnosticCode::MissingOwner,
-                ..
-            }
+fn orphan_outputs_keep_recorded_admission_and_stable_identity_without_inventing_invocations() {
+    for kind in ["function_call_output", "custom_tool_call_output"] {
+        let header_capture = capture(1, false);
+        let header = CodexMapper.map(MapInput {
+            capture: &header_capture,
+            canonical_observation: &header_capture.observation_ref,
+            raw: br#"{"type":"session_meta","payload":{"id":"root"}}"#,
+            state: &MapperState::default(),
+            archive: &ArchiveContext::default(),
+        });
+        let call_capture = capture(2, false);
+        let call = CodexMapper.map(MapInput {
+            capture: &call_capture,
+            canonical_observation: &call_capture.observation_ref,
+            raw: br#"{"type":"response_item","payload":{"type":"function_call","call_id":"call-a","name":"exec","arguments":"{\"command\":\"true\"}"}}"#,
+            state: &header.state,
+            archive: &ArchiveContext::default(),
+        });
+        let result_capture = capture(3, false);
+        let raw = serde_json::to_vec(&serde_json::json!({"type":"response_item","payload":{"type":kind,"call_id":"call-a","output":"orphan bytes"}})).unwrap();
+        let mut results = Vec::new();
+        for state in [&header.state, &call.state] {
+            let output = CodexMapper.map(MapInput {
+                capture: &result_capture,
+                canonical_observation: &result_capture.observation_ref,
+                raw: &raw,
+                state,
+                archive: &ArchiveContext::default(),
+            });
+            let result = output
+                .claims
+                .iter()
+                .find_map(|claim| match &claim.fact {
+                    Fact::Declare {
+                        object: TraceObject::Result(result),
+                    } => Some(result.clone()),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(
+                result.operation,
+                OperationRef::native(agent("root"), "codex.model-call", vec!["call-a".into()])
+                    .unwrap()
+            );
+            assert_eq!(result.representation, ResultRepresentation::CallerResult);
+            let delivery = result
+                .delivery
+                .as_ref()
+                .expect("the recorded output proves admission independently of its invocation");
+            assert!(output.claims.iter().any(|claim| matches!(&claim.fact,
+                Fact::DeliveryStage { delivery: observed, stage: DeliveryStage::Admitted { entry: Some(_) } } if observed == delivery
+            )));
+            assert!(!output.claims.iter().any(|claim| matches!(
+                &claim.fact,
+                Fact::Declare {
+                    object: TraceObject::Operation(_)
+                } | Fact::Execution { .. }
+            )));
+            assert!(output.claims.iter().all(|claim| !matches!(&claim.fact,
+                Fact::DeliveryStage { stage, .. } if !matches!(stage, DeliveryStage::Admitted { .. })
+            )));
+            let payload = result.payload.as_ref().unwrap();
+            assert_eq!(
+                output
+                    .payloads
+                    .iter()
+                    .find(|item| item.reference == payload.reference)
+                    .unwrap()
+                    .bytes,
+                b"orphan bytes"
+            );
+            results.push(result);
         }
-    )));
+        assert_eq!(
+            results[0], results[1],
+            "invocation arrival cannot change a retained result's identity or delivery"
+        );
+    }
 }

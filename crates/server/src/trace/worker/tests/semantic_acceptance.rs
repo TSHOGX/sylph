@@ -289,3 +289,135 @@ async fn receipt_clocks_never_fill_missing_native_execution_endpoints() {
         }
     }
 }
+
+#[tokio::test]
+async fn orphan_output_admission_survives_late_invocation_and_rebuild() {
+    let fixture = Fixture::new().await;
+    let header = CODEX_NATIVE
+        .split_inclusive(|byte| *byte == b'\n')
+        .next()
+        .unwrap();
+    fixture.native(1, 0, header).await;
+    let raw = b"{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"late-call\",\"output\":\"retained orphan output\"}}\n";
+    let capture = fixture.native(2, header.len() as u64, raw).await;
+    let (generation, _) = fixture.generation("orphan-output").await;
+    fixture.worker().catch_up(&generation, 1, 2).await.unwrap();
+    let retained = claims(&generation).await;
+    assert!(!retained.iter().any(|claim| matches!(
+        &claim.fact,
+        Fact::Declare {
+            object: TraceObject::Operation(_)
+        } | Fact::Execution { .. }
+    )));
+    let result = retained
+        .iter()
+        .find_map(|claim| match &claim.fact {
+            Fact::Declare {
+                object: TraceObject::Result(result),
+            } => Some(result.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        result.delivery.is_some(),
+        "recorded output proves admission even without the invocation"
+    );
+    assert_eq!(
+        fixture
+            .evidence
+            .capture_payload(&capture.observation_ref, raw.len())
+            .await
+            .unwrap(),
+        Some(raw.to_vec())
+    );
+    for phase in 0..3 {
+        let rebuilt;
+        let current = if phase == 2 {
+            rebuilt = fixture.generation("orphan-output-rebuilt").await.0;
+            fixture.worker().catch_up(&rebuilt, 1, 4).await.unwrap();
+            &rebuilt
+        } else {
+            &generation
+        };
+        let snapshot = current.checkpoint().await.unwrap().snapshot;
+        let page = current
+            .read_page(
+                &snapshot,
+                &read_scope(&agent(), None, "history"),
+                None,
+                None,
+                None,
+                8,
+                false,
+            )
+            .await
+            .unwrap();
+        assert!(
+            page.rows
+                .iter()
+                .any(|row| row.body.to_string().contains("retained orphan output")),
+            "orphan content must remain readable in phase {phase}"
+        );
+        let observed = claims(current).await;
+        assert!(
+            observed.iter().any(|claim| matches!(&claim.fact,
+                Fact::Declare { object: TraceObject::Result(found) } if found == &result
+            )),
+            "late invocation and rebuild must retain the same result"
+        );
+        if phase == 0 {
+            fixture.native_on("late-invocation", 3, 0, header).await;
+            fixture.native_on("late-invocation", 4, header.len() as u64,
+                b"{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"call_id\":\"late-call\",\"name\":\"exec\",\"arguments\":\"{}\"}}\n").await;
+            fixture.worker().catch_up(&generation, 1, 4).await.unwrap();
+        } else {
+            assert!(observed.iter().any(|claim| matches!(&claim.fact,
+                Fact::Declare { object: TraceObject::Operation(operation) } if operation.operation_ref == result.operation
+            )));
+        }
+    }
+}
+
+#[tokio::test]
+async fn orphan_claude_delegation_resolves_from_a_late_invocation_on_another_source() {
+    let fixture = Fixture::for_vendor("claude").await;
+    let returned = br#"{"type":"user","sessionId":"late-root","uuid":"result-a","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"delegate-a","content":"child answer"}]},"toolUseResult":{"agentId":"late-child","status":"completed"}}"#;
+    let result_capture = fixture.native_on("result-source", 1, 0, returned).await;
+    let (generation, _) = fixture.generation("late-claude-call").await;
+    fixture.worker().catch_up(&generation, 1, 1).await.unwrap();
+    assert!(!claims(&generation).await.iter().any(|claim| matches!(
+        &claim.fact,
+        Fact::Declare {
+            object: TraceObject::Agent(AgentThread {
+                agent_ref: AgentRef::Embedded { .. },
+                ..
+            })
+        }
+    )));
+    let call_capture = fixture.native_on("call-source", 2, 0,
+        br#"{"type":"assistant","sessionId":"late-root","uuid":"call-a","message":{"role":"assistant","content":[{"type":"tool_use","id":"delegate-a","name":"Agent","input":{"prompt":"perform work"}}]}}"#).await;
+    fixture.worker().catch_up(&generation, 1, 2).await.unwrap();
+    let root = AgentRef::Session(SessionId::decode("env7fk2:claude:late-root").unwrap());
+    let child = AgentRef::Embedded {
+        anchor_session: root.anchor_session().clone(),
+        namespace: "claude.agent".into(),
+        native_child_id: "late-child".into(),
+    };
+    for current in [
+        &generation,
+        &fixture.generation("late-claude-call-rebuilt").await.0,
+    ] {
+        fixture.worker().catch_up(current, 1, 2).await.unwrap();
+        let retained = claims(current).await;
+        let proof = retained
+            .iter()
+            .find(|claim| {
+                matches!(&claim.fact,
+                    Fact::Declare { object: TraceObject::Agent(agent) } if agent.agent_ref == child
+                )
+            })
+            .expect("late retained invocation must resolve the pending child result");
+        assert!(proof.evidence.contains(&result_capture.observation_ref));
+        assert!(proof.evidence.contains(&call_capture.observation_ref));
+    }
+}
