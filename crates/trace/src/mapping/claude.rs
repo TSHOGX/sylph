@@ -1070,25 +1070,6 @@ impl Context<'_, '_> {
                 .contains_key(&operation);
         let absent = Value::Null;
         self.schedule_result(owner, &operation, part, structured.unwrap_or(&absent));
-        if !retained_invocation {
-            self.issue(
-                Some(owner),
-                &format!("{slot}/orphan"),
-                DiagnosticCode::MissingOwner,
-                "Claude tool result has no retained tool_use invocation; kept as an orphan result",
-            );
-            if let Some(structured) = structured {
-                let payload = self.json(structured, &format!("{slot}/structured"));
-                self.result(
-                    owner,
-                    &operation,
-                    payload,
-                    ResultRepresentation::Runtime,
-                    &format!("{slot}/structured"),
-                );
-            }
-            return;
-        }
         if let Some(structured) = structured {
             let payload = self.json(structured, &format!("{slot}/structured"));
             self.result(
@@ -1099,47 +1080,58 @@ impl Context<'_, '_> {
                 &format!("{slot}/structured"),
             );
         }
+        let orphan = !retained_invocation;
+        if orphan {
+            self.issue(
+                Some(owner),
+                &format!("{slot}/orphan"),
+                DiagnosticCode::MissingOwner,
+                "Claude tool result has no retained tool_use invocation; kept as an orphan result",
+            );
+        }
         let absent = Value::Null;
         let structured = structured.unwrap_or(&absent);
 
-        if text(structured, "taskType") == Some("local_workflow") {
-            self.workflow_launch(owner, root, &operation, structured, slot);
-        }
-        let interpretation =
-            self.delegation_result(owner, root, &operation, part, structured, slot);
-        let (outcome, evidence) = match interpretation {
-            delegation::ResultInterpretation::AwaitingInvocation => (None, vec![]),
-            delegation::ResultInterpretation::Unclassified => (
-                part.get("is_error").and_then(Value::as_bool).map(|error| {
-                    if error {
-                        TerminalOutcome::Failed
-                    } else {
-                        TerminalOutcome::Succeeded
-                    }
-                }),
-                vec![],
-            ),
-            delegation::ResultInterpretation::Outcome(outcome, evidence) => {
-                (Some(outcome), evidence)
+        if !orphan {
+            if text(structured, "taskType") == Some("local_workflow") {
+                self.workflow_launch(owner, root, &operation, structured, slot);
             }
-        };
-        if let Some(outcome) = outcome {
-            self.add(
-                owner,
-                &format!("{slot}/outcome"),
-                Fact::Execution {
-                    execution: ExecutionRef::Operation(operation.clone()),
-                    boundary: ExecutionBoundary::Outcome {
-                        outcome,
-                        reason: None,
-                        detail: None,
+            let interpretation =
+                self.delegation_result(owner, root, &operation, part, structured, slot);
+            let (outcome, evidence) = match interpretation {
+                delegation::ResultInterpretation::AwaitingInvocation => (None, vec![]),
+                delegation::ResultInterpretation::Unclassified => (
+                    part.get("is_error").and_then(Value::as_bool).map(|error| {
+                        if error {
+                            TerminalOutcome::Failed
+                        } else {
+                            TerminalOutcome::Succeeded
+                        }
+                    }),
+                    vec![],
+                ),
+                delegation::ResultInterpretation::Outcome(outcome, evidence) => {
+                    (Some(outcome), evidence)
+                }
+            };
+            if let Some(outcome) = outcome {
+                self.add(
+                    owner,
+                    &format!("{slot}/outcome"),
+                    Fact::Execution {
+                        execution: ExecutionRef::Operation(operation.clone()),
+                        boundary: ExecutionBoundary::Outcome {
+                            outcome,
+                            reason: None,
+                            detail: None,
+                        },
                     },
-                },
-            );
-            let claim = self.output.claims.last_mut().unwrap();
-            claim.evidence.extend(evidence);
-            claim.evidence.sort();
-            claim.evidence.dedup();
+                );
+                let claim = self.output.claims.last_mut().unwrap();
+                claim.evidence.extend(evidence);
+                claim.evidence.sort();
+                claim.evidence.dedup();
+            }
         }
         for field in ["persistedOutputPath", "outputFile"] {
             if let Some(path) = text(structured, field) {
