@@ -124,9 +124,9 @@ The first local append to an entirely inherited history requires header reconcil
 after that transition ordinary independent appends keep their bounded path. Coverage spans
 pure classification, the incremental boundary, normalized HTTP snapshots, native Codex
 frozen-prefix replay/restart/rebuild and desktop/mobile live control. Positive `ContextCopy`
-proofs now label copied entries with the original containing agent through one unambiguous
-nested chain; conflicting or cyclic witnesses remain unresolved and origin metadata never
-owns copied bytes. Pi copy-derived ultimate actor attribution for unmatched nested copies
+proofs now label copied entries through an unambiguous chain of exact source versions;
+conflicting or cyclic witnesses remain unresolved. Unknown ultimate owners stay absent,
+and origin metadata never owns copied bytes. Pi copy-derived ultimate actor attribution for unmatched nested copies
 and general child-local suffix proof remain open alongside the vendor and reader acceptance
 gates.
 
@@ -358,10 +358,14 @@ Targeted identity, content, source-generation, continuation, authorization and n
 faults were observed failing the regressions before restoration. Reader projection now
 also rejects exact-ID copy joins whose retained endpoint positions do not match, while
 preserving unresolved context. Positive source matching does not establish an unmatched
-child-local suffix or ultimate actor attribution for nested copies. Optional inline copy
-metadata still needs its own relation-proof authorization and redaction acceptance,
-which remains open alongside
-remain open; historical RPC snapshots now preserve absent ownership as described above.
+child-local suffix or an actor absent from the retained lineage. Optional inline copy
+metadata uses independently authorized proof nodes for each exact version and preserves
+agreeing witnesses as alternatives. The reader checks this graph within a bounded page
+budget without enrolling remote proof epochs in the copied body's lease; missing,
+retired or inaccessible proof leaves unresolved context and readable local bytes.
+Page assembly rechecks deletion visibility and grants before returning cached optional
+provenance. The projection schema advances in place; source evidence stays authoritative.
+Historical RPC snapshots preserve absent ownership as described above.
 
 Pi historical reads and unresolved native fork records no longer create new delivery
 or admission claims from a user/tool-result protocol role. Direct runtime message events

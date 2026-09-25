@@ -104,6 +104,11 @@ pub fn project_independent_append(
         guard.examine()?;
         for (claim, relation) in index.relations.get(reference).into_iter().flatten() {
             guard.examine()?;
+            if matches!(relation.relation, Relation::ContextCopy { .. }) {
+                // The partial region omits remote version proofs. Reconcile the
+                // semantic graph instead of silently dropping optional lineage.
+                return None;
+            }
             relations.insert(claim.clone(), relation.clone());
         }
     }

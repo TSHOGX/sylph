@@ -68,6 +68,8 @@ pub struct TraceService {
     #[cfg(test)]
     pub(crate) directory_read_pause: ReprojectionPause,
     #[cfg(test)]
+    pub(crate) copy_context_read_pause: ReprojectionPause,
+    #[cfg(test)]
     pub(crate) result_catalogue_read_pause: ReprojectionPause,
     #[cfg(test)]
     pub(crate) structure_scan_pause: ReprojectionPause,
@@ -252,6 +254,8 @@ impl TraceService {
             evidence_read_pause: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             directory_read_pause: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            copy_context_read_pause: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             result_catalogue_read_pause: Arc::new(Mutex::new(None)),
             #[cfg(test)]
@@ -745,7 +749,7 @@ impl TraceService {
     fn manifest(generation: String) -> GenerationManifest {
         GenerationManifest {
             generation: generation.clone(),
-            semantic_schema: "trace-24".into(),
+            semantic_schema: "trace-25".into(),
             mapper_builds: [
                 ("server", mapping::server::ServerMapper.build()),
                 ("codex", mapping::codex::CodexMapper.build()),

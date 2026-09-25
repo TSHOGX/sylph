@@ -101,18 +101,49 @@ async fn child_is_readable_without_admission(
         .await
         .unwrap();
     let mut text = vec![];
-    let mut proved = 0;
     for row in rows.rows {
         assert_ne!(&row.epoch, parent_epoch);
         assert!(!row.dependency_epochs.contains(parent_epoch));
         let unit: ReadingUnit = serde_json::from_value(row.body).unwrap();
-        if matches!(
-            unit.entry_context,
-            Some(ReadEntryContext::Inherited {
-                original_owner: Some(_)
+        let copied = unit.anchor.object();
+        let witnesses: Vec<_> = reduced
+            .relations
+            .iter()
+            .filter_map(|relation| match &relation.relation {
+                Relation::ContextCopy {
+                    original,
+                    copied: entry,
+                    original_position,
+                    copied_position,
+                } if copied == AnyObjectRef::HistoryEntry(entry.clone()) => {
+                    Some((original, original_position, copied_position))
+                }
+                _ => None,
             })
-        ) {
-            proved += 1;
+            .collect();
+        if !witnesses.is_empty() {
+            let Some(ReadEntryContext::Inherited {
+                original_owner: Some(origin),
+            }) = &unit.entry_context
+            else {
+                panic!("this copied entry must retain its own exact provenance: {copied:?}");
+            };
+            assert_eq!(origin.address.agent(), owner(PARENT_ID));
+            let AnyObjectRef::HistoryEntry(entry) = &copied else {
+                unreachable!()
+            };
+            for (original, original_position, copied_position) in witnesses {
+                assert!(
+                    reduced.history_contents[original]
+                        .values()
+                        .any(|content| &content.position == original_position)
+                );
+                assert!(
+                    reduced.history_contents[entry]
+                        .values()
+                        .any(|content| &content.position == copied_position)
+                );
+            }
         } else {
             assert_eq!(unit.entry_context, Some(ReadEntryContext::Unresolved));
         }
@@ -136,26 +167,6 @@ async fn child_is_readable_without_admission(
         }
     }
     assert_eq!(text, ["Say one", "hello"]);
-    eprintln!(
-        "copy rows={} proved={} relations={}",
-        text.len(),
-        proved,
-        reduced.relations.len()
-    );
-    for relation in &reduced.relations {
-        if matches!(relation.relation, Relation::ContextCopy { .. }) {
-            eprintln!("copy relation {:?}", relation.relation);
-        }
-    }
-    let has_copy = reduced
-        .relations
-        .iter()
-        .any(|relation| matches!(relation.relation, Relation::ContextCopy { .. }));
-    assert_eq!(
-        proved > 0,
-        has_copy,
-        "copy reader context must follow retained provenance evidence"
-    );
 }
 
 async fn inventory(fixture: &Fixture, parent: &Capture) -> Capture {

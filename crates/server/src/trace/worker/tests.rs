@@ -358,7 +358,7 @@ struct ReaderProjection {
 
 impl ReaderProjection {
     async fn normalize_separate_archive_epochs(mut self, catalogue: &EvidenceCatalogue) -> Self {
-        let epochs: BTreeSet<_> = self
+        let mut epochs: BTreeSet<_> = self
             .rows
             .values()
             .flat_map(|row| {
@@ -376,6 +376,13 @@ impl ReaderProjection {
                 OracleEpoch::Scope(_) => panic!("archive epochs were already normalized"),
             })
             .collect();
+        for ((scope, _), row) in &self.rows {
+            if scope.starts_with("[\"copy-proof-nodes\",") {
+                let proof: crate::trace::reading_store::CopyAuthorizationNode =
+                    serde_json::from_value(row.body.clone()).unwrap();
+                epochs.extend(proof.groups.into_iter().flatten().flatten());
+            }
+        }
         let mut scopes = BTreeMap::new();
         let mut epochs_by_scope = BTreeMap::new();
         for epoch in epochs {
@@ -394,13 +401,33 @@ impl ReaderProjection {
             };
             OracleEpoch::Scope(scopes[epoch].clone())
         };
-        for row in self.rows.values_mut() {
+        for ((scope, _), row) in &mut self.rows {
             row.source_epoch = normalized(&row.source_epoch);
             row.dependency_epochs = row.dependency_epochs.iter().map(&normalized).collect();
             row.directory_epochs = row
                 .directory_epochs
                 .as_ref()
                 .map(|epochs| epochs.iter().map(&normalized).collect());
+            if scope.starts_with("[\"copy-proof-nodes\",") {
+                let proof: crate::trace::reading_store::CopyAuthorizationNode =
+                    serde_json::from_value(row.body.clone()).unwrap();
+                let groups: Vec<Vec<BTreeSet<IngestionScope>>> = proof
+                    .groups
+                    .into_iter()
+                    .map(|alternatives| {
+                        alternatives
+                            .into_iter()
+                            .map(|epochs| {
+                                epochs
+                                    .into_iter()
+                                    .map(|epoch| scopes[&epoch].clone())
+                                    .collect()
+                            })
+                            .collect()
+                    })
+                    .collect();
+                row.body["groups"] = serde_json::to_value(groups).unwrap();
+            }
         }
         for payload in self.payloads.values_mut() {
             payload.root_epochs = payload.root_epochs.iter().map(&normalized).collect();

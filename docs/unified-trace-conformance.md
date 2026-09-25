@@ -232,8 +232,18 @@ cannot borrow a different version. Early/late inventory and parent/child orderin
 produce identical claims, while deleting the origin removes only the optional source
 links. A separate held-continuation test verifies persisted matching indexes and same-cut
 restart recovery beyond one work budget. These establish positive native record copies, and the reader now
-presents the original containing agent for one unambiguous `ContextCopy` chain while
-keeping copied bytes independently readable. Multiple/cyclic witnesses remain unresolved.
+presents the original owner for one unambiguous exact-version `ContextCopy` chain while
+keeping copied bytes independently readable. Multiple/cyclic witnesses remain unresolved;
+unknown terminal owners remain absent. The reader regression uses declared messages and
+revisions and tests an intermediate entry observed at two different source positions.
+The HTTP copy-link regression separately retires relation evidence while leaving both
+endpoint headers readable, checks every nested edge, and preserves an independent
+alternative witness until its own deletion. These checks use held snapshots and retain
+payload access independently of the optional lineage label. A held page-assembly window
+also tests proof deletion and grant revocation after cached authorization has run.
+Selected-version, terminal-owner, nested-edge and page-revalidation mutations fail their
+own assertions. Deep-copy fixtures measure immediate proof storage at 100 and 1,000
+entries and require constant reader-label bytes rather than embedded ancestry paths.
 They do not establish the local-production status of unmatched entries or an ultimate actor
 for nested copies.
 

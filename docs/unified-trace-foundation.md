@@ -448,6 +448,12 @@ and predecessor relationships. This relation establishes copy provenance, not an
 execution or admission, and does not equate the two histories. Its evidence and optional
 navigation are authorized independently of the copied entry's own retained content;
 losing the origin must not make independently retained copied bytes unreadable.
+Nested copy lineage joins the exact intermediate version, not just its entry ID.
+A copy can prove inherited context while its ultimate owner remains unknown. An
+unresolved original-owner assertion never defaults to the containing agent. Optional
+inline provenance requires a retained proof for every step; agreeing independent
+witnesses remain alternatives. Losing all sufficient proofs removes that assertion
+without withdrawing the copied body or expiring its independent reading lease.
 
 A ContextCheckpoint describes known context inclusion, replacement, or summary. Exact
 context requires the observed ordered request or replacement set, settings and payload

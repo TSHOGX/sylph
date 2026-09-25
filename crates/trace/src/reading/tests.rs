@@ -1673,3 +1673,4 @@ fn unclassified_payload_uses_can_borrow_only_their_own_immutable_manifest_format
 }
 
 mod entry_context;
+mod copy_versions;

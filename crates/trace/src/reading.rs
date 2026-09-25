@@ -15,6 +15,8 @@ mod inputs;
 mod resources;
 pub use directory::DirectoryEntry;
 mod inheritance;
+mod copies;
+pub use copies::{CopyContextProof, CopyNodeKey, CopyProofNode};
 mod message_update;
 mod window;
 pub use append::{project_independent_append, AppendIndex, AppendProjection, AppendWork};
@@ -49,6 +51,8 @@ pub struct ReadingProjection {
     pub headers: BTreeMap<AgentRef, AgentHeader>,
     pub inherited_context_sources: BTreeMap<AgentRef, Vec<AnyObjectRef>>,
     pub windows: BTreeMap<ReadingScope, Vec<ReadingUnit>>,
+    pub copy_contexts: BTreeMap<(ReadingScope, EntryRef), CopyContextProof>,
+    pub copy_nodes: BTreeMap<CopyNodeKey, CopyProofNode>,
     pub directory: BTreeMap<AgentRef, DirectoryEntry>,
     pub activations: BTreeMap<AgentRef, Vec<ExecutionSummary>>,
     pub histories: BTreeMap<AgentRef, Vec<HistoryChoice>>,
@@ -82,7 +86,7 @@ struct Index<'a> {
     parents: BTreeMap<AgentRef, AgentRef>,
     origins: BTreeMap<AgentRef, BTreeSet<Option<AgentRef>>>,
     inherited_context_sources: BTreeMap<AgentRef, Vec<AnyObjectRef>>,
-    copy_contexts: BTreeMap<EntryRef, ReadEntryContext>,
+    copies: copies::CopyIndex,
 }
 
 pub fn project(
@@ -115,7 +119,7 @@ pub fn project(
         parents: BTreeMap::new(),
         origins: BTreeMap::new(),
         inherited_context_sources: inheritance::sources(reduction),
-        copy_contexts: BTreeMap::new(),
+        copies: copies::CopyIndex::new(reduction),
     };
     for object in reduction
         .objects
@@ -207,113 +211,6 @@ pub fn project(
     // Build adjacency once. Detail materialization must not rescan the whole graph
     // for every object, and repeated evidence must not inflate relation counts.
     let mut relation_keys = BTreeMap::<AnyObjectRef, BTreeSet<(String, AnyObjectRef)>>::new();
-    // A native entry ID is only a join key inside the source version that was
-    // observed. Keep the exact positions with each edge and reject a relation
-    // whose endpoints were never observed at those positions. This prevents a
-    // stale ID from silently borrowing a newer body or predecessor chain.
-    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-    struct CopyEdge {
-        original: EntryRef,
-        original_position: SourcePosition,
-        copied_position: SourcePosition,
-        valid: bool,
-    }
-    let observed_positions: BTreeMap<EntryRef, BTreeSet<SourcePosition>> = reduction
-        .history_contents
-        .iter()
-        .map(|(entry, observations)| {
-            (
-                entry.clone(),
-                observations
-                    .values()
-                    .map(|observation| observation.position.clone())
-                    .collect(),
-            )
-        })
-        .collect();
-    let copy_edges: BTreeMap<EntryRef, BTreeSet<CopyEdge>> = reduction
-        .relations
-        .iter()
-        .filter_map(|relation| match &relation.relation {
-            Relation::ContextCopy {
-                original,
-                copied,
-                original_position,
-                copied_position,
-            } => Some((
-                copied.clone(),
-                CopyEdge {
-                    original: original.clone(),
-                    original_position: original_position.clone(),
-                    copied_position: copied_position.clone(),
-                    valid: observed_positions
-                        .get(original)
-                        .is_some_and(|positions| positions.contains(original_position))
-                        && observed_positions
-                            .get(copied)
-                            .is_some_and(|positions| positions.contains(copied_position)),
-                },
-            )),
-            _ => None,
-        })
-        .fold(BTreeMap::new(), |mut edges, (copied, edge)| {
-            edges.entry(copied).or_default().insert(edge);
-            edges
-        });
-    for copied in copy_edges.keys() {
-        let mut current = copied.clone();
-        let mut visited = BTreeSet::new();
-        let mut resolved = None;
-        let mut ambiguous = false;
-        loop {
-            if !visited.insert(current.clone()) {
-                ambiguous = true;
-                break;
-            }
-            let Some(edges) = copy_edges.get(&current) else {
-                resolved = reduction
-                    .object(&AnyObjectRef::HistoryEntry(current.clone()))
-                    .and_then(|object| object.declaration.known())
-                    .and_then(|object| match object {
-                        TraceObject::HistoryEntry(entry) => match &entry.original_owner {
-                            Some(OwnerRef::Agent { agent }) if agent != &entry.containing_agent => {
-                                Some(agent.clone())
-                            }
-                            // A valid copy edge terminating at a root entry names
-                            // that root's containing session. The containing agent
-                            // is not used when the entry itself has an unresolved
-                            // owner claim.
-                            None => Some(entry.containing_agent.clone()),
-                            _ => None,
-                        },
-                        _ => None,
-                    });
-                break;
-            };
-            if edges.len() != 1 {
-                ambiguous = true;
-                break;
-            }
-            let edge = edges.iter().next().unwrap();
-            if !edge.valid {
-                ambiguous = true;
-                break;
-            }
-            current = edge.original.clone();
-        }
-        index.copy_contexts.insert(
-            copied.clone(),
-            if ambiguous {
-                ReadEntryContext::Unresolved
-            } else if let Some(agent) = resolved {
-                ReadEntryContext::Inherited {
-                    original_owner: Some(index.agent_link(&agent)),
-                }
-            } else {
-                ReadEntryContext::Unresolved
-            },
-        );
-    }
     for relation in &reduction.relations {
         let subjects = relation.relation.subject_refs();
         for subject in &subjects {
@@ -538,6 +435,20 @@ pub fn project(
             }
         }
     }
+    for (scope, units) in &result.windows {
+        for unit in units {
+            if let AnyObjectRef::HistoryEntry(entry) = unit.anchor.object() {
+                if let Some(proof) =
+                    index
+                        .copies
+                        .context(reduction, &entry, scope.selection.as_ref())
+                {
+                    result.copy_contexts.insert((scope.clone(), entry), proof);
+                }
+            }
+        }
+    }
+    result.copy_nodes = index.copies.nodes;
     result
 }
 
@@ -1056,26 +967,7 @@ impl Index<'_> {
     }
 
     fn agent_link(&self, agent: &AgentRef) -> AgentLink {
-        let native = match agent {
-            AgentRef::Session(session) => session.native_id.as_str(),
-            AgentRef::Embedded {
-                native_child_id, ..
-            } => native_child_id,
-        };
-        let suffix = native
-            .chars()
-            .rev()
-            .take(8)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
-        AgentLink {
-            address: AgentAddress::of(agent),
-            name: self.agents.get(agent).and_then(|agent| agent.name.clone()),
-            identity_suffix: suffix,
-            vendor: agent.anchor_session().agent.as_str().into(),
-        }
+        agent_link_from_reduction(self.reduction, agent)
     }
 
     fn execution(&self, reference: &AnyObjectRef) -> ExecutionSummary {
@@ -1601,3 +1493,31 @@ fn object_label(object: &TraceObject) -> &'static str {
 mod fixture;
 #[cfg(test)]
 mod tests;
+
+fn agent_link_from_reduction(reduction: &Reduction, agent: &AgentRef) -> AgentLink {
+    let native = match agent {
+        AgentRef::Session(session) => session.native_id.as_str(),
+        AgentRef::Embedded {
+            native_child_id, ..
+        } => native_child_id,
+    };
+    AgentLink {
+        address: AgentAddress::of(agent),
+        name: reduction
+            .object(&AnyObjectRef::Agent(agent.clone()))
+            .and_then(|object| object.declaration.known())
+            .and_then(|object| match object {
+                TraceObject::Agent(agent) => agent.name.clone(),
+                _ => None,
+            }),
+        identity_suffix: native
+            .chars()
+            .rev()
+            .take(8)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect(),
+        vendor: agent.anchor_session().agent.as_str().into(),
+    }
+}

@@ -1,4 +1,5 @@
 use super::*;
+mod copy_contexts;
 use crate::trace::{
     generation::{PayloadAnchor, PayloadAnchorChange},
     reading_store::{ReadRowChange, read_scope},
@@ -1060,6 +1061,7 @@ fn rows(
             );
         }
     }
+    copy_contexts::materialize(&mut rows, projection, provenance, reduction, support_index)?;
     Ok(rows)
 }
 

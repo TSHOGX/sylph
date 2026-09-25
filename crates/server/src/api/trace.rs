@@ -46,6 +46,7 @@ mod directory;
 mod results;
 mod structure;
 mod archive;
+mod copy_context;
 #[cfg(test)]
 mod visibility_tests;
 fn invalid(message: impl Into<String>) -> TraceError {
@@ -1576,13 +1577,32 @@ async fn page<T: serde::de::DeserializeOwned + Serialize>(
         .await
         .map_err(storage)?;
     let mut items = Vec::new();
+    let mut copy_authorization = copy_context::Authorization::default();
     for row in rows.rows {
         check_row(state, subject, lease, &row).await?;
         let mut body =
             authorized_value(state, subject, &generation, &lease.snapshot, row.body).await?;
+        copy_authorization
+            .redact(
+                state,
+                subject,
+                &generation,
+                &lease.snapshot,
+                selection,
+                &mut body,
+            )
+            .await?;
         select_payloads(&mut body, selection);
-        items.push(serde_json::from_value(body).map_err(internal)?);
+        items.push(body);
     }
+    copy_authorization
+        .finish(state, subject, &mut items)
+        .await?;
+    let items: Vec<T> = items
+        .into_iter()
+        .map(serde_json::from_value)
+        .collect::<std::result::Result<_, _>>()
+        .map_err(internal)?;
     let bytes = serde_json::to_vec(&items).map_err(internal)?.len();
     Ok(ReadPage {
         view: read_view(lease),

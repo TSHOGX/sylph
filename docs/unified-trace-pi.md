@@ -163,6 +163,10 @@ observations for the named entries; a reused ID at another source generation rem
 unresolved. Late records and locator certificates resolve through indexed bounded
 continuations, without rescanning unrelated histories or retaining another copy of the
 vendor body.
+Nested lineage follows the same exact intermediate position on both adjoining edges.
+Retained copies with unknown original ownership may be labeled inherited without
+naming an ultimate owner. Authorization of that label includes every retained edge
+and endpoint observation, independently of authorization of the copied body.
 An unmatched entry remains unresolved: absence from a captured prefix cannot establish
 a child-local suffix. Copy relations do not rewrite the child's content or predecessor,
 and identifying a copied entry does not itself prove the original actor of nested copies.

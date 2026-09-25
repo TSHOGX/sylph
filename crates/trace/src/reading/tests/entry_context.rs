@@ -381,7 +381,7 @@ fn context_copy_proof_labels_copied_entries_and_follows_one_nested_origin_but_co
     let root_entry = entry(&root, "root");
     let middle_entry = entry(&middle, "middle");
     let child_entry = entry(&child, "child");
-    let objects = vec![
+    let mut objects = vec![
         declared_agent(root.clone()),
         declared_agent(middle.clone()),
         declared_agent(child.clone()),
@@ -411,9 +411,23 @@ fn context_copy_proof_labels_copied_entries_and_follows_one_nested_origin_but_co
     ]
     .into_iter()
     .map(|(owner, entry, key, capture_index)| {
-        let _message = MessageRef::native(owner.clone(), "copy-message", vec![key.into()]).unwrap();
+        let message = MessageRef::native(owner.clone(), "copy-message", vec![key.into()]).unwrap();
         let revision =
             MessageRevisionRef::native(owner.clone(), "copy-revision", vec![key.into()]).unwrap();
+        objects.push(TraceObject::Message(Message {
+            message_ref: message.clone(),
+            author: Author::Unknown,
+            protocol_role: Some(ProtocolRole::User),
+            purpose: MessagePurpose::Context,
+            production: None,
+        }));
+        objects.push(TraceObject::MessageRevision(MessageRevision {
+            revision_ref: revision.clone(),
+            message,
+            representation: Representation::Conversation,
+            form: RevisionForm::Complete,
+            parts: vec![],
+        }));
         HistoryContentObservation::complete(
             entry.clone(),
             capture(capture_index).source_position,
@@ -436,13 +450,76 @@ fn context_copy_proof_labels_copied_entries_and_follows_one_nested_origin_but_co
             copied_position: capture(3).source_position.clone(),
         },
     ];
-    let projection = objects_projection(objects.clone(), relations, observations.clone());
+    let projection = objects_projection(objects.clone(), relations.clone(), observations.clone());
     let rows = &projection.windows[&ReadingScope {
         agent: child.clone(),
         selection: None,
     }];
     assert!(
         matches!(&rows[0].entry_context, Some(ReadEntryContext::Inherited { original_owner: Some(link) }) if link.address.agent() == root)
+    );
+    assert!(
+        matches!(&rows[0].content, ReadingContent::Message { revision_ref, .. }
+        if revision_ref == &MessageRevisionRef::native(child.clone(), "copy-revision", vec!["child".into()]).unwrap())
+    );
+    let mut unknown_root = objects.clone();
+    for object in &mut unknown_root {
+        if let TraceObject::HistoryEntry(entry) = object {
+            if entry.entry_ref == root_entry {
+                entry.original_owner = Some(OwnerRef::Unknown);
+            }
+        }
+    }
+    let unknown = objects_projection(unknown_root, relations.clone(), observations.clone());
+    assert_eq!(
+        unknown.windows[&ReadingScope {
+            agent: child.clone(),
+            selection: None
+        }][0]
+            .entry_context,
+        Some(ReadEntryContext::Inherited {
+            original_owner: None
+        }),
+        "a copy proves inheritance but not an unresolved ultimate owner"
+    );
+    let mut versions = observations.clone();
+    let mut other_version = observations[1].clone();
+    other_version.position = capture(4).source_position;
+    versions.push(other_version);
+    let mut mismatched_chain = relations.clone();
+    if let Relation::ContextCopy {
+        original_position, ..
+    } = &mut mismatched_chain[1]
+    {
+        *original_position = capture(4).source_position;
+    }
+    let mismatched_chain = objects_projection(objects.clone(), mismatched_chain, versions);
+    assert_eq!(
+        mismatched_chain.windows[&ReadingScope {
+            agent: child.clone(),
+            selection: None
+        }][0]
+            .entry_context,
+        Some(ReadEntryContext::Inherited {
+            original_owner: None
+        }),
+        "the middle entry's other version cannot bridge to the root's copy proof"
+    );
+    let mut cyclic = relations.clone();
+    cyclic.push(Relation::ContextCopy {
+        original: child_entry.clone(),
+        copied: root_entry.clone(),
+        original_position: capture(3).source_position,
+        copied_position: capture(1).source_position,
+    });
+    let cyclic = objects_projection(objects.clone(), cyclic, observations.clone());
+    assert_eq!(
+        cyclic.windows[&ReadingScope {
+            agent: child.clone(),
+            selection: None
+        }][0]
+            .entry_context,
+        Some(ReadEntryContext::Unresolved)
     );
     let ambiguous = objects_projection(
         objects.clone(),

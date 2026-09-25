@@ -320,14 +320,18 @@ impl super::Index<'_> {
         }
         // The entry owns this assertion. Origin metadata is an independently
         // authorized link, so losing it must not erase inherited context.
-        let context = self.copy_contexts.get(entry_ref).cloned().or_else(|| {
-            entry.original_owner.as_ref().map(|owner| match owner {
-                OwnerRef::Agent { agent } => ReadEntryContext::Inherited {
-                    original_owner: Some(self.agent_link(agent)),
-                },
-                OwnerRef::Unresolved { .. } | OwnerRef::Unknown => ReadEntryContext::Unresolved,
-            })
-        });
+        let context = self
+            .copies
+            .context(self.reduction, entry_ref, scope.selection.as_ref())
+            .map(|proof| proof.context)
+            .or_else(|| {
+                entry.original_owner.as_ref().map(|owner| match owner {
+                    OwnerRef::Agent { agent } => ReadEntryContext::Inherited {
+                        original_owner: Some(self.agent_link(agent)),
+                    },
+                    OwnerRef::Unresolved { .. } | OwnerRef::Unknown => ReadEntryContext::Unresolved,
+                })
+            });
         for unit in &mut units {
             unit.entry_context = context.clone();
         }
@@ -397,6 +401,9 @@ pub(super) fn group_work(units: impl IntoIterator<Item = ReadingUnit>) -> Vec<Re
             if previous.activation == unit.activation
                 && unit.activation.is_some()
                 && previous.entry_context == unit.entry_context
+                // Optional provenance belongs to an entry's own proof. Grouping
+                // distinct entries must not let the first proof authorize both.
+                && (unit.entry_context.is_none() || previous.anchor == unit.anchor)
             {
                 if let ReadingContent::Work {
                     owner: prior_owner,

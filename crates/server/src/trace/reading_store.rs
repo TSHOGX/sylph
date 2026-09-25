@@ -47,6 +47,13 @@ pub struct ReadRow {
     pub dependency_epochs: BTreeSet<IngestionEpoch>,
 }
 
+/// Private optional-provenance metadata. These rows never enter client pages.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct CopyAuthorizationNode {
+    pub next: Option<sylph_trace::reading::CopyNodeKey>,
+    pub groups: Vec<Vec<BTreeSet<IngestionEpoch>>>,
+}
+
 /// Authorization inputs are stored separately so denied bodies are never hydrated.
 #[derive(Debug, Clone)]
 pub struct ReadCandidate {
