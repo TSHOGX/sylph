@@ -358,6 +358,18 @@ old/current versions, retirement, delivery exclusion and measured lookup work un
 superseded density. `frontend/e2e/trace-search-body.spec.ts` checks later byte windows,
 desktop/mobile navigation and unchanged-query refresh after expiry.
 
+Inherited-only context status is checked in `crates/trace/src/reading/tests/entry_context.rs`
+against empty, unknown, incomplete and local-work alternatives, including conflicted
+entries omitted by readable history, unresolved predecessors and undeclared content entries. The append regression in
+`crates/trace/src/reading/append/tests/inheritance.rs` requires reconciliation on the first
+local tail and permits subsequent ordinary appends. The normalized HTTP case in
+`crates/server/src/trace/worker/tests/provenance/inherited_summary.rs` preserves older views
+and unavailable origin content. `crates/server/src/trace/worker/tests/frozen_history.rs`
+checks native frozen-prefix mapping, local work outside its selection, restart and rebuild.
+`frontend/e2e/trace-inherited-summary.spec.ts` keeps inherited content readable and live
+controls independent of this status at both desktop and mobile widths. These cases do not
+certify unresolved Pi copy ownership or an unobserved local suffix.
+
 ## Reproducible checks
 
 The vendor audit works entirely from retained sanitized artifacts by default:

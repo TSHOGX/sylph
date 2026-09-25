@@ -470,8 +470,16 @@ the origin action alone becomes unavailable. An unresolved original-owner handle
 shown as unresolved context provenance, not proof of inherited membership or local work.
 Adjacent work rows with different entry provenance are not grouped together. Origin
 inspection retains the reader's view and leaves its control target unchanged.
-A child with only inherited context and no observed local work gets that
-specific state, not an empty completed activation.
+A child with only inherited context and no observed local work gets `Only inherited
+context observed`, independently of its execution outcome and control availability.
+This requires a nonempty retained history whose entries all have known foreign provenance
+and complete content observations. Unknown, conflicting or missing provenance cannot
+establish this state. Conflicted entries, unresolved predecessors and content whose entry
+declaration is absent still count as uncertainty when the readable archive omits them. Owned activations, operations, local message production or incoming
+deliveries prevent it, including work outside the currently selected branch. Execution
+claims whose owner has not yet been established also prevent it. The first
+local history append must clear it while preserving the reading position. It is a report
+about retained observations, not a certificate that unobserved local work never occurred.
 
 Related-object links name the target's containing agent. Inspecting an object in another
 agent keeps the retained view and clears the previous agent's history selection instead

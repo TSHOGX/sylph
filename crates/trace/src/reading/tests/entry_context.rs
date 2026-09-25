@@ -181,3 +181,190 @@ fn work_grouping_preserves_a_change_in_entry_provenance_within_one_activation() 
     };
     assert_eq!(operations.value, Some(2));
 }
+
+#[test]
+fn inherited_only_requires_positive_complete_history_and_no_local_work_in_any_branch() {
+    let entry = EntryRef::native(agent(), "context-only", vec!["entry".into()]).unwrap();
+    let message = MessageRef::native(agent(), "context-only", vec!["message".into()]).unwrap();
+    let revision =
+        MessageRevisionRef::native(agent(), "context-only", vec!["revision".into()]).unwrap();
+    let base = vec![
+        Fact::Declare {
+            object: declared_agent(agent()),
+        },
+        Fact::Declare {
+            object: TraceObject::HistoryEntry(HistoryEntry {
+                entry_ref: entry.clone(),
+                containing_agent: agent(),
+                predecessor: None,
+                original_owner: Some(OwnerRef::Agent { agent: original() }),
+            }),
+        },
+        Fact::Declare {
+            object: TraceObject::Message(Message {
+                message_ref: message.clone(),
+                author: Author::Unknown,
+                protocol_role: None,
+                purpose: MessagePurpose::Context,
+                production: None,
+            }),
+        },
+        Fact::Declare {
+            object: TraceObject::MessageRevision(MessageRevision {
+                revision_ref: revision.clone(),
+                message,
+                representation: Representation::Conversation,
+                form: RevisionForm::Complete,
+                parts: vec![],
+            }),
+        },
+        Fact::HistoryContentObserved {
+            observation: HistoryContentObservation::complete(
+                entry,
+                capture(1).source_position,
+                "context-only",
+                vec![HistoryContent::Message(revision)],
+            ),
+        },
+    ];
+    let positive = facts_projection(base.clone(), &PayloadPreviews::new());
+    assert!(positive.headers[&agent()].inherited_context_only);
+    assert!(matches!(
+        positive.headers[&agent()].own_execution.state,
+        ReadExecutionState::Unavailable
+    ));
+    // No origin Agent declaration is required to retain the child's context evidence.
+    assert_eq!(positive.inherited_context_sources[&agent()].len(), 1);
+    for owner in [
+        None,
+        Some(OwnerRef::Unknown),
+        Some(OwnerRef::Agent { agent: agent() }),
+    ] {
+        let mut changed = base.clone();
+        let Fact::Declare {
+            object: TraceObject::HistoryEntry(entry),
+        } = &mut changed[1]
+        else {
+            unreachable!()
+        };
+        entry.original_owner = owner;
+        assert!(
+            !facts_projection(changed, &PayloadPreviews::new()).headers[&agent()]
+                .inherited_context_only
+        );
+    }
+    let conflicted_entry =
+        EntryRef::native(agent(), "context-only", vec!["conflicted".into()]).unwrap();
+    let mut conflicted = base.clone();
+    for owner in [
+        Some(OwnerRef::Agent { agent: original() }),
+        Some(OwnerRef::Agent { agent: agent() }),
+    ] {
+        conflicted.push(Fact::Declare {
+            object: TraceObject::HistoryEntry(HistoryEntry {
+                entry_ref: conflicted_entry.clone(),
+                containing_agent: agent(),
+                predecessor: None,
+                original_owner: owner,
+            }),
+        });
+    }
+    assert!(
+        !facts_projection(conflicted, &PayloadPreviews::new()).headers[&agent()]
+            .inherited_context_only,
+        "a conflicted entry omitted from the readable archive cannot disappear from this classification"
+    );
+    let mut missing_predecessor = base.clone();
+    let Fact::Declare {
+        object: TraceObject::HistoryEntry(entry),
+    } = &mut missing_predecessor[1]
+    else {
+        unreachable!()
+    };
+    entry.predecessor =
+        Some(EntryRef::native(agent(), "context-only", vec!["missing".into()]).unwrap());
+    assert!(
+        !facts_projection(missing_predecessor, &PayloadPreviews::new()).headers[&agent()]
+            .inherited_context_only,
+        "a missing predecessor leaves part of the retained history unclassified"
+    );
+    let mut undeclared_entry = base.clone();
+    let mut orphan = base.last().unwrap().clone();
+    let Fact::HistoryContentObserved { observation } = &mut orphan else {
+        unreachable!()
+    };
+    observation.entry =
+        EntryRef::native(agent(), "context-only", vec!["undeclared".into()]).unwrap();
+    undeclared_entry.push(orphan);
+    assert!(
+        !facts_projection(undeclared_entry, &PayloadPreviews::new()).headers[&agent()]
+            .inherited_context_only,
+        "observed content without its entry declaration cannot disappear from classification"
+    );
+    let mut incomplete = base.clone();
+    incomplete.pop();
+    assert!(
+        !facts_projection(incomplete, &PayloadPreviews::new()).headers[&agent()]
+            .inherited_context_only
+    );
+    for object in [
+        TraceObject::Activation(Activation {
+            activation_ref: ActivationRef::native(
+                agent(),
+                "context-only",
+                vec!["activation".into()],
+            )
+            .unwrap(),
+            owner: OwnerRef::Agent { agent: agent() },
+        }),
+        TraceObject::Operation(declared_operation("local-without-activation")),
+        TraceObject::Operation(Operation {
+            owner: OwnerRef::Unknown,
+            ..declared_operation("uncertain-work")
+        }),
+        TraceObject::Message(Message {
+            message_ref: MessageRef::native(agent(), "context-only", vec!["local".into()]).unwrap(),
+            author: Author::Unknown,
+            protocol_role: None,
+            purpose: MessagePurpose::Unclassified,
+            production: Some(ProductionScope {
+                owner: OwnerRef::Agent { agent: agent() },
+                activation: None,
+            }),
+        }),
+        TraceObject::Delivery(Delivery {
+            delivery_ref: DeliveryRef::native(agent(), "context-only", vec!["input".into()])
+                .unwrap(),
+            sender: Author::Unknown,
+            recipient: Recipient::Agent {
+                agent: OwnerRef::Agent { agent: agent() },
+            },
+            route: DeliveryRoute::ServerCommand {
+                command_id: "input".into(),
+            },
+        }),
+    ] {
+        let mut with_work = base.clone();
+        with_work.push(Fact::Declare { object });
+        assert!(
+            !facts_projection(with_work, &PayloadPreviews::new()).headers[&agent()]
+                .inherited_context_only
+        );
+    }
+    let mut unbound_execution = base.clone();
+    unbound_execution.push(Fact::Execution {
+        execution: ExecutionRef::Activation(
+            ActivationRef::native(agent(), "context-only", vec!["unbound".into()]).unwrap(),
+        ),
+        boundary: ExecutionBoundary::Started { time: None },
+    });
+    assert!(
+        !facts_projection(unbound_execution, &PayloadPreviews::new()).headers[&agent()]
+            .inherited_context_only,
+        "an execution with missing ownership cannot be classified as inherited-only"
+    );
+    assert!(
+        !objects_projection(vec![declared_agent(agent())], vec![], vec![]).headers[&agent()]
+            .inherited_context_only
+    );
+}

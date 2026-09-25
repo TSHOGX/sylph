@@ -432,6 +432,7 @@ fn inherited_content_keeps_original_authorship_without_a_recipient_activation() 
             vec![HistoryContent::Message(revision)],
         )],
     );
+    assert!(projection.headers[&recipient].inherited_context_only);
     let units = &projection.windows[&ReadingScope {
         agent: recipient,
         selection: None,

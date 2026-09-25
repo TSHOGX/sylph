@@ -64,7 +64,10 @@ pub fn project_independent_append(
     }
     for (agent, append) in proof.agents() {
         guard.examine()?;
-        if index.submitted_agents.contains(agent)
+        // The first non-inherited tail can change the header's context state.
+        // Reconcile that transition once; ordinary local tails keep their bounds.
+        if index.inherited_history.get(agent) == Some(&true)
+            || index.submitted_agents.contains(agent)
             || index.selected_entries.contains(append.previous_head())
         {
             return None;

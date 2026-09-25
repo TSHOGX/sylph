@@ -102,6 +102,7 @@ export interface FileContext {
   workdir: string;
 }
 export interface AgentHeader {
+  inheritedContextOnly: boolean;
   agent: AgentLink;
   environment: string;
   environmentName: string | null;

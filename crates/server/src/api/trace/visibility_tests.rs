@@ -18,6 +18,7 @@ struct Fixture {
 
 fn header(agent: &AgentRef, name: &str, parent: Option<AgentLink>) -> AgentHeader {
     AgentHeader {
+        inherited_context_only: false,
         agent: AgentLink {
             address: AgentAddress::of(agent),
             name: Some(name.into()),

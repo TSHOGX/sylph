@@ -266,6 +266,8 @@ pub struct ReadFileContext {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentHeader {
+    /// The retained archive contains only proved inherited context and no local work.
+    pub inherited_context_only: bool,
     pub agent: AgentLink,
     pub environment: String,
     pub environment_name: Option<String>,

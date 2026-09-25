@@ -1,4 +1,5 @@
 use super::*;
+use crate::trace::reading_store::read_scope;
 use sylph_protocol::{NativeDatabaseSnapshot, NativeDatabaseStatus, NativeDatabaseValue};
 
 const PARENT: &str = "11111111-1111-4111-8111-111111111111";
@@ -348,4 +349,112 @@ async fn selection_waits_for_late_physical_binding_and_never_accepts_only_the_ch
             .len(),
         2
     );
+}
+
+#[tokio::test]
+async fn a_frozen_native_prefix_reports_inherited_only_until_local_production_is_retained() {
+    let fixture = Fixture::new().await;
+    let parent_bytes = native(&fixture, PARENT, "parent", None, 0, 1).await;
+    let child_bytes = native(
+        &fixture,
+        CHILD,
+        "child",
+        Some(serde_json::json!({
+            "thread_id": PARENT, "end_ordinal_exclusive": 2, "end_byte_offset": parent_bytes
+        })),
+        2,
+        0,
+    )
+    .await;
+    selection(&fixture, CHILD, "child", 1).await;
+    let (generation, _) = fixture.generation("inherited-only-native").await;
+    fixture
+        .worker()
+        .catch_up(
+            &generation,
+            1,
+            fixture.evidence.evidence_cut().await.unwrap(),
+        )
+        .await
+        .unwrap();
+    let old = generation.checkpoint().await.unwrap().snapshot;
+    let scope = read_scope(&agent("child"), None, "header");
+    let inherited: AgentHeader = serde_json::from_value(
+        generation
+            .read_row(&old, &scope, &agent("child").encode())
+            .await
+            .unwrap()
+            .body,
+    )
+    .unwrap();
+    assert!(inherited.inherited_context_only);
+    assert!(inherited.own_execution.reference.is_none());
+    let mut raw = serde_json::to_vec(&serde_json::json!({"type":"response_item","ordinal":3,"payload":{
+        "type":"message","id":"local-answer","role":"assistant","content":[{"type":"output_text","text":"new local work"}]
+    }})).unwrap();
+    raw.push(b'\n');
+    fixture
+        .admit(
+            observation(CHILD, 2),
+            SourcePosition {
+                source: source(CHILD),
+                generation: 0,
+                locator: SourceLocator::Jsonl {
+                    byte_start: child_bytes,
+                    byte_end: child_bytes + raw.len() as u64,
+                    record_ordinal: 1,
+                },
+            },
+            &raw,
+            TransportKind::NativeJsonl,
+        )
+        .await;
+    // A new worker restores the old aggregate before processing the local suffix.
+    fixture
+        .worker()
+        .catch_up(
+            &generation,
+            1,
+            fixture.evidence.evidence_cut().await.unwrap(),
+        )
+        .await
+        .unwrap();
+    let current = generation.checkpoint().await.unwrap().snapshot;
+    let local: AgentHeader = serde_json::from_value(
+        generation
+            .read_row(&current, &scope, &agent("child").encode())
+            .await
+            .unwrap()
+            .body,
+    )
+    .unwrap();
+    assert!(
+        !local.inherited_context_only,
+        "local work outside the frozen selected prefix was ignored"
+    );
+    let old: AgentHeader = serde_json::from_value(
+        generation
+            .read_row(&old, &scope, &agent("child").encode())
+            .await
+            .unwrap()
+            .body,
+    )
+    .unwrap();
+    assert!(old.inherited_context_only);
+    let (rebuilt, _) = fixture.generation("inherited-only-rebuilt").await;
+    fixture
+        .worker()
+        .catch_up(&rebuilt, 1, fixture.evidence.evidence_cut().await.unwrap())
+        .await
+        .unwrap();
+    let head = rebuilt.checkpoint().await.unwrap().snapshot;
+    let restored: AgentHeader = serde_json::from_value(
+        rebuilt
+            .read_row(&head, &scope, &agent("child").encode())
+            .await
+            .unwrap()
+            .body,
+    )
+    .unwrap();
+    assert!(!restored.inherited_context_only);
 }

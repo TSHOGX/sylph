@@ -158,6 +158,7 @@ export const en = {
   "trace.retry": "Retry",
   "trace.searchContextUnavailable":
     "Surrounding history unavailable at this checkpoint",
+  "trace.inheritedOnly": "Only inherited context observed",
   "trace.matchedContent": "Matched content",
   "trace.searchScope": "Search scope",
   "trace.searchRetained": "Retained history",

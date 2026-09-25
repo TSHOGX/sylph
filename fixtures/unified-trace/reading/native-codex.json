@@ -38,6 +38,7 @@
         "selection": null,
         "selectionKnown": false
       },
+      "inheritedContextOnly": false,
       "model": null,
       "origin": null,
       "ownExecution": {

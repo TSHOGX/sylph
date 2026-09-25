@@ -827,3 +827,5 @@ mod search_scope;
 mod search_membership;
 
 mod search_result;
+
+mod inherited_summary;

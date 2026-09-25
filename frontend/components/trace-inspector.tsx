@@ -1197,7 +1197,9 @@ function Coverage({ bootstrap }: { bootstrap: ReaderBootstrap }) {
     <div className="space-y-4">
       <h3 className="font-medium">{t("trace.coverage")}</h3>
       <p className="text-sm">
-        {executionLabel(bootstrap.header.ownExecution, t)}
+        {bootstrap.header.inheritedContextOnly
+          ? t("trace.inheritedOnly")
+          : executionLabel(bootstrap.header.ownExecution, t)}
       </p>
       <ul className="space-y-2">
         {bootstrap.header.coverage.map((coverage, index) => (

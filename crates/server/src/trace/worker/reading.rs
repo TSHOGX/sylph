@@ -650,6 +650,14 @@ fn rows(
                         .cloned()
                         .map(AnyObjectRef::HistorySelection),
                 )
+                .chain(
+                    projection
+                        .inherited_context_sources
+                        .get(agent)
+                        .into_iter()
+                        .flatten()
+                        .cloned(),
+                )
                 .collect(),
             false,
         )?;

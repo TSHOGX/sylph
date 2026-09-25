@@ -131,6 +131,7 @@ export const zh: Dictionary = {
   "trace.inspectActivation": "查看执行段",
   "trace.retry": "重试",
   "trace.searchContextUnavailable": "此检查点的附近历史不可用",
+  "trace.inheritedOnly": "仅观察到继承的上下文",
   "trace.matchedContent": "匹配内容",
   "trace.searchScope": "搜索范围",
   "trace.searchRetained": "保留的历史",

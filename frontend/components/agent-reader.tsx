@@ -395,10 +395,12 @@ export function AgentReader({
           </h1>
           {data && (
             <>
-              <p className="mt-1 truncate text-xs text-ink-muted">
+              <p className="mt-1 break-words text-xs text-ink-muted">
                 {data.header.environmentName ?? data.header.environment} ·{" "}
                 {data.header.history.label} ·{" "}
-                {executionLabel(data.header.ownExecution, t)}
+                {data.header.inheritedContextOnly
+                  ? t("trace.inheritedOnly")
+                  : executionLabel(data.header.ownExecution, t)}
               </p>
               <div className="flex flex-wrap items-center gap-x-2 text-xs">
                 {data.header.parent && (

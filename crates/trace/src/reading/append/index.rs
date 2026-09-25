@@ -36,6 +36,7 @@ pub struct AppendIndex {
     pub(in crate::reading) selected_messages: imbl::OrdSet<MessageRef>,
     pub(in crate::reading) delivered_messages: imbl::OrdSet<MessageRef>,
     pub(in crate::reading) delivered_entries: imbl::OrdSet<EntryRef>,
+    pub(in crate::reading) inherited_history: imbl::OrdMap<AgentRef, bool>,
     references: usize,
     max_references: usize,
 }
@@ -64,6 +65,7 @@ impl AppendIndex {
             selected_messages: imbl::OrdSet::new(),
             delivered_messages: imbl::OrdSet::new(),
             delivered_entries: imbl::OrdSet::new(),
+            inherited_history: imbl::OrdMap::new(),
             references: 0,
             max_references,
         };
@@ -186,6 +188,12 @@ impl AppendIndex {
         work: &mut AppendWork,
     ) -> Option<()> {
         work.index_records_examined += 1;
+        if !self.inherited_history.contains_key(agent) {
+            self.reserve(work)?;
+        }
+        let inherited = self.inherited_history.get(agent).copied().unwrap_or(true)
+            && crate::reading::inheritance::inherited_entry(reduction, entry);
+        self.inherited_history.insert(agent.clone(), inherited);
         let contents = reduction.entry_contents(entry, None);
         let mut unsupported = !contents.complete || contents.slots.is_empty();
         let mut messages = BTreeSet::new();

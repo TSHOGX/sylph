@@ -163,6 +163,7 @@ export function tracePage<T>(
 }
 export function header(agent = MAIN_AGENT): AgentHeader {
   return {
+    inheritedContextOnly: false,
     agent: agentLink(agent, agent === MAIN_AGENT ? "Main agent" : null),
     environment: "fixture-environment",
     environmentName: "Fixture machine",

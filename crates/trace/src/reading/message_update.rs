@@ -34,6 +34,9 @@ pub fn project_message_update(
         return None;
     }
     let ((agent, _), _) = indexed.entries.get_min()?;
+    if index.inherited_history.get(agent) == Some(&true) {
+        return None;
+    }
     let scope = ReadingScope {
         agent: agent.clone(),
         selection: None,

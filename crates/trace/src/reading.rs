@@ -16,6 +16,7 @@ mod directory;
 pub use directory::DirectoryEntry;
 mod message_update;
 mod window;
+mod inheritance;
 pub use append::{project_independent_append, AppendIndex, AppendProjection, AppendWork};
 pub use content::{compose_revisions, composition_payloads, ComposedPayload, ComposedRevisions};
 pub use message_update::{project_message_update, MessageProjection};
@@ -46,6 +47,7 @@ pub struct ReadingScope {
 pub struct ReadingProjection {
     pub composed_payloads: BTreeMap<PayloadRef, ComposedPayload>,
     pub headers: BTreeMap<AgentRef, AgentHeader>,
+    pub inherited_context_sources: BTreeMap<AgentRef, Vec<AnyObjectRef>>,
     pub windows: BTreeMap<ReadingScope, Vec<ReadingUnit>>,
     pub directory: BTreeMap<AgentRef, DirectoryEntry>,
     pub activations: BTreeMap<AgentRef, Vec<ExecutionSummary>>,
@@ -79,6 +81,7 @@ struct Index<'a> {
     input_messages: BTreeMap<MessageRef, BTreeSet<DeliveryRef>>,
     parents: BTreeMap<AgentRef, AgentRef>,
     origins: BTreeMap<AgentRef, BTreeSet<Option<AgentRef>>>,
+    inherited_context_sources: BTreeMap<AgentRef, Vec<AnyObjectRef>>,
 }
 
 pub fn project(
@@ -110,6 +113,7 @@ pub fn project(
         input_messages: BTreeMap::new(),
         parents: BTreeMap::new(),
         origins: BTreeMap::new(),
+        inherited_context_sources: inheritance::sources(reduction),
     };
     for object in reduction
         .objects
@@ -271,6 +275,7 @@ pub fn project(
     index.index_submitted_presentations();
     let mut result = ReadingProjection {
         composed_payloads,
+        inherited_context_sources: index.inherited_context_sources.clone(),
         directory: directory::project(&index),
         ..ReadingProjection::default()
     };
@@ -1188,6 +1193,9 @@ impl Index<'_> {
         let known = selection.is_some();
         let complete = history.is_some_and(|history| history.selected_entries.is_some());
         AgentHeader {
+            inherited_context_only: self
+                .inherited_context_sources
+                .contains_key(&agent.agent_ref),
             agent: self.agent_link(&agent.agent_ref),
             environment: agent.agent_ref.environment().as_str().into(),
             environment_name: None,

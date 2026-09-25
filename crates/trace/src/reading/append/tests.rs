@@ -388,3 +388,5 @@ fn reader_index_capacity_is_enforced_during_build_and_append() {
     assert!(append(&sample, &index, 1000, &mut work).is_none());
     assert!(work.index_unavailable);
 }
+
+mod inheritance;

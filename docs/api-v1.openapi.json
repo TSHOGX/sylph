@@ -5590,8 +5590,15 @@
             "properties": {
               "history": {
                 "$ref": "#/components/schemas/HistoryLocation"
+              },
+              "inheritedContextOnly": {
+                "type": "boolean",
+                "description": "Only positively evidenced inherited context has been observed in the retained archive, without local work. Independent of execution state and control authorization."
               }
-            }
+            },
+            "required": [
+              "inheritedContextOnly"
+            ]
           },
           "window": {
             "allOf": [
