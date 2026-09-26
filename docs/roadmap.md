@@ -371,13 +371,14 @@ Page assembly rechecks deletion visibility and grants before returning cached op
 provenance. The projection schema advances in place; source evidence stays authoritative.
 Historical RPC snapshots preserve absent ownership as described above.
 
-The Pi clause audit also leaves a concrete snapshot-continuation gap:
-`crates/trace/src/mapping/pi.rs` scopes a history response to only the content observations
-returned in that response, while acquisition uses `get_entries(since)` for later polls.
-The retained request and verified baseline must establish cumulative content membership
-for that append window, including an empty response that changes no entries. A baseline
-cannot be borrowed from another source epoch or inferred from an unpaired response.
-This needs production replay coverage before the entry-snapshot clause closes.
+Pi snapshot continuation now retains a bounded request table and one verified baseline
+selection. Paired `get_entries(since)` replies extend the exact content chain, including
+empty replies and branch navigation; fresh `get_entries`/`get_tree` replies reset it.
+Missing or recycled request IDs, wrong cursors, source gaps, generation changes,
+overlapping replies, rejected commands and session switches invalidate continuation while
+retaining each response's own bytes. Production replay covers restart, reread, same-cut
+rebuild, sibling navigation and request-evidence authorization. Snapshot chains remain
+private proof rows and do not accumulate all prior claim IDs in mapper state.
 
 Pi historical reads and unresolved native fork records no longer create new delivery
 or admission claims from a user/tool-result protocol role. Direct runtime message events

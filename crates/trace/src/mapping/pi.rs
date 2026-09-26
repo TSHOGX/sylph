@@ -17,6 +17,7 @@ pub struct PiMapper;
 mod maintenance;
 pub mod copies;
 mod runtime;
+mod snapshots;
 use maintenance::ObservedWork;
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -33,6 +34,7 @@ struct PiState {
     current_parent: Option<String>,
     retry: Option<ObservedWork>,
     compaction: Option<ObservedWork>,
+    snapshots: snapshots::State,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -77,7 +79,7 @@ struct LiveMessage {
 
 impl SemanticMapper for PiMapper {
     fn build(&self) -> &'static str {
-        "pi-11"
+        "pi-12"
     }
 
     fn map(&self, input: MapInput<'_>) -> MapOutput {
@@ -88,9 +90,6 @@ impl SemanticMapper for PiMapper {
             state: input.state.clone(),
             ..MapOutput::default()
         };
-        if input.capture.transport_kind == TransportKind::LiveStdin {
-            return output;
-        }
         let value = match serde_json::from_slice::<Value>(input.raw) {
             Ok(value) => value,
             Err(error) => {
@@ -1595,6 +1594,9 @@ impl Context<'_, '_> {
     }
 
     fn live(&mut self, value: &Value) {
+        self.state
+            .snapshots
+            .observe(&self.input.capture.source_position);
         let frame = match self.input.capture.source_position.locator {
             SourceLocator::Frame { ordinal } => Some(ordinal),
             _ => None,
@@ -1607,6 +1609,14 @@ impl Context<'_, '_> {
             }
         }
         self.state.last_frame = frame;
+        if self.input.capture.transport_kind == TransportKind::LiveStdin {
+            self.state.snapshots.request(
+                self.output.state.governing_agent.clone(),
+                value,
+                self.input.canonical_observation,
+            );
+            return;
+        }
         let kind = text(value, "type").unwrap_or("");
         if kind == "response"
             && text(value, "command") == Some("get_state")
@@ -1614,6 +1624,9 @@ impl Context<'_, '_> {
         {
             if let Some(owner) = text(&value["data"], "sessionId").and_then(|id| self.identify(id))
             {
+                if self.output.state.governing_agent.as_ref() != Some(&owner) {
+                    self.state.snapshots.invalidate();
+                }
                 self.output.state.governing_agent = Some(owner.clone());
                 self.state.header_evidence = Some(self.input.canonical_observation.clone());
                 self.declare_agent(
@@ -1927,6 +1940,14 @@ impl Context<'_, '_> {
 
     fn response(&mut self, owner: &AgentRef, value: &Value) {
         let command = text(value, "command").unwrap_or("");
+        if matches!(command, "new_session" | "switch_session" | "fork" | "clone") {
+            self.state.snapshots.invalidate();
+        }
+        let snapshot = if matches!(command, "get_entries" | "get_tree") {
+            self.state.snapshots.response(owner, value)
+        } else {
+            None
+        };
         if value["success"] != true {
             self.issue(
                 Some(owner),
@@ -1939,7 +1960,7 @@ impl Context<'_, '_> {
         if matches!(command, "get_entries" | "get_tree") {
             let pending = std::mem::take(&mut self.state.current_pending);
             let parent = self.state.current_parent.take();
-            self.history_response(owner, value);
+            self.history_response(owner, value, snapshot);
             self.state.current_pending = pending;
             self.state.current_parent = parent;
         } else if matches!(command, "prompt" | "steer" | "follow_up") {
@@ -1947,7 +1968,12 @@ impl Context<'_, '_> {
         }
     }
 
-    fn history_response(&mut self, owner: &AgentRef, value: &Value) {
+    fn history_response(
+        &mut self,
+        owner: &AgentRef,
+        value: &Value,
+        mut snapshot: Option<snapshots::Continuation>,
+    ) {
         let first_claim = self.output.claims.len();
         if let Some(entries) = value["data"]["entries"].as_array() {
             for (index, entry) in entries.iter().enumerate() {
@@ -1976,8 +2002,13 @@ impl Context<'_, '_> {
                 }
             }
         }
-        // An append window can name a head whose ancestors were omitted. Keep
-        // their topology, without claiming this response observed their content.
+        if self.output.claims[first_claim..].iter().any(|claim| matches!(&claim.fact,
+            Fact::Diagnostic { diagnostic } if matches!(diagnostic.code, DiagnosticCode::DecodeFailure | DiagnosticCode::UnsupportedKind))) {
+            snapshot = None;
+            self.state.snapshots.invalidate();
+        }
+        // Only paired, cursor-verified replies may inherit a baseline. Unpaired
+        // snapshots prove their own bodies and head without guessing an extent.
         let observations = self.output.claims[first_claim..]
             .iter()
             .filter(|claim| matches!(claim.fact, Fact::HistoryContentObserved { .. }))
@@ -1997,6 +2028,7 @@ impl Context<'_, '_> {
                     DiagnosticCode::DecodeFailure,
                     "Selected leaf ID is neither a native ID nor null",
                 );
+                self.state.snapshots.invalidate();
                 return;
             };
             let selection = SelectionRef::occurrence(
@@ -2012,10 +2044,17 @@ impl Context<'_, '_> {
                     selection_ref: selection.clone(),
                     agent: owner.clone(),
                     membership,
-                    content_scope: HistoryContentScope::ObservationSet { observations },
+                    content_scope: snapshot.as_ref().map_or_else(
+                        || HistoryContentScope::ObservationSet { observations },
+                        |proof| proof.scope(&self.input.capture.source_position),
+                    ),
                     excluded_heads: vec![],
                 }),
             );
+            if let Some(proof) = &snapshot {
+                proof.add_evidence(self.output.claims.last_mut().unwrap());
+                self.state.snapshots.accept(owner, &selection, proof);
+            }
             self.add(
                 owner,
                 "pi/select-history",
@@ -2026,6 +2065,7 @@ impl Context<'_, '_> {
                 },
             );
         } else {
+            self.state.snapshots.invalidate();
             self.issue(
                 Some(owner),
                 "pi/leaf-missing",

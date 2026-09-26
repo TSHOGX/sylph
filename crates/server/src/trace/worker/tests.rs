@@ -1856,5 +1856,6 @@ mod route_proofs;
 mod copied_communication;
 
 mod pi_origin;
+mod pi_snapshots;
 
 mod claude_forwarding;

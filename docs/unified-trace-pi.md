@@ -360,6 +360,15 @@ append window and the head. Reconnect requests a new verified baseline; it does 
 an old live message ordinal in a new process epoch. Sources that lack the supported
 snapshot commands retain native/live coverage independently.
 
+Incremental content membership requires the retained `get_entries` request and its
+matching response ID in one contiguous RPC source generation. Its `since` entry must
+equal the last entry in the verified baseline, not the selected leaf. Paired complete
+`get_entries`/`get_tree` replies reset the baseline; paired append replies extend it,
+including an empty reply. A rejected request, source gap, session switch, or overlapping
+stale reply invalidates continuation. Unpaired replies retain their own observed
+content and head without borrowing earlier content. Bounded pending-request state and
+one snapshot reference replace cumulative per-poll claim lists.
+
 The vendor's snapshot response has no page-size parameter. Capture prefers incremental
 `get_entries(since)` with a verified known entry, and does not poll the entire `get_tree`
 surface to refresh a head. An initial or lagging response can still be large; bounded

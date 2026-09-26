@@ -492,3 +492,75 @@ fn proved_tail_support_matches_reconciliation_and_shares_untouched_buckets() {
     assert!(!needed.contains(&claims[1].claim_ref));
     assert!(before.support[&unrelated].ptr_eq(&incremental.support[&unrelated]));
 }
+
+#[test]
+fn snapshot_continuation_requires_baseline_certificates_without_borrowing_an_inactive_branch() {
+    let owner = agent("recipient");
+    let entry =
+        |name: &str| EntryRef::native(owner.clone(), "snapshot-entry", vec![name.into()]).unwrap();
+    let selection =
+        |name: &str| SelectionRef::native(owner.clone(), "snapshot", vec![name.into()]).unwrap();
+    let position = |ordinal| SourcePosition {
+        source: SourceRef {
+            issuer: Issuer::Server("support-test".into()),
+            instance: "rpc".into(),
+        },
+        generation: 0,
+        locator: SourceLocator::Frame { ordinal },
+    };
+    let declaration = |name: &str| {
+        TraceObject::HistoryEntry(HistoryEntry {
+            entry_ref: entry(name),
+            containing_agent: owner.clone(),
+            predecessor: None,
+            original_owner: None,
+        })
+    };
+    let content = |name: &str, ordinal| Fact::HistoryContentObserved {
+        observation: HistoryContentObservation::complete(
+            entry(name),
+            position(ordinal),
+            "snapshot",
+            vec![HistoryContent::Opaque(
+                PayloadRef::bytes("a".repeat(64)).unwrap(),
+            )],
+        ),
+    };
+    let snapshot = |name: &str, head: &str, ordinal, previous| {
+        TraceObject::HistorySelection(HistorySelection {
+            selection_ref: selection(name),
+            agent: owner.clone(),
+            membership: SelectionMembership::EntryPath { head: entry(head) },
+            content_scope: HistoryContentScope::Snapshot {
+                position: position(ordinal),
+                mapping_rule: "snapshot".into(),
+                previous,
+            },
+            excluded_heads: vec![],
+        })
+    };
+    let claims = vec![
+        declared_agent(1, "recipient"),
+        declared(2, declaration("inactive")),
+        declared(3, declaration("selected")),
+        claim(4, content("inactive", 1)),
+        claim(5, content("selected", 1)),
+        declared(6, snapshot("base", "inactive", 1, None)),
+        declared(7, snapshot("next", "selected", 2, Some(selection("base")))),
+    ];
+    let (index, reduced, _) = support(&claims);
+    assert_eq!(
+        reduced.selection_content_observations[&selection("next")],
+        Some(BTreeSet::from([claims[4].claim_ref.clone()]))
+    );
+    assert_eq!(
+        index.support[&AnyObjectRef::HistorySelection(selection("next"))],
+        imbl::ordset![
+            claims[2].claim_ref.clone(),
+            claims[4].claim_ref.clone(),
+            claims[5].claim_ref.clone(),
+            claims[6].claim_ref.clone()
+        ],
+        "baseline declaration proves continuation; its earlier chosen branch does not own the next view"
+    );
+}

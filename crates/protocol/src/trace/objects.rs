@@ -706,6 +706,13 @@ pub enum HistoryContentScope {
     ObservationSet {
         observations: Vec<ClaimRef>,
     },
+    /// One verified snapshot response, optionally extending an earlier snapshot
+    /// from the same source generation. Its content is independent of its head.
+    Snapshot {
+        position: SourcePosition,
+        mapping_rule: String,
+        previous: Option<SelectionRef>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

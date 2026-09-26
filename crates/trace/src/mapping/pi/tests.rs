@@ -920,6 +920,7 @@ fn a_fork_tool_record_keeps_its_unresolved_production_without_naming_the_child_a
 }
 
 mod copies;
+mod snapshots;
 
 #[test]
 fn historical_pi_entries_never_borrow_the_readers_identity_as_production_ownership() {

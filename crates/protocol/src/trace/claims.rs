@@ -582,6 +582,22 @@ impl Claim {
             Fact::Declare {
                 object: TraceObject::HistorySelection(selection),
             } => {
+                if let HistoryContentScope::Snapshot {
+                    position,
+                    mapping_rule,
+                    previous,
+                } = &selection.content_scope
+                {
+                    if position.validate().is_err()
+                        || mapping_rule.trim().is_empty()
+                        || previous.as_ref() == Some(&selection.selection_ref)
+                        || previous
+                            .as_ref()
+                            .is_some_and(|previous| previous.scope() != &selection.agent)
+                    {
+                        return Err(ClaimError::InvalidHistoryContent);
+                    }
+                }
                 if let SelectionMembership::SourceExtents { extents, .. } = &selection.membership {
                     for extent in extents {
                         if extent.start_inclusive > extent.end_exclusive

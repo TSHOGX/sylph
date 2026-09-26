@@ -326,6 +326,15 @@ impl Dependencies {
                         self.claims.extend(observations.iter().cloned())
                     }
                     HistoryContentScope::AllObservedAtCut => {}
+                    HistoryContentScope::Snapshot {
+                        position, previous, ..
+                    } => {
+                        self.selection_sources
+                            .insert((position.source.clone(), position.generation));
+                        if let Some(previous) = previous {
+                            self.add(AnyObjectRef::HistorySelection(previous.clone()));
+                        }
+                    }
                 }
                 for head in excluded_heads {
                     self.add(AnyObjectRef::HistoryEntry(head.clone()));

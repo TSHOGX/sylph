@@ -5,6 +5,7 @@
 //! that cardinality cannot decide whether selected membership is known.
 
 use super::*;
+mod snapshots;
 
 type SelectionObservationGroup<'a> = (&'a SourcePosition, Vec<(&'a SelectionRef, &'a ClaimRef)>);
 type PositionDomain = (SourceRef, u64, HistoryCoordinate, String);
@@ -314,6 +315,7 @@ pub(super) fn resolve_histories(active: &[&Claim], result: &mut Reduction) {
         .enumerate()
         .map(|(index, entry)| (entry, index))
         .collect();
+    let snapshots = snapshots::resolve(&selections, &result.history_contents);
     for selection in selections.values() {
         let resolved = membership(
             selection,
@@ -322,6 +324,7 @@ pub(super) fn resolve_histories(active: &[&Claim], result: &mut Reduction) {
             active,
             &result.history_contents,
             &entry_order,
+            &snapshots,
             &mut BTreeSet::new(),
         );
         result.selection_content_observations.insert(
@@ -407,6 +410,7 @@ struct SelectedMembership {
     observations: BTreeSet<ClaimRef>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn membership(
     selection: &HistorySelection,
     graph: &HistoryGraph,
@@ -414,6 +418,7 @@ fn membership(
     active: &[&Claim],
     contents: &imbl::OrdMap<EntryRef, BTreeMap<ClaimRef, HistoryContentObservation>>,
     entry_order: &BTreeMap<EntryRef, usize>,
+    snapshots: &snapshots::Snapshots,
     visiting: &mut BTreeSet<SelectionRef>,
 ) -> Option<SelectedMembership> {
     if !visiting.insert(selection.selection_ref.clone()) {
@@ -442,6 +447,7 @@ fn membership(
                     active,
                     contents,
                     entry_order,
+                    snapshots,
                     visiting,
                 )?;
                 members.extend(inherited.entries);
@@ -507,7 +513,18 @@ fn membership(
     visiting.remove(&selection.selection_ref);
     let mut unique = BTreeSet::new();
     members.retain(|entry| unique.insert(entry.clone()));
-    if !matches!(
+    if matches!(
+        selection.content_scope,
+        HistoryContentScope::Snapshot { .. }
+    ) {
+        let bindings = snapshots.get(&selection.selection_ref)?.as_ref()?;
+        observations = members
+            .iter()
+            .filter_map(|entry| bindings.get(entry))
+            .flatten()
+            .cloned()
+            .collect();
+    } else if !matches!(
         selection.membership,
         SelectionMembership::SourceExtents { .. }
     ) {

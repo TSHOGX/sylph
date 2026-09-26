@@ -252,6 +252,16 @@ suffix merely because its predecessor has a copy witness. Both source orders, re
 same-cut rebuilding and the held earlier view preserve this distinction. The reader and
 production regressions fail when the predecessor-based local classification is restored.
 
+Pi entry snapshots have an additional production continuation certificate in
+`crates/server/src/trace/worker/tests/pi_snapshots.rs`. The real admission path receives
+paired RPC writes and replies, persists the bounded mapper checkpoint, extends a baseline
+through empty append windows and sibling navigation, then reopens, rereads and rebuilds
+the generation. Request evidence is part of the selected snapshot claim. Faults for
+missing or recycled IDs, wrong cursors, source gaps, generation changes, rejected or
+overlapping replies, and session switches leave the response's own content readable but
+do not borrow the old baseline. The reducer keeps inactive branches through private
+snapshot proof rows rather than copying every prior claim into each poll.
+
 Pi RPC entry/tree snapshots are also checked independently of native ownership in
 `crates/trace/src/mapping/pi/tests.rs`: assistant messages, operations, shell records and
 checkpoints make no producer claim from the reader identity. Native declarations refine

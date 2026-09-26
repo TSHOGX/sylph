@@ -405,6 +405,14 @@ head/path establishes topology only: the reader considers observed alternatives 
 query cut and does not claim a source-selected content revision. A retained query snapshot
 pins both topology and content bindings.
 
+An incremental snapshot content scope names its exact response position and mapping
+rule, plus the previous verified snapshot when the retained request proves continuation.
+The chain describes captured content, independently of each snapshot's selected head:
+switching to a previously observed sibling does not discard its body. A fresh snapshot
+resets this chain; an empty incremental reply preserves it. Newer observations of one
+entry replace that entry's eligible snapshot binding while older query views remain
+immutable. Missing, conflicting, cyclic or cross-source snapshot links stay unresolved.
+
 Readable presentation is separate from revision identity. After restricting candidates
 to the selected bindings and one proved Message identity, explicit append, replacement,
 final and correction rules apply. Otherwise competing complete candidates can provide

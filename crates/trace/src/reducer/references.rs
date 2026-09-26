@@ -164,6 +164,11 @@ fn normalized_object(
         TraceObject::HistorySelection(v) => {
             v.selection_ref = resolved_ref!(registry, HistorySelection, v.selection_ref);
             v.agent = resolved_ref!(registry, Agent, v.agent);
+            if let HistoryContentScope::Snapshot { previous, .. } = &mut v.content_scope {
+                *previous = previous
+                    .as_ref()
+                    .map(|previous| resolved_ref!(registry, HistorySelection, previous));
+            }
             match &mut v.membership {
                 SelectionMembership::EntryPath { head } => {
                     *head = resolved_ref!(registry, HistoryEntry, head)

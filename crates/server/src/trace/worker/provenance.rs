@@ -264,25 +264,42 @@ impl SupportIndex {
         selection: &SelectionRef,
     ) -> imbl::OrdSet<ClaimRef> {
         let mut support = imbl::OrdSet::new();
-        let mut pending = vec![selection.clone()];
+        let mut pending = vec![(selection.clone(), true)];
         let mut visited = BTreeSet::new();
-        while let Some(reference) = pending.pop() {
+        while let Some((reference, include_members)) = pending.pop() {
             let Some(object) = reduction.object(&AnyObjectRef::HistorySelection(reference)) else {
                 continue;
             };
-            if !visited.insert(object.reference.clone()) {
+            if !visited.insert((object.reference.clone(), include_members)) {
                 continue;
             }
             support.extend(resolved_claims(&object.declaration));
             let Some(TraceObject::HistorySelection(selection)) = object.declaration.known() else {
                 continue;
             };
+            if let HistoryContentScope::Snapshot {
+                previous: Some(previous),
+                ..
+            } = &selection.content_scope
+            {
+                // The baseline certificate is required, but its old selected
+                // branch need not be readable to inspect a different branch.
+                pending.push((previous.clone(), false));
+            }
+            if !include_members {
+                continue;
+            }
             if let SelectionMembership::SourceExtents {
                 extents,
                 inherited_selections,
             } = &selection.membership
             {
-                pending.extend(inherited_selections.iter().cloned());
+                pending.extend(
+                    inherited_selections
+                        .iter()
+                        .cloned()
+                        .map(|selection| (selection, true)),
+                );
                 for extent in extents {
                     for claim in self
                         .source_witnesses

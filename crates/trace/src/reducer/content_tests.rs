@@ -228,6 +228,138 @@ fn two_revisions(second_digest: char) -> Fixture {
 }
 
 #[test]
+fn snapshot_content_chains_retain_inactive_branches_and_refuse_missing_or_foreign_baselines() {
+    let mut fixture = Fixture::default();
+    for (name, parent) in [("a", None), ("b", Some("a")), ("c", Some("a"))] {
+        fixture.entry(name, parent);
+        fixture.message(name);
+        fixture.revision(name, name, 'a');
+    }
+    let selected =
+        |name: &str| SelectionRef::native(owner("root"), "snapshot", vec![name.into()]).unwrap();
+    let declare = |name: &str, head: &str, at: SourcePosition, previous| {
+        TraceObject::HistorySelection(HistorySelection {
+            selection_ref: selected(name),
+            agent: owner("root"),
+            membership: SelectionMembership::EntryPath { head: entry(head) },
+            content_scope: HistoryContentScope::Snapshot {
+                position: at,
+                mapping_rule: "rpc-snapshot".into(),
+                previous,
+            },
+            excluded_heads: vec![],
+        })
+    };
+    let a = fixture.content("a", position("rpc", 1), "rpc-snapshot", &["a"], true);
+    let b = fixture.content("b", position("rpc", 2), "rpc-snapshot", &["b"], true);
+    let c = fixture.content("c", position("rpc", 2), "rpc-snapshot", &["c"], true);
+    fixture.declare(declare("base", "a", position("rpc", 1), None));
+    fixture.declare(declare(
+        "branches",
+        "b",
+        position("rpc", 2),
+        Some(selected("base")),
+    ));
+    fixture.declare(declare(
+        "other-branch",
+        "c",
+        position("rpc", 3),
+        Some(selected("branches")),
+    ));
+    let reduced = fixture.reduce();
+    assert_eq!(
+        reduced.selection_content_observations[&selected("other-branch")],
+        Some(BTreeSet::from([a.clone(), c]))
+    );
+    assert_eq!(
+        reduced.selection_content_observations[&selected("branches")],
+        Some(BTreeSet::from([a.clone(), b]))
+    );
+    assert!(
+        !reduced
+            .entry_contents(&entry("b"), Some(&selected("other-branch")))
+            .complete
+    );
+    // Same entry, different body at a later full snapshot. Earlier selections
+    // keep their own observations; a fresh baseline cannot inherit omitted b/c.
+    fixture.revision("a-new", "a", 'b');
+    let latest = fixture.content("a", position("rpc", 4), "rpc-snapshot", &["a-new"], true);
+    fixture.declare(declare("fresh", "b", position("rpc", 4), None));
+    let reduced = fixture.reduce();
+    assert_eq!(
+        reduced.selection_content_observations[&selected("fresh")],
+        Some(BTreeSet::from([latest]))
+    );
+    assert_eq!(
+        reduced.selection_content_observations[&selected("base")],
+        Some(BTreeSet::from([a]))
+    );
+
+    for fault in [
+        "missing",
+        "source",
+        "generation",
+        "reverse",
+        "rule",
+        "cycle",
+        "owner",
+    ] {
+        let mut invalid = fixture.clone();
+        let previous = if fault == "missing" {
+            selected("absent")
+        } else {
+            selected("base")
+        };
+        let mut at = position("rpc", 9);
+        match fault {
+            "source" => at.source.instance = "other-source".into(),
+            "generation" => at.generation += 1,
+            "reverse" => at = position("rpc", 0),
+            _ => {}
+        }
+        let mut value = declare("invalid", "a", at, Some(previous));
+        if let TraceObject::HistorySelection(selection) = &mut value {
+            if let HistoryContentScope::Snapshot {
+                mapping_rule,
+                previous,
+                ..
+            } = &mut selection.content_scope
+            {
+                if fault == "rule" {
+                    *mapping_rule = "other-rule".into();
+                }
+                if fault == "cycle" {
+                    *previous = Some(selected("cycle"));
+                }
+            }
+        }
+        if fault == "cycle" {
+            invalid.declare(declare(
+                "cycle",
+                "a",
+                position("rpc", 8),
+                Some(selected("invalid")),
+            ));
+        }
+        if fault == "owner" {
+            // The reference namespace remains valid; the retained declaration
+            // itself contradicts which agent the earlier snapshot belonged to.
+            let mut old = declare("base", "a", position("rpc", 1), None);
+            if let TraceObject::HistorySelection(selection) = &mut old {
+                selection.agent = owner("other");
+            }
+            invalid.declare(old);
+        }
+        invalid.declare(value);
+        let reduced = invalid.reduce();
+        assert!(
+            reduced.selection_memberships[&selected("invalid")].is_none(),
+            "{fault}: invalid baseline cannot establish an empty complete selection"
+        );
+    }
+}
+
+#[test]
 fn one_delivery_keeps_observed_revision_bindings_and_respects_selected_content() {
     let mut fixture = two_revisions('a');
     let delivery = DeliveryRef::native(owner("root"), "admission", vec!["entry".into()]).unwrap();
