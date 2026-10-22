@@ -29,7 +29,7 @@ sqlx = { version = "0.8", features = [
 # a convenience. Pinned to a commit of its own repository: a path dependency compiles on
 # exactly one machine, and a branch would let a rebuild change the tokenizer under an
 # existing index.
-fts5-jieba = { git = "https://github.com/TSHOGX/fts5-jieba", rev = "625bcbd61731e62730f6d6c74afed9895943bf74" }
+fts5-jieba = { git = "https://github.com/TSHOGX/fts5-jieba", rev = "c5ff1e2b007a261712aa259f14a1d5a1c931eba9", features = ["link"] }
 
 # The event vocabulary and the adapter contract as types.
 #

@@ -716,7 +716,7 @@ checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
 [[package]]
 name = "fts5-jieba"
 version = "0.1.0"
-source = "git+https://github.com/TSHOGX/fts5-jieba?rev=625bcbd61731e62730f6d6c74afed9895943bf74#625bcbd61731e62730f6d6c74afed9895943bf74"
+source = "git+https://github.com/TSHOGX/fts5-jieba?rev=c5ff1e2b007a261712aa259f14a1d5a1c931eba9#c5ff1e2b007a261712aa259f14a1d5a1c931eba9"
 dependencies = [
  "jieba-rs",
  "libc",
