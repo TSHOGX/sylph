@@ -54,9 +54,6 @@ owns progress and status; `docs/` owns design.
   needs, and reads that vendor's native store.
 - `crates/envagent/` — local framing, durable spool, reconnect epochs, path containment,
   credential storage, and adapter hosting.
-- `crates/fts5-jieba/` — the SQLite FTS5 tokenizer, linked into the server so Chinese is
-  searchable. Vendored rather than depended on by path, which is only ever right on one
-  machine.
 - `crates/trace/` — pure vendor mapping, deterministic reduction and reader projections.
 - `crates/server/` — Rust, Axum, SQLx. Holds operational policy, trace evidence,
   generation publication and the API.

@@ -34,7 +34,8 @@ silently return another generation's results.
 ### Tokenization
 
 The SQLite FTS5 tokenizer is jieba, linked into the server through
-[fts5-jieba](../crates/fts5-jieba/). Registration occurs per search connection through the
+[fts5-jieba](https://github.com/TSHOGX/fts5-jieba), pinned to a commit in
+`crates/server/Cargo.toml`. Registration occurs per search connection through the
 [SQLite pool helper](../crates/server/src/db/sqlite.rs). Registration failure is fatal;
 falling back to another tokenizer would make existing indexes answer incorrectly.
 The immutable dictionary is shared across tokenizer instances.

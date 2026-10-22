@@ -26,8 +26,10 @@ sqlx = { version = "0.8", features = [
 
 # The FTS5 tokenizer, linked in rather than loaded as a platform-specific extension.
 # `docs/storage.md` § Tokenization says why static linking is the requirement rather than
-# a convenience.
-fts5-jieba = { path = "../fts5-jieba" }
+# a convenience. Pinned to a commit of its own repository: a path dependency compiles on
+# exactly one machine, and a branch would let a rebuild change the tokenizer under an
+# existing index.
+fts5-jieba = { git = "https://github.com/TSHOGX/fts5-jieba", rev = "625bcbd61731e62730f6d6c74afed9895943bf74" }
 
 # The event vocabulary and the adapter contract as types.
 #

@@ -14,7 +14,6 @@ members = [
   "crates/protocol",
   "crates/trace",
   "crates/adapters",
-  "crates/fts5-jieba",
   "crates/envagent",
   "crates/docs-check",
 ]
