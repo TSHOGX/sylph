@@ -137,6 +137,11 @@ loosening the checker: a shortened form is already accepted (a pointer may name 
 of a heading before its `:`, `,`, `—`, or `(`), and `fixtures/` is skipped on purpose,
 since a vendor payload legitimately contains paths that are not ours.
 
+A path that passes through a generated directory (`node_modules`, `target`, `.next`, and
+the e2e output directories) is not checked either. Whether it resolves depends on whether
+the install ran on this machine, so checking it would turn the suite red on a fresh
+checkout without saying anything about the prose.
+
 ## Configuration
 
 Everything the server owns is under `~/.sylph` and configured in `~/.sylph/config.toml`;

@@ -391,12 +391,6 @@ fn check_section_pointers(
     }
 }
 
-/// A backticked path that looks like this repo's own and does not exist.
-///
-/// Deliberately narrow. Only a token containing `/`, starting at a real top-level
-/// directory, and ending in a source extension is checked, because prose is full
-/// of paths belonging to vendors, other machines, and hypotheticals — and a lint
-/// that flags those gets turned off.
 /// Whether a cited path is spelled as one of this repo's own.
 ///
 /// Deliberately narrow. Prose here is full of paths belonging to vendors, other
@@ -414,6 +408,33 @@ fn is_ours(candidate: &str) -> bool {
     candidate.contains('/') && OWNED.iter().any(|dir| candidate.starts_with(dir))
 }
 
+/// Directories that exist only after a build or an install.
+///
+/// A path through one is not part of this repo: whether it resolves depends on whether
+/// somebody ran the install on this machine, not on whether the prose is right. Checking
+/// it makes the suite red on a fresh checkout and green on a developer's, which is the
+/// opposite of what a gate is for. `SKIP_DIRS` already declares these ungoverned for
+/// scanning; this applies the same decision to citing.
+///
+/// `fixtures` is deliberately not here: it is committed, so a path into it can rot.
+const GENERATED_DIRS: &[&str] = &[
+    "node_modules",
+    "target",
+    ".next",
+    ".e2e-home",
+    "test-results",
+    "playwright-report",
+];
+
+fn passes_through_generated_dir(path: &str) -> bool {
+    path.split('/')
+        .any(|component| GENERATED_DIRS.contains(&component))
+}
+
+/// A backticked path that looks like this repo's own and does not exist.
+///
+/// Deliberately narrow. Only a token containing `/` and starting at a real top-level
+/// directory is checked, and one that passes through a generated directory is not.
 fn check_code_paths(root: &Path, from: &str, line: &str, push: &mut impl FnMut(String, String)) {
     for token in line.split('`').skip(1).step_by(2) {
         let candidate = token.trim();
@@ -424,6 +445,9 @@ fn check_code_paths(root: &Path, from: &str, line: &str, push: &mut impl FnMut(S
         // to a region rather than a file; the file part is what gets checked.
         let path = candidate.split([':', ' ', '#']).next().unwrap_or(candidate);
         if path.contains('*') || path.contains('{') || path.contains("...") {
+            continue;
+        }
+        if passes_through_generated_dir(path) {
             continue;
         }
         let Some(extension) = Path::new(path).extension().and_then(|e| e.to_str()) else {
@@ -581,5 +605,45 @@ mod tests {
 
         assert_eq!(found.len(), 1, "expected one finding, got {found:?}");
         assert!(found[0].1.contains("no such section"), "{:?}", found[0]);
+    }
+
+    /// A path through a generated directory is not governed; a missing real one is.
+    ///
+    /// Without the first half the suite is red on every fresh checkout, because
+    /// whether `node_modules` exists says nothing about whether the prose is right.
+    /// Without the second half "skip generated directories" could quietly grow into
+    /// "skip everything". Both probes are composed at runtime so this file does not
+    /// cite them itself.
+    #[test]
+    fn generated_directories_are_skipped_but_real_misses_are_not() {
+        let root = repo_root();
+        let tick = '`';
+        let probe = |path: &str| -> Vec<(String, String)> {
+            let mut found = Vec::new();
+            check_code_paths(
+                &root,
+                "docs/probe.md",
+                &format!("See {tick}{path}{tick} for this."),
+                &mut |pointer, problem| found.push((pointer, problem)),
+            );
+            found
+        };
+
+        for generated in [
+            "frontend/node_modules/no-such-package/index.js",
+            "frontend/node_modules/no-such-package/docs/",
+            "crates/server/target/debug/no-such-binary.rs",
+            "frontend/.next/no-such-chunk.js",
+        ] {
+            assert!(probe(generated).is_empty(), "{generated} should be skipped");
+        }
+
+        let missing = probe("frontend/no-such-directory/no-such-file.rs");
+        assert_eq!(
+            missing.len(),
+            1,
+            "a real miss must still be reported: {missing:?}"
+        );
+        assert!(missing[0].1.contains("no such file"), "{:?}", missing[0]);
     }
 }
