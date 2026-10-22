@@ -79,8 +79,10 @@ impl Index<'_> {
                                 &claim.encode(),
                                 payload,
                                 Representation::Runtime,
-                                Some("application/json".into()),
-                                Some(PayloadEncoding::Utf8),
+                                PayloadFormat {
+                                    media_type: Some("application/json".into()),
+                                    encoding: Some(PayloadEncoding::Utf8),
+                                },
                             )
                         })
                         .into_iter()

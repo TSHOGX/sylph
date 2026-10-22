@@ -365,6 +365,7 @@ impl GenerationStore {
         decode(row)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn read_page(
         &self,
         snapshot: &Snapshot,
@@ -388,6 +389,7 @@ impl GenerationStore {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn read_filtered_page(
         &self,
         snapshot: &Snapshot,

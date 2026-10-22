@@ -1320,18 +1320,16 @@ fn select_payloads(value: &mut serde_json::Value, selection: Option<&SelectionRe
             if object.contains_key("payloadRef")
                 && object.contains_key("viaRef")
                 && object.contains_key("bodyRevision")
-            {
-                if object
+                && object
                     .get("containingAgent")
                     .and_then(serde_json::Value::as_str)
                     .and_then(|value| AgentAddress::parse(value).ok())
                     .is_some_and(|agent| &agent.agent() == selection.scope())
-                {
-                    object.insert(
-                        "selection".into(),
-                        serde_json::Value::String(selection.encode()),
-                    );
-                }
+            {
+                object.insert(
+                    "selection".into(),
+                    serde_json::Value::String(selection.encode()),
+                );
             }
             for value in object.values_mut() {
                 select_payloads(value, Some(selection));
@@ -1516,6 +1514,7 @@ pub async fn bootstrap(
     Ok(Json(response))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn page<T: serde::de::DeserializeOwned + Serialize>(
     state: &AppState,
     subject: &str,

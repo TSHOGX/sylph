@@ -311,8 +311,10 @@ impl super::Index<'_> {
                             &payload.to_string(),
                             payload,
                             Representation::Conversation,
-                            None,
-                            Some(PayloadEncoding::Binary),
+                            PayloadFormat {
+                                media_type: None,
+                                encoding: Some(PayloadEncoding::Binary),
+                            },
                         )],
                     },
                 }),

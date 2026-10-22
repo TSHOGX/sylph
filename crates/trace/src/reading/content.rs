@@ -30,14 +30,7 @@ pub fn composition_payloads(
         .collect()
 }
 
-pub(super) fn resolve(
-    reduction: &Reduction,
-    payloads: &mut PayloadPreviews,
-) -> (
-    BTreeMap<MessageRevisionRef, Vec<ContentPart>>,
-    BTreeMap<PayloadRef, ComposedPayload>,
-    BTreeMap<MessageRevisionRef, String>,
-) {
+pub(super) fn resolve(reduction: &Reduction, payloads: &mut PayloadPreviews) -> ComposedRevisions {
     let mut requested: BTreeSet<_> = reduction
         .objects
         .values()
@@ -94,8 +87,7 @@ pub(super) fn resolve(
             }
         }
     }
-    let result = compose_revisions(reduction, &requested, payloads);
-    (result.parts, result.payloads, result.unavailable)
+    compose_revisions(reduction, &requested, payloads)
 }
 
 /// Compose explicitly requested immutable revisions without choosing a history or

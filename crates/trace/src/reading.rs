@@ -95,8 +95,11 @@ pub fn project(
     max_parts: usize,
 ) -> ReadingProjection {
     let mut payloads = payloads.clone();
-    let (composed_parts, composed_payloads, content_errors) =
-        content::resolve(reduction, &mut payloads);
+    let ComposedRevisions {
+        parts: composed_parts,
+        payloads: composed_payloads,
+        unavailable: content_errors,
+    } = content::resolve(reduction, &mut payloads);
     let mut index = Index {
         reduction,
         payloads: &payloads,
@@ -726,8 +729,7 @@ impl Index<'_> {
                             &result.result_ref.encode(),
                             &payload.reference,
                             result.representation.into(),
-                            format.media_type,
-                            format.encoding,
+                            format,
                         )
                     })
                     .into_iter()
@@ -839,8 +841,7 @@ impl Index<'_> {
                                 &payload.reference.to_string(),
                                 &payload.reference,
                                 Representation::Runtime,
-                                format.media_type,
-                                format.encoding,
+                                format,
                             )
                         })
                         .into_iter()
@@ -885,8 +886,10 @@ impl Index<'_> {
                             &revision.revision_ref.encode(),
                             &part.payload,
                             revision.representation,
-                            part.media_type.clone(),
-                            Some(part.encoding),
+                            PayloadFormat {
+                                media_type: part.media_type.clone(),
+                                encoding: Some(part.encoding),
+                            },
                         )
                     })
                     .collect(),
@@ -984,17 +987,15 @@ impl Index<'_> {
         let mut last = None;
         for (boundary, _) in &execution.boundaries {
             match boundary {
-                ExecutionBoundary::Started { time } => {
-                    if let Some(time) = time {
-                        started = Some(time);
-                        last = Some(time);
-                    }
+                ExecutionBoundary::Started { time: Some(time) } => {
+                    started = Some(time);
+                    last = Some(time);
                 }
-                ExecutionBoundary::Terminated { time, .. } => {
-                    if let Some(time) = time {
-                        stopped = Some(time);
-                        last = Some(time);
-                    }
+                ExecutionBoundary::Terminated {
+                    time: Some(time), ..
+                } => {
+                    stopped = Some(time);
+                    last = Some(time);
                 }
                 _ => {}
             }
@@ -1293,8 +1294,7 @@ impl Index<'_> {
         revision: &str,
         payload: &PayloadRef,
         representation: Representation,
-        media_type: Option<String>,
-        encoding: Option<PayloadEncoding>,
+        format: PayloadFormat,
     ) -> PayloadAccess {
         let preview = self.payloads.get(payload);
         PayloadAccess {
@@ -1305,8 +1305,8 @@ impl Index<'_> {
             via_ref: TraceAddress::of(anchor),
             containing_agent: AgentAddress::of(&scope.agent),
             selection: scope.selection.clone(),
-            media_type,
-            encoding,
+            media_type: format.media_type,
+            encoding: format.encoding,
             total_bytes: preview.and_then(|preview| preview.total_bytes),
             available_ranges: preview.map_or_else(Vec::new, |preview| preview.ranges.clone()),
             availability: preview
@@ -1331,8 +1331,10 @@ impl Index<'_> {
             &revision.revision_ref.encode(),
             &part.payload,
             revision.representation,
-            part.media_type.clone(),
-            Some(part.encoding),
+            PayloadFormat {
+                media_type: part.media_type.clone(),
+                encoding: Some(part.encoding),
+            },
         );
         if let Some(reason) = self.content_errors.get(&revision.revision_ref) {
             access.availability = ReadAvailability::Partial {
