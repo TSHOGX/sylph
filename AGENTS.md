@@ -370,3 +370,13 @@ changes against older training data, so consult `frontend/node_modules/next/dist
 before writing frontend code.
 
 The root `CLAUDE.md` is a symlink to this file. Edit `AGENTS.md`.
+
+## Cursor Cloud specific instructions
+
+The default Cloud Agent image ships rustc 1.83. `crates/server` sets `rust-version` to 1.89. The environment install pins rustc 1.99.1, adds `clippy` and `rustfmt`, and installs `libsqlite3-dev` because sqlx links the system SQLite through pkg-config. Frontend dependencies are `npm ci` in `frontend/`, and Playwright Chromium is installed there for `npm run e2e`.
+
+On boot, `start` runs three processes: `sylph-server` on `127.0.0.1:4317`, a paired `sylph-envagent`, and `npm run dev` in `frontend/` on `127.0.0.1:3000`. It sets `SYLPH_BROWSE_ROOTS` to the checkout and `/tmp`. `$HOME` is always a browse root and does not contain the checkout on this VM, so a session cannot name `/workspace` without that variable. Readiness is `GET /api/v1/environments` showing the paired environment `connected`, not the public health boolean.
+
+`claude`, `codex`, and `pi` are not installed. Health can still report `agents.available: true` after the envagent connects, because that boolean means a connected environment sent a non-empty agent list. Each CLI is then `available: false`, and creating a session surfaces `agent unavailable` until one of those binaries is on `PATH`.
+
+Two adapter tests fail on a UTC machine that has no Claude Code CLI. `the_declared_capabilities_match_what_the_session_accepts` probes `claude` and expects the binary. `the_json_entry_point_reads_both_shapes_consistently` asserts an offsetless stamp equals `1776416849330`, which is that wall time in UTC+8; the VM zone is UTC, so the same function returns a value eight hours later. The sibling test in `crates/adapters/src/native/timestamp.rs` computes the expected instant from the local zone.
